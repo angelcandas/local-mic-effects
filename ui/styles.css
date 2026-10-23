@@ -620,6 +620,19 @@ select.dropdown {
 
 .reverb-graphic rect { fill: var(--cat); }
 
+/* ---------- Denoise graphic ---------- */
+
+.denoise-graphic {
+  flex: 1 1 100%;
+  width: 100%;
+  height: 54px;
+  border-radius: 10px;
+  background: #0d1016;
+}
+
+.denoise-graphic .noise { fill: var(--cat); opacity: 0.3; }
+.denoise-graphic .cut { fill: var(--cat); }
+
 /* ---------- Levels ---------- */
 
 .levels {

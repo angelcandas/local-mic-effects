@@ -12,6 +12,7 @@
 #include "Presets.h"
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
+#include "dsp/SpectralDenoiser.h"
 
 // The real editor needs the WebView; the tests only exercise the processor.
 juce::AudioProcessorEditor* PluginProcessor::createEditor() { return nullptr; }
@@ -173,6 +174,193 @@ namespace
     }
 
     //==========================================================================
+    std::vector<float> makeNoise (double seconds, float rmsDb, int seed = 1)
+    {
+        juce::Random random (seed);
+        std::vector<float> samples ((size_t) (seconds * sampleRate));
+        const auto peak = juce::Decibels::decibelsToGain (rmsDb) * std::sqrt (3.0f); // uniform: rms = peak / sqrt 3
+
+        for (auto& sample : samples)
+            sample = peak * (2.0f * random.nextFloat() - 1.0f);
+
+        return samples;
+    }
+
+    std::vector<float> mix (const std::vector<float>& a, const std::vector<float>& b)
+    {
+        auto result = a;
+        for (size_t i = 0; i < result.size() && i < b.size(); ++i)
+            result[i] += b[i];
+        return result;
+    }
+
+    float rmsDb (const std::vector<float>& signal, size_t from, size_t to)
+    {
+        double sum = 0.0;
+        for (auto i = from; i < to; ++i)
+            sum += (double) signal[i] * signal[i];
+        return juce::Decibels::gainToDecibels ((float) std::sqrt (sum / (double) juce::jmax ((size_t) 1, to - from)), -200.0f);
+    }
+
+    struct DenoiseSettings { float reductionDb = 20.0f, thresholdDb = 0.0f; bool adaptive = true; double learnSeconds = 0.0; };
+
+    // Runs a mono signal through the denoiser in 256-sample blocks. With learnSeconds > 0,
+    // Learn is held on for that long from the start.
+    std::vector<float> runDenoiser (fx::SpectralDenoiser& denoiser, const std::vector<float>& input, const DenoiseSettings& settings)
+    {
+        auto output = input;
+        const auto learnSamples = (size_t) (settings.learnSeconds * sampleRate);
+
+        for (size_t start = 0; start < output.size(); start += blockSize)
+        {
+            denoiser.setParameters (settings.reductionDb, settings.thresholdDb, settings.adaptive, start < learnSamples);
+
+            const auto length = std::min ((size_t) blockSize, output.size() - start);
+            float* channels[] = { output.data() + start };
+            juce::dsp::AudioBlock<float> block (channels, 1, length);
+            denoiser.process (juce::dsp::ProcessContextReplacing<float> (block));
+        }
+
+        return output;
+    }
+
+    std::vector<float> runDenoiser (const std::vector<float>& input, const DenoiseSettings& settings)
+    {
+        fx::SpectralDenoiser denoiser;
+        denoiser.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+        return runDenoiser (denoiser, input, settings);
+    }
+
+    // Level of the output minus the (latency-aligned) reference, relative to the reference.
+    float errorDb (const std::vector<float>& output, const std::vector<float>& reference, int latency, size_t from)
+    {
+        std::vector<float> error (output.size(), 0.0f);
+        for (auto i = from; i < output.size(); ++i)
+            error[i] = output[i] - reference[i - (size_t) latency];
+
+        return rmsDb (error, from, output.size()) - rmsDb (reference, from - (size_t) latency, output.size() - (size_t) latency);
+    }
+
+    void testDenoiser()
+    {
+        std::cout << "\nSpectral denoiser\n";
+
+        fx::SpectralDenoiser probe;
+        probe.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+        const auto latency = probe.getLatencySamples();
+        check (latency == 512, "latency is one 512-sample frame at 48 kHz (" + juce::String (latency * 1000.0 / sampleRate, 1) + " ms)");
+
+        // With no reduction allowed, the STFT must reconstruct the input exactly (delayed).
+        {
+            const auto input = mix (makeVoice (180.0f, 1.0), makeNoise (1.0, -40.0f));
+            const auto output = runDenoiser (input, { 0.0f });
+            const auto error = errorDb (output, input, latency, (size_t) latency * 2);
+            check (error < -80.0f, "0 dB reduction is a clean delay (reconstruction error " + juce::String (error, 1) + " dB)");
+        }
+
+        const auto seconds = 4.0;
+        const auto tail = (size_t) (2.0 * sampleRate); // measure the last 2 s, once the estimate has settled
+        const auto length = (size_t) (seconds * sampleRate);
+
+        // Steady hiss on its own is pushed down to (almost) the reduction floor.
+        {
+            const auto noise = makeNoise (seconds, -50.0f);
+            const auto output = runDenoiser (noise, { 20.0f });
+            const auto reduction = rmsDb (noise, tail, length) - rmsDb (output, tail, length);
+            check (reduction > 15.0f, "adaptive: hiss alone reduced by " + juce::String (reduction, 1) + " dB (floor 20 dB)");
+        }
+
+        // Mains hum (50 Hz + harmonics) is tonal but stationary, so it's noise too.
+        {
+            std::vector<float> hum (length);
+            for (size_t i = 0; i < length; ++i)
+                for (int h = 1; h <= 6; ++h)
+                    hum[i] += 0.004f / (float) h * std::sin (juce::MathConstants<float>::twoPi * 50.0f * (float) h * (float) i / (float) sampleRate);
+
+            const auto output = runDenoiser (hum, { 20.0f });
+            const auto reduction = rmsDb (hum, tail, length) - rmsDb (output, tail, length);
+            check (reduction > 10.0f, "adaptive: 50 Hz hum reduced by " + juce::String (reduction, 1) + " dB");
+        }
+
+        // Voice over hiss (after a second of room noise, as when you switch it on before
+        // singing): the noise goes, the voice stays. Error is measured against the clean
+        // voice, so it counts both leftover noise and any damage to the voice.
+        {
+            auto voice = makeVoice (180.0f, seconds);
+            std::fill (voice.begin(), voice.begin() + (long) sampleRate, 0.0f);
+            const auto noise = makeNoise (seconds, -45.0f);
+            const auto input = mix (voice, noise);
+            const auto output = runDenoiser (input, { 20.0f });
+
+            const auto before = errorDb (input, voice, 0, tail);
+            const auto after = errorDb (output, voice, latency, tail);
+            check (before - after > 6.0f, "adaptive: voice + hiss, noise-to-voice " + juce::String (before, 1) + " dB -> "
+                                              + juce::String (after, 1) + " dB");
+
+            const auto voiceChange = rmsDb (output, tail, length) - rmsDb (voice, tail - (size_t) latency, length - (size_t) latency);
+            check (std::abs (voiceChange) < 1.0f, "adaptive: voice level kept (" + juce::String (voiceChange, 2) + " dB)");
+        }
+
+        // A note held for 7 s (with a little vibrato, like a singer) mustn't be mistaken
+        // for noise and faded away.
+        {
+            const auto longSeconds = 8.0;
+            const auto longLength = (size_t) (longSeconds * sampleRate);
+            std::vector<float> voice (longLength, 0.0f);
+            double phase = 0.0;
+
+            for (auto i = (size_t) sampleRate; i < longLength; ++i)
+            {
+                const auto t = (double) i / sampleRate;
+                phase += juce::MathConstants<double>::twoPi * 220.0 * std::exp2 (0.3 / 12.0 * std::sin (juce::MathConstants<double>::twoPi * 5.5 * t)) / sampleRate;
+
+                double value = 0.0;
+                for (int h = 1; h <= 12; ++h)
+                    value += std::sin (phase * h) / h;
+                voice[i] = (float) (value * 0.15);
+            }
+
+            const auto output = runDenoiser (mix (voice, makeNoise (longSeconds, -50.0f)), { 20.0f });
+            const auto from = longLength - (size_t) sampleRate;
+            const auto change = rmsDb (output, from, longLength) - rmsDb (voice, from - (size_t) latency, longLength - (size_t) latency);
+            check (std::abs (change) < 1.5f, "adaptive: sustained note still at " + juce::String (change, 2) + " dB after 7 s");
+        }
+
+        // Learn: 1 s of room noise, then voice with Adaptive off uses the learnt profile.
+        {
+            const auto noise = makeNoise (seconds + 1.0, -45.0f, 7);
+            auto voice = makeVoice (180.0f, seconds + 1.0);
+            std::fill (voice.begin(), voice.begin() + (long) sampleRate, 0.0f);
+
+            fx::SpectralDenoiser denoiser;
+            denoiser.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+            const auto output = runDenoiser (denoiser, mix (voice, noise), { 20.0f, 0.0f, false, 1.0 });
+
+            check (denoiser.getLearnedFrames() > 300, "learn: profile built from " + juce::String (denoiser.getLearnedFrames()) + " frames");
+
+            const auto start = (size_t) (2.0 * sampleRate);
+            const auto before = errorDb (mix (voice, noise), voice, 0, start);
+            const auto after = errorDb (output, voice, latency, start);
+            check (before - after > 6.0f, "learned profile: voice + hiss, noise-to-voice " + juce::String (before, 1) + " dB -> "
+                                              + juce::String (after, 1) + " dB");
+        }
+
+        // The processor reports the latency only while the module is on.
+        {
+            PluginProcessor processor;
+            processor.prepareToPlay (sampleRate, blockSize);
+            const auto off = processor.getLatencySamples();
+
+            if (auto* on = dynamic_cast<juce::AudioParameterBool*> (processor.getState().getParameter ("denoiseOn")))
+                *on = true;
+
+            processor.prepareToPlay (sampleRate, blockSize);
+            check (off == 0 && processor.getLatencySamples() == latency,
+                   "processor latency: " + juce::String (off) + " samples off, " + juce::String (processor.getLatencySamples()) + " on");
+        }
+    }
+
+    //==========================================================================
     struct RunResult { bool finite = true; float peak = 0.0f, rmsDb = -100.0f; double realtimeFactor = 0.0; };
 
     RunResult runProcessor (PluginProcessor& processor, const std::vector<float>& voice)
@@ -263,7 +451,7 @@ namespace
 
         const auto result = runProcessor (processor, voice);
         check (result.finite && result.peak <= 1.0f,
-               "all 24 effects: peak " + juce::String (result.peak, 3) + ", cpu "
+               "all 25 effects: peak " + juce::String (result.peak, 3) + ", cpu "
                    + juce::String (result.realtimeFactor * 100.0, 2) + "% of real time");
 
         std::cout << "\n  Worst preset CPU: " << juce::String (worstFactor * 100.0, 2) << "% of one core\n";
@@ -277,6 +465,7 @@ int main()
     testPitchDetector();
     testPitchShift();
     testAutotune();
+    testDenoiser();
     testPresets();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";

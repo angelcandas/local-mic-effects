@@ -10,7 +10,8 @@
 //   choice parameters -> Juce.getComboBoxState (id)
 //   other parameters  -> Juce.getSliderState (id)
 // Native functions: getParameterDefaults, getPresets, loadPreset (index).
-// Pushed events: "meters" { input, output, note, target, preset } at 30 Hz.
+// Pushed events: "meters" { input, output, note, target, preset, denoiseNoise[32],
+// denoiseReduction[32] } at 30 Hz (denoiser bands in dB, low to high frequency).
 class PluginEditor final : public juce::AudioProcessorEditor,
                            private juce::Timer
 {

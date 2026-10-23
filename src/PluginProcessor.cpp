@@ -53,6 +53,7 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     inputGain.prepare (spec);
     highPass.prepare (spec);
+    denoiser.prepare (spec);
     gate.prepare (spec);
     pitchEngine.prepare (spec);
     eq.prepare (spec);
@@ -107,6 +108,14 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     limiter.reset();
     moduleWasOn.fill (false);
     pitchWasOn = false;
+
+    denoiserLatencyActive = params.denoise.on.get();
+    setLatencySamples (denoiserLatencyActive ? denoiser.getLatencySamples() : 0);
+}
+
+void PluginProcessor::handleAsyncUpdate()
+{
+    setLatencySamples (denoiserLatencyActive ? denoiser.getLatencySamples() : 0);
 }
 
 void PluginProcessor::updateDspParameters()
@@ -115,6 +124,8 @@ void PluginProcessor::updateDspParameters()
     outputGain.setGainDecibels (params.outputGain.get());
 
     highPass.setCutoffFrequency (params.highPass.freq.get());
+    denoiser.setParameters (params.denoise.reduction.get(), params.denoise.threshold.get(),
+                            params.denoise.adaptive.get(), params.denoise.learn.get());
     gate.setThreshold (params.gate.threshold.get());
 
     pitchSettings.tuneOn           = params.autotune.on.get();
@@ -224,6 +235,16 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     updatePeak (inputPeak, buffer.getMagnitude (0, numSamples));
 
     run (highPass, params.highPass.on);
+    run (denoiser, params.denoise.on);
+
+    // The denoiser delays the signal by one FFT frame only while it's on; tell the
+    // host (from the message thread) whenever that changes.
+    if (params.denoise.on.get() != denoiserLatencyActive.load())
+    {
+        denoiserLatencyActive = params.denoise.on.get();
+        triggerAsyncUpdate();
+    }
+
     run (gate, params.gate.on);
 
     if (pitchSettings.isActive())

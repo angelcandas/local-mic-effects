@@ -49,7 +49,8 @@ set(MICFX_DSP_SOURCES
     src/dsp/Effects.h
     src/dsp/PitchDetector.h
     src/dsp/PitchEngine.h
-    src/dsp/PsolaShifter.h)
+    src/dsp/PsolaShifter.h
+    src/dsp/SpectralDenoiser.h)
 
 target_sources(MicFX
     PRIVATE

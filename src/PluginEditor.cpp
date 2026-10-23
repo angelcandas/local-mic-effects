@@ -161,6 +161,16 @@ void PluginEditor::timerCallback()
     status->setProperty ("target", pitch.tunedNote.load());
     status->setProperty ("preset", processorRef.currentPreset.load());
 
+    const auto& denoiser = processorRef.getDenoiser();
+    juce::Array<juce::var> noise, reduction;
+    for (int band = 0; band < fx::SpectralDenoiser::numBands; ++band)
+    {
+        noise.add (denoiser.noiseBandsDb[(size_t) band].load (std::memory_order_relaxed));
+        reduction.add (denoiser.reductionBandsDb[(size_t) band].load (std::memory_order_relaxed));
+    }
+    status->setProperty ("denoiseNoise", noise);
+    status->setProperty ("denoiseReduction", reduction);
+
     webView->emitEventIfBrowserIsVisible ("meters", juce::var (status));
 }
 

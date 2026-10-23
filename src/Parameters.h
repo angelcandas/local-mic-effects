@@ -16,6 +16,7 @@ struct Parameters
     FloatParam& inputGain;
 
     struct HighPass   { BoolParam& on; FloatParam& freq; } highPass;
+    struct Denoise    { BoolParam& on; FloatParam& reduction; FloatParam& threshold; BoolParam& adaptive; BoolParam& learn; } denoise;
     struct Gate       { BoolParam& on; FloatParam& threshold; } gate;
     struct Autotune   { BoolParam& on; ChoiceParam& key; ChoiceParam& scale; FloatParam& speed; FloatParam& amount; } autotune;
     struct PitchShift { BoolParam& on; FloatParam& semitones; FloatParam& formant; } pitchShift;

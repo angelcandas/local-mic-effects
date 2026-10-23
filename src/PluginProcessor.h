@@ -6,13 +6,15 @@
 #include "Parameters.h"
 #include "dsp/Effects.h"
 #include "dsp/PitchEngine.h"
+#include "dsp/SpectralDenoiser.h"
 
 // Signal chain, in order (every module except gain/reverb/limiter is skipped when off):
-//   input gain -> high-pass -> gate -> autotune / pitch shift / harmonizer -> EQ
+//   input gain -> high-pass -> denoise -> gate -> autotune / pitch shift / harmonizer -> EQ
 //   -> compressor -> de-esser -> exciter -> saturation -> radio -> bitcrusher -> robot
 //   -> filter -> auto-wah -> tremolo -> vibrato -> chorus -> flanger -> phaser
 //   -> doubler -> echo -> reverb -> stereo width -> output gain -> safety limiter
-class PluginProcessor final : public juce::AudioProcessor
+class PluginProcessor final : public juce::AudioProcessor,
+                              private juce::AsyncUpdater
 {
 public:
     PluginProcessor();
@@ -48,6 +50,7 @@ public:
     //==============================================================================
     juce::AudioProcessorValueTreeState& getState() noexcept { return state; }
     const fx::PitchEngine& getPitchEngine() const noexcept  { return pitchEngine; }
+    const fx::SpectralDenoiser& getDenoiser() const noexcept { return denoiser; }
 
     // Peak levels (linear gain) since the UI last read them. Written by the audio
     // thread, drained with exchange (0) by the editor.
@@ -60,12 +63,14 @@ private:
     explicit PluginProcessor (juce::AudioProcessorValueTreeState::ParameterLayout layout);
 
     void updateDspParameters();
+    void handleAsyncUpdate() override; // reports the denoiser's latency to the host
 
     Parameters params;
     juce::AudioProcessorValueTreeState state;
 
     juce::dsp::Gain<float> inputGain, outputGain;
     juce::dsp::StateVariableTPTFilter<float> highPass;
+    fx::SpectralDenoiser denoiser;
     juce::dsp::NoiseGate<float> gate;
     fx::PitchEngine pitchEngine;
     fx::PitchEngine::Settings pitchSettings;
@@ -92,6 +97,7 @@ private:
     // Which switchable modules ran last block, so one switched back on starts clean.
     std::array<bool, 32> moduleWasOn {};
     bool pitchWasOn = false;
+    std::atomic<bool> denoiserLatencyActive { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
 };
