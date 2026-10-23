@@ -19,6 +19,11 @@ export const MODULES = [
     description: "Cuts rumble and handling noise",
     controls: [knob("hpfFreq", "Cutoff")] },
 
+  { id: "denoise", name: "Denoise", category: "cleanup", power: "denoiseOn", wide: true,
+    description: "Removes hiss and hum band by band, even under your voice",
+    controls: [{ type: "denoise-graphic" }, knob("denoiseReduction", "Reduction"), knob("denoiseThreshold", "Threshold"),
+               toggle("denoiseAdaptive", "Adaptive"), toggle("denoiseLearn", "Learn noise")] },
+
   { id: "gate", name: "Noise Gate", category: "cleanup", power: "gateOn",
     description: "Mutes background noise between words",
     controls: [knob("gateThreshold", "Threshold")] },

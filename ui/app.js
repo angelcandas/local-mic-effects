@@ -403,6 +403,48 @@ class ReverbGraphic {
 }
 
 //==============================================================================
+// The denoiser's live analysis: the noise profile it has learnt (bars, low to high
+// frequency) and how far each band is being turned down right now (the overlay
+// hanging from the top).
+class DenoiseGraphic {
+  static FLOOR_DB = -110;
+  static CEILING_DB = -30;
+  static MAX_REDUCTION_DB = 40;
+
+  constructor() {
+    this.element = svg("svg", { class: "denoise-graphic", viewBox: "0 0 400 60", preserveAspectRatio: "none" });
+    this.element.append(svg("title"));
+    this.element.firstChild.textContent = "Bars: learnt noise, low to high frequency · From the top: how much is being removed";
+    this.bars = [];
+  }
+
+  update(noiseDb = [], reductionDb = []) {
+    const count = noiseDb.length;
+    if (count === 0) return;
+
+    if (this.bars.length !== count) {
+      const width = 400 / count;
+      this.bars = Array.from({ length: count }, (_, i) => {
+        const noise = svg("rect", { class: "noise", x: i * width + 1, width: width - 2, rx: 1.5 });
+        const cut = svg("rect", { class: "cut", x: i * width + width * 0.3, y: 0, width: width * 0.4, rx: 1 });
+        return { noise, cut };
+      });
+      this.element.replaceChildren(this.element.firstChild, ...this.bars.flatMap(({ noise, cut }) => [noise, cut]));
+    }
+
+    const { FLOOR_DB, CEILING_DB, MAX_REDUCTION_DB } = DenoiseGraphic;
+
+    this.bars.forEach(({ noise, cut }, i) => {
+      const level = clamp((noiseDb[i] - FLOOR_DB) / (CEILING_DB - FLOOR_DB));
+      const height = Math.max(1.5, 58 * level);
+      noise.setAttribute("y", 59 - height);
+      noise.setAttribute("height", height);
+      cut.setAttribute("height", 58 * clamp((reductionDb[i] ?? 0) / MAX_REDUCTION_DB));
+    });
+  }
+}
+
+//==============================================================================
 // Peak meter with instant attack, smooth fall-off and a held peak marker.
 class Meter {
   constructor(element) {
@@ -618,6 +660,7 @@ class Rack {
       case "tuner": return (this.tuner = new Tuner()).element;
       case "keys": return (this.keyPicker = new KeyPicker(control.param, control.scaleParam, this.onUserChange)).element;
       case "reverb-graphic": return new ReverbGraphic(card).element;
+      case "denoise-graphic": return (this.denoiseGraphic = new DenoiseGraphic()).element;
       default: throw new Error(`Unknown control type ${control.type}`);
     }
   }
@@ -687,6 +730,7 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   meters.output.push(status.output);
   rack.tuner?.update(status.note, status.target);
   rack.keyPicker?.setTarget(status.target);
+  rack.denoiseGraphic?.update(status.denoiseNoise, status.denoiseReduction);
   presetBar.syncFromHost(status.preset);
 });
 

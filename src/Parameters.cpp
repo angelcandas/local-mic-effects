@@ -63,6 +63,12 @@ Parameters::Parameters (Layout& l)
       highPass   { toggle (l, "hpfOn", "High-Pass On", true),
                    hertz (l, "hpfFreq", "High-Pass Freq", 20.0f, 400.0f, 80.0f, 100.0f) },
 
+      denoise    { toggle (l, "denoiseOn", "Denoise On"),
+                   number (l, "denoiseReduction", "Denoise Reduction", 0.0f, 40.0f, 0.1f, 12.0f, "dB"),
+                   decibels (l, "denoiseThreshold", "Denoise Threshold", -10.0f, 10.0f, 0.0f),
+                   toggle (l, "denoiseAdaptive", "Denoise Adaptive", true),
+                   toggle (l, "denoiseLearn", "Denoise Learn") },
+
       gate       { toggle (l, "gateOn", "Gate On", true),
                    decibels (l, "gateThreshold", "Gate Threshold", -80.0f, 0.0f, -55.0f) },
 
