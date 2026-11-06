@@ -678,6 +678,134 @@ const rack = new Rack({
 document.querySelectorAll(".levels .knob").forEach((element) =>
   new Knob(element, { param: element.dataset.param, label: element.dataset.label, bipolar: element.hasAttribute("data-bipolar") }));
 
+//==============================================================================
+// Record / stop, the dry-file option and where takes are saved. The C++ side does the
+// recording; this only drives it and shows the elapsed time from the "meters" event.
+class RecorderBar {
+  constructor(element) {
+    this.element = element;
+    this.button = element.querySelector(".record-button");
+    this.label = element.querySelector(".record-label");
+    this.time = element.querySelector(".record-time");
+    this.dry = element.querySelector(".record-dry");
+    this.path = element.querySelector(".record-path");
+    this.change = element.querySelector(".record-change");
+    this.status = element.querySelector(".record-status");
+    this.recording = false;
+    this.busy = false;
+
+    this.start = Juce.getNativeFunction("startRecording");
+    this.stop = Juce.getNativeFunction("stopRecording");
+    this.reveal = Juce.getNativeFunction("revealRecording");
+    this.setDry = Juce.getNativeFunction("setRecordDry");
+    this.chooseFolder = Juce.getNativeFunction("chooseRecordingFolder");
+
+    this.button.addEventListener("click", () => this.toggle());
+    this.dry.addEventListener("click", () => {
+      const on = this.dry.getAttribute("aria-pressed") !== "true";
+      this.dry.setAttribute("aria-pressed", String(on));
+      this.setDry(on);
+    });
+    this.change.addEventListener("click", () => this.chooseFolder().then((settings) => this.applySettings(settings)));
+
+    document.addEventListener("keydown", (event) => {
+      const typing = event.target.closest?.("input, select, textarea");
+      if ((event.key === "r" || event.key === "R") && !typing && !event.metaKey && !event.ctrlKey && !event.altKey) {
+        event.preventDefault();
+        this.toggle();
+      }
+    });
+
+    Juce.getNativeFunction("getRecorderSettings")().then((settings) => this.applySettings(settings));
+  }
+
+  applySettings(settings) {
+    if (!settings) return;
+    // Shorten the home folder to ~ so the interesting end of the path stays visible.
+    this.path.textContent = settings.folder.replace(/^(\/Users\/[^/]+|\/home\/[^/]+|[A-Z]:\\Users\\[^\\]+)/, "~");
+    this.path.title = settings.folder;
+    this.dry.setAttribute("aria-pressed", String(Boolean(settings.includeDry)));
+  }
+
+  async toggle() {
+    if (this.busy) return;
+    this.busy = true;
+    this.button.disabled = true;
+
+    try {
+      if (this.recording) {
+        this.showTake(await this.stop());
+        this.setRecording(false);
+      } else {
+        const result = await this.start(this.dry.getAttribute("aria-pressed") === "true");
+        if (result?.ok) {
+          this.setStatus("");
+          this.setRecording(true, 0);
+        } else {
+          this.setStatus(result?.error || "Couldn't start recording", "is-error");
+        }
+      }
+    } finally {
+      this.busy = false;
+      this.button.disabled = false;
+    }
+  }
+
+  setRecording(recording, seconds = null) {
+    this.recording = recording;
+    this.element.classList.toggle("is-recording", recording);
+    this.button.setAttribute("aria-pressed", String(recording));
+    this.label.textContent = recording ? "Stop" : "Record";
+    this.dry.disabled = recording;
+    this.change.disabled = recording;
+    if (seconds !== null) this.time.textContent = formatDuration(seconds);
+  }
+
+  // From the "meters" event: seconds recorded, or -1 when not recording.
+  update(seconds) {
+    if (seconds === undefined || this.busy) return;
+
+    if (seconds >= 0) {
+      if (!this.recording) this.setRecording(true);
+      this.time.textContent = formatDuration(seconds);
+    } else if (this.recording) {
+      // Stopped from the C++ side (e.g. the audio device changed): fetch the saved take.
+      this.setRecording(false);
+      this.stop().then((take) => this.showTake(take));
+    }
+  }
+
+  showTake(take) {
+    if (!take?.file) return;
+
+    this.status.replaceChildren(
+      html("span", "", "Saved"),
+      Object.assign(html("span", "name", take.fileName), { title: take.file }),
+      html("span", "", `· ${formatDuration(take.seconds)}`),
+    );
+
+    if (take.dropped) this.status.append(html("span", "warning", "· some audio was dropped"));
+
+    const show = html("button", "text-button", "Show");
+    show.addEventListener("click", () => this.reveal());
+    this.status.append(show);
+    this.status.className = `record-status${take.dropped ? " is-warning" : ""}`;
+  }
+
+  setStatus(text, className = "") {
+    this.status.textContent = text;
+    this.status.className = `record-status ${className}`;
+  }
+}
+
+function formatDuration(seconds) {
+  const tenths = Math.floor(Math.max(0, seconds) * 10);
+  const minutes = Math.floor(tenths / 600);
+  return `${minutes}:${((tenths % 600) / 10).toFixed(1).padStart(4, "0")}`;
+}
+
+const recorderBar = new RecorderBar(document.querySelector(".recorder"));
+
 const meters = Object.fromEntries(
   [...document.querySelectorAll("[data-meter]")].map((element) => [element.dataset.meter, new Meter(element)]),
 );
@@ -688,6 +816,7 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   rack.tuner?.update(status.note, status.target);
   rack.keyPicker?.setTarget(status.target);
   presetBar.syncFromHost(status.preset);
+  recorderBar.update(status.recording);
 });
 
 let lastFrame = performance.now();

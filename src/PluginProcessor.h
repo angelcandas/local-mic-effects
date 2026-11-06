@@ -4,6 +4,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "Parameters.h"
+#include "Recorder.h"
 #include "dsp/Effects.h"
 #include "dsp/PitchEngine.h"
 
@@ -49,6 +50,10 @@ public:
     juce::AudioProcessorValueTreeState& getState() noexcept { return state; }
     const fx::PitchEngine& getPitchEngine() const noexcept  { return pitchEngine; }
 
+    // Records the processed output (and optionally the dry mic) to WAV. Start/stop it
+    // from the message thread; processBlock feeds it.
+    Recorder& getRecorder() noexcept                        { return recorder; }
+
     // Peak levels (linear gain) since the UI last read them. Written by the audio
     // thread, drained with exchange (0) by the editor.
     std::atomic<float> inputPeak  { 0.0f };
@@ -88,6 +93,9 @@ private:
     juce::dsp::Reverb reverb;
     fx::StereoWidth width;
     juce::dsp::Limiter<float> limiter;
+
+    Recorder recorder;
+    juce::AudioBuffer<float> dryInput; // the raw mic, kept for the recorder's dry file
 
     // Which switchable modules ran last block, so one switched back on starts clean.
     std::array<bool, 32> moduleWasOn {};
