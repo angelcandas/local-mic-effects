@@ -98,6 +98,11 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     limiter.setThreshold (-1.0f);
     limiter.setRelease (100.0f);
 
+    recorder.prepare (sampleRate, (int) spec.numChannels);
+    // Room for blocks a bit larger than announced; hosts occasionally send them.
+    dryInput.setSize (1, juce::jmax (samplesPerBlock, 4096));
+    dryInput.clear();
+
     updateDspParameters();
 
     // Start from the current values instead of ramping from the defaults.
@@ -190,6 +195,17 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     const auto numOut     = getTotalNumOutputChannels();
     const auto numSamples = buffer.getNumSamples();
 
+    // Keep the raw mic for the recorder before anything touches it.
+    const auto recording = recorder.isRecording();
+    const auto dryLength = juce::jmin (numSamples, dryInput.getNumSamples());
+
+    if (recording && numIn > 0)
+    {
+        dryInput.copyFrom (0, 0, buffer, 0, 0, dryLength);
+        if (dryLength < numSamples)
+            dryInput.clear(); // oversized block: the dry file gets silence rather than garbage
+    }
+
     // A mono mic feeds every output channel so stereo effects have signal on both sides.
     if (numIn == 1)
         for (int ch = 1; ch < numOut; ++ch)
@@ -261,6 +277,18 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     limiter.process (context);
 
     updatePeak (outputPeak, buffer.getMagnitude (0, numSamples));
+
+    if (recording)
+    {
+        // Write in chunks the dry buffer can cover so both files stay sample-aligned.
+        for (int start = 0; start < numSamples; start += dryInput.getNumSamples())
+        {
+            const auto length = juce::jmin (dryInput.getNumSamples(), numSamples - start);
+            std::array<const float*, 2> output { buffer.getReadPointer (0, start),
+                                                 buffer.getReadPointer (juce::jmin (1, numOut - 1), start) };
+            recorder.write (output.data(), dryInput.getReadPointer (0), length);
+        }
+    }
 }
 
 //==============================================================================

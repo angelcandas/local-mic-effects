@@ -24,7 +24,7 @@ html, body { height: 100%; margin: 0; }
 
 body {
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto 1fr auto;
   gap: 14px;
   padding: 14px 16px 16px;
   overflow: hidden;
@@ -688,10 +688,87 @@ select.dropdown {
 
 .meter.is-hot .readout { color: var(--hot); }
 
+/* ---------- Recorder ---------- */
+
+.recorder {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding: 8px 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: rgba(19, 22, 30, 0.7);
+  font-size: 12px;
+}
+
+.record-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  height: 32px;
+  padding: 0 14px 0 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--panel-raised);
+  font-weight: 650;
+  cursor: pointer;
+}
+
+.record-button:hover { border-color: #414b61; }
+.record-button:disabled { opacity: 0.5; cursor: default; }
+
+.record-dot {
+  width: 11px;
+  height: 11px;
+  border-radius: 50%;
+  background: var(--hot);
+  transition: border-radius 0.15s;
+}
+
+.record-button[aria-pressed="true"] { border-color: var(--hot); background: rgba(255, 93, 108, 0.14); }
+.record-button[aria-pressed="true"] .record-dot { border-radius: 2px; animation: record-blink 1.2s infinite; }
+
+@keyframes record-blink { 50% { opacity: 0.35; } }
+
+.record-time {
+  min-width: 56px;
+  color: var(--faint);
+  font: 600 13px/1 var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+.recorder.is-recording .record-time { color: var(--hot); }
+
+.recorder .pill:disabled { opacity: 0.5; cursor: default; }
+
+.record-folder { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); }
+.record-caption { color: var(--faint); white-space: nowrap; }
+.record-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.text-button {
+  padding: 2px 4px;
+  border: 0;
+  background: none;
+  color: var(--accent);
+  font-size: 12px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.text-button:hover { text-decoration: underline; }
+.text-button:disabled { color: var(--faint); text-decoration: none; cursor: default; }
+
+.record-status { display: flex; align-items: center; gap: 4px; margin-left: auto; min-width: 0; color: var(--muted); white-space: nowrap; }
+.record-status .name { overflow: hidden; text-overflow: ellipsis; color: var(--text); }
+.record-status.is-error { color: var(--hot); white-space: normal; }
+.record-status.is-warning .warning { color: var(--warn); }
+
 /* ---------- Narrower windows ---------- */
 
 @media (max-width: 1040px) {
   .chips .chip:not(.chip--live) { display: none; }
   .workspace { grid-template-columns: 180px 1fr 108px; }
   .preset-button { min-width: 210px; }
+  .record-caption { display: none; }
 }

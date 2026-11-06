@@ -9,8 +9,11 @@
 //   bool parameters   -> Juce.getToggleState (id)
 //   choice parameters -> Juce.getComboBoxState (id)
 //   other parameters  -> Juce.getSliderState (id)
-// Native functions: getParameterDefaults, getPresets, loadPreset (index).
-// Pushed events: "meters" { input, output, note, target, preset } at 30 Hz.
+// Native functions: getParameterDefaults, getPresets, loadPreset (index),
+//   getRecorderSettings, startRecording, stopRecording, chooseRecordingFolder,
+//   setRecordDry (bool), revealRecording.
+// Pushed events: "meters" { input, output, note, target, preset, recording } at 30 Hz
+// (recording = seconds recorded so far, or -1 when not recording).
 class PluginEditor final : public juce::AudioProcessorEditor,
                            private juce::Timer
 {
@@ -25,7 +28,15 @@ private:
     juce::WebBrowserComponent::Options createOptions();
     static std::optional<juce::WebBrowserComponent::Resource> getResource (const juce::String& url);
 
+    // Recording folder and "also save the dry mic" are app-wide preferences, not
+    // part of the plugin state, so they survive across sessions and projects.
+    juce::File getRecordingFolder();
+    juce::var describeRecorderSettings();
+
+    std::unique_ptr<juce::FileChooser> folderChooser;
+
     PluginProcessor& processorRef;
+    juce::PropertiesFile settings;
 
     // Declaration order matters: relays must outlive the WebView, and the
     // attachments must be destroyed before either of them.

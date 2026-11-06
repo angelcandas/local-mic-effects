@@ -30,6 +30,16 @@ namespace
         return "application/octet-stream";
     }
 
+    juce::PropertiesFile::Options settingsOptions()
+    {
+        juce::PropertiesFile::Options options;
+        options.applicationName     = "MicFX";
+        options.filenameSuffix      = ".settings";
+        options.folderName          = "MicFX";
+        options.osxLibrarySubFolder = "Application Support";
+        return options;
+    }
+
     float toDecibels (std::atomic<float>& peak)
     {
         return juce::Decibels::gainToDecibels (peak.exchange (0.0f), -100.0f);
@@ -46,7 +56,7 @@ juce::AudioProcessorEditor* PluginProcessor::createEditor()
 
 //==============================================================================
 PluginEditor::PluginEditor (PluginProcessor& p)
-    : AudioProcessorEditor (&p), processorRef (p)
+    : AudioProcessorEditor (&p), processorRef (p), settings (settingsOptions())
 {
     webView = std::make_unique<SinglePageBrowser> (createOptions());
 
@@ -121,6 +131,69 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            complete (processorRef.getCurrentProgram());
                        })
 
+                       // -> { folder, includeDry, recording }
+                       .withNativeFunction ("getRecorderSettings", [this] (const auto&, auto complete)
+                       {
+                           complete (describeRecorderSettings());
+                       })
+
+                       // (includeDry) -> { ok, error }
+                       .withNativeFunction ("startRecording", [this] (const auto& args, auto complete)
+                       {
+                           const auto includeDry = args.size() > 0 && (bool) args[0];
+                           settings.setValue ("recordDry", includeDry);
+
+                           const auto error = processorRef.getRecorder().start (getRecordingFolder(), includeDry);
+
+                           auto* result = new juce::DynamicObject();
+                           result->setProperty ("ok", error.isEmpty());
+                           result->setProperty ("error", error);
+                           complete (juce::var (result));
+                       })
+
+                       // -> { file, dryFile, seconds, dropped } (the last take; file is "" if none)
+                       .withNativeFunction ("stopRecording", [this] (const auto&, auto complete)
+                       {
+                           const auto take = processorRef.getRecorder().stop();
+
+                           auto* result = new juce::DynamicObject();
+                           result->setProperty ("file", take.file.getFullPathName());
+                           result->setProperty ("fileName", take.file.getFileName());
+                           result->setProperty ("dryFile", take.dryFile.getFullPathName());
+                           result->setProperty ("seconds", take.seconds);
+                           result->setProperty ("dropped", take.droppedAudio);
+                           complete (juce::var (result));
+                       })
+
+                       // -> settings as getRecorderSettings, after the user picks a folder (or cancels)
+                       .withNativeFunction ("chooseRecordingFolder", [this] (const auto&, auto complete)
+                       {
+                           folderChooser = std::make_unique<juce::FileChooser> ("Save recordings in…", getRecordingFolder());
+                           folderChooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectDirectories,
+                                                       [this, complete] (const juce::FileChooser& chooser)
+                                                       {
+                                                           if (const auto folder = chooser.getResult(); folder != juce::File{})
+                                                               settings.setValue ("recordFolder", folder.getFullPathName());
+
+                                                           complete (describeRecorderSettings());
+                                                       });
+                       })
+
+                       // (includeDry) -> undefined
+                       .withNativeFunction ("setRecordDry", [this] (const auto& args, auto complete)
+                       {
+                           settings.setValue ("recordDry", args.size() > 0 && (bool) args[0]);
+                           complete ({});
+                       })
+
+                       // -> undefined; shows the last take in Finder (or the folder if there's none)
+                       .withNativeFunction ("revealRecording", [this] (const auto&, auto complete)
+                       {
+                           const auto file = processorRef.getRecorder().getLastTake().file;
+                           (file.existsAsFile() ? file : getRecordingFolder()).revealToUser();
+                           complete ({});
+                       })
+
                        // (message) -> undefined; the UI reports uncaught JavaScript errors here.
                        .withNativeFunction ("logError", [] (const auto& args, auto complete)
                        {
@@ -161,7 +234,25 @@ void PluginEditor::timerCallback()
     status->setProperty ("target", pitch.tunedNote.load());
     status->setProperty ("preset", processorRef.currentPreset.load());
 
+    const auto& recorder = processorRef.getRecorder();
+    status->setProperty ("recording", recorder.isRecording() ? recorder.getSeconds() : -1.0);
+
     webView->emitEventIfBrowserIsVisible ("meters", juce::var (status));
+}
+
+juce::File PluginEditor::getRecordingFolder()
+{
+    const auto saved = settings.getValue ("recordFolder");
+    return juce::File::isAbsolutePath (saved) ? juce::File (saved) : Recorder::getDefaultFolder();
+}
+
+juce::var PluginEditor::describeRecorderSettings()
+{
+    auto* result = new juce::DynamicObject();
+    result->setProperty ("folder", getRecordingFolder().getFullPathName());
+    result->setProperty ("includeDry", settings.getBoolValue ("recordDry", false));
+    result->setProperty ("recording", processorRef.getRecorder().isRecording());
+    return juce::var (result);
 }
 
 //==============================================================================

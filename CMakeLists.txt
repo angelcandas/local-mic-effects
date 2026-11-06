@@ -45,6 +45,7 @@ set(MICFX_DSP_SOURCES
     src/Parameters.cpp
     src/Presets.cpp
     src/PluginProcessor.cpp
+    src/Recorder.cpp
     src/dsp/Biquad.h
     src/dsp/Effects.h
     src/dsp/PitchDetector.h
@@ -97,6 +98,7 @@ if(MICFX_BUILD_TESTS)
     target_link_libraries(MicFXTests
         PRIVATE
             juce::juce_audio_processors
+            juce::juce_audio_formats
             juce::juce_dsp
         PUBLIC
             juce::juce_recommended_config_flags

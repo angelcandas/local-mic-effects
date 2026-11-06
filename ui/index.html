@@ -80,5 +80,21 @@
       </section>
     </aside>
   </div>
+
+  <footer class="recorder" aria-label="Recorder">
+    <button class="record-button" aria-pressed="false" title="Record the processed output to a WAV file (R)">
+      <span class="record-dot"></span><span class="record-label">Record</span>
+    </button>
+    <span class="record-time" aria-live="off">0:00.0</span>
+    <button class="pill record-dry" aria-pressed="false" title="Also save the unprocessed mic to a second file">
+      <span class="switch"></span><span>Also save dry mic</span>
+    </button>
+    <div class="record-folder">
+      <span class="record-caption">Saving to</span>
+      <span class="record-path" title=""></span>
+      <button class="text-button record-change">Change…</button>
+    </div>
+    <div class="record-status" aria-live="polite"></div>
+  </footer>
 </body>
 </html>

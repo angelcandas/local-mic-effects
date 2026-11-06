@@ -42,6 +42,18 @@ They also appear as programs in DAWs.
 The Pitch Shift and Harmonizer use the same engine, so they're tuned too when Autotune is on.
 Chromatic works for any song. Pick the song's key and scale for a tighter, more musical tune.
 
+### Recording
+
+The bar at the bottom of the window records what you hear (the processed output) to a 24-bit WAV
+file. Press **Record** (or the **R** key) to start and again to stop.
+
+- Takes are saved to `~/Music/MicFX Recordings` by default, named by date and time. **Change…** picks another folder.
+- **Also save dry mic** writes a second, sample-aligned file with your unprocessed voice
+  (`… (dry).wav`), so you can re-process it later.
+- **Show** reveals the last take in Finder.
+- Disk writes happen on a background thread, so recording doesn't add load to the audio thread.
+  The plugin versions record too, independently of the DAW.
+
 ## Requirements
 
 - Xcode Command Line Tools (`xcode-select --install`)
@@ -106,6 +118,7 @@ IntelliSense comes from `build/debug/compile_commands.json`, so run a configure 
 src/Parameters.*        every parameter: IDs, ranges, defaults
 src/Presets.*           factory voice presets
 src/PluginProcessor.*   audio thread: the effects chain
+src/Recorder.*          WAV recording of the output (and dry mic) on a background thread
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune/pitch/harmony),
                         Effects (EQ, de-esser, saturation, echo…), Biquad

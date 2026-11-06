@@ -268,6 +268,85 @@ namespace
 
         std::cout << "\n  Worst preset CPU: " << juce::String (worstFactor * 100.0, 2) << "% of one core\n";
     }
+
+    //==========================================================================
+    // Reads a whole WAV file; empty if it can't be opened.
+    juce::AudioBuffer<float> readWav (const juce::File& file, double& fileRate)
+    {
+        juce::WavAudioFormat format;
+        std::unique_ptr<juce::AudioFormatReader> reader (format.createReaderFor (file.createInputStream().release(), true));
+
+        if (reader == nullptr)
+            return {};
+
+        fileRate = reader->sampleRate;
+        juce::AudioBuffer<float> contents ((int) reader->numChannels, (int) reader->lengthInSamples);
+        reader->read (&contents, 0, contents.getNumSamples(), 0, true, true);
+        return contents;
+    }
+
+    float maxDifference (const float* a, const float* b, int length)
+    {
+        float worst = 0.0f;
+        for (int i = 0; i < length; ++i)
+            worst = std::max (worst, std::abs (a[i] - b[i]));
+        return worst;
+    }
+
+    void testRecorder()
+    {
+        std::cout << "\nRecorder\n";
+
+        PluginProcessor processor;
+        processor.setCurrentProgram (1); // any preset, so the output differs from the dry mic
+        processor.prepareToPlay (sampleRate, blockSize);
+
+        const auto folder = juce::File::createTempFile ("micfx-recordings");
+        auto& recorder = processor.getRecorder();
+        const auto error = recorder.start (folder, true);
+        check (error.isEmpty() && recorder.isRecording(), "starts recording" + (error.isEmpty() ? "" : ": " + error));
+
+        const auto voice = makeVoice (200.0f, 1.0);
+        const auto numBlocks = (int) voice.size() / blockSize;
+        juce::AudioBuffer<float> expected (2, numBlocks * blockSize);
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            buffer.clear();
+            buffer.copyFrom (0, 0, voice.data() + b * blockSize, blockSize);
+            processor.processBlock (buffer, midi);
+
+            for (int ch = 0; ch < 2; ++ch)
+                expected.copyFrom (ch, b * blockSize, buffer, ch, 0, blockSize);
+        }
+
+        const auto take = recorder.stop();
+        check (! recorder.isRecording() && ! take.droppedAudio, "stops without dropping audio");
+        check (std::abs (take.seconds - numBlocks * blockSize / sampleRate) < 1e-6,
+               "reports the take length (" + juce::String (take.seconds, 3) + " s)");
+
+        double wetRate = 0.0, dryRate = 0.0;
+        const auto wet = readWav (take.file, wetRate);
+        const auto dry = readWav (take.dryFile, dryRate);
+        const auto length = numBlocks * blockSize;
+
+        // 24-bit files: anything closer than ~1e-6 is quantisation.
+        check (wet.getNumChannels() == 2 && wet.getNumSamples() == length && juce::exactlyEqual (wetRate, sampleRate)
+                   && maxDifference (wet.getReadPointer (0), expected.getReadPointer (0), length) < 1e-5f
+                   && maxDifference (wet.getReadPointer (1), expected.getReadPointer (1), length) < 1e-5f,
+               "output file matches the processed audio (" + take.file.getFileName() + ")");
+        check (dry.getNumChannels() == 1 && dry.getNumSamples() == length && juce::exactlyEqual (dryRate, sampleRate)
+                   && maxDifference (dry.getReadPointer (0), voice.data(), length) < 1e-5f,
+               "dry file matches the mic input (" + take.dryFile.getFileName() + ")");
+
+        // Audio processed while not recording isn't captured.
+        processor.processBlock (buffer, midi);
+        check (readWav (take.file, wetRate).getNumSamples() == length, "nothing is written after stop");
+
+        folder.deleteRecursively();
+    }
 }
 
 int main()
@@ -278,6 +357,7 @@ int main()
     testPitchShift();
     testAutotune();
     testPresets();
+    testRecorder();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;
