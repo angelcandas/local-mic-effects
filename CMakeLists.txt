@@ -46,6 +46,7 @@ set(MICFX_DSP_SOURCES
     src/Presets.cpp
     src/PluginProcessor.cpp
     src/Recorder.cpp
+    src/Multitrack.cpp
     src/dsp/Biquad.h
     src/dsp/Effects.h
     src/dsp/PitchDetector.h

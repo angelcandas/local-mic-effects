@@ -87,6 +87,7 @@ juce::String Recorder::start (const juce::File& folder, bool includeDry)
     current = take;
     samplesWritten = 0;
     dropped = false;
+    firstPosition = 0;
 
     {
         const juce::SpinLock::ScopedLockType lock (writerLock);
@@ -119,11 +120,13 @@ Recorder::Take Recorder::stop()
 
     current.seconds = getSeconds();
     current.droppedAudio = dropped.load();
+    current.timelineStart = firstPosition.load();
     last = std::exchange (current, {});
     return last;
 }
 
-void Recorder::write (const float* const* output, const float* dry, int numSamples) noexcept
+void Recorder::write (const float* const* output, const float* dry, int numSamples,
+                      juce::int64 timelinePosition) noexcept
 {
     const juce::SpinLock::ScopedTryLockType lock (writerLock);
 
@@ -137,6 +140,9 @@ void Recorder::write (const float* const* output, const float* dry, int numSampl
 
     if (! ok)
         dropped = true;
+
+    if (samplesWritten.load() == 0)
+        firstPosition = timelinePosition;
 
     samplesWritten += numSamples;
 }

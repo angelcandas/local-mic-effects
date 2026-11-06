@@ -99,6 +99,9 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     limiter.setRelease (100.0f);
 
     recorder.prepare (sampleRate, (int) spec.numChannels);
+    multitrack.prepare (sampleRate);
+    mixGuardGain = 1.0f;
+    mixGuardRelease = 1.0f - std::exp (-1.0f / (0.1f * (float) sampleRate)); // ~100 ms
     // Room for blocks a bit larger than announced; hosts occasionally send them.
     dryInput.setSize (1, juce::jmax (samplesPerBlock, 4096));
     dryInput.clear();
@@ -276,7 +279,9 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     outputGain.process (context);
     limiter.process (context);
 
-    updatePeak (outputPeak, buffer.getMagnitude (0, numSamples));
+    // Where this block sits on the multitrack timeline. The playback is added after the
+    // voice is recorded, so takes contain only the voice.
+    const auto timelinePosition = multitrack.getPosition();
 
     if (recording)
     {
@@ -286,9 +291,34 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             const auto length = juce::jmin (dryInput.getNumSamples(), numSamples - start);
             std::array<const float*, 2> output { buffer.getReadPointer (0, start),
                                                  buffer.getReadPointer (juce::jmin (1, numOut - 1), start) };
-            recorder.write (output.data(), dryInput.getReadPointer (0), length);
+            recorder.write (output.data(), dryInput.getReadPointer (0), length, timelinePosition + start);
         }
     }
+
+    if (multitrack.isPlaying())
+    {
+        multitrack.process (buffer, numOut, numSamples);
+
+        constexpr auto ceiling = 0.89125f; // -1 dB
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            float peak = 0.0f;
+            for (int ch = 0; ch < numOut; ++ch)
+                peak = juce::jmax (peak, std::abs (buffer.getSample (ch, i)));
+
+            if (peak * mixGuardGain > ceiling)
+                mixGuardGain = ceiling / peak; // instant attack: never overshoots
+            else
+                mixGuardGain += (1.0f - mixGuardGain) * mixGuardRelease;
+
+            if (mixGuardGain < 0.9999f)
+                for (int ch = 0; ch < numOut; ++ch)
+                    buffer.setSample (ch, i, buffer.getSample (ch, i) * mixGuardGain);
+        }
+    }
+
+    updatePeak (outputPeak, buffer.getMagnitude (0, numSamples));
 }
 
 //==============================================================================
