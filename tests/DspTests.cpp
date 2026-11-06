@@ -347,6 +347,133 @@ namespace
 
         folder.deleteRecursively();
     }
+
+    //==========================================================================
+    void writeWav (const juce::File& file, const juce::AudioBuffer<float>& audio, double rate)
+    {
+        std::unique_ptr<juce::OutputStream> stream = std::make_unique<juce::FileOutputStream> (file);
+        auto writer = juce::WavAudioFormat().createWriterFor (stream, juce::AudioFormatWriterOptions{}
+                                                                          .withSampleRate (rate)
+                                                                          .withNumChannels (audio.getNumChannels())
+                                                                          .withBitsPerSample (24));
+        writer->writeFromAudioSampleBuffer (audio, 0, audio.getNumSamples());
+    }
+
+    // Runs silent mic input through the processor and returns the left output.
+    std::vector<float> playSilence (PluginProcessor& processor, int numBlocks)
+    {
+        std::vector<float> out;
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+
+        for (int b = 0; b < numBlocks; ++b)
+        {
+            buffer.clear();
+            processor.processBlock (buffer, midi);
+            out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+        }
+
+        return out;
+    }
+
+    float rms (const std::vector<float>& x, size_t from, size_t to)
+    {
+        double sum = 0.0;
+        for (auto i = from; i < to; ++i)
+            sum += (double) x[i] * x[i];
+        return (float) std::sqrt (sum / (double) juce::jmax ((size_t) 1, to - from));
+    }
+
+    void testMultitrack()
+    {
+        std::cout << "\nMulti-track player\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-multitrack");
+        folder.createDirectory();
+
+        // 2 s of 300 Hz at 44.1 kHz, so loading has to resample to the 48 kHz session.
+        const double fileRate = 44100.0;
+        juce::AudioBuffer<float> song (2, (int) (2.0 * fileRate));
+        for (int i = 0; i < song.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                song.setSample (ch, i, 0.25f * (float) std::sin (juce::MathConstants<double>::twoPi * 300.0 * i / fileRate));
+
+        const auto songFile = folder.getChildFile ("backing.wav");
+        writeWav (songFile, song, fileRate);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& tracks = processor.getMultitrack();
+
+        const auto backingId = tracks.loadNow (songFile, false, 0);
+        check (backingId > 0 && tracks.getTracks().size() == 1, "loads a 44.1 kHz WAV as the backing track");
+        check (std::abs ((double) tracks.getLength() / sampleRate - 2.0) < 0.01,
+               "resampled to 48 kHz keeps its 2 s length (" + juce::String ((double) tracks.getLength() / sampleRate, 3) + " s)");
+        check (tracks.loadNow (folder.getChildFile ("missing.wav"), false, 0) == -1, "a missing file is rejected");
+
+        check (rms (playSilence (processor, 20), 0, 20 * blockSize) < 1e-6f, "silent while the transport is stopped");
+
+        tracks.play();
+        const auto played = playSilence (processor, 100);
+        const auto expectedRms = 0.25f / std::sqrt (2.0f);
+        const auto measuredRms = rms (played, 10 * blockSize, played.size());
+        check (std::abs (measuredRms - expectedRms) < 0.01f, "plays the backing track into the output (rms "
+                                                                 + juce::String (measuredRms, 3) + ")");
+        check (std::abs (centsBetween (measurePitch (played), 300.0f)) < 5.0f, "at the right pitch after resampling");
+        check (tracks.getPosition() == 100 * blockSize, "the playhead advances with the audio");
+
+        tracks.setTrackMuted (backingId, true);
+        check (rms (playSilence (processor, 10), 0, 10 * blockSize) < 1e-6f, "mute silences the track");
+        tracks.setTrackMuted (backingId, false);
+
+        tracks.seek ((juce::int64) (3.0 * sampleRate));
+        check (rms (playSilence (processor, 10), 0, 10 * blockSize) < 1e-6f, "silent past the end of the song");
+
+        // Record a take while the song plays from 0.5 s: it remembers where it started.
+        tracks.seek ((juce::int64) (0.5 * sampleRate));
+        auto& recorder = processor.getRecorder();
+        recorder.start (folder, false);
+
+        const auto voice = makeVoice (200.0f, 0.5);
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+
+        for (size_t start = 0; start + blockSize <= voice.size(); start += blockSize)
+        {
+            buffer.clear();
+            buffer.copyFrom (0, 0, voice.data() + start, blockSize);
+            processor.processBlock (buffer, midi);
+        }
+
+        const auto take = recorder.stop();
+        check (take.timelineStart == (juce::int64) (0.5 * sampleRate),
+               "the take starts where the playhead was (" + juce::String (take.timelineStart) + ")");
+
+        double takeRate = 0.0;
+        const auto takeAudio = readWav (take.file, takeRate);
+        const auto voiceOnly = rms (std::vector<float> (takeAudio.getReadPointer (0), takeAudio.getReadPointer (0) + takeAudio.getNumSamples()),
+                                    0, (size_t) takeAudio.getNumSamples());
+        const auto dryVoice = rms (voice, 0, voice.size());
+        check (std::abs (centsBetween (measurePitch (std::vector<float> (takeAudio.getReadPointer (0), takeAudio.getReadPointer (0) + takeAudio.getNumSamples())), 200.0f)) < 10.0f
+                   && voiceOnly < dryVoice * 2.0f,
+               "the take holds the voice, not the backing track");
+
+        const auto takeId = tracks.loadNow (take.file, true, take.timelineStart);
+        tracks.setTrackMuted (backingId, true);
+        processor.prepareToPlay (sampleRate, blockSize); // clear the reverb tail of the voice
+        tracks.seek (0);
+        const auto withTake = playSilence (processor, (int) (1.2 * sampleRate) / blockSize);
+        const auto takeStart = (size_t) take.timelineStart;
+        check (takeId > 0 && rms (withTake, 0, takeStart - blockSize) < 1e-6f && rms (withTake, takeStart + blockSize, takeStart + 10 * blockSize) > 0.01f,
+               "the take plays back on its own row at its position");
+
+        tracks.removeTrack (takeId);
+        tracks.removeTrack (backingId);
+        check (tracks.getTracks().empty() && tracks.getLength() == 0, "removing tracks empties the session");
+
+        tracks.pause();
+        folder.deleteRecursively();
+    }
 }
 
 int main()
@@ -358,6 +485,7 @@ int main()
     testAutotune();
     testPresets();
     testRecorder();
+    testMultitrack();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

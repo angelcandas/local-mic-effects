@@ -11,14 +11,17 @@
 //   other parameters  -> Juce.getSliderState (id)
 // Native functions: getParameterDefaults, getPresets, loadPreset (index),
 //   getRecorderSettings, startRecording, stopRecording, chooseRecordingFolder,
-//   setRecordDry (bool), revealRecording.
-// Pushed events: "meters" { input, output, note, target, preset, recording } at 30 Hz
-// (recording = seconds recorded so far, or -1 when not recording).
+//   setRecordDry (bool), revealRecording, getTracks, loadBackingTrack, setTrack (id, { gain, muted }),
+//   removeTrack (id), transport (action, seconds).
+// Pushed events: "meters" { input, output, note, target, preset, recording, transport } at 30 Hz
+// (recording = seconds recorded so far, or -1; transport = { position, length, playing } in
+// seconds), "tracks" when the track list changes, "trackError" (message).
 class PluginEditor final : public juce::AudioProcessorEditor,
                            private juce::Timer
 {
 public:
     explicit PluginEditor (PluginProcessor&);
+    ~PluginEditor() override;
 
     void resized() override;
 
@@ -32,6 +35,10 @@ private:
     // part of the plugin state, so they survive across sessions and projects.
     juce::File getRecordingFolder();
     juce::var describeRecorderSettings();
+    juce::var describeTracks();
+    juce::int64 getRoundTripLatency();
+
+    juce::File lastTakeOnTimeline;
 
     std::unique_ptr<juce::FileChooser> folderChooser;
 

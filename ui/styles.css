@@ -690,10 +690,10 @@ select.dropdown {
 
 /* ---------- Recorder ---------- */
 
-.recorder {
+.studio {
   display: flex;
-  align-items: center;
-  gap: 14px;
+  flex-direction: column;
+  gap: 8px;
   min-width: 0;
   padding: 8px 12px;
   border: 1px solid var(--line);
@@ -701,6 +701,144 @@ select.dropdown {
   background: rgba(19, 22, 30, 0.7);
   font-size: 12px;
 }
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.transport-button {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--panel-raised);
+  color: var(--text);
+  cursor: pointer;
+}
+
+.transport-button svg { width: 14px; height: 14px; fill: currentColor; }
+.transport-button:hover { border-color: #414b61; }
+.transport + .tracks { margin-top: 0; }
+.play-button .icon-pause,
+.studio.is-playing .play-button .icon-play { display: none; }
+.studio.is-playing .play-button .icon-pause { display: block; }
+.studio.is-playing .play-button { border-color: var(--accent-2); color: var(--accent-2); }
+
+.transport-length { margin-left: -8px; color: var(--faint); font: 600 11px/1 var(--mono); white-space: nowrap; }
+
+.add-track {
+  height: 28px;
+  padding: 0 11px;
+  border: 1px dashed var(--line-strong);
+  border-radius: 8px;
+  background: none;
+  color: var(--muted);
+  font-size: 11.5px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+
+.add-track:hover { color: var(--text); border-color: var(--muted); }
+
+.tracks-toggle { flex: none; width: 28px; height: 28px; font-size: 13px; }
+.studio.is-collapsed .tracks { display: none; }
+.studio.is-collapsed .tracks-toggle { transform: rotate(180deg); }
+
+/* Track rows: a header (name, mute, volume, remove) and the waveform lane. */
+.tracks {
+  --header: 200px;
+  position: relative;
+  max-height: 172px;
+  overflow-y: auto;
+}
+
+.tracks-rows { display: grid; gap: 4px; }
+
+.track {
+  display: grid;
+  grid-template-columns: var(--header) 1fr;
+  gap: 8px;
+  height: 40px;
+}
+
+.track-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding: 0 6px 0 10px;
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--track-color);
+  border-radius: 8px;
+  background: var(--panel);
+}
+
+.track-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--text); }
+
+.track-mute,
+.track-remove {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 5px;
+  background: none;
+  color: var(--muted);
+  font: 700 10px/1 var(--mono);
+  cursor: pointer;
+}
+
+.track-remove { border-color: transparent; font-size: 13px; }
+.track-remove:hover { color: var(--hot); }
+.track-mute[aria-pressed="true"] { border-color: var(--warn); background: var(--warn); color: #0b0d12; }
+
+.track-volume { flex: none; width: 58px; accent-color: var(--track-color); }
+
+.track-lane {
+  position: relative;
+  min-width: 0;
+  border-radius: 8px;
+  background: #0d1016;
+  cursor: text;
+}
+
+.track-lane canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.track.is-muted .track-lane { opacity: 0.35; }
+.track.is-loading .track-name { color: var(--muted); font-style: italic; }
+
+.track--backing { --track-color: var(--accent-2); }
+.track--take { --track-color: var(--accent); }
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--text);
+  box-shadow: 0 0 6px rgba(233, 236, 244, 0.5);
+  pointer-events: none;
+}
+
+.studio.is-recording .playhead { background: var(--hot); box-shadow: 0 0 6px rgba(255, 93, 108, 0.6); }
+
+.tracks-empty {
+  padding: 10px 12px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  color: var(--faint);
+  text-align: center;
+}
+
+.tracks-empty .text-button { padding: 0; font-size: inherit; }
+.tracks.has-tracks .tracks-empty { display: none; }
 
 .record-button {
   display: inline-flex;
@@ -732,14 +870,16 @@ select.dropdown {
 @keyframes record-blink { 50% { opacity: 0.35; } }
 
 .record-time {
-  min-width: 56px;
+  min-width: 52px;
+  text-align: right;
   color: var(--faint);
   font: 600 13px/1 var(--mono);
   font-variant-numeric: tabular-nums;
 }
 
-.recorder.is-recording .record-time { color: var(--hot); }
+.studio.is-recording .record-time { color: var(--hot); }
 
+.recorder .pill { flex: none; white-space: nowrap; }
 .recorder .pill:disabled { opacity: 0.5; cursor: default; }
 
 .record-folder { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); }
@@ -771,4 +911,5 @@ select.dropdown {
   .workspace { grid-template-columns: 180px 1fr 108px; }
   .preset-button { min-width: 210px; }
   .record-caption { display: none; }
+  .tracks { --header: 170px; }
 }

@@ -709,8 +709,7 @@ class RecorderBar {
     this.change.addEventListener("click", () => this.chooseFolder().then((settings) => this.applySettings(settings)));
 
     document.addEventListener("keydown", (event) => {
-      const typing = event.target.closest?.("input, select, textarea");
-      if ((event.key === "r" || event.key === "R") && !typing && !event.metaKey && !event.ctrlKey && !event.altKey) {
+      if ((event.key === "r" || event.key === "R") && !isTyping(event) && !event.metaKey && !event.ctrlKey && !event.altKey) {
         event.preventDefault();
         this.toggle();
       }
@@ -740,7 +739,7 @@ class RecorderBar {
         const result = await this.start(this.dry.getAttribute("aria-pressed") === "true");
         if (result?.ok) {
           this.setStatus("");
-          this.setRecording(true, 0);
+          this.setRecording(true);
         } else {
           this.setStatus(result?.error || "Couldn't start recording", "is-error");
         }
@@ -751,14 +750,13 @@ class RecorderBar {
     }
   }
 
-  setRecording(recording, seconds = null) {
+  setRecording(recording) {
     this.recording = recording;
     this.element.classList.toggle("is-recording", recording);
     this.button.setAttribute("aria-pressed", String(recording));
     this.label.textContent = recording ? "Stop" : "Record";
     this.dry.disabled = recording;
     this.change.disabled = recording;
-    if (seconds !== null) this.time.textContent = formatDuration(seconds);
   }
 
   // From the "meters" event: seconds recorded, or -1 when not recording.
@@ -767,7 +765,6 @@ class RecorderBar {
 
     if (seconds >= 0) {
       if (!this.recording) this.setRecording(true);
-      this.time.textContent = formatDuration(seconds);
     } else if (this.recording) {
       // Stopped from the C++ side (e.g. the audio device changed): fetch the saved take.
       this.setRecording(false);
@@ -778,10 +775,9 @@ class RecorderBar {
   showTake(take) {
     if (!take?.file) return;
 
+    // The take also appears as a new track row; the full path is in the tooltip.
     this.status.replaceChildren(
-      html("span", "", "Saved"),
-      Object.assign(html("span", "name", take.fileName), { title: take.file }),
-      html("span", "", `· ${formatDuration(take.seconds)}`),
+      Object.assign(html("span", "", `Saved ${formatDuration(take.seconds)} take`), { title: take.file }),
     );
 
     if (take.dropped) this.status.append(html("span", "warning", "· some audio was dropped"));
@@ -798,6 +794,210 @@ class RecorderBar {
   }
 }
 
+function isTyping(event) {
+  return Boolean(event.target.closest?.("input:not([type=range]), select, textarea"));
+}
+
+//==============================================================================
+// The multi-track player: transport buttons, a row per track (the backing track and
+// every recorded take) with its waveform, and a playhead you can click to move.
+class Tracks {
+  constructor(studio) {
+    this.studio = studio;
+    this.container = studio.querySelector(".tracks");
+    this.rowsElement = studio.querySelector(".tracks-rows");
+    this.playhead = studio.querySelector(".playhead");
+    this.time = studio.querySelector(".record-time");
+    this.lengthLabel = studio.querySelector(".transport-length");
+    this.toggleButton = studio.querySelector(".tracks-toggle");
+
+    this.transport = Juce.getNativeFunction("transport");
+    this.getTracks = Juce.getNativeFunction("getTracks");
+    this.setTrack = Juce.getNativeFunction("setTrack");
+    this.removeTrack = Juce.getNativeFunction("removeTrack");
+    this.loadBacking = Juce.getNativeFunction("loadBackingTrack");
+
+    this.rows = new Map(); // id -> { element, canvas, track }
+    this.state = { position: 0, length: 0, playing: false, loading: 0 };
+
+    studio.querySelectorAll("[data-transport]").forEach((button) =>
+      button.addEventListener("click", () => {
+        const action = button.dataset.transport;
+        this.transport(action === "play" && this.state.playing ? "pause" : action);
+      }));
+
+    studio.querySelectorAll(".add-track, .add-track-inline").forEach((button) =>
+      button.addEventListener("click", () => this.loadBacking()));
+
+    this.toggleButton.addEventListener("click", () => {
+      const collapsed = studio.classList.toggle("is-collapsed");
+      this.toggleButton.setAttribute("aria-expanded", String(!collapsed));
+    });
+
+    document.addEventListener("keydown", (event) => {
+      if (event.key === " " && !isTyping(event) && !event.target.closest?.("button, [role=slider]")) {
+        event.preventDefault();
+        this.transport(this.state.playing ? "pause" : "play");
+      }
+    });
+
+    new ResizeObserver(() => this.redraw()).observe(this.container);
+
+    window.__JUCE__.backend.addEventListener("tracks", () => this.refresh());
+    window.__JUCE__.backend.addEventListener("trackError", (message) => recorderBar.setStatus(message, "is-error"));
+    this.refresh();
+  }
+
+  async refresh() {
+    const tracks = (await this.getTracks()) ?? [];
+    const seen = new Set();
+    let takeNumber = 0;
+
+    for (const track of tracks) {
+      seen.add(track.id);
+      const label = track.isTake ? `Take ${++takeNumber}` : track.name;
+      const row = this.rows.get(track.id) ?? this.createRow(track);
+      row.track = track;
+      row.name.textContent = label;
+      row.name.title = track.file;
+      row.mute.setAttribute("aria-pressed", String(track.muted));
+      row.element.classList.toggle("is-muted", track.muted);
+      row.volume.value = String(Math.round(Math.sqrt(track.gain) * 100));
+      this.rowsElement.append(row.element); // keeps rows in track order
+    }
+
+    for (const [id, row] of this.rows) {
+      if (!seen.has(id)) {
+        row.element.remove();
+        this.rows.delete(id);
+      }
+    }
+
+    this.container.classList.toggle("has-tracks", this.rows.size > 0);
+    this.redraw();
+  }
+
+  createRow(track) {
+    const element = html("div", `track ${track.isTake ? "track--take" : "track--backing"}`);
+    const header = html("div", "track-header");
+    const name = html("span", "track-name");
+    const mute = Object.assign(html("button", "track-mute", "M"), { title: "Mute" });
+    const volume = Object.assign(document.createElement("input"),
+                                 { type: "range", min: 0, max: 150, className: "track-volume", title: "Volume" });
+    const remove = Object.assign(html("button", "track-remove", "×"), { title: "Remove from the session (the file stays on disk)" });
+    const lane = html("div", "track-lane");
+    const canvas = document.createElement("canvas");
+
+    header.append(name, mute, volume, remove);
+    lane.append(canvas);
+    element.append(header, lane);
+
+    const row = { element, name, mute, volume, canvas, lane, track };
+
+    mute.addEventListener("click", () => {
+      const muted = mute.getAttribute("aria-pressed") !== "true";
+      mute.setAttribute("aria-pressed", String(muted));
+      element.classList.toggle("is-muted", muted);
+      this.setTrack(row.track.id, { muted });
+    });
+
+    // Slider position is the square root of the gain, so the middle of the travel is
+    // about -6 dB and the top is +3.5 dB.
+    volume.addEventListener("input", () => {
+      const position = Number(volume.value) / 100;
+      this.setTrack(row.track.id, { gain: position * position });
+    });
+    volume.addEventListener("dblclick", () => {
+      volume.value = "100";
+      this.setTrack(row.track.id, { gain: 1 });
+    });
+
+    remove.addEventListener("click", () => this.removeTrack(row.track.id));
+
+    lane.addEventListener("pointerdown", (event) => {
+      const box = lane.getBoundingClientRect();
+      this.transport("seek", clamp((event.clientX - box.left) / box.width) * this.viewLength());
+    });
+
+    this.rows.set(track.id, row);
+    return row;
+  }
+
+  // Seconds shown across the lanes: the whole session plus a little room to record past the end.
+  viewLength() {
+    const end = Math.max(0, ...[...this.rows.values()].map(({ track }) => track.start + track.length));
+    return Math.max(30, end * 1.1, this.state.position * 1.1);
+  }
+
+  redraw() {
+    const view = this.viewLength();
+    for (const row of this.rows.values()) this.drawWaveform(row, view);
+    this.movePlayhead();
+  }
+
+  drawWaveform({ canvas, lane, track }, view) {
+    const ratio = window.devicePixelRatio || 1;
+    const width = Math.max(1, Math.round(lane.clientWidth * ratio));
+    const height = Math.max(1, Math.round(lane.clientHeight * ratio));
+    if (canvas.width !== width) canvas.width = width;
+    if (canvas.height !== height) canvas.height = height;
+
+    const context = canvas.getContext("2d");
+    context.clearRect(0, 0, width, height);
+
+    const color = getComputedStyle(lane).getPropertyValue("--track-color").trim() || "#8c7bff";
+    const pixelsPerSecond = width / view;
+    const x0 = track.start * pixelsPerSecond;
+    const x1 = (track.start + track.length) * pixelsPerSecond;
+
+    // Clip background, then a min/max column per pixel.
+    context.fillStyle = color;
+    context.globalAlpha = 0.12;
+    context.fillRect(x0, 0, x1 - x0, height);
+    context.globalAlpha = 0.9;
+
+    const peaks = track.peaks ?? [];
+    const peaksPerPixel = 1 / (pixelsPerSecond * track.peakSeconds);
+    const middle = height / 2;
+
+    for (let x = Math.max(0, Math.floor(x0)); x < Math.min(width, x1); ++x) {
+      const first = Math.floor((x - x0) * peaksPerPixel);
+      const last = Math.max(first + 1, Math.floor((x + 1 - x0) * peaksPerPixel));
+      let peak = 0;
+      for (let i = Math.max(0, first); i < Math.min(peaks.length, last); ++i) peak = Math.max(peak, peaks[i]);
+      const half = Math.max(0.5 * ratio, Math.min(1, peak) * (middle - 2 * ratio));
+      context.fillRect(x, middle - half, 1, half * 2);
+    }
+
+    context.globalAlpha = 1;
+  }
+
+  movePlayhead() {
+    const lane = this.rows.values().next().value?.lane;
+    this.playhead.hidden = !lane;
+    if (!lane) return;
+
+    const offset = lane.offsetLeft;
+    const x = offset + clamp(this.state.position / this.viewLength()) * lane.clientWidth;
+    this.playhead.style.left = `${x}px`;
+  }
+
+  // From the "meters" event.
+  update(transport) {
+    if (!transport) return;
+    const viewBefore = this.viewLength();
+    this.state = transport;
+
+    this.studio.classList.toggle("is-playing", transport.playing);
+    this.time.textContent = formatDuration(transport.position);
+    this.lengthLabel.textContent = transport.length > 0 ? `/ ${formatDuration(transport.length)}` : "";
+
+    // Recording past the end widens the view, so the waveforms have to be redrawn.
+    if (Math.abs(this.viewLength() - viewBefore) > 1e-6) this.redraw();
+    else this.movePlayhead();
+  }
+}
+
 function formatDuration(seconds) {
   const tenths = Math.floor(Math.max(0, seconds) * 10);
   const minutes = Math.floor(tenths / 600);
@@ -805,6 +1005,7 @@ function formatDuration(seconds) {
 }
 
 const recorderBar = new RecorderBar(document.querySelector(".recorder"));
+const tracks = new Tracks(document.querySelector(".studio"));
 
 const meters = Object.fromEntries(
   [...document.querySelectorAll("[data-meter]")].map((element) => [element.dataset.meter, new Meter(element)]),
@@ -817,6 +1018,7 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   rack.keyPicker?.setTarget(status.target);
   presetBar.syncFromHost(status.preset);
   recorderBar.update(status.recording);
+  tracks.update(status.transport);
 });
 
 let lastFrame = performance.now();

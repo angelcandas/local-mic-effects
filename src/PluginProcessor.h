@@ -4,6 +4,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "Parameters.h"
+#include "Multitrack.h"
 #include "Recorder.h"
 #include "dsp/Effects.h"
 #include "dsp/PitchEngine.h"
@@ -54,6 +55,10 @@ public:
     // from the message thread; processBlock feeds it.
     Recorder& getRecorder() noexcept                        { return recorder; }
 
+    // Backing track + recorded takes, mixed in after the voice chain (so the music
+    // isn't processed or recorded with the voice). Message thread only.
+    Multitrack& getMultitrack() noexcept                    { return multitrack; }
+
     // Peak levels (linear gain) since the UI last read them. Written by the audio
     // thread, drained with exchange (0) by the editor.
     std::atomic<float> inputPeak  { 0.0f };
@@ -95,6 +100,10 @@ private:
     juce::dsp::Limiter<float> limiter;
 
     Recorder recorder;
+    Multitrack multitrack;
+    // Transparent peak guard for the voice + playback sum: only acts above -1 dB, so
+    // the music isn't coloured (juce::dsp::Limiter compresses from -10 dB).
+    float mixGuardGain = 1.0f, mixGuardRelease = 0.0f;
     juce::AudioBuffer<float> dryInput; // the raw mic, kept for the recorder's dry file
 
     // Which switchable modules ran last block, so one switched back on starts clean.

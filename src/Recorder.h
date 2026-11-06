@@ -16,6 +16,7 @@ public:
         juce::File file;    // processed output
         juce::File dryFile; // dry mic input; empty unless requested
         double seconds = 0.0;
+        juce::int64 timelineStart = 0; // multitrack position of the first recorded sample
         bool droppedAudio = false; // the disk couldn't keep up and some audio was lost
     };
 
@@ -34,8 +35,10 @@ public:
     Take stop();
 
     // Audio thread. `output` has the channel count passed to prepare(); `dry` is mono
-    // and may be null when no dry file is being written.
-    void write (const float* const* output, const float* dry, int numSamples) noexcept;
+    // and may be null when no dry file is being written. `timelinePosition` is where
+    // this block sits on the multitrack timeline; the first one is kept with the take.
+    void write (const float* const* output, const float* dry, int numSamples,
+                juce::int64 timelinePosition = 0) noexcept;
 
     // Message thread. The most recent finished take (empty file if there's none yet).
     const Take& getLastTake() const noexcept { return last; }
@@ -60,6 +63,7 @@ private:
     std::atomic<bool> recording { false };
     std::atomic<juce::int64> samplesWritten { 0 };
     std::atomic<bool> dropped { false };
+    std::atomic<juce::int64> firstPosition { 0 };
 
     Take current, last;
 

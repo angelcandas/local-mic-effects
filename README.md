@@ -42,17 +42,26 @@ They also appear as programs in DAWs.
 The Pitch Shift and Harmonizer use the same engine, so they're tuned too when Autotune is on.
 Chromatic works for any song. Pick the song's key and scale for a tighter, more musical tune.
 
-### Recording
+### Sing along and record
 
-The bar at the bottom of the window records what you hear (the processed output) to a 24-bit WAV
-file. Press **Record** (or the **R** key) to start and again to stop.
+The panel at the bottom of the window is a small multi-track player:
 
-- Takes are saved to `~/Music/MicFX Recordings` by default, named by date and time. **Change…** picks another folder.
-- **Also save dry mic** writes a second, sample-aligned file with your unprocessed voice
+1. **+ Backing track** loads a song (WAV, AIFF, FLAC, Ogg or MP3; on macOS also M4A). It appears
+   as the first row with its waveform.
+2. Press **Record** (or **R**). The music plays, and you hear it mixed with your processed voice.
+3. Press **Stop**. Your take lands on its own row below the music, at the point where you started
+   singing. Record again for more takes; earlier takes play back while you record.
+
+- **Play/pause** (or **Space**) and **back to start** control the transport. Click a row to move the playhead.
+- Each row has **M** (mute), a volume slider (double-click for 0 dB) and **×** (remove from the
+  session; the file stays on disk).
+- Takes contain only your voice, never the backing track. In the app they're shifted earlier by the
+  audio interface's round-trip latency so they line up with what you heard.
+- Takes are 24-bit WAV files in `~/Music/MicFX Recordings` by default. **Change…** picks another
+  folder. **Save dry mic** also writes your unprocessed voice to a second, sample-aligned file
   (`… (dry).wav`), so you can re-process it later.
-- **Show** reveals the last take in Finder.
-- Disk writes happen on a background thread, so recording doesn't add load to the audio thread.
-  The plugin versions record too, independently of the DAW.
+- Disk access and file decoding run on background threads, so they don't add load to the audio thread.
+- The session (which tracks are loaded) isn't saved yet when you quit.
 
 ## Requirements
 
@@ -119,6 +128,7 @@ src/Parameters.*        every parameter: IDs, ranges, defaults
 src/Presets.*           factory voice presets
 src/PluginProcessor.*   audio thread: the effects chain
 src/Recorder.*          WAV recording of the output (and dry mic) on a background thread
+src/Multitrack.*        backing track + takes: loading, resampling, timeline playback
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune/pitch/harmony),
                         Effects (EQ, de-esser, saturation, echo…), Biquad

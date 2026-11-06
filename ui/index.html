@@ -81,20 +81,39 @@
     </aside>
   </div>
 
-  <footer class="recorder" aria-label="Recorder">
-    <button class="record-button" aria-pressed="false" title="Record the processed output to a WAV file (R)">
-      <span class="record-dot"></span><span class="record-label">Record</span>
-    </button>
-    <span class="record-time" aria-live="off">0:00.0</span>
-    <button class="pill record-dry" aria-pressed="false" title="Also save the unprocessed mic to a second file">
-      <span class="switch"></span><span>Also save dry mic</span>
-    </button>
-    <div class="record-folder">
-      <span class="record-caption">Saving to</span>
-      <span class="record-path" title=""></span>
-      <button class="text-button record-change">Change…</button>
+  <footer class="recorder studio" aria-label="Tracks and recorder">
+    <div class="transport">
+      <button class="transport-button" data-transport="stop" title="Back to the start" aria-label="Back to the start">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="2" height="10" rx="0.5" /><path d="M13 3.5v9a.5.5 0 0 1-.8.4L6.3 8.4a.5.5 0 0 1 0-.8l5.9-4.5a.5.5 0 0 1 .8.4z" /></svg>
+      </button>
+      <button class="transport-button play-button" data-transport="play" title="Play / pause (Space)" aria-label="Play">
+        <svg class="icon-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.8v10.4a.6.6 0 0 0 .9.5l8.2-5.2a.6.6 0 0 0 0-1L4.9 2.3a.6.6 0 0 0-.9.5z" /></svg>
+        <svg class="icon-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="0.8" /><rect x="9.5" y="2.5" width="3" height="11" rx="0.8" /></svg>
+      </button>
+      <button class="record-button" aria-pressed="false" title="Record your voice on a new track while the music plays (R)">
+        <span class="record-dot"></span><span class="record-label">Record</span>
+      </button>
+      <span class="record-time" aria-live="off">0:00.0</span>
+      <span class="transport-length"></span>
+      <button class="add-track" title="Load a song to sing along to (WAV, AIFF, FLAC, Ogg, MP3)">+ Backing track</button>
+      <button class="pill record-dry" aria-pressed="false" title="Also save the unprocessed mic to a second file">
+        <span class="switch"></span><span>Save dry mic</span>
+      </button>
+      <div class="record-folder">
+        <span class="record-caption">Saving to</span>
+        <span class="record-path" title=""></span>
+        <button class="text-button record-change">Change…</button>
+      </div>
+      <div class="record-status" aria-live="polite"></div>
+      <button class="icon-button tracks-toggle" aria-expanded="true" title="Show or hide the tracks" aria-label="Show or hide the tracks">▾</button>
     </div>
-    <div class="record-status" aria-live="polite"></div>
+    <div class="tracks">
+      <div class="tracks-rows"></div>
+      <div class="tracks-empty">
+        Load a <button class="text-button add-track-inline">backing track</button> to sing along. Every take you record lands on its own row below the music.
+      </div>
+      <div class="playhead" hidden></div>
+    </div>
   </footer>
 </body>
 </html>
