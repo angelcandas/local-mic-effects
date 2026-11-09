@@ -56,7 +56,8 @@ set(MICFX_DSP_SOURCES
 target_sources(MicFX
     PRIVATE
         ${MICFX_DSP_SOURCES}
-        src/PluginEditor.cpp)
+        src/PluginEditor.cpp
+        src/StandaloneApp.cpp)
 
 target_include_directories(MicFX PRIVATE src)
 
@@ -65,7 +66,11 @@ target_compile_definitions(MicFX
         JUCE_WEB_BROWSER=1
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
+        # Our own standalone app (src/StandaloneApp.cpp) adds "Check for updates..." to the Options menu.
+        JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1
     PRIVATE
+        # Where scripts/update.sh lives, for "Check for updates...".
+        MICFX_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
         # Debug builds load ui/ from disk so UI edits only need a page reload.
         $<$<CONFIG:Debug>:MICFX_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ui">
         $<$<CONFIG:Debug>:MICFX_JUCE_JS_FILE="${CMAKE_CURRENT_SOURCE_DIR}/libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js">)
