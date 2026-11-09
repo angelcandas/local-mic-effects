@@ -85,6 +85,22 @@ On first launch (and after rebuilds, which change the app's signature):
    **Mute audio input**. **Use headphones**, or you'll get feedback.
 3. In **Options → Audio/MIDI Settings**, pick your mic and set the buffer size. 128 samples at 48 kHz ≈ 2.7 ms per buffer.
 
+## Updating
+
+**Options → Check for updates…** in the standalone app fetches the latest version, lists what's
+new, and on **Update and rebuild** pulls it, updates JUCE and rebuilds the app. Then
+**Relaunch MicFX** restarts it. The new build has a new signature, so macOS asks for mic access again.
+
+The same steps work from a terminal:
+
+```bash
+scripts/update.sh check     # what's new (exit 0 = up to date, 10 = update available)
+scripts/update.sh install   # pull + submodule update + cmake --preset debug + cmake --build --preset app
+```
+
+It updates from the current branch's upstream (`origin/main` for a normal clone), and won't
+touch a checkout with uncommitted changes or local commits.
+
 ## Working on the UI
 
 Debug builds load `ui/` straight from the source folder. To see a change:
@@ -130,6 +146,8 @@ src/PluginProcessor.*   audio thread: the effects chain
 src/Recorder.*          WAV recording of the output (and dry mic) on a background thread
 src/Multitrack.*        backing track + takes: loading, resampling, timeline playback
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
+src/StandaloneApp.cpp   standalone app window, with Options → Check for updates…
+scripts/update.sh       update check / pull + rebuild, used by Check for updates…
 src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune/pitch/harmony),
                         Effects (EQ, de-esser, saturation, echo…), Biquad
 ui/modules.js           the effect catalog the UI is built from
