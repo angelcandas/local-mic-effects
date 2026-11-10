@@ -4,6 +4,8 @@
 #include <juce_data_structures/juce_data_structures.h>
 #include <juce_dsp/juce_dsp.h>
 
+#include "dsp/PitchDetector.h"
+
 #include <array>
 #include <functional>
 #include <optional>
@@ -47,6 +49,7 @@ struct Profile
     std::vector<float> rmsDb;         // unweighted level of this hop, dBFS (a full-scale sine is -3 dB)
     std::vector<Bands> bandsDb;       // power per 1/3-octave band over the last ~170 ms, dB re full-scale mean square
     std::vector<bool> active;         // something is playing (see analyse())
+    std::vector<float> pitchHz;       // YIN pitch at the end of the hop, 0 when unpitched
 
     float integratedLufs = -200.0f;   // gated, over the whole signal (-200 = silence)
     float shortTermMaxLufs = -200.0f; // loudest 3 s
@@ -54,6 +57,13 @@ struct Profile
 
     int getNumFrames() const noexcept { return (int) rmsDb.size(); }
     double getActiveSeconds() const;
+
+    // Share of the active frames with a clear pitch (a sung or spoken voice is mostly
+    // pitched; a full backing track mostly isn't to a monophonic detector).
+    double getPitchedFraction() const;
+
+    // The pitch below which only `fraction` of the pitched active frames lie (0 if none).
+    float getPitchPercentile (double fraction) const;
 
     // Average spectrum (power mean, dB) over the frames where `mask` is true, or over
     // the active frames when no mask is given. -200 in every band when no frame counts.
@@ -77,6 +87,9 @@ public:
     // Finishes the gating and the activity detection and returns the result.
     Profile finish();
 
+    // Gain of the BS.1770 K-weighting filter at `frequency`, in dB.
+    static double getKWeightingDb (double frequency, double sampleRate);
+
 private:
     struct KWeighting
     {
@@ -95,6 +108,8 @@ private:
     double hopWeighted[2] {}, hopSquares = 0.0;
     float peak = 0.0f;
     std::vector<double> hopPowers; // K-weighted mean square of each 100 ms hop (channels summed)
+
+    fx::PitchDetector pitch;
 
     static constexpr int fftOrder = 13, fftSize = 1 << fftOrder;
     juce::dsp::FFT fft { fftOrder };

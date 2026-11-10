@@ -48,6 +48,8 @@ juce_add_binary_data(MicFX_WebUI
 set(MICFX_DSP_SOURCES
     src/analysis/Analysis.cpp
     src/analysis/Analysis.h
+    src/analysis/MixAssistant.cpp
+    src/analysis/MixAssistant.h
     src/Parameters.cpp
     src/Presets.cpp
     src/PluginProcessor.cpp

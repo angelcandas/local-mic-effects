@@ -13,6 +13,7 @@
 
 #include "PluginProcessor.h"
 #include "analysis/Analysis.h"
+#include "analysis/MixAssistant.h"
 #include "Presets.h"
 #include "daw/DawEngine.h"
 #include "daw/Exporter.h"
@@ -672,6 +673,147 @@ namespace
 
             folder.deleteRecursively();
         }
+    }
+
+    // A sung line: phrases of a 160 Hz voice-like tone (harmonics at 1/h) with a muddy
+    // second harmonic (+9.5 dB at 320 Hz), alternating loud and soft, with gaps.
+    juce::AudioBuffer<float> makeSungLine (double seconds)
+    {
+        juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
+        buffer.clear();
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto phrase = (int) std::floor (t / 1.25);
+            if (std::fmod (t, 1.25) > 1.0)
+                continue; // a breath between phrases
+
+            const auto level = phrase % 2 == 0 ? 0.3 : 0.07;
+            const auto f0 = 160.0 * (1.0 + 0.06 * (phrase % 3)); // a few different notes
+            double value = 0.0;
+            for (int h = 1; h <= 20; ++h)
+                value += std::sin (twoPi * f0 * h * t) / h * (h == 2 ? 3.0 : 1.0);
+
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.setSample (ch, i, (float) (value * level / 3.0));
+        }
+
+        return buffer;
+    }
+
+    // A backing: a low note, a loud part right where the voice's words are (2.5 kHz),
+    // some top end and a little noise, all the way through.
+    juce::AudioBuffer<float> makeBacking (double seconds)
+    {
+        juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
+        juce::Random random (42);
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto value = 0.1 * std::sin (twoPi * 110.0 * t) + 0.06 * std::sin (twoPi * 2500.0 * t)
+                             + 0.02 * std::sin (twoPi * 6000.0 * t) + 0.01 * (random.nextFloat() * 2.0 - 1.0);
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.setSample (ch, i, (float) value);
+        }
+
+        return buffer;
+    }
+
+    void testMixAssistant()
+    {
+        std::cout << "\nAuto Mix (mix assistant)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-automix");
+        folder.createDirectory();
+        const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav");
+        writeWav (voiceFile, makeSungLine (10.0), sampleRate);
+        writeWav (backingFile, makeBacking (10.0), sampleRate);
+
+        daw::Edit edit;
+        const auto voice = (int) edit.addTrack ("Track 1")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Backing")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 10.0);
+        edit.addClip (backing, backingFile, 0.0, 10.0);
+        const auto reverb = (int) edit.addInsert (voice, fx::ModuleType::reverb)[daw::ids::id];
+        edit.setInsertValue (reverb, "reverbMix", 0.0f);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const auto& voiceProfile = source.tracks[0].second;
+        const auto& backingProfile = source.tracks[1].second;
+
+        check (analysis::guessRole ("Track 1", voiceProfile, 10.0) == analysis::Role::voice
+                   && analysis::guessRole ("Backing", backingProfile, 10.0) == analysis::Role::backing
+                   && analysis::guessRole ("Lead vocal", backingProfile, 10.0) == analysis::Role::voice,
+               "guesses voice and backing (pitched " + juce::String (voiceProfile.getPitchedFraction() * 100.0, 0) + "% of the voice)");
+
+        const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { backing, analysis::Role::backing } };
+        const auto plan = analysis::planMix (source, roles, { { voice, 0.0f }, { backing, 0.0f } }, 0.0f, analysis::MixStyle::pop);
+
+        for (const auto& move : plan.moves)
+            for (const auto& reason : move.reasons)
+                std::cout << "        " << (move.trackId == voice ? "voice:   " : move.trackId == backing ? "backing: " : "master:  ") << reason << "\n";
+        for (const auto& note : plan.notes)
+            std::cout << "        note: " << note << "\n";
+
+        const auto find = [&] (int track, std::optional<fx::ModuleType> type) -> const analysis::MixMove*
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == track && move.insert == type)
+                    return &move;
+            return nullptr;
+        };
+
+        const auto* voiceEq = find (voice, fx::ModuleType::paraEq);
+        check (voiceEq != nullptr && std::abs (voiceEq->values.at ("peqLowCutFreq") - 120.0f) <= 12.0f,
+               "voice: low cut under the lowest note (160 Hz)");
+        check (voiceEq != nullptr && voiceEq->values.at ("peqBell1Gain") <= -2.0f
+                   && std::abs (std::log2 (voiceEq->values.at ("peqBell1Freq") / 320.0f)) <= 0.34f,
+               "voice: cuts the muddy 320 Hz");
+
+        const auto* compressor = find (voice, fx::ModuleType::compressor);
+        check (compressor != nullptr && compressor->values.at ("compRatio") >= 3.0f, "voice: compresses the loud and soft phrases");
+
+        const auto* backingEq = find (backing, fx::ModuleType::paraEq);
+        check (backingEq != nullptr && backingEq->values.at ("peqBell2Gain") <= -1.0f
+                   && std::abs (std::log2 (backingEq->values.at ("peqBell2Freq") / 2500.0f)) <= 0.34f,
+               "backing: dips where it covers the words (2.5 kHz)");
+
+        // Applied, the voice lands near the style's balance and the mix near its target.
+        analysis::applyMix (edit, plan);
+        const auto inserts = daw::Edit::getInserts (edit.getTrack (voice));
+        check (inserts.getNumChildren() == 3 + (find (voice, fx::ModuleType::deEsser) != nullptr ? 1 : 0)
+                   && inserts.getChild (0)[daw::ids::type].toString() == "paraEq"
+                   && inserts.getChild (inserts.getNumChildren() - 1)[daw::ids::type].toString() == "reverb",
+               "adds its inserts before the track's own effects");
+
+        const auto after = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, true).run();
+        const auto masking = analysis::measureMasking (after.tracks[0].second, after.tracks[1].second);
+        const auto target = analysis::getTargets (analysis::MixStyle::pop).voiceOverBackingLu;
+        check (std::abs (masking.voiceOverBackingLu - target) < 1.5f,
+               "voice sits " + juce::String (masking.voiceOverBackingLu, 2) + " LU over the backing (target " + juce::String (target, 1)
+                   + ", predicted " + juce::String (plan.voiceOverBackingLu, 2) + ")");
+        check (after.mix.has_value() && after.mix->peakDb < -0.5f && std::abs (after.mix->integratedLufs - plan.mixLufs) < 2.0f,
+               "mix at " + juce::String (after.mix->integratedLufs, 1) + " LUFS (predicted " + juce::String (plan.mixLufs, 1)
+                   + "), peak " + juce::String (after.mix->peakDb, 1) + " dBFS");
+
+        // One undo step takes it all back.
+        edit.getUndoManager().undo();
+        check (daw::Edit::getInserts (edit.getTrack (voice)).getNumChildren() == 1 && daw::Edit::getInserts (edit.getTrack (backing)).getNumChildren() == 0
+                   && juce::exactlyEqual ((float) edit.getTrack (voice)[daw::ids::volume], 0.0f)
+                   && juce::exactlyEqual ((float) edit.getMaster()[daw::ids::volume], 0.0f),
+               "one undo removes the whole Auto Mix");
+
+        // Amount 0 changes nothing you can hear.
+        analysis::applyMix (edit, plan, 0.0f);
+        const auto eqInsert = daw::Edit::getInserts (edit.getTrack (voice)).getChild (0);
+        check (juce::exactlyEqual ((float) eqInsert["peqBell1Gain"], 0.0f) && juce::exactlyEqual ((float) edit.getTrack (voice)[daw::ids::volume], 0.0f),
+               "amount 0 leaves the gains and volumes neutral");
+
+        folder.deleteRecursively();
     }
 
     //==========================================================================
@@ -1665,6 +1807,7 @@ int main()
     testClipEditing();
     testDawMode();
     testAnalysis();
+    testMixAssistant();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;
