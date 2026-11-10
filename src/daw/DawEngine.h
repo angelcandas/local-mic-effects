@@ -34,7 +34,9 @@ class DawEngine : private juce::ValueTree::Listener,
                   private juce::Timer
 {
 public:
-    explicit DawEngine (Edit&);
+    // An offline engine (for exports) runs entirely on the thread that drives it: no
+    // timer, and replaced graphs are freed straight away.
+    explicit DawEngine (Edit&, bool realtime = true);
     ~DawEngine() override;
 
     // Message thread, with the audio stopped (e.g. from prepareToPlay).
@@ -44,6 +46,10 @@ public:
     // Message thread. Applies any pending change now instead of on the next message
     // loop pass (for tests, and before an offline render).
     void rebuildNow();
+
+    // Message thread (or the offline engine's thread). Decodes every clip's audio now
+    // and rebuilds, so playback is complete from the first block.
+    void loadAllNow();
 
     AudioPool& getAudioPool() noexcept { return pool; }
 
@@ -163,6 +169,7 @@ private:
     void updateTempo();
 
     Edit& edit;
+    const bool realtime;
     AudioPool pool;
 
     double sampleRate = 48000.0;
