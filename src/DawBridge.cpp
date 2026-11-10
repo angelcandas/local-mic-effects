@@ -201,6 +201,7 @@ juce::var DawBridge::describeStatus()
         { "length", (double) engine.getLength() / rate },
         { "playing", engine.isPlaying() },
         { "recording", engine.isRecording() },
+        { "recordStart", (double) engine.getRecordStart() / rate },
         { "input", peakToDecibels (processor.inputPeak.exchange (0.0f)) },
         { "master", peakToDecibels (engine.takePeak (daw::Edit::masterId)) },
         { "tracks", juce::var (peaks) },
@@ -428,6 +429,27 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "split")      { complete (edit.splitClip (id, args["time"])); return; }
     if (command == "duplicate")  { complete (edit.duplicateClip (id)); return; }
     if (command == "removeClip") { edit.removeClip (id); ok(); return; }
+
+    // A copy of a clip (from copy/cut in the UI) at a new place: { track, start, file, offset,
+    // length, gain, fadeIn, fadeOut, name } -> the new clip's id, or -1.
+    if (command == "pasteClip")
+    {
+        const juce::File file (args["file"].toString());
+        auto clip = edit.addClip (arg (args, "track", -1), file, juce::jmax (0.0, (double) args["start"]),
+                                  args["length"], args["offset"]);
+        if (! clip.isValid())
+        {
+            complete (-1);
+            return;
+        }
+
+        if (args.hasProperty ("name"))
+            clip.setProperty (ids::name, args["name"], &undo);
+        edit.setClipGain ((int) clip[ids::id], arg (args, "gain", 0.0f));
+        edit.setClipFades ((int) clip[ids::id], arg (args, "fadeIn", 0.0), arg (args, "fadeOut", 0.0));
+        complete (clip[ids::id]);
+        return;
+    }
     if (command == "clipGain")   { edit.setClipGain (id, args["gain"]); ok(); return; }
     if (command == "clipFades")  { edit.setClipFades (id, args["fadeIn"], args["fadeOut"]); ok(); return; }
 

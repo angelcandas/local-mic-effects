@@ -78,6 +78,7 @@ public:
     juce::String startRecording (const juce::File& folder);
     Recorder::Take stopRecording();
     bool isRecording() const noexcept { return recorder.isRecording() || countingIn.load(); }
+    juce::int64 getRecordStart() const noexcept { return recordStart.load(); } // where the take begins
 
     // Interface input + output latency, so takes line up with what was heard.
     void setRecordingLatency (juce::int64 samples) noexcept { recordingLatency = samples; }
