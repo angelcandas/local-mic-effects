@@ -122,6 +122,10 @@ private:
 // A whole buffer at once.
 Profile analyse (const juce::AudioBuffer<float>&, double sampleRate);
 
+// An audio file (WAV, AIFF, FLAC, Ogg, MP3...), decoded in blocks. Empty (no frames)
+// if it can't be read. `shouldContinue` is polled now and then; false stops early.
+Profile analyseFile (const juce::File&, const std::function<bool()>& shouldContinue = {});
+
 //==============================================================================
 // How a backing track covers a voice, measured over the frames where the voice is
 // active. Both profiles must come from the same timeline and sample rate.
@@ -158,7 +162,7 @@ public:
     using Progress = std::function<bool (double)>; // 0..1; return false to cancel
 
     // Message thread: takes a snapshot of the session.
-    SessionAnalyser (daw::Edit&, Point, bool includeMix, double sampleRate = 48000.0);
+    SessionAnalyser (daw::Edit&, Point, bool includeMix, double sampleRate = 48000.0, bool includeTracks = true);
 
     // Any thread.
     Result run (Progress = {});
@@ -168,7 +172,7 @@ private:
 
     juce::ValueTree snapshot;
     Point point;
-    bool includeMix;
+    bool includeMix, includeTracks;
     double sampleRate;
     double songSeconds = 0.0;
 };

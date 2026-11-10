@@ -539,10 +539,119 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
 }
 
 //==============================================================================
+MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float currentMasterVolume)
+{
+    MixPlan plan;
+
+    if (mix.getActiveSeconds() <= 0.0 || reference.getActiveSeconds() <= 0.0)
+    {
+        plan.notes.add (mix.getActiveSeconds() <= 0.0 ? "The mix is silent." : "Couldn't read the reference.");
+        return plan;
+    }
+
+    // Tonal balance: the difference of the long-term spectra, both levelled over
+    // 100 Hz - 10 kHz, smoothed over about an octave so only the broad shape counts.
+    const auto mixSpectrum = mix.getAverageSpectrum(), referenceSpectrum = reference.getAverageSpectrum();
+    std::vector<double> difference ((size_t) numBands, 0.0);
+    {
+        double offset = 0.0;
+        int count = 0;
+        for (int b = 0; b < numBands; ++b)
+        {
+            difference[(size_t) b] = juce::jmax (referenceSpectrum[(size_t) b], -120.0f) - juce::jmax (mixSpectrum[(size_t) b], -120.0f);
+            if (getBandCentre (b) >= 100.0 && getBandCentre (b) <= 10000.0)
+                offset += difference[(size_t) b], ++count;
+        }
+        offset /= juce::jmax (1, count);
+
+        auto raw = difference;
+        for (int b = 0; b < numBands; ++b)
+        {
+            double sum = 0.0;
+            int n = 0;
+            for (int k = juce::jmax (0, b - 1); k <= juce::jmin (numBands - 1, b + 1); ++k)
+                sum += raw[(size_t) k] - offset, ++n;
+            difference[(size_t) b] = sum / n;
+        }
+    }
+
+    const auto meanOver = [&] (double fromHz, double toHz)
+    {
+        double sum = 0.0;
+        int n = 0;
+        for (int b = 0; b < numBands; ++b)
+            if (getBandCentre (b) >= fromHz && getBandCentre (b) <= toHz)
+                sum += difference[(size_t) b], ++n;
+        return n > 0 ? sum / n : 0.0;
+    };
+
+    const auto gain = [] (double db) { return roundTo (juce::jlimit (-4.0, 4.0, 0.8 * db), 0.5); };
+
+    fx::ParametricEq::Settings eq;
+    eq.lowShelfHz = 120.0f;
+    eq.lowShelfDb = gain (meanOver (40.0, 125.0));
+    eq.highShelfHz = 8000.0f;
+    eq.highShelfDb = gain (meanOver (8000.0, 16000.0));
+    eq.bells[0] = { 300.0f, gain (meanOver (200.0, 450.0)), 0.7f };
+    eq.bells[1] = { 1000.0f, gain (meanOver (700.0, 1400.0)), 0.7f };
+    eq.bells[2] = { 3500.0f, gain (meanOver (2500.0, 5000.0)), 0.7f };
+
+    MixMove eqMove;
+    eqMove.trackId = daw::Edit::masterId;
+    eqMove.insert = fx::ModuleType::paraEq;
+    eqMove.values = { { "peqOn", 1.0f }, { "peqLowCutOn", 0.0f }, { "peqHighCutOn", 0.0f },
+                      { "peqLowFreq", eq.lowShelfHz }, { "peqLowGain", eq.lowShelfDb },
+                      { "peqHighFreq", eq.highShelfHz }, { "peqHighGain", eq.highShelfDb } };
+    for (int b = 0; b < fx::ParametricEq::numBells; ++b)
+    {
+        const auto prefix = "peqBell" + juce::String (b + 1);
+        eqMove.values[prefix + "Freq"] = eq.bells[(size_t) b].hz;
+        eqMove.values[prefix + "Gain"] = eq.bells[(size_t) b].db;
+        eqMove.values[prefix + "Q"] = eq.bells[(size_t) b].q;
+    }
+
+    const auto describe = [&eqMove] (float db, const juce::String& what)
+    {
+        if (std::abs (db) >= 0.5f)
+            eqMove.reasons.add ((db > 0 ? "More " : "Less ") + what + ": " + (db > 0 ? "+" : "-") + formatDb (db));
+    };
+    describe (eq.lowShelfDb, "low end (under 120 Hz)");
+    describe (eq.bells[0].db, "body (300 Hz)");
+    describe (eq.bells[1].db, "middle (1 kHz)");
+    describe (eq.bells[2].db, "presence (3.5 kHz)");
+    describe (eq.highShelfDb, "top end (over 8 kHz)");
+    if (eqMove.reasons.isEmpty())
+        eqMove.reasons.add ("The tonal balance already matches the reference");
+    plan.moves.push_back (eqMove);
+
+    // Loudness: like the reference, without clipping.
+    const auto eqDb = fx::ParametricEq::getMagnitudeDb (eq, bandCentres(), analysisRate);
+    const auto eqChange = loudnessChangeDb (mixSpectrum, eqDb);
+    const auto boost = juce::jmax (0.0, *std::max_element (eqDb.begin(), eqDb.end()));
+    const auto forLoudness = reference.integratedLufs - (mix.integratedLufs + eqChange);
+    const auto forPeak = -1.0 - (mix.peakDb + boost);
+    const auto change = juce::jmin (forLoudness, forPeak);
+    const auto master = roundTo (juce::jlimit (-24.0, 12.0, currentMasterVolume + change), 0.1);
+
+    MixMove volume;
+    volume.trackId = daw::Edit::masterId;
+    volume.values = { { "volume", master } };
+    volume.reasons.add ("Master " + juce::String (master, 1) + " dB, towards the reference's "
+                        + juce::String (reference.integratedLufs, 1) + " LUFS");
+    if (forPeak < forLoudness)
+        volume.reasons.add ("Held back " + formatDb (forLoudness - forPeak) + " so the peaks stay under -1 dB. "
+                            "Export with Normalise for more loudness.");
+    plan.moves.push_back (volume);
+
+    plan.mixLufs = (float) (mix.integratedLufs + eqChange + (master - currentMasterVolume));
+    return plan;
+}
+
+//==============================================================================
 void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
 {
     amount = juce::jlimit (0.0f, 1.0f, amount);
-    edit.getUndoManager().beginNewTransaction ("Auto Mix");
+    edit.getUndoManager().beginNewTransaction ("Auto Mix"); // DawBridge looks for this name
 
     std::map<int, int> added; // inserts added per track, so they keep the plan's order
 

@@ -3,6 +3,8 @@
 #include "daw/DawEngine.h"
 #include "daw/Edit.h"
 
+#include <juce_audio_formats/juce_audio_formats.h>
+
 #include <algorithm>
 #include <cmath>
 #include <complex>
@@ -382,6 +384,33 @@ Profile analyse (const juce::AudioBuffer<float>& buffer, double sampleRate)
     return analyser.finish();
 }
 
+Profile analyseFile (const juce::File& file, const std::function<bool()>& shouldContinue)
+{
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+
+    if (reader == nullptr || reader->sampleRate <= 0.0)
+        return {};
+
+    Analyser analyser (reader->sampleRate);
+    constexpr int blockSize = 1 << 15;
+    const auto channels = (int) juce::jmin (2u, reader->numChannels);
+    juce::AudioBuffer<float> buffer (channels, blockSize);
+
+    for (juce::int64 start = 0; start < reader->lengthInSamples; start += blockSize)
+    {
+        const auto count = (int) juce::jmin ((juce::int64) blockSize, reader->lengthInSamples - start);
+        reader->read (&buffer, 0, count, start, true, channels > 1);
+        analyser.push (buffer.getReadPointer (0), channels > 1 ? buffer.getReadPointer (1) : nullptr, count);
+
+        if (shouldContinue && ! shouldContinue())
+            return {};
+    }
+
+    return analyser.finish();
+}
+
 //==============================================================================
 Masking measureMasking (const Profile& voice, const Profile& backing)
 {
@@ -426,8 +455,9 @@ Masking measureMasking (const Profile& voice, const Profile& backing)
 }
 
 //==============================================================================
-SessionAnalyser::SessionAnalyser (daw::Edit& edit, Point p, bool mix, double rate)
-    : snapshot (edit.getState().createCopy()), point (p), includeMix (mix), sampleRate (rate > 0.0 ? rate : 48000.0)
+SessionAnalyser::SessionAnalyser (daw::Edit& edit, Point p, bool mix, double rate, bool tracksToo)
+    : snapshot (edit.getState().createCopy()), point (p), includeMix (mix), includeTracks (tracksToo),
+      sampleRate (rate > 0.0 ? rate : 48000.0)
 {
 }
 
@@ -481,7 +511,7 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress)
 
     juce::Array<juce::ValueTree> tracks;
     for (const auto& child : snapshot)
-        if (child.hasType (daw::ids::TRACK))
+        if (child.hasType (daw::ids::TRACK) && includeTracks)
             tracks.add (child);
 
     const auto steps = (double) (tracks.size() + (includeMix ? 1 : 0));
