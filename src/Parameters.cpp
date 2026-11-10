@@ -6,7 +6,7 @@ namespace
     using Layout = juce::AudioProcessorValueTreeState::ParameterLayout;
 
     template <typename Param, typename... Args>
-    Param& add (Layout& layout, const char* id, const char* name, Args&&... args)
+    Param& add (Layout& layout, const juce::String& id, const juce::String& name, Args&&... args)
     {
         auto param = std::make_unique<Param> (juce::ParameterID { id, 1 }, name, std::forward<Args> (args)...);
         auto& ref = *param;
@@ -15,7 +15,7 @@ namespace
     }
 
     // `centre` puts that value at the middle of the knob (log-like feel for Hz and ms).
-    FloatParam& number (Layout& layout, const char* id, const char* name, float min, float max, float step,
+    FloatParam& number (Layout& layout, const juce::String& id, const juce::String& name, float min, float max, float step,
                         float defaultValue, const char* label, float centre = 0.0f)
     {
         juce::NormalisableRange<float> range { min, max, step };
@@ -26,32 +26,41 @@ namespace
                                 juce::AudioParameterFloatAttributes{}.withLabel (label));
     }
 
-    BoolParam& toggle (Layout& layout, const char* id, const char* name, bool defaultValue = false)
+    BoolParam& toggle (Layout& layout, const juce::String& id, const juce::String& name, bool defaultValue = false)
     {
         return add<BoolParam> (layout, id, name, defaultValue);
     }
 
-    ChoiceParam& choice (Layout& layout, const char* id, const char* name, const juce::StringArray& choices, int defaultIndex = 0)
+    ChoiceParam& choice (Layout& layout, const juce::String& id, const juce::String& name, const juce::StringArray& choices, int defaultIndex = 0)
     {
         return add<ChoiceParam> (layout, id, name, choices, defaultIndex);
     }
 
-    FloatParam& decibels (Layout& layout, const char* id, const char* name, float min, float max, float defaultValue)
+    FloatParam& decibels (Layout& layout, const juce::String& id, const juce::String& name, float min, float max, float defaultValue)
     {
         return number (layout, id, name, min, max, 0.1f, defaultValue, "dB");
     }
 
-    FloatParam& percent (Layout& layout, const char* id, const char* name, float defaultValue, float max = 100.0f)
+    FloatParam& percent (Layout& layout, const juce::String& id, const juce::String& name, float defaultValue, float max = 100.0f)
     {
         return number (layout, id, name, 0.0f, max, 1.0f, defaultValue, "%");
     }
 
-    FloatParam& hertz (Layout& layout, const char* id, const char* name, float min, float max, float defaultValue, float centre)
+    FloatParam& hertz (Layout& layout, const juce::String& id, const juce::String& name, float min, float max, float defaultValue, float centre)
     {
         return number (layout, id, name, min, max, 0.01f, defaultValue, "Hz", centre);
     }
 
-    FloatParam& semitones (Layout& layout, const char* id, const char* name, float range, float step, float defaultValue)
+    // One bell of the parametric EQ: "peqBell<n>Freq", "...Gain" and "...Q".
+    Parameters::ParaEq::Bell bell (Layout& layout, int n, float defaultFreq)
+    {
+        const auto id = "peqBell" + juce::String (n), name = "PEQ Bell " + juce::String (n);
+        return { hertz (layout, id + "Freq", name + " Freq", 20.0f, 20000.0f, defaultFreq, 1000.0f),
+                 decibels (layout, id + "Gain", name + " Gain", -18.0f, 18.0f, 0.0f),
+                 number (layout, id + "Q", name + " Q", 0.1f, 18.0f, 0.01f, 1.0f, "", 1.5f) };
+    }
+
+    FloatParam& semitones (Layout& layout, const juce::String& id, const juce::String& name, float range, float step, float defaultValue)
     {
         return number (layout, id, name, -range, range, step, defaultValue, "st");
     }
@@ -86,6 +95,17 @@ Parameters::Parameters (Layout& l)
                    hertz (l, "eqMidFreq", "EQ Mid Freq", 200.0f, 5000.0f, 2500.0f, 1000.0f),
                    decibels (l, "eqMidGain", "EQ Mid Gain", -12.0f, 12.0f, 0.0f),
                    decibels (l, "eqHigh", "EQ High", -12.0f, 12.0f, 0.0f) },
+
+      paraEq     { toggle (l, "peqOn", "Parametric EQ On"),
+                   toggle (l, "peqLowCutOn", "PEQ Low Cut On"),
+                   hertz (l, "peqLowCutFreq", "PEQ Low Cut", 20.0f, 1000.0f, 80.0f, 120.0f),
+                   hertz (l, "peqLowFreq", "PEQ Low Freq", 30.0f, 1000.0f, 120.0f, 150.0f),
+                   decibels (l, "peqLowGain", "PEQ Low Gain", -18.0f, 18.0f, 0.0f),
+                   bell (l, 1, 250.0f), bell (l, 2, 1000.0f), bell (l, 3, 4000.0f),
+                   hertz (l, "peqHighFreq", "PEQ High Freq", 1000.0f, 20000.0f, 8000.0f, 6000.0f),
+                   decibels (l, "peqHighGain", "PEQ High Gain", -18.0f, 18.0f, 0.0f),
+                   toggle (l, "peqHighCutOn", "PEQ High Cut On"),
+                   hertz (l, "peqHighCutFreq", "PEQ High Cut", 1000.0f, 20000.0f, 18000.0f, 6000.0f) },
 
       compressor { toggle (l, "compOn", "Compressor On", true),
                    decibels (l, "compThreshold", "Comp Threshold", -60.0f, 0.0f, -18.0f),

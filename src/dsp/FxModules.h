@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Effects.h"
+#include "ParametricEq.h"
 #include "FxModule.h"
 #include "PitchEngine.h"
 
@@ -124,6 +125,57 @@ private:
     void render (const Context& c) noexcept override                 { eq.process (c); }
 
     Equalizer eq;
+};
+
+class ParaEq final : public Module
+{
+public:
+    ParaEq() : Module (ModuleType::paraEq) {}
+
+    Value& on          = addSwitch ("peqOn");
+    Value& lowCutOn    = addValue ("peqLowCutOn", 0.0f); // a value, not a switch: it doesn't switch the module on
+    Value& lowCutFreq  = addValue ("peqLowCutFreq", 80.0f);
+    Value& lowFreq     = addValue ("peqLowFreq", 120.0f);
+    Value& lowGain     = addValue ("peqLowGain", 0.0f);
+    Value& bell1Freq   = addValue ("peqBell1Freq", 250.0f);
+    Value& bell1Gain   = addValue ("peqBell1Gain", 0.0f);
+    Value& bell1Q      = addValue ("peqBell1Q", 1.0f);
+    Value& bell2Freq   = addValue ("peqBell2Freq", 1000.0f);
+    Value& bell2Gain   = addValue ("peqBell2Gain", 0.0f);
+    Value& bell2Q      = addValue ("peqBell2Q", 1.0f);
+    Value& bell3Freq   = addValue ("peqBell3Freq", 4000.0f);
+    Value& bell3Gain   = addValue ("peqBell3Gain", 0.0f);
+    Value& bell3Q      = addValue ("peqBell3Q", 1.0f);
+    Value& highFreq    = addValue ("peqHighFreq", 8000.0f);
+    Value& highGain    = addValue ("peqHighGain", 0.0f);
+    Value& highCutOn   = addValue ("peqHighCutOn", 0.0f);
+    Value& highCutFreq = addValue ("peqHighCutFreq", 18000.0f);
+
+    // The values as EQ settings (for the analysis, which plans moves on the same curve).
+    ParametricEq::Settings getSettings() const noexcept
+    {
+        ParametricEq::Settings s;
+        s.lowCutOn    = flag (lowCutOn);
+        s.lowCutHz    = get (lowCutFreq);
+        s.lowShelfHz  = get (lowFreq);
+        s.lowShelfDb  = get (lowGain);
+        s.bells[0]    = { get (bell1Freq), get (bell1Gain), get (bell1Q) };
+        s.bells[1]    = { get (bell2Freq), get (bell2Gain), get (bell2Q) };
+        s.bells[2]    = { get (bell3Freq), get (bell3Gain), get (bell3Q) };
+        s.highShelfHz = get (highFreq);
+        s.highShelfDb = get (highGain);
+        s.highCutOn   = flag (highCutOn);
+        s.highCutHz   = get (highCutFreq);
+        return s;
+    }
+
+private:
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override { eq.prepare (spec); }
+    void resetModule() override                                      { eq.reset(); }
+    void update() noexcept override                                  { eq.setSettings (getSettings()); }
+    void render (const Context& c) noexcept override                 { eq.process (c); }
+
+    ParametricEq eq;
 };
 
 class Compressor final : public Module
@@ -549,6 +601,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::gate:       return std::make_unique<modules::Gate>();
         case ModuleType::pitch:      return std::make_unique<modules::Pitch>();
         case ModuleType::eq:         return std::make_unique<modules::Eq>();
+        case ModuleType::paraEq:     return std::make_unique<modules::ParaEq>();
         case ModuleType::compressor: return std::make_unique<modules::Compressor>();
         case ModuleType::deEsser:    return std::make_unique<modules::DeEsser>();
         case ModuleType::exciter:    return std::make_unique<modules::Exciter>();
@@ -577,7 +630,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
 inline const char* getModuleKey (ModuleType type)
 {
     static constexpr const char* keys[] = {
-        "highPass", "gate", "pitch", "eq", "compressor", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
+        "highPass", "gate", "pitch", "eq", "paraEq", "compressor", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
         "robot", "filter", "autoWah", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "width"
     };
     static_assert (std::size (keys) == numModuleTypes);

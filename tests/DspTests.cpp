@@ -438,6 +438,98 @@ namespace
     }
 
     //==========================================================================
+    // Gain (dB) of a sine at `frequency` through `chain`, measured on the left channel
+    // after the filters settle.
+    double measureGainDb (fx::FxChain& chain, double frequency)
+    {
+        std::vector<float> sine ((size_t) (0.5 * sampleRate));
+        for (size_t i = 0; i < sine.size(); ++i)
+            sine[i] = (float) (0.25 * std::sin (juce::MathConstants<double>::twoPi * frequency * (double) i / sampleRate));
+
+        const auto output = runChain (chain, sine);
+        double in = 0.0, out = 0.0;
+        const auto blocks = sine.size() / blockSize;
+
+        for (size_t b = blocks / 2; b < blocks; ++b)
+            for (size_t i = 0; i < (size_t) blockSize; ++i)
+            {
+                in  += juce::square ((double) sine[b * blockSize + i]);
+                out += juce::square ((double) output[b * blockSize * 2 + i]);
+            }
+
+        return 10.0 * std::log10 (juce::jmax (1.0e-30, out) / in);
+    }
+
+    void testParametricEq()
+    {
+        std::cout << "\nParametric EQ\n";
+
+        fx::FxChain chain ({ fx::ModuleType::paraEq });
+        auto& eq = *chain.find<fx::modules::ParaEq>();
+        chain.setValue ("peqOn", 1.0f);
+
+        // Flat: every band at 0 dB and both cuts off passes the signal through.
+        {
+            const auto voice = makeVoice (180.0f, 0.5);
+            const auto output = runChain (chain, voice);
+            float worst = 0.0f;
+            for (size_t i = 0; i < voice.size() / blockSize * blockSize; ++i)
+                worst = std::max (worst, std::abs (output[(i / blockSize) * blockSize * 2 + i % blockSize] - voice[i]));
+            check (worst < 1.0e-5f, "flat settings pass the signal through (max error " + juce::String (worst, 7) + ")");
+        }
+
+        // A bell boosts by its gain at its centre and leaves far-away frequencies alone.
+        chain.setValue ("peqBell2Freq", 1000.0f);
+        chain.setValue ("peqBell2Gain", 6.0f);
+        chain.setValue ("peqBell2Q", 2.0f);
+        {
+            const auto centre = measureGainDb (chain, 1000.0), far = measureGainDb (chain, 100.0);
+            check (std::abs (centre - 6.0) < 0.2 && std::abs (far) < 0.2,
+                   "bell: +" + juce::String (centre, 2) + " dB at 1 kHz, " + juce::String (far, 2) + " dB at 100 Hz");
+        }
+
+        // The low cut is 24 dB/octave: -3 dB at the corner, about -48 dB two octaves below.
+        chain.setValue ("peqBell2Gain", 0.0f);
+        chain.setValue ("peqLowCutOn", 1.0f);
+        chain.setValue ("peqLowCutFreq", 200.0f);
+        {
+            const auto corner = measureGainDb (chain, 200.0), below = measureGainDb (chain, 50.0);
+            check (std::abs (corner + 3.0) < 0.3 && below < -44.0,
+                   "low cut: " + juce::String (corner, 2) + " dB at the corner, " + juce::String (below, 1) + " dB two octaves below");
+        }
+
+        // The low cut toggle is a band setting, not the module's switch.
+        {
+            fx::FxChain other ({ fx::ModuleType::paraEq });
+            other.setValue ("peqLowCutOn", 1.0f);
+            check (! other[0].isOn(), "switching a cut on doesn't switch the EQ on");
+        }
+
+        // getMagnitudeDb() (used to plan Auto Mix moves) matches what the EQ does.
+        chain.setValue ("peqLowCutFreq", 60.0f);
+        chain.setValue ("peqLowGain", -4.0f);
+        chain.setValue ("peqLowFreq", 150.0f);
+        chain.setValue ("peqBell1Freq", 320.0f);
+        chain.setValue ("peqBell1Gain", -5.0f);
+        chain.setValue ("peqBell1Q", 1.4f);
+        chain.setValue ("peqBell3Freq", 3500.0f);
+        chain.setValue ("peqBell3Gain", 3.0f);
+        chain.setValue ("peqBell3Q", 0.8f);
+        chain.setValue ("peqHighGain", 2.5f);
+        chain.setValue ("peqHighCutOn", 1.0f);
+        chain.setValue ("peqHighCutFreq", 15000.0f);
+        {
+            double worst = 0.0;
+            for (auto f : { 40.0, 90.0, 150.0, 320.0, 700.0, 1500.0, 3500.0, 7000.0, 12000.0, 16000.0 })
+            {
+                const auto predicted = fx::ParametricEq::getMagnitudeDb (eq.getSettings(), f, sampleRate);
+                worst = std::max (worst, std::abs (predicted - measureGainDb (chain, f)));
+            }
+            check (worst < 0.3, "predicted response matches the measured one (worst " + juce::String (worst, 3) + " dB)");
+        }
+    }
+
+    //==========================================================================
     // Reads a whole WAV file; empty if it can't be opened.
     juce::AudioBuffer<float> readWav (const juce::File& file, double& fileRate)
     {
@@ -1418,6 +1510,7 @@ int main()
     testAutotune();
     testPresets();
     testFxChain();
+    testParametricEq();
     testRecorder();
     testMultitrack();
     testDawEngine();

@@ -8,18 +8,18 @@ Builds as a **standalone app**, plus **AU** and **VST3** plugins from the same c
 
 ## What's inside
 
-**24 effects**, processed in this order (each can be switched on/off):
+**25 effects**, processed in this order (each can be switched on/off):
 
 | Category | Effects |
 | --- | --- |
-| Clean-up | High-pass · Noise Gate · EQ · Compressor · De-esser |
+| Clean-up | High-pass · Noise Gate · EQ · **Parametric EQ** · Compressor · De-esser |
 | Pitch | **Autotune** · Pitch Shift (with formant) · Harmonizer (2 voices) |
 | Character | Exciter · Saturation · Radio · Bitcrusher · Robot · Filter · Auto-wah |
 | Modulation | Tremolo · Vibrato · Chorus · Flanger · Phaser |
 | Space | Doubler · Echo (ping-pong) · Reverb · Stereo Width |
 
 ```
-mic → input gain → high-pass → gate → autotune/pitch/harmonizer → EQ → compressor → de-esser
+mic → input gain → high-pass → gate → autotune/pitch/harmonizer → EQ → parametric EQ → compressor → de-esser
     → exciter → saturation → radio → bitcrusher → robot → filter → auto-wah → tremolo → vibrato
     → chorus → flanger → phaser → doubler → echo → reverb → width → output gain → limiter (−1 dB)
 ```
@@ -41,6 +41,17 @@ They also appear as programs in DAWs.
 
 The Pitch Shift and Harmonizer use the same engine, so they're tuned too when Autotune is on.
 Chromatic works for any song. Pick the song's key and scale for a tighter, more musical tune.
+
+### Parametric EQ
+
+A precise seven-band EQ for mixing, next to the simple three-knob EQ:
+
+- **Low cut** and **high cut** (24 dB/octave, each with its own on/off), a **low shelf**, three **bells**
+  and a **high shelf**, ±18 dB.
+- Drag the points on its curve to set frequency and gain; scroll on a bell to make it wider or narrower
+  (Q 0.1–18). Every band also has knobs.
+- It's the EQ the coming Auto Mix uses for its moves, so its response can be computed exactly
+  (`fx::ParametricEq::getMagnitudeDb`).
 
 ### Sing along and record
 
@@ -196,7 +207,7 @@ src/DawBridge.*         the DAW screen's commands and events (session, status, e
 src/StandaloneApp.cpp   standalone app window, with Options → Check for updates…
 scripts/update.sh       update check / pull + rebuild, used by Check for updates…
 src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune/pitch/harmony),
-                        Effects (EQ, de-esser, saturation, echo…), Biquad,
+                        Effects (EQ, de-esser, saturation, echo…), ParametricEq, Biquad,
                         FxModules (each effect + its values), FxChain (an ordered list of them)
 ui/modules.js           the effect catalog the UI is built from
 ui/app.js, styles.css   the interface (Live mode)
@@ -215,7 +226,7 @@ libs/JUCE               JUCE 9.0.2 (git submodule)
    `createModule()` and `getModuleKey()`. Live mode runs every type in `ModuleType` order; the tests check
    the module values and the parameters stay in sync.
 3. Add an entry to `ui/modules.js`. The card, sidebar item and parameter bindings are generated from it.
-   For DAW inserts, map its id to the module key in `MODULE_KEYS` in `ui/daw.js`.
+   For DAW inserts, map its id to the module key in `MODULE_KEYS` in `ui/modules.js`.
 
 ## Using the processed mic in other apps (Zoom, Discord, OBS)
 

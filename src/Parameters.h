@@ -21,6 +21,16 @@ struct Parameters
     struct PitchShift { BoolParam& on; FloatParam& semitones; FloatParam& formant; } pitchShift;
     struct Harmonizer { BoolParam& on; FloatParam& voice1; FloatParam& voice2; FloatParam& mix; } harmonizer;
     struct Eq         { BoolParam& on; FloatParam& low; FloatParam& midFreq; FloatParam& midGain; FloatParam& high; } eq;
+    struct ParaEq
+    {
+        struct Bell { FloatParam& freq; FloatParam& gain; FloatParam& q; };
+        BoolParam& on;
+        BoolParam& lowCutOn; FloatParam& lowCutFreq;
+        FloatParam& lowFreq; FloatParam& lowGain;
+        Bell bell1, bell2, bell3;
+        FloatParam& highFreq; FloatParam& highGain;
+        BoolParam& highCutOn; FloatParam& highCutFreq;
+    } paraEq;
     struct Compressor { BoolParam& on; FloatParam& threshold; FloatParam& ratio; } compressor;
     struct DeEsser    { BoolParam& on; FloatParam& threshold; FloatParam& freq; } deEsser;
     struct Exciter    { BoolParam& on; FloatParam& freq; FloatParam& amount; } exciter;
