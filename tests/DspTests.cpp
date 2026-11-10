@@ -14,6 +14,7 @@
 #include "PluginProcessor.h"
 #include "Presets.h"
 #include "daw/DawEngine.h"
+#include "daw/Project.h"
 #include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
@@ -991,6 +992,147 @@ namespace
 
         folder.deleteRecursively();
     }
+    void testProjects()
+    {
+        std::cout << "\nDAW projects (save, open, autosave, recovery)\n";
+
+        const auto root = juce::File::createTempFile ("micfx-projects");
+        root.createDirectory();
+
+        // An audio file that lives outside any project, as an import would.
+        juce::AudioBuffer<float> tone (1, (int) sampleRate / 2);
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            tone.setSample (0, i, 0.3f * (float) std::sin (0.05 * i));
+        const auto outside = root.getChildFile ("loop.wav");
+        writeWav (outside, tone, sampleRate);
+
+        daw::Edit edit;
+        daw::Project project (edit);
+
+        check (project.createNew (root.getChildFile ("Song")).isEmpty()
+                   && project.getFolder().getFileName() == "Song.micfx"
+                   && project.getAudioFolder().isDirectory() && project.getFolder().getChildFile ("project.xml").existsAsFile(),
+               "creates a project folder (Song.micfx with Audio, Backups, Exports)");
+
+        const auto imported = project.importAudio (outside);
+        check (imported.isAChildOf (project.getAudioFolder()) && imported.getSize() == outside.getSize(),
+               "importing copies the file into Audio/");
+
+        const auto track = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        edit.setTrackVolume (track, -3.5f);
+        edit.setTrackPan (track, 0.25f);
+        edit.addClip (track, imported, 1.25, 0.5);
+        const auto insert = (int) edit.addInsert (track, fx::ModuleType::echo)[daw::ids::id];
+        edit.setInsertValue (insert, "delayTime", 420.0f);
+        edit.addInsert (daw::Edit::masterId, fx::ModuleType::compressor);
+        edit.setTempo (96.0);
+
+        check (project.hasUnsavedChanges() && project.save().isEmpty() && ! project.hasUnsavedChanges(), "saves, and tracks unsaved changes");
+
+        const auto xmlText = project.getFolder().getChildFile ("project.xml").loadFileAsString();
+        check (xmlText.contains ("file=\"Audio/loop.wav\""), "clip files inside the project are stored relative");
+
+        const auto saved = edit.getState().createCopy();
+        project.close();
+
+        // Move the whole folder, then open it: relative paths still resolve.
+        const auto moved = root.getChildFile ("Moved.micfx");
+        project.getFolder(); // closed: empty
+        check (root.getChildFile ("Song.micfx").moveFileTo (moved), "(moved the project folder)");
+
+        daw::Edit reopened;
+        daw::Project second (reopened);
+        check (second.open (moved).isEmpty(), "opens a project");
+
+        const auto reTrack = reopened.getTrack (track);
+        const auto reClip = reTrack.getChildWithName (daw::ids::CLIP);
+        check (reopened.getTracks().size() == 1 && (float) reTrack[daw::ids::volume] == -3.5f
+                   && (float) reTrack[daw::ids::pan] == 0.25f && juce::approximatelyEqual (reopened.getTempo(), 96.0)
+                   && (double) reClip[daw::ids::start] == 1.25
+                   && (float) reopened.getInsert (insert)[juce::Identifier ("delayTime")] == 420.0f
+                   && daw::Edit::getInserts (reopened.getMaster()).getNumChildren() == 1,
+               "tracks, clips, inserts, master and tempo come back as saved");
+        check (juce::File (reClip[daw::ids::file].toString()) == moved.getChildFile ("Audio/loop.wav") && second.getMissingFiles().isEmpty(),
+               "a moved project still finds its audio");
+        check (! reopened.getUndoManager().canUndo() && ! second.hasUnsavedChanges(), "opening starts with a clean undo history");
+
+        // The engine plays the reopened project.
+        {
+            daw::DawEngine engine (reopened);
+            engine.prepare (sampleRate, blockSize);
+            engine.getAudioPool().loadNow (juce::File (reClip[daw::ids::file].toString()));
+            engine.rebuildNow();
+            engine.seek ((juce::int64) (1.25 * sampleRate));
+            engine.play();
+            const auto out = render (engine, 0.3);
+            check (rms (out[0], 2400, out[0].size()) > 0.05f, "the reopened project plays");
+        }
+
+        // Save as copies the audio into the new folder.
+        const auto copy = root.getChildFile ("Copy");
+        check (second.saveAs (copy).isEmpty() && second.getFolder().getFileName() == "Copy.micfx"
+                   && second.getAudioFolder().getChildFile ("loop.wav").existsAsFile()
+                   && juce::File (reopened.getTrack (track).getChildWithName (daw::ids::CLIP)[daw::ids::file].toString())
+                          .isAChildOf (second.getFolder()),
+               "save as copies the audio and switches to the new folder");
+
+        // Autosave and crash recovery: a backup newer than the save, and no clean close.
+        reopened.setTrackVolume (track, -6.0f);
+        check (second.writeBackup().isEmpty() && second.getBackupsFolder().findChildFiles (juce::File::findFiles, false, "*.xml").size() == 1,
+               "autosave writes a backup");
+
+        for (int i = 0; i < daw::Project::numBackups + 2; ++i)
+            second.writeBackup();
+        check (second.getBackupsFolder().findChildFiles (juce::File::findFiles, false, "*.xml").size() == daw::Project::numBackups,
+               "keeps the newest " + juce::String (daw::Project::numBackups) + " backups");
+
+        const auto crashedFolder = second.getFolder();
+
+        // Backups older than the last save aren't offered, even after a crash.
+        second.save();
+        {
+            daw::Edit afterSave;
+            daw::Project probe (afterSave);
+            check (probe.open (crashedFolder).isEmpty() && ! probe.getRecoverableBackup().exists(),
+                   "backups older than the last save aren't offered");
+        }
+
+        second.save(); // the probe's close removed the lock; the open session writes it again
+        reopened.setTrackVolume (track, -9.0f);
+        second.writeBackup();
+        // Simulate a crash: no close(), the lock file stays. A fresh app opens the project.
+        {
+            daw::Edit afterCrash;
+            daw::Project third (afterCrash);
+            check (third.open (crashedFolder).isEmpty() && third.getRecoverableBackup().existsAsFile(),
+                   "after a crash, opening offers the newest backup");
+            check (third.restoreBackup (third.getRecoverableBackup()).isEmpty()
+                       && (float) afterCrash.getTrack (track)[daw::ids::volume] == -9.0f && third.hasUnsavedChanges(),
+                   "restoring the backup brings back the unsaved change");
+            third.close();
+
+            daw::Edit clean;
+            daw::Project fourth (clean);
+            check (fourth.open (crashedFolder).isEmpty() && ! fourth.getRecoverableBackup().exists(),
+                   "after a clean close, nothing to recover");
+        }
+
+        // Projects from a newer version, and folders that aren't projects, are refused.
+        {
+            daw::Edit future;
+            future.getState().setProperty (daw::ids::version, daw::Edit::formatVersion + 1, nullptr);
+            const auto futureFolder = root.getChildFile ("Future.micfx");
+            futureFolder.createDirectory();
+            future.getState().createXml()->writeTo (futureFolder.getChildFile ("project.xml"));
+
+            daw::Edit target;
+            daw::Project loader (target);
+            check (loader.open (futureFolder).contains ("newer version") && loader.open (root).isNotEmpty() && ! loader.isOpen(),
+                   "refuses newer-format projects and non-project folders");
+        }
+
+        root.deleteRecursively();
+    }
 }
 
 int main()
@@ -1006,6 +1148,7 @@ int main()
     testMultitrack();
     testDawEngine();
     testDawRecording();
+    testProjects();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

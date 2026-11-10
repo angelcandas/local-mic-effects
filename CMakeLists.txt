@@ -50,6 +50,7 @@ set(MICFX_DSP_SOURCES
     src/daw/AudioPool.cpp
     src/daw/DawEngine.cpp
     src/daw/Edit.cpp
+    src/daw/Project.cpp
     src/dsp/Biquad.h
     src/dsp/Effects.h
     src/dsp/FxChain.h
