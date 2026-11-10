@@ -22,8 +22,10 @@ DawEngine::DawEngine (Edit& e) : edit (e)
 {
     pool.setSampleRate (sampleRate);
     pool.onLoaded = [this] { triggerAsyncUpdate(); };
+    recorder.prepare (sampleRate, 1);
 
     edit.getState().addListener (this);
+    updateTempo();
     rebuild();
     startTimerHz (10);
 }
@@ -51,6 +53,9 @@ void DawEngine::prepare (double newSampleRate, int maximumBlockSize)
     }
 
     blockSize = juce::jmax (1, maximumBlockSize);
+    recorder.prepare (sampleRate, 1); // stops (and keeps) a take in progress
+    countingIn = false;
+    updateTempo();
 
     // Fresh strips: every chain is prepared for the new rate and block size.
     strips.clear();
@@ -93,9 +98,18 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         return;
     }
 
+    if (tree.hasType (ids::PROJECT))
+    {
+        if (property == ids::tempo)
+            updateTempo();
+
+        return;
+    }
+
     if (tree.hasType (ids::TRACK) || tree.hasType (ids::MASTER))
     {
-        if (property == ids::volume || property == ids::pan || property == ids::mute || property == ids::solo)
+        if (property == ids::volume || property == ids::pan || property == ids::mute || property == ids::solo
+            || property == ids::monitor)
             updateMix();
 
         return;
@@ -133,8 +147,13 @@ void DawEngine::updateMix()
     const auto anySolo = std::any_of (tracks.begin(), tracks.end(), [] (const auto& t) { return (bool) t[ids::solo]; });
 
     for (const auto& track : tracks)
+    {
         if (const auto it = strips.find ((int) track[ids::id]); it != strips.end())
+        {
             setStripTargets (*it->second, track, ! (bool) track[ids::mute] && (! anySolo || (bool) track[ids::solo]), false);
+            it->second->monitoring = (bool) track[ids::monitor];
+        }
+    }
 
     if (const auto it = strips.find (Edit::masterId); it != strips.end())
         setStripTargets (*it->second, edit.getMaster(), true, false);
@@ -273,6 +292,108 @@ void DawEngine::collectGarbage()
 }
 
 //==============================================================================
+void DawEngine::updateTempo()
+{
+    const auto bpm = juce::jlimit (20.0, 400.0, (double) edit.getState().getProperty (ids::tempo, 120.0));
+    samplesPerBeat = sampleRate * 60.0 / bpm;
+}
+
+juce::String DawEngine::startRecording (const juce::File& folder)
+{
+    if (isRecording())
+        return "Already recording.";
+
+    const auto tracks = edit.getTracks();
+    if (std::none_of (tracks.begin(), tracks.end(), [] (const auto& t) { return (bool) t[ids::arm]; }))
+        return "Arm a track to record on first.";
+
+    if (const auto error = recorder.start (folder, false); error.isNotEmpty())
+        return error;
+
+    const auto start = position.load();
+    recordStart = start;
+
+    if (const auto bars = countInBars.load(); bars > 0)
+    {
+        countingIn = true;
+        position = start - (juce::int64) std::llround (bars * 4 * samplesPerBeat.load());
+    }
+
+    playing = true;
+    return {};
+}
+
+Recorder::Take DawEngine::stopRecording()
+{
+    playing = false;
+    countingIn = false;
+
+    const auto wasRecording = recorder.isRecording();
+    auto take = recorder.stop();
+
+    if (! wasRecording || ! take.file.existsAsFile() || take.seconds <= 0.0)
+        return take;
+
+    // Where the first sample was heard: the playhead minus the interface's round trip.
+    auto start = (double) (take.timelineStart - recordingLatency.load()) / sampleRate;
+    auto offset = 0.0;
+
+    if (start < 0.0)
+    {
+        offset = -start;
+        start = 0.0;
+    }
+
+    edit.getUndoManager().beginNewTransaction ("Record");
+
+    for (const auto& track : edit.getTracks())
+        if ((bool) track[ids::arm])
+            edit.addClip ((int) track[ids::id], take.file, start, take.seconds - offset, offset);
+
+    edit.getUndoManager().beginNewTransaction();
+    return take;
+}
+
+void DawEngine::renderClick (juce::AudioBuffer<float>& output, int offset, int numChannels, int numSamples,
+                             juce::int64 blockStart) noexcept
+{
+    const auto spb = samplesPerBeat.load();
+    const auto counting = countingIn.load();
+    const auto start = recordStart.load();
+    const auto clickOn = metronome.load();
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const auto t = blockStart + i;
+
+        if (clickOn || (counting && t < start))
+        {
+            const auto beat = (juce::int64) std::floor ((double) t / spb);
+
+            if ((double) t - (double) beat * spb < 1.0) // a beat starts on this sample
+            {
+                const auto downbeat = ((beat % 4) + 4) % 4 == 0;
+                clickPhase = 0.0f;
+                clickIncrement = (downbeat ? 1500.0f : 1000.0f) / (float) sampleRate;
+                clickLevel = downbeat ? 0.35f : 0.22f;
+                clickDecay = (float) std::exp (-1.0 / (0.012 * sampleRate));
+            }
+        }
+
+        if (clickLevel < 1.0e-4f)
+            continue;
+
+        const auto sample = clickLevel * std::sin (juce::MathConstants<float>::twoPi * clickPhase);
+        clickPhase += clickIncrement;
+        clickPhase -= std::floor (clickPhase);
+        clickLevel *= clickDecay;
+
+        for (int ch = 0; ch < numChannels; ++ch)
+            output.addSample (ch, offset + i, sample);
+    }
+}
+
+//==============================================================================
 void DawEngine::renderClip (const Clip& clip, juce::AudioBuffer<float>& buffer, juce::int64 blockStart, int numSamples) noexcept
 {
     const auto from = juce::jmax (blockStart, clip.start);
@@ -330,10 +451,26 @@ void DawEngine::applyDelay (Track& track, int numSamples) noexcept
 }
 
 void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int outputOffset, int numChannels,
-                             int numSamples) noexcept
+                             int numSamples, const float* input) noexcept
 {
     const auto isPlaying = playing.load();
     const auto blockStart = position.load();
+
+    // The dry take: the raw mic from the record start on (not during the count-in).
+    if (isPlaying && input != nullptr && recorder.isRecording())
+    {
+        const auto start = recordStart.load();
+        const auto skip = (int) juce::jlimit ((juce::int64) 0, (juce::int64) numSamples, start - blockStart);
+
+        if (skip < numSamples)
+        {
+            const float* channels[] = { input + skip };
+            recorder.write (channels, nullptr, numSamples - skip, blockStart + skip);
+        }
+
+        if (blockStart + numSamples > start)
+            countingIn = false;
+    }
 
     auto& master = *graph.master;
     master.buffer.clear (0, numSamples);
@@ -348,6 +485,13 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
                 renderClip (clip, strip.buffer, blockStart, numSamples);
 
         applyDelay (track, numSamples);
+
+        // Live mic after the delay line: monitoring shouldn't wait for compensation.
+        if (input != nullptr && strip.monitoring.load (std::memory_order_relaxed))
+        {
+            strip.buffer.addFrom (0, 0, input, numSamples);
+            strip.buffer.addFrom (1, 0, input, numSamples);
+        }
 
         auto block = juce::dsp::AudioBlock<float> (strip.buffer).getSubBlock (0, (size_t) numSamples);
         strip.chain.process (fx::Module::Context (block));
@@ -390,10 +534,13 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     }
 
     if (isPlaying)
+    {
+        renderClick (output, outputOffset, numChannels, numSamples, blockStart);
         position = blockStart + numSamples;
+    }
 }
 
-void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int numSamples) noexcept
+void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int numSamples, const float* input) noexcept
 {
     if (auto* next = incoming.exchange (nullptr, std::memory_order_acq_rel))
     {
@@ -419,6 +566,7 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
     }
 
     for (int done = 0; done < numSamples; done += blockSize)
-        renderBlock (*active, output, done, numChannels, juce::jmin (blockSize, numSamples - done));
+        renderBlock (*active, output, done, numChannels, juce::jmin (blockSize, numSamples - done),
+                     input != nullptr ? input + done : nullptr);
 }
 }

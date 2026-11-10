@@ -4,6 +4,7 @@
 #include <juce_events/juce_events.h>
 
 #include "AudioPool.h"
+#include "Recorder.h"
 #include "Edit.h"
 #include "dsp/FxChain.h"
 
@@ -24,6 +25,10 @@ namespace daw
 //
 // Latency compensation: every track is delayed to match the track whose inserts add
 // the most latency, so tracks stay in time with each other.
+//
+// Recording is always dry: the raw mic goes to a WAV file and becomes a clip on every
+// armed track, and the track's inserts are applied on playback. Tracks with monitor on
+// hear the mic live through their inserts.
 class DawEngine : private juce::ValueTree::Listener,
                   private juce::AsyncUpdater,
                   private juce::Timer
@@ -54,6 +59,28 @@ public:
     // Delay the inserts add (the slowest track's chain plus the master chain), in samples.
     int getLatencySamples() const noexcept   { return latency.load(); }
 
+    //==============================================================================
+    // Recording. Message thread.
+    //
+    // startRecording() needs at least one armed track. It starts the transport from
+    // the playhead (after the count-in, if any) and writes the dry mic to a new WAV in
+    // `folder`. stopRecording() stops the transport and adds the take as a clip on
+    // every armed track, in one undo step. Returns an error message, or empty.
+    juce::String startRecording (const juce::File& folder);
+    Recorder::Take stopRecording();
+    bool isRecording() const noexcept { return recorder.isRecording() || countingIn.load(); }
+
+    // Interface input + output latency, so takes line up with what was heard.
+    void setRecordingLatency (juce::int64 samples) noexcept { recordingLatency = samples; }
+
+    // Click on every beat at the project tempo while playing (accent on the bar, 4/4).
+    void setMetronome (bool on) noexcept    { metronome = on; }
+    bool getMetronome() const noexcept      { return metronome.load(); }
+    // Bars of click before recording starts (0 = none). The click plays during the
+    // count-in even when the metronome is off.
+    void setCountInBars (int bars) noexcept { countInBars = juce::jlimit (0, 4, bars); }
+    int getCountInBars() const noexcept     { return countInBars.load(); }
+
     // Message thread. Peak level (linear) of a track's output, or the master's with
     // Edit::masterId, since the last call.
     float takePeak (int trackId);
@@ -62,7 +89,10 @@ public:
     // Audio thread. Renders numSamples into the first numChannels of `output`
     // (overwriting them) and advances the playhead while playing. Inserts keep running
     // while stopped, so reverb and echo tails ring out.
-    void process (juce::AudioBuffer<float>& output, int numChannels, int numSamples) noexcept;
+    // `input` is the mono mic (numSamples long), or null when there isn't one. It may
+    // alias the first output channel: each chunk is read before it's overwritten.
+    void process (juce::AudioBuffer<float>& output, int numChannels, int numSamples,
+                  const float* input = nullptr) noexcept;
 
 private:
     // A track's (or the master's) chain and mixer state. Shared between consecutive
@@ -77,6 +107,7 @@ private:
 
         std::atomic<float> targetLeft { 1.0f }, targetRight { 1.0f };
         std::atomic<float> peak { 0.0f };
+        std::atomic<bool> monitoring { false }; // mic in, through the inserts
 
         // Audio thread.
         juce::SmoothedValue<float> left, right;
@@ -126,7 +157,10 @@ private:
 
     static void renderClip (const Clip&, juce::AudioBuffer<float>&, juce::int64 blockStart, int numSamples) noexcept;
     static void applyDelay (Track&, int numSamples) noexcept;
-    void renderBlock (Graph&, juce::AudioBuffer<float>& output, int outputOffset, int numChannels, int numSamples) noexcept;
+    void renderBlock (Graph&, juce::AudioBuffer<float>& output, int outputOffset, int numChannels, int numSamples,
+                      const float* input) noexcept;
+    void renderClick (juce::AudioBuffer<float>&, int offset, int numChannels, int numSamples, juce::int64 blockStart) noexcept;
+    void updateTempo();
 
     Edit& edit;
     AudioPool pool;
@@ -147,6 +181,16 @@ private:
     std::atomic<bool> playing { false };
     std::atomic<juce::int64> position { 0 }, length { 0 };
     std::atomic<int> latency { 0 };
+
+    Recorder recorder;
+    std::atomic<bool> countingIn { false };
+    std::atomic<juce::int64> recordStart { 0 };
+    std::atomic<juce::int64> recordingLatency { 0 };
+
+    std::atomic<bool> metronome { false };
+    std::atomic<int> countInBars { 0 };
+    std::atomic<double> samplesPerBeat { 24000.0 };
+    float clickPhase = 0.0f, clickIncrement = 0.0f, clickLevel = 0.0f, clickDecay = 0.0f; // audio thread
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DawEngine)
 };
