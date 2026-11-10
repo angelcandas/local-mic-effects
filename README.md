@@ -63,6 +63,32 @@ The panel at the bottom of the window is a small multi-track player:
 - Disk access and file decoding run on background threads, so they don't add load to the audio thread.
 - The session (which tracks are loaded) isn't saved yet when you quit.
 
+### DAW mode (standalone app)
+
+Switch **Live / DAW** at the top of the window. DAW mode is a multitrack recorder built around
+tracks instead of one live chain:
+
+- **Tracks** hold clips on a timeline with a bar ruler. Each track has its own **effect inserts**
+  (any of the Live effects, in any order, or a preset loaded into the track), volume, pan,
+  **M**ute, **S**olo, **●** arm and **In** (hear the mic through the track's effects while you play).
+- Every track feeds the **master** bus, which has its own inserts and volume. **Mixer** shows a
+  channel strip per track plus the master.
+- **Recording is always dry.** Arm one or more tracks and press **Rec** (or **R**). The take is the
+  unprocessed mic; the track's inserts play on top, so you can change the effects afterwards.
+  Optional click and count-in; the take is shifted by the audio round-trip latency.
+- **Editing**: drag clips to move them (also to another track), drag the edges to trim, the top
+  corners to fade, **S** splits at the playhead, **Ctrl+D** duplicates, **Delete** removes. Edits
+  snap to the beat at the project tempo (hold **Alt** to drag freely). Drag on the ruler to mark a
+  loop, **L** toggles it. **Ctrl+Z / Ctrl+Shift+Z** undo and redo every edit.
+- **Projects** are folders (`My Song.micfx/`) with `project.xml`, the audio, autosave backups and
+  exports, so they move and back up as one thing. If the app quits unexpectedly you're offered the
+  newest autosave the next time.
+- **Export** renders the mix, or one stem per track, to 16/24/32-bit WAV faster than real time,
+  optionally normalised or limited to the loop range.
+
+Keys: Space play/pause, Enter back to start, R record, C click, L loop, Tab tracks/mixer, +/− zoom
+(or Ctrl+scroll), Ctrl+S save, Ctrl+T new track.
+
 ## Requirements
 
 - Xcode Command Line Tools (`xcode-select --install`)
@@ -150,13 +176,16 @@ src/daw/                DAW mode: Edit (the session as an undoable ValueTree), A
                         dry recording, metronome), Project (.micfx folders, autosave, recovery),
                         Exporter (offline mixdown and stems to WAV)
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
+src/DawBridge.*         the DAW screen's commands and events (session, status, export)
 src/StandaloneApp.cpp   standalone app window, with Options → Check for updates…
 scripts/update.sh       update check / pull + rebuild, used by Check for updates…
 src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune/pitch/harmony),
                         Effects (EQ, de-esser, saturation, echo…), Biquad,
                         FxModules (each effect + its values), FxChain (an ordered list of them)
 ui/modules.js           the effect catalog the UI is built from
-ui/app.js, styles.css   the interface
+ui/app.js, styles.css   the interface (Live mode)
+ui/daw.js, daw.css      the DAW screen: tracks, clips, inserts, mixer, transport
+ui/widgets.js           helpers shared by both screens
 tests/DspTests.cpp      headless DSP test runner
 libs/JUCE               JUCE 9.0.2 (git submodule)
 ```
@@ -169,6 +198,7 @@ libs/JUCE               JUCE 9.0.2 (git submodule)
    `createModule()` and `getModuleKey()`. Live mode runs every type in `ModuleType` order; the tests check
    the module values and the parameters stay in sync.
 3. Add an entry to `ui/modules.js`. The card, sidebar item and parameter bindings are generated from it.
+   For DAW inserts, map its id to the module key in `MODULE_KEYS` in `ui/daw.js`.
 
 ## Using the processed mic in other apps (Zoom, Discord, OBS)
 

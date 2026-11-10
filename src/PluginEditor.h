@@ -2,6 +2,7 @@
 
 #include <juce_gui_extra/juce_gui_extra.h>
 
+#include "DawBridge.h"
 #include "PluginProcessor.h"
 
 // Hosts the HTML/JS UI from ui/ in a native WebView. Every processor parameter is
@@ -12,10 +13,12 @@
 // Native functions: getParameterDefaults, getPresets, loadPreset (index),
 //   getRecorderSettings, startRecording, stopRecording, chooseRecordingFolder,
 //   setRecordDry (bool), revealRecording, getTracks, loadBackingTrack, setTrack (id, { gain, muted }),
-//   removeTrack (id), transport (action, seconds).
+//   removeTrack (id), transport (action, seconds), getParameterInfo,
+//   daw (command, args) for the DAW screen (see DawBridge).
 // Pushed events: "meters" { input, output, note, target, preset, recording, transport } at 30 Hz
 // (recording = seconds recorded so far, or -1; transport = { position, length, playing } in
-// seconds), "tracks" when the track list changes, "trackError" (message).
+// seconds), "tracks" when the track list changes, "trackError" (message), and the DAW
+// events "dawSession", "dawStatus" and "dawExport" (see DawBridge).
 class PluginEditor final : public juce::AudioProcessorEditor,
                            private juce::Timer
 {
@@ -54,6 +57,8 @@ private:
     std::vector<std::unique_ptr<juce::WebSliderParameterAttachment>> sliderAttachments;
     std::vector<std::unique_ptr<juce::WebToggleButtonParameterAttachment>> toggleAttachments;
     std::vector<std::unique_ptr<juce::WebComboBoxParameterAttachment>> comboAttachments;
+
+    std::unique_ptr<DawBridge> daw; // after webView: it emits through it
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginEditor)
 };

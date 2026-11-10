@@ -39,6 +39,9 @@ juce_add_binary_data(MicFX_WebUI
         ui/styles.css
         ui/app.js
         ui/modules.js
+        ui/widgets.js
+        ui/daw.js
+        ui/daw.css
         libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js)
 
 set(MICFX_DSP_SOURCES
@@ -64,6 +67,7 @@ set(MICFX_DSP_SOURCES
 target_sources(MicFX
     PRIVATE
         ${MICFX_DSP_SOURCES}
+        src/DawBridge.cpp
         src/PluginEditor.cpp
         src/StandaloneApp.cpp)
 

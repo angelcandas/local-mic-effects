@@ -34,6 +34,7 @@ DawEngine::DawEngine (Edit& e, bool isRealtime) : edit (e), realtime (isRealtime
 
 DawEngine::~DawEngine()
 {
+    *alive = false;
     stopTimer();
     cancelPendingUpdate();
     edit.getState().removeListener (this);
@@ -47,6 +48,16 @@ DawEngine::~DawEngine()
 //==============================================================================
 void DawEngine::prepare (double newSampleRate, int maximumBlockSize)
 {
+    if (auto* mm = juce::MessageManager::getInstanceWithoutCreating(); realtime && mm != nullptr && ! mm->isThisTheMessageThread())
+    {
+        juce::MessageManager::callAsync ([this, newSampleRate, maximumBlockSize, weak = std::weak_ptr<bool> (alive)]
+        {
+            if (auto flag = weak.lock(); flag != nullptr && *flag)
+                prepare (newSampleRate, maximumBlockSize);
+        });
+        return;
+    }
+
     if (newSampleRate > 0.0 && ! juce::exactlyEqual (newSampleRate, sampleRate))
     {
         position = (juce::int64) ((double) position.load() * newSampleRate / sampleRate);
@@ -217,6 +228,7 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
 void DawEngine::rebuild()
 {
     auto graph = std::make_unique<Graph>();
+    graph->blockSize = blockSize;
     std::map<int, std::shared_ptr<Strip>> previous;
     std::swap (previous, strips);
 
@@ -596,7 +608,7 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
 
     for (int done = 0; done < numSamples;)
     {
-        auto chunk = juce::jmin (blockSize, numSamples - done);
+        auto chunk = juce::jmin (active->blockSize, numSamples - done);
 
         // Looping: stop the chunk at the loop end, then jump back to the start.
         const auto looping = loopOn.load() && playing.load() && ! isRecording();

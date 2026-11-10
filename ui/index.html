@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>MicFX</title>
   <link rel="stylesheet" href="styles.css">
+  <link rel="stylesheet" href="daw.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
@@ -44,6 +45,10 @@
     </div>
 
     <div class="chips">
+      <div class="segmented mode-switch" hidden title="Live: sing through the effects. DAW: record and mix tracks.">
+        <button data-mode="live" class="is-selected">Live</button>
+        <button data-mode="daw">DAW</button>
+      </div>
       <span class="chip chip--live"><span class="dot"></span>Live</span>
       <span class="chip">Headphones recommended</span>
     </div>
@@ -80,6 +85,37 @@
       </section>
     </aside>
   </div>
+
+  <!-- DAW mode: built by daw.js from the "dawSession" event. -->
+  <section class="daw" aria-label="DAW" hidden>
+    <div class="daw-transport"></div>
+    <div class="daw-banner" hidden></div>
+    <div class="daw-main">
+      <div class="arrange"></div>
+      <div class="mixer"></div>
+      <aside class="inspector" aria-label="Effects and clip settings"></aside>
+    </div>
+    <div class="export-panel" hidden>
+      <div class="export-head">
+        <strong>Export</strong>
+        <button class="mini export-close" title="Close" aria-label="Close">×</button>
+      </div>
+      <div class="export-options">
+        <label>What <select class="dropdown" name="kind"><option value="mix">The mix (one stereo WAV)</option><option value="stems">Stems (one WAV per track)</option></select></label>
+        <label>Format <select class="dropdown" name="bitDepth"><option value="16">16-bit (dithered)</option><option value="24" selected>24-bit</option><option value="32">32-bit float</option></select></label>
+        <label>Tail <select class="dropdown" name="tail"><option value="0">None</option><option value="2" selected>2 s (let echoes ring out)</option><option value="5">5 s</option></select></label>
+        <label class="check"><input type="checkbox" name="normalise"> Normalise to −1 dBFS</label>
+        <label class="check"><input type="checkbox" name="loopOnly"> Only the loop range</label>
+      </div>
+      <div class="export-bar"><div></div></div>
+      <div class="export-footer">
+        <span class="export-result"></span>
+        <button class="tool export-cancel">Cancel</button>
+        <button class="tool is-accent export-go">Export…</button>
+      </div>
+    </div>
+    <div class="daw-toast" role="status" aria-live="polite"></div>
+  </section>
 
   <footer class="recorder studio" aria-label="Tracks and recorder">
     <div class="transport">

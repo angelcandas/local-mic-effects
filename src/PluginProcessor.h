@@ -6,6 +6,8 @@
 #include "Parameters.h"
 #include "Multitrack.h"
 #include "Recorder.h"
+#include "daw/DawEngine.h"
+#include "daw/Project.h"
 #include "dsp/FxChain.h"
 
 // Signal chain, in order (every module except gain/reverb/limiter is skipped when off):
@@ -61,6 +63,14 @@ public:
     // isn't processed or recorded with the voice). Message thread only.
     Multitrack& getMultitrack() noexcept                    { return multitrack; }
 
+    // DAW mode (standalone app): the mic feeds the DAW engine's tracks instead of the
+    // Live chain. The session, its engine and its project file. Message thread.
+    daw::Edit& getDawEdit() noexcept                         { return dawEdit; }
+    daw::DawEngine& getDawEngine() noexcept                  { return dawEngine; }
+    daw::Project& getDawProject() noexcept                   { return dawProject; }
+    void setDawMode (bool on) noexcept                       { dawMode = on; }
+    bool isDawMode() const noexcept                          { return dawMode.load(); }
+
     // Peak levels (linear gain) since the UI last read them. Written by the audio
     // thread, drained with exchange (0) by the editor.
     std::atomic<float> inputPeak  { 0.0f };
@@ -83,6 +93,13 @@ private:
 
     Recorder recorder;
     Multitrack multitrack;
+
+    daw::Edit dawEdit;
+    daw::DawEngine dawEngine { dawEdit };
+    daw::Project dawProject { dawEdit };
+    std::atomic<bool> dawMode { false };
+
+    void applyPeakGuard (juce::AudioBuffer<float>&, int numChannels, int numSamples) noexcept;
     // Transparent peak guard for the voice + playback sum: only acts above -1 dB, so
     // the music isn't coloured (juce::dsp::Limiter compresses from -10 dB).
     float mixGuardGain = 1.0f, mixGuardRelease = 0.0f;
