@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <complex>
 #include <numeric>
 
 namespace analysis
@@ -85,6 +86,34 @@ double Profile::getActiveSeconds() const
     return (double) std::count (active.begin(), active.end(), true) * hopSeconds;
 }
 
+double Profile::getPitchedFraction() const
+{
+    int activeFrames = 0, pitched = 0;
+    for (size_t i = 0; i < active.size() && i < pitchHz.size(); ++i)
+        if (active[i])
+        {
+            ++activeFrames;
+            pitched += pitchHz[i] > 0.0f ? 1 : 0;
+        }
+
+    return activeFrames > 0 ? (double) pitched / activeFrames : 0.0;
+}
+
+float Profile::getPitchPercentile (double fraction) const
+{
+    std::vector<float> values;
+    for (size_t i = 0; i < active.size() && i < pitchHz.size(); ++i)
+        if (active[i] && pitchHz[i] > 0.0f)
+            values.push_back (pitchHz[i]);
+
+    if (values.empty())
+        return 0.0f;
+
+    const auto nth = values.begin() + (long) std::lround (juce::jlimit (0.0, 1.0, fraction) * (double) (values.size() - 1));
+    std::nth_element (values.begin(), nth, values.end());
+    return *nth;
+}
+
 Bands Profile::getAverageSpectrum (const std::vector<bool>* mask) const
 {
     const auto& use = maskOrActive (*this, mask);
@@ -163,11 +192,27 @@ double Analyser::KWeighting::process (int channel, double x) noexcept
     return y2;
 }
 
+double Analyser::getKWeightingDb (double frequency, double sampleRate)
+{
+    KWeighting k;
+    k.setup (sampleRate);
+
+    const auto response = [frequency, sampleRate] (const std::array<double, 5>& c)
+    {
+        const auto w = juce::MathConstants<double>::twoPi * frequency / sampleRate;
+        const std::complex<double> z1 = std::polar (1.0, -w), z2 = z1 * z1;
+        return std::norm ((c[0] + c[1] * z1 + c[2] * z2) / (1.0 + c[3] * z1 + c[4] * z2));
+    };
+
+    return 10.0 * std::log10 (response (k.shelf) * response (k.highPass));
+}
+
 Analyser::Analyser (double sampleRate)
     : hopSize (juce::jmax (1, (int) std::lround (sampleRate * Profile::hopSeconds)))
 {
     profile.sampleRate = sampleRate;
     kWeighting.setup (sampleRate);
+    pitch.prepare (sampleRate);
 
     history.assign ((size_t) fftSize, 0.0f);
     fftData.assign ((size_t) fftSize * 2, 0.0f);
@@ -196,7 +241,9 @@ void Analyser::push (const float* left, const float* right, int numSamples)
         hopSquares += right != nullptr ? 0.5 * ((double) l * l + (double) r * r) : (double) l * l;
         peak = juce::jmax (peak, std::abs (l), std::abs (r));
 
-        history[(size_t) historyPos] = 0.5f * (l + r);
+        const auto mono = 0.5f * (l + r);
+        pitch.push (&mono, 1);
+        history[(size_t) historyPos] = mono;
         historyPos = (historyPos + 1) % fftSize;
 
         if (++hopFill == hopSize)
@@ -209,6 +256,7 @@ void Analyser::endHop()
     const auto n = (double) hopSize;
     hopPowers.push_back ((hopWeighted[0] + hopWeighted[1]) / n);
     profile.rmsDb.push_back (toDb (hopSquares / n));
+    profile.pitchHz.push_back (pitch.getFrequency());
     hopWeighted[0] = hopWeighted[1] = hopSquares = 0.0;
     hopFill = 0;
 
