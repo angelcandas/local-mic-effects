@@ -46,6 +46,8 @@ juce_add_binary_data(MicFX_WebUI
         libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js)
 
 set(MICFX_DSP_SOURCES
+    src/analysis/Analysis.cpp
+    src/analysis/Analysis.h
     src/Parameters.cpp
     src/Presets.cpp
     src/PluginProcessor.cpp
@@ -62,6 +64,7 @@ set(MICFX_DSP_SOURCES
     src/dsp/FxModule.h
     src/dsp/FxModules.h
     src/dsp/PitchDetector.h
+    src/dsp/ParametricEq.h
     src/dsp/PitchEngine.h
     src/dsp/PsolaShifter.h)
 
