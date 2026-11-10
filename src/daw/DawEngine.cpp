@@ -114,6 +114,8 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     {
         if (property == ids::tempo)
             updateTempo();
+        else if (property == ids::loopOn || property == ids::loopStart || property == ids::loopEnd)
+            updateLoop();
 
         return;
     }
@@ -308,6 +310,17 @@ void DawEngine::updateTempo()
 {
     const auto bpm = juce::jlimit (20.0, 400.0, (double) edit.getState().getProperty (ids::tempo, 120.0));
     samplesPerBeat = sampleRate * 60.0 / bpm;
+    updateLoop();
+}
+
+void DawEngine::updateLoop()
+{
+    const auto& project = edit.getState();
+    const auto start = (juce::int64) std::llround ((double) project.getProperty (ids::loopStart, 0.0) * sampleRate);
+    const auto end = (juce::int64) std::llround ((double) project.getProperty (ids::loopEnd, 0.0) * sampleRate);
+    loopStart = start;
+    loopEnd = end;
+    loopOn = (bool) project.getProperty (ids::loopOn, false) && end > start;
 }
 
 juce::String DawEngine::startRecording (const juce::File& folder)
@@ -581,8 +594,26 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
         return;
     }
 
-    for (int done = 0; done < numSamples; done += blockSize)
-        renderBlock (*active, output, done, numChannels, juce::jmin (blockSize, numSamples - done),
-                     input != nullptr ? input + done : nullptr);
+    for (int done = 0; done < numSamples;)
+    {
+        auto chunk = juce::jmin (blockSize, numSamples - done);
+
+        // Looping: stop the chunk at the loop end, then jump back to the start.
+        const auto looping = loopOn.load() && playing.load() && ! isRecording();
+        const auto end = loopEnd.load();
+
+        if (looping && position.load() == end)
+            position = loopStart.load();
+
+        if (const auto pos = position.load(); looping && pos < end && pos + chunk > end)
+            chunk = (int) (end - pos);
+
+        renderBlock (*active, output, done, numChannels, chunk, input != nullptr ? input + done : nullptr);
+
+        if (looping && position.load() == end)
+            position = loopStart.load();
+
+        done += chunk;
+    }
 }
 }

@@ -61,6 +61,8 @@ public:
     bool isPlaying() const noexcept          { return playing.load(); }
     juce::int64 getPosition() const noexcept { return position.load(); }
     juce::int64 getLength() const noexcept   { return length.load(); } // end of the last clip
+    // While the Edit's loop is on, playback wraps from its end to its start (not while
+    // recording, which always runs straight on).
 
     // Delay the inserts add (the slowest track's chain plus the master chain), in samples.
     int getLatencySamples() const noexcept   { return latency.load(); }
@@ -167,6 +169,7 @@ private:
                       const float* input) noexcept;
     void renderClick (juce::AudioBuffer<float>&, int offset, int numChannels, int numSamples, juce::int64 blockStart) noexcept;
     void updateTempo();
+    void updateLoop();
 
     Edit& edit;
     const bool realtime;
@@ -193,6 +196,9 @@ private:
     std::atomic<bool> countingIn { false };
     std::atomic<juce::int64> recordStart { 0 };
     std::atomic<juce::int64> recordingLatency { 0 };
+
+    std::atomic<bool> loopOn { false };
+    std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 };
 
     std::atomic<bool> metronome { false };
     std::atomic<int> countInBars { 0 };

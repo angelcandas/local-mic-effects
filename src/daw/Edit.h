@@ -9,7 +9,7 @@
 // The DAW session as a ValueTree, so every change can be undone and the whole thing
 // saves to a file as it is:
 //
-//   PROJECT  version, tempo
+//   PROJECT  version, tempo, loopOn, loopStart, loopEnd
 //     MASTER  volume (dB)
 //       INSERTS
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value
@@ -32,6 +32,7 @@ namespace ids
     MICFX_DAW_ID (volume) MICFX_DAW_ID (pan) MICFX_DAW_ID (mute) MICFX_DAW_ID (solo) MICFX_DAW_ID (arm)
     MICFX_DAW_ID (monitor) MICFX_DAW_ID (type) MICFX_DAW_ID (file) MICFX_DAW_ID (start) MICFX_DAW_ID (offset)
     MICFX_DAW_ID (length) MICFX_DAW_ID (gain) MICFX_DAW_ID (fadeIn) MICFX_DAW_ID (fadeOut)
+    MICFX_DAW_ID (loopOn) MICFX_DAW_ID (loopStart) MICFX_DAW_ID (loopEnd)
 #undef MICFX_DAW_ID
 }
 
@@ -39,6 +40,7 @@ class Edit
 {
 public:
     static constexpr int formatVersion = 1;
+    static constexpr double minClipSeconds = 0.01;
 
     Edit();
 
@@ -77,6 +79,23 @@ public:
                              double offsetSeconds = 0.0);
     void removeClip (int clipId);
     juce::ValueTree getClip (int clipId) const;
+
+    // Clip editing. Everything is non-destructive: clips are windows onto their files.
+    // Times are in seconds on the timeline.
+    void moveClip (int clipId, double newStart, int toTrackId = -1);  // -1 = same track
+    void trimClipStart (int clipId, double newStart);  // keeps the audio in place; can't go before the file's start
+    void trimClipEnd (int clipId, double newEnd);
+    int splitClip (int clipId, double time);           // returns the new (right-hand) clip, or -1
+    int duplicateClip (int clipId);                    // placed right after the original
+    void setClipGain (int clipId, float decibels);
+    void setClipFades (int clipId, double fadeInSeconds, double fadeOutSeconds);
+
+    // The nearest grid line at the project tempo, `beats` apart (1 = quarter notes,
+    // 4 = bars in 4/4, 0.5 = eighths).
+    double snapToGrid (double seconds, double beats) const;
+
+    // Loop range: while on, playback wraps from the end back to the start.
+    void setLoop (bool on, double startSeconds, double endSeconds);
 
     //==============================================================================
     // Inserts on a track, or on the master bus with trackId == masterId. A new insert

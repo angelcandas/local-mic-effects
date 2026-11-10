@@ -1240,6 +1240,117 @@ namespace
 
         folder.deleteRecursively();
     }
+    void testClipEditing()
+    {
+        std::cout << "\nDAW clip editing (move, trim, split, fades, snap, loop)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-edit");
+        folder.createDirectory();
+
+        // A ramp makes it easy to see which part of the file plays where.
+        juce::AudioBuffer<float> ramp (1, (int) sampleRate * 2);
+        for (int i = 0; i < ramp.getNumSamples(); ++i)
+            ramp.setSample (0, i, 0.1f + 0.4f * (float) i / (float) ramp.getNumSamples());
+        const auto rampFile = folder.getChildFile ("ramp.wav");
+        writeWav (rampFile, ramp, sampleRate);
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        const auto source = engine.getAudioPool().loadNow (rampFile);
+
+        const auto a = (int) edit.addTrack ("A")[daw::ids::id];
+        const auto b = (int) edit.addTrack ("B")[daw::ids::id];
+        const auto clip = (int) edit.addClip (a, rampFile, 1.0, 2.0)[daw::ids::id];
+        const auto get = [&] (int id, const juce::Identifier& p) { return (double) edit.getClip (id)[p]; };
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.trimClipStart (clip, 1.5);
+        check (juce::approximatelyEqual (get (clip, daw::ids::start), 1.5) && juce::approximatelyEqual (get (clip, daw::ids::offset), 0.5)
+                   && juce::approximatelyEqual (get (clip, daw::ids::length), 1.5),
+               "trimming the start keeps the audio in place");
+
+        edit.trimClipStart (clip, 0.2);
+        check (juce::approximatelyEqual (get (clip, daw::ids::start), 1.0) && juce::approximatelyEqual (get (clip, daw::ids::offset), 0.0),
+               "can't trim before the start of the file");
+
+        edit.trimClipEnd (clip, 2.5);
+        check (juce::approximatelyEqual (get (clip, daw::ids::length), 1.5), "trimming the end");
+
+        const auto right = edit.splitClip (clip, 2.0);
+        check (right > 0 && juce::approximatelyEqual (get (clip, daw::ids::length), 1.0)
+                   && juce::approximatelyEqual (get (right, daw::ids::start), 2.0) && juce::approximatelyEqual (get (right, daw::ids::offset), 1.0)
+                   && juce::approximatelyEqual (get (right, daw::ids::length), 0.5),
+               "split makes two clips that play the same audio as before");
+        check (edit.splitClip (clip, 5.0) == -1, "splitting outside a clip does nothing");
+
+        // The split pair plays exactly like the unsplit clip.
+        engine.loadAllNow();
+        engine.seek (0);
+        engine.play();
+        auto out = render (engine, 2.6);
+        engine.stop();
+
+        float worst = 0.0f;
+        for (int i = 0; i < (int) (1.5 * sampleRate); ++i)
+            worst = std::max (worst, std::abs (out[0][(size_t) sampleRate + (size_t) i] - source->getSample (0, i)));
+        check (worst == 0.0f, "the split is seamless (sample-exact across the cut)");
+
+        edit.moveClip (right, 0.25, b);
+        check (edit.getClip (right).getParent() == edit.getTrack (b) && juce::approximatelyEqual (get (right, daw::ids::start), 0.25),
+               "moves a clip in time and to another track");
+
+        const auto copy = edit.duplicateClip (clip);
+        check (copy > 0 && juce::approximatelyEqual (get (copy, daw::ids::start), 2.0), "duplicate lands right after the original");
+
+        edit.setClipFades (copy, 0.8, 0.8);
+        check (juce::approximatelyEqual (get (copy, daw::ids::fadeIn), 0.8) && std::abs (get (copy, daw::ids::fadeOut) - 0.2) < 1.0e-9,
+               "fades never overlap past the clip");
+
+        edit.setClipGain (copy, -6.0f);
+        edit.getUndoManager().beginNewTransaction();
+        edit.getUndoManager().undo();
+        check (edit.getTrack (a).getNumChildren() == 2 // INSERTS + the original clip
+                   && ! edit.getClip (right).isValid() && ! edit.getClip (copy).isValid()
+                   && juce::approximatelyEqual (get (clip, daw::ids::length), 2.0),
+               "one undo reverts the whole editing gesture");
+        edit.getUndoManager().redo();
+
+        // Fades shape the audio: silent at the clip's start, full level after the fade.
+        edit.setClipFades (clip, 0.5, 0.0);
+        engine.loadAllNow();
+        engine.seek (0);
+        engine.play();
+        out = render (engine, 1.8);
+        engine.stop();
+        const auto at = [&] (double seconds) { return out[0][(size_t) (seconds * sampleRate)]; };
+        check (std::abs (at (1.0)) < 1.0e-6f && std::abs (at (1.25) - 0.5f * source->getSample (0, (int) (0.25 * sampleRate))) < 1.0e-4f
+                   && juce::approximatelyEqual (at (1.6), source->getSample (0, (int) (0.6 * sampleRate))),
+               "a fade-in ramps the clip up");
+
+        edit.setTempo (120.0);
+        check (juce::approximatelyEqual (edit.snapToGrid (1.13, 1.0), 1.0) && juce::approximatelyEqual (edit.snapToGrid (1.3, 1.0), 1.5)
+                   && juce::approximatelyEqual (edit.snapToGrid (3.9, 4.0), 4.0),
+               "snaps to beats and bars at the project tempo");
+
+        // Loop: playback wraps from the loop end back to its start, sample-exact.
+        edit.setClipFades (clip, 0.0, 0.0);
+        edit.setLoop (true, 1.0, 1.1);
+        engine.loadAllNow();
+        engine.seek ((juce::int64) sampleRate);
+        engine.play();
+        out = render (engine, 0.35);
+        engine.stop();
+
+        const auto loopLength = (size_t) (0.1 * sampleRate);
+        worst = 0.0f;
+        for (size_t i = 0; i < out[0].size(); ++i)
+            worst = std::max (worst, std::abs (out[0][i] - source->getSample (0, (int) (i % loopLength))));
+        check (worst == 0.0f && engine.getPosition() < (juce::int64) (1.1 * sampleRate), "loops between the loop points");
+
+        edit.setLoop (false, 1.0, 1.1);
+        folder.deleteRecursively();
+    }
 }
 
 int main()
@@ -1257,6 +1368,7 @@ int main()
     testDawRecording();
     testProjects();
     testExport();
+    testClipEditing();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

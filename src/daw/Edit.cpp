@@ -176,6 +176,119 @@ juce::ValueTree Edit::getClip (int clipId) const
     return findById (ids::CLIP, clipId);
 }
 
+void Edit::moveClip (int clipId, double newStart, int toTrackId)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid())
+        return;
+
+    clip.setProperty (ids::start, juce::jmax (0.0, newStart), &undoManager);
+
+    if (auto target = getTrack (toTrackId); target.isValid() && target != clip.getParent())
+    {
+        clip.getParent().removeChild (clip, &undoManager);
+        target.appendChild (clip, &undoManager);
+    }
+}
+
+void Edit::trimClipStart (int clipId, double newStart)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid())
+        return;
+
+    const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+    const auto end = start + length;
+    const auto clamped = juce::jlimit (juce::jmax (0.0, start - offset), end - minClipSeconds, newStart);
+    const auto delta = clamped - start;
+
+    clip.setProperty (ids::start, clamped, &undoManager);
+    clip.setProperty (ids::offset, offset + delta, &undoManager);
+    clip.setProperty (ids::length, length - delta, &undoManager);
+}
+
+void Edit::trimClipEnd (int clipId, double newEnd)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid())
+        return;
+
+    const auto start = (double) clip[ids::start];
+    clip.setProperty (ids::length, juce::jmax (minClipSeconds, newEnd - start), &undoManager);
+}
+
+int Edit::splitClip (int clipId, double time)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid())
+        return -1;
+
+    const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+
+    if (time <= start + minClipSeconds || time >= start + length - minClipSeconds)
+        return -1;
+
+    auto right = clip.createCopy();
+    const auto id = takeNextId();
+    right.setProperty (ids::id, id, nullptr);
+    right.setProperty (ids::start, time, nullptr);
+    right.setProperty (ids::offset, offset + (time - start), nullptr);
+    right.setProperty (ids::length, start + length - time, nullptr);
+    right.setProperty (ids::fadeIn, 0.0, nullptr);
+
+    clip.setProperty (ids::length, time - start, &undoManager);
+    clip.setProperty (ids::fadeOut, 0.0, &undoManager);
+    clip.getParent().addChild (right, clip.getParent().indexOf (clip) + 1, &undoManager);
+    return id;
+}
+
+int Edit::duplicateClip (int clipId)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid())
+        return -1;
+
+    auto copy = clip.createCopy();
+    const auto id = takeNextId();
+    copy.setProperty (ids::id, id, nullptr);
+    copy.setProperty (ids::start, (double) clip[ids::start] + (double) clip[ids::length], nullptr);
+    clip.getParent().addChild (copy, clip.getParent().indexOf (clip) + 1, &undoManager);
+    return id;
+}
+
+void Edit::setClipGain (int clipId, float decibels)
+{
+    getClip (clipId).setProperty (ids::gain, juce::jlimit (-60.0f, 24.0f, decibels), &undoManager);
+}
+
+void Edit::setClipFades (int clipId, double fadeInSeconds, double fadeOutSeconds)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid())
+        return;
+
+    // The two fades together never exceed the clip.
+    const auto length = (double) clip[ids::length];
+    const auto fadeIn = juce::jlimit (0.0, length, fadeInSeconds);
+    clip.setProperty (ids::fadeIn, fadeIn, &undoManager);
+    clip.setProperty (ids::fadeOut, juce::jlimit (0.0, length - fadeIn, fadeOutSeconds), &undoManager);
+}
+
+double Edit::snapToGrid (double seconds, double beats) const
+{
+    const auto step = juce::jmax (1.0e-3, beats) * 60.0 / getTempo();
+    return std::round (seconds / step) * step;
+}
+
+void Edit::setLoop (bool on, double startSeconds, double endSeconds)
+{
+    const auto start = juce::jmax (0.0, juce::jmin (startSeconds, endSeconds));
+    const auto end = juce::jmax (startSeconds, endSeconds);
+    state.setProperty (ids::loopStart, start, &undoManager);
+    state.setProperty (ids::loopEnd, end, &undoManager);
+    state.setProperty (ids::loopOn, on && end - start >= minClipSeconds, &undoManager);
+}
+
 //==============================================================================
 juce::ValueTree Edit::getInserts (const juce::ValueTree& trackOrMaster)
 {
