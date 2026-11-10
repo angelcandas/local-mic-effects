@@ -114,6 +114,17 @@ export const MODULES = [
     controls: [knob("widthAmount", "Width")] },
 ];
 
+// Module key (C++ fx::getModuleKey) for each entry above, used by the DAW inserts and the
+// effect pictures (fxviews.js). The pitch module holds three entries (autotune, pitch shift,
+// harmonizer).
+export const MODULE_KEYS = {
+  hpf: "highPass", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq",
+  comp: "compressor", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
+  crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", tremolo: "tremolo",
+  vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
+  echo: "echo", reverb: "reverb", width: "width",
+};
+
 export const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 
 // Semitones above the key, same order as PitchEngine::getScaleNames().

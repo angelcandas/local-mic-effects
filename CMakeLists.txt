@@ -40,6 +40,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/app.js
         ui/modules.js
         ui/widgets.js
+        ui/fxviews.js
         ui/daw.js
         ui/daw.css
         libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js)

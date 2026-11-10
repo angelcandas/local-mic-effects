@@ -1,7 +1,8 @@
 // MicFX web UI. Runs inside the JUCE WebView; every control is bound to a processor
 // parameter through the relays created in src/PluginEditor.cpp (relay name = parameter ID).
 import * as Juce from "./juce/index.js";
-import { CATEGORIES, MODULES, NOTE_NAMES, SCALES } from "./modules.js";
+import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, SCALES } from "./modules.js";
+import { createFxView } from "./fxviews.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 import { initDaw } from "./daw.js";
 
@@ -14,6 +15,10 @@ window.addEventListener("unhandledrejection", (event) => logError(`Unhandled rej
 const METER_FLOOR_DB = -60;
 
 let parameterDefaults = {};
+
+// Parameter kind by ID ("choice" | "toggle"; anything else is a slider), from the catalog.
+const parameterKinds = Object.fromEntries(MODULES.flatMap((m) => [[m.power, "toggle"],
+  ...m.controls.filter((c) => c.param && (c.type === "choice" || c.type === "toggle")).map((c) => [c.param, c.type])]));
 
 // Scaled value -> [0, 1], mirroring juce::NormalisableRange (range + skew).
 function toNormalised(state, scaled) {
@@ -560,8 +565,54 @@ class Rack {
     for (const control of module.controls)
       controls.append(this.buildControl(control, card));
 
-    card.append(header, html("p", "desc", module.description), controls);
+    card.append(header, html("p", "desc", module.description));
+
+    // A picture of what the effect does (reverb has its own; pitch has the tuner).
+    const key = MODULE_KEYS[module.id];
+    if (key !== "pitch" && key !== "reverb") {
+      const view = createFxView(key, this.liveAccess(() => view?.update()));
+      if (view) card.append(view.element);
+    }
+
+    card.append(controls);
     return card;
+  }
+
+  // How an effect picture reads and writes parameters on the Live screen: through
+  // the relays, redrawing whenever one of the values it uses changes.
+  liveAccess(redraw) {
+    const watched = new Set();
+    const state = (param) => {
+      const kind = parameterKinds[param] ?? "slider";
+      const s = kind === "choice" ? Juce.getComboBoxState(param) : kind === "toggle" ? Juce.getToggleState(param) : Juce.getSliderState(param);
+      if (!watched.has(param)) {
+        watched.add(param);
+        s.valueChangedEvent.addListener(() => redraw());
+        s.propertiesChangedEvent?.addListener(() => redraw());
+      }
+      return { kind, s };
+    };
+
+    return {
+      get: (param) => {
+        const { kind, s } = state(param);
+        return kind === "choice" ? s.getChoiceIndex() : kind === "toggle" ? (s.getValue() ? 1 : 0) : s.getScaledValue();
+      },
+      set: (param, value, first) => {
+        const { kind, s } = state(param);
+        if (kind !== "slider") return;
+        if (first) s.sliderDragStarted();
+        s.setNormalisedValue(toNormalised(s, value));
+        clearTimeout(this.gestureTimers?.[param]);
+        (this.gestureTimers ??= {})[param] = setTimeout(() => s.sliderDragEnded(), 300);
+        this.onUserChange();
+        redraw();
+      },
+      range: (param) => {
+        const { kind, s } = state(param);
+        return kind === "slider" ? { min: s.properties.start, max: s.properties.end } : null;
+      },
+    };
   }
 
   buildControl(control, card) {

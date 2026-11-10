@@ -193,6 +193,7 @@ ui/modules.js           the effect catalog the UI is built from
 ui/app.js, styles.css   the interface (Live mode)
 ui/daw.js, daw.css      the DAW screen: tracks, clips, inserts, mixer, transport
 ui/widgets.js           helpers shared by both screens
+ui/fxviews.js           effect pictures (EQ/filter curves, dynamics, echo taps…) for both screens
 tests/DspTests.cpp      headless DSP test runner
 libs/JUCE               JUCE 9.0.2 (git submodule)
 ```
