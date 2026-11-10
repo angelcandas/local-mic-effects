@@ -3,7 +3,8 @@
 // "dawSession" it receives and sends edits back through one native function,
 // daw (command, args). Every edit is one undo step: drags only send on release.
 import * as Juce from "./juce/index.js";
-import { CATEGORIES, MODULES } from "./modules.js";
+import { CATEGORIES, MODULE_KEYS, MODULES } from "./modules.js";
+import { createFxView } from "./fxviews.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
@@ -15,15 +16,6 @@ const METER_FLOOR_DB = -60;
 const FADER_MIN_DB = -60, FADER_MAX_DB = 6;
 const TRACK_COLOURS = ["#8c7bff", "#3fd9c6", "#ffb547", "#ff6fb1", "#5aafff", "#9be15d", "#ff8a5c", "#c78bff"];
 
-// Module key (C++ fx::getModuleKey) for each entry of the Live screen's catalog. The
-// pitch insert holds three of them (autotune, pitch shift, harmonizer).
-const MODULE_KEYS = {
-  hpf: "highPass", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq",
-  comp: "compressor", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
-  crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", tremolo: "tremolo",
-  vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
-  echo: "echo", reverb: "reverb", width: "width",
-};
 
 const PITCH_PARTS = ["tune", "pitch", "harmony"].map((id) => MODULES.find((m) => m.id === id));
 
@@ -370,6 +362,18 @@ class InsertCard {
     this.body = html("div", "insert-body");
     this.element.append(head, this.body);
 
+    // A picture of what the effect does; some have handles to drag.
+    this.view = insert.type === "pitch" ? null : createFxView(insert.type, {
+      get: (param) => this.insert.values[param] ?? parameterInfo[param]?.default ?? 0,
+      set: (param, value, first) => {
+        this.insert.values[param] = value;
+        this.update(this.insert);
+        this.send(param, value, first);
+      },
+      range: (param) => parameterInfo[param],
+    });
+    if (this.view) this.body.append(this.view.element);
+
     this.parts = []; // pitch: [{ power, row }], so parts that are off fold away
     for (const part of parts) {
       const row = html("div", "insert-controls");
@@ -438,7 +442,11 @@ class InsertCard {
     const knob = new ValueKnob({
       label: control.label, min: info.min, max: info.max, skew: info.skew || 1, step: info.step || 0,
       unit: info.label, value, defaultValue: info.default, bipolar: control.bipolar,
-      onChange: (v, first) => this.send(control.param, v, first),
+      onChange: (v, first) => {
+        this.insert.values[control.param] = v;
+        this.view?.update();
+        this.send(control.param, v, first);
+      },
     });
     this.controls.push({ param: control.param, widget: knob });
     return knob.element;
@@ -449,6 +457,7 @@ class InsertCard {
     for (const { param, element } of this.switches)
       element.setAttribute("aria-pressed", String((insert.values[param] ?? 0) >= 0.5));
     for (const { param, widget } of this.controls) widget.update(insert.values[param]);
+    this.view?.update();
     for (const { power, row } of this.parts) row.hidden = (insert.values[power] ?? 0) < 0.5;
     this.element.classList.toggle("is-off", !this.switches.some(({ param }) => (insert.values[param] ?? 0) >= 0.5));
   }

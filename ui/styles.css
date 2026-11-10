@@ -913,3 +913,29 @@ select.dropdown {
   .record-caption { display: none; }
   .tracks { --header: 170px; }
 }
+
+/* ---------- Effect pictures (fxviews.js) ---------- */
+
+.fx-view {
+  position: relative;
+  height: 78px;
+  margin: 4px 0 6px;
+  border-radius: 10px;
+  background: #0b0d12;
+}
+
+.fx-graph { display: block; width: 100%; height: 100%; overflow: visible; }
+.fx-label { position: absolute; color: var(--faint); font: 600 9px/1 var(--mono); transform: translateY(-100%); pointer-events: none; }
+.fx-graph .grid { stroke: rgba(255, 255, 255, 0.06); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.fx-graph .grid.zero { stroke: rgba(255, 255, 255, 0.12); }
+.fx-graph .grid.dashed { stroke-dasharray: 3 3; }
+.fx-graph .fx-curve { fill: none; stroke: var(--cat); stroke-width: 2; stroke-linejoin: round; vector-effect: non-scaling-stroke; }
+.fx-graph .fx-ghost { fill: none; stroke: var(--faint); stroke-width: 1; stroke-dasharray: 2 3; vector-effect: non-scaling-stroke; }
+.fx-graph .fx-fill { fill: color-mix(in srgb, var(--cat) 16%, transparent); stroke: none; }
+.fx-graph .fx-band { fill: color-mix(in srgb, var(--cat) 22%, transparent); }
+.fx-graph .fx-threshold { stroke: var(--cat); stroke-width: 1.5; stroke-dasharray: 4 3; vector-effect: non-scaling-stroke; }
+.fx-graph .fx-tap { fill: var(--cat); }
+.fx-graph .fx-tap.is-dry { fill: var(--muted); }
+.fx-graph .fx-handle { fill: none; stroke: var(--cat); stroke-width: 11; stroke-linecap: round; vector-effect: non-scaling-stroke; pointer-events: none; }
+.fx-graph .fx-hit { fill: none; stroke: transparent; stroke-width: 24; stroke-linecap: round; vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: grab; touch-action: none; }
+.fx-graph g:hover .fx-handle { stroke: var(--text); }
