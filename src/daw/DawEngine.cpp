@@ -18,7 +18,7 @@ namespace
     }
 }
 
-DawEngine::DawEngine (Edit& e) : edit (e)
+DawEngine::DawEngine (Edit& e, bool isRealtime) : edit (e), realtime (isRealtime)
 {
     pool.setSampleRate (sampleRate);
     pool.onLoaded = [this] { triggerAsyncUpdate(); };
@@ -27,7 +27,9 @@ DawEngine::DawEngine (Edit& e) : edit (e)
     edit.getState().addListener (this);
     updateTempo();
     rebuild();
-    startTimerHz (10);
+
+    if (realtime)
+        startTimerHz (10);
 }
 
 DawEngine::~DawEngine()
@@ -66,6 +68,16 @@ void DawEngine::rebuildNow()
 {
     cancelPendingUpdate();
     rebuild();
+}
+
+void DawEngine::loadAllNow()
+{
+    for (const auto& track : edit.getTracks())
+        for (const auto& clip : track)
+            if (clip.hasType (ids::CLIP))
+                pool.loadNow (juce::File (clip[ids::file].toString()));
+
+    rebuildNow();
 }
 
 float DawEngine::takePeak (int trackId)
@@ -544,7 +556,11 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
 {
     if (auto* next = incoming.exchange (nullptr, std::memory_order_acq_rel))
     {
-        if (active != nullptr)
+        if (! realtime)
+        {
+            delete active;
+        }
+        else if (active != nullptr)
         {
             const auto scope = retiredFifo.write (1);
             jassert (scope.blockSize1 == 1); // the message thread isn't freeing old graphs

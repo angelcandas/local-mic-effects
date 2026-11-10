@@ -14,6 +14,7 @@
 #include "PluginProcessor.h"
 #include "Presets.h"
 #include "daw/DawEngine.h"
+#include "daw/Exporter.h"
 #include "daw/Project.h"
 #include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
@@ -1133,6 +1134,112 @@ namespace
 
         root.deleteRecursively();
     }
+    void testExport()
+    {
+        std::cout << "\nDAW export (mixdown and stems)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-export");
+        folder.createDirectory();
+
+        juce::AudioBuffer<float> tone (1, (int) sampleRate);
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            tone.setSample (0, i, 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * i / sampleRate));
+        const auto toneFile = folder.getChildFile ("tone.wav");
+        writeWav (toneFile, tone, sampleRate);
+
+        daw::Edit edit;
+        const auto a = (int) edit.addTrack ("Lead")[daw::ids::id];
+        const auto b = (int) edit.addTrack ("Harmony/2")[daw::ids::id];
+        edit.addClip (a, toneFile, 0.5, 1.0);
+        edit.addClip (b, toneFile, 1.0, 1.0);
+        edit.setTrackPan (b, 0.5f);
+        const auto echo = (int) edit.addInsert (a, fx::ModuleType::echo)[daw::ids::id];
+        edit.setInsertValue (echo, "delayTime", 250.0f);
+        edit.addInsert (daw::Edit::masterId, fx::ModuleType::eq);
+        edit.setInsertValue ((int) daw::Edit::getInserts (edit.getMaster()).getChild (0)[daw::ids::id], "eqHigh", -6.0f);
+
+        // What real-time playback sounds like, for comparison.
+        std::array<std::vector<float>, 2> live;
+        {
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+            engine.loadAllNow();
+            engine.play();
+            live = render (engine, 3.0);
+        }
+
+        daw::Exporter::Settings settings;
+        settings.sampleRate = sampleRate;
+        settings.bitDepth = 32;
+        settings.tail = 1.0;
+
+        std::vector<double> progress;
+        const auto mixFile = folder.getChildFile ("Exports/mix.wav");
+        const auto mix = daw::Exporter (edit, settings).exportMix (mixFile, [&] (double p) { progress.push_back (p); return true; });
+
+        double fileRate = 0.0;
+        const auto written = readWav (mixFile, fileRate);
+        const auto expectedLength = (int) (3.0 * sampleRate); // last clip ends at 2 s, plus 1 s tail
+        check (mix.error.isEmpty() && written.getNumChannels() == 2 && written.getNumSamples() == expectedLength
+                   && juce::exactlyEqual (fileRate, sampleRate),
+               "exports the mix to a stereo WAV: the song plus the tail (" + juce::String (written.getNumSamples()) + " samples)");
+
+        float worst = 0.0f;
+        for (int ch = 0; ch < 2; ++ch)
+            worst = std::max (worst, maxDifference (written.getReadPointer (ch), live[(size_t) ch].data(), expectedLength));
+        check (worst < 1.0e-5f, "the export matches real-time playback (max error " + juce::String (worst, 7) + ")");
+
+        check (! progress.empty() && std::is_sorted (progress.begin(), progress.end()) && juce::approximatelyEqual (progress.back(), 1.0),
+               "reports progress up to 100%");
+
+        // 16-bit with normalising.
+        settings.bitDepth = 16;
+        settings.normalise = true;
+        settings.normaliseTo = -1.0f;
+        const auto loudFile = folder.getChildFile ("Exports/loud.wav");
+        const auto loud = daw::Exporter (edit, settings).exportMix (loudFile);
+        const auto loudAudio = readWav (loudFile, fileRate);
+        const auto loudPeak = juce::Decibels::gainToDecibels (loudAudio.getMagnitude (0, loudAudio.getNumSamples()));
+        check (loud.error.isEmpty() && std::abs (loudPeak + 1.0f) < 0.05f, "normalises a 16-bit export to -1 dBFS (peak " + juce::String (loudPeak, 2) + " dB)");
+
+        // Stems: one file per track, which sum to the mix without the master bus.
+        settings.bitDepth = 32;
+        settings.normalise = false;
+        const auto stems = daw::Exporter (edit, settings).exportStems (folder.getChildFile ("Stems"));
+        check (stems.error.isEmpty() && stems.files.size() == 2 && stems.files[0].getFileName() == "01 Lead.wav"
+                   && stems.files[1].getFileName().startsWith ("02 Harmony") && ! stems.files[1].getFileName().containsChar ('/'),
+               "exports one stem per track, named after it");
+
+        {
+            daw::Edit bare;
+            bare.replaceState (edit.getState().createCopy());
+            daw::Edit::getInserts (bare.getMaster()).removeAllChildren (nullptr);
+            const auto bareFile = folder.getChildFile ("bare.wav");
+            daw::Exporter (bare, settings).exportMix (bareFile);
+
+            const auto bareMix = readWav (bareFile, fileRate);
+            const auto stem1 = readWav (stems.files[0], fileRate), stem2 = readWav (stems.files[1], fileRate);
+            float sumError = 0.0f;
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < bareMix.getNumSamples(); ++i)
+                    sumError = std::max (sumError, std::abs (stem1.getSample (ch, i) + stem2.getSample (ch, i) - bareMix.getSample (ch, i)));
+            check (stem1.getNumSamples() == bareMix.getNumSamples() && sumError < 1.0e-5f, "the stems sum to the mix before the master bus");
+        }
+
+        // A range, and cancelling.
+        settings.start = 1.0;
+        settings.end = 1.5;
+        settings.tail = 0.0;
+        const auto rangeFile = folder.getChildFile ("range.wav");
+        daw::Exporter (edit, settings).exportMix (rangeFile);
+        check (readWav (rangeFile, fileRate).getNumSamples() == (int) (0.5 * sampleRate), "exports just a time range");
+
+        const auto cancelFile = folder.getChildFile ("cancelled.wav");
+        const auto cancelled = daw::Exporter (edit, settings).exportMix (cancelFile, [] (double p) { return p < 0.3; });
+        check (cancelled.cancelled && ! cancelFile.exists(), "cancelling stops and removes the partial file");
+
+        folder.deleteRecursively();
+    }
 }
 
 int main()
@@ -1149,6 +1256,7 @@ int main()
     testDawEngine();
     testDawRecording();
     testProjects();
+    testExport();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

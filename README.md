@@ -147,7 +147,8 @@ src/Recorder.*          WAV recording of the output (and dry mic) on a backgroun
 src/Multitrack.*        backing track + takes: loading, resampling, timeline playback
 src/daw/                DAW mode: Edit (the session as an undoable ValueTree), AudioPool (decoded
                         clip audio), DawEngine (tracks + inserts + master bus, lock-free graph swap,
-                        dry recording, metronome), Project (.micfx folders, autosave, recovery)
+                        dry recording, metronome), Project (.micfx folders, autosave, recovery),
+                        Exporter (offline mixdown and stems to WAV)
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/StandaloneApp.cpp   standalone app window, with Options → Check for updates…
 scripts/update.sh       update check / pull + rebuild, used by Check for updates…
