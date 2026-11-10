@@ -121,6 +121,28 @@
         <button class="tool is-accent export-go">Export…</button>
       </div>
     </div>
+    <div class="automix-panel" hidden>
+      <div class="export-head">
+        <strong>Auto Mix</strong>
+        <button class="mini automix-close" title="Close" aria-label="Close">×</button>
+      </div>
+      <p class="automix-intro">Listens to your voice and the backing track, then sets EQ, compression and levels with the effects you already have. One undo takes it all back.</p>
+      <div class="export-options">
+        <label>Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="coaching">Coaching (voice up front)</option></select></label>
+      </div>
+      <div class="automix-roles"></div>
+      <div class="automix-plan"></div>
+      <div class="export-bar"><div></div></div>
+      <label class="automix-amount" hidden>Amount <input type="range" name="amount" min="0" max="100" step="1" value="100"> <span class="automix-amount-value">100%</span></label>
+      <div class="export-footer">
+        <button class="text-button automix-reference" title="Match the mix's tone and loudness to a song you like">Match a reference…</button>
+        <span class="export-result automix-result"></span>
+        <button class="tool automix-cancel">Cancel</button>
+        <button class="tool automix-compare" hidden title="Switch between the mix before and after Auto Mix">Hear before</button>
+        <button class="tool automix-analyse">Listen</button>
+        <button class="tool is-accent automix-apply" disabled>Apply</button>
+      </div>
+    </div>
     <div class="daw-toast" role="status" aria-live="polite"></div>
   </section>
 

@@ -271,6 +271,8 @@ namespace
                 { "delete",    "Delete clip",            "Delete",       true },
                 { "", "", "", false },
                 { "addTrack",  "New track",              "Ctrl+T",       true },
+                { "", "", "", false },
+                { "autoMix",   "Auto Mix...",            "",             true },
             } },
             { "View", {
                 { "mode:live", "Live",                   "",             false },

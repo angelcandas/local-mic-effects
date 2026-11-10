@@ -4,6 +4,7 @@
 
 #include "PluginProcessor.h"
 #include "daw/Exporter.h"
+#include "analysis/MixAssistant.h"
 
 // Connects the web UI's DAW screen (ui/daw.js) to the processor's DAW session.
 //
@@ -12,6 +13,8 @@
 //                 any change
 //   "dawStatus"   transport, recording and meters, 30 times a second (while in DAW mode)
 //   "dawExport"   { progress } while an export runs, then { done, error, files }
+//   "dawAutoMix"  { state: "analysing", progress } while Auto Mix listens, then
+//                 { state: "ready", plan... } (see describeAutoMix), or "cancelled"/"error"
 // See handle() for the commands. Message thread only.
 class DawBridge final : private juce::ValueTree::Listener
 {
@@ -42,6 +45,12 @@ private:
     void loadPresetInto (int trackId, int presetIndex);
     void startExport (const juce::var& args, const juce::File& destination);
 
+    // Auto Mix (src/analysis/MixAssistant.h): analysis runs on a background thread;
+    // planning and applying on the message thread.
+    juce::var handleAutoMix (const juce::var& args, Complete&);
+    void startAutoMix (const juce::File& reference);
+    void replanAutoMix();
+    juce::var describeAutoMix() const;
     juce::String withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
                               std::function<juce::String (const juce::File&)> action, Complete);
 
@@ -67,6 +76,16 @@ private:
     // A running export (at most one).
     struct ExportJob;
     std::shared_ptr<ExportJob> exportJob;
+
+    // Auto Mix: the running analysis (at most one), the last analysis and its plan.
+    struct AutoMixJob;
+    std::shared_ptr<AutoMixJob> autoMixJob;
+    std::optional<analysis::SessionAnalyser::Result> autoMixAnalysis;
+    std::map<int, analysis::Role> autoMixRoles;
+    analysis::MixStyle autoMixStyle = analysis::MixStyle::pop;
+    analysis::MixPlan autoMixPlan;
+    bool autoMixReference = false; // the plan matches a reference song
+    juce::String autoMixReferenceName;
 
     JUCE_DECLARE_NON_COPYABLE (DawBridge)
 };

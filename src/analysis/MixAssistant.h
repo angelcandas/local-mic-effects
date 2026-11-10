@@ -64,6 +64,12 @@ struct MixPlan
 MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Role>& roles,
                  const std::map<int, float>& currentVolumes, float currentMasterVolume, MixStyle);
 
+// Matches the mix to a reference song you like: a gentle master EQ (shelves and three
+// wide bells) towards the reference's long-term tonal balance, and the master volume
+// towards its loudness, held below clipping. `mix` is the session's mix as it plays
+// now (SessionAnalyser with includeMix), at `currentMasterVolume`.
+MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float currentMasterVolume);
+
 // Writes the plan into the session as one undo step. Inserts it needs are reused when
 // the track already has one of that type, otherwise added at the start of the chain.
 // `amount` 0..1 scales every move from neutral (EQ gains, compression) or from the

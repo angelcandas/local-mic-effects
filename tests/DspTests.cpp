@@ -807,6 +807,40 @@ namespace
                    && juce::exactlyEqual ((float) edit.getMaster()[daw::ids::volume], 0.0f),
                "one undo removes the whole Auto Mix");
 
+        // Reference match: a darker, quieter mix is brought towards a brighter, louder song.
+        {
+            auto referenceAudio = makeBacking (6.0);
+            fx::FxChain bright ({ fx::ModuleType::paraEq });
+            bright.setValue ("peqOn", 1.0f);
+            bright.setValue ("peqHighFreq", 8000.0f);
+            bright.setValue ("peqHighGain", 4.0f);
+            bright.prepare ({ sampleRate, (juce::uint32) referenceAudio.getNumSamples(), 2 });
+            juce::dsp::AudioBlock<float> block (referenceAudio);
+            bright.process (fx::Module::Context (block));
+            referenceAudio.applyGain (0.25f);
+
+            const auto referenceFile = folder.getChildFile ("reference.wav");
+            writeWav (referenceFile, referenceAudio, sampleRate);
+            const auto reference = analysis::analyseFile (referenceFile);
+
+            auto quiet = makeBacking (6.0);
+            quiet.applyGain (0.1f);
+            const auto quietMix = analysis::analyse (quiet, sampleRate);
+            const auto match = analysis::planReferenceMatch (quietMix, reference, 0.0f);
+
+            for (const auto& move : match.moves)
+                for (const auto& reason : move.reasons)
+                    std::cout << "        reference: " << reason << "\n";
+
+            const auto& eqValues = match.moves.at (0).values;
+            const auto& volume = match.moves.at (1).values.at ("volume");
+            const auto expectedVolume = reference.integratedLufs - quietMix.integratedLufs;
+            check (reference.getNumFrames() == 60 && eqValues.at ("peqHighGain") >= 2.0f && std::abs (eqValues.at ("peqLowGain")) <= 1.0f,
+                   "reference: brightens the top end to match (" + juce::String (eqValues.at ("peqHighGain"), 1) + " dB), leaves the lows");
+            check (volume > expectedVolume - 4.0f && volume < expectedVolume + 1.0f && std::abs (match.mixLufs - reference.integratedLufs) < 1.0f,
+                   "reference: master up " + juce::String (volume, 1) + " dB towards its loudness (" + juce::String (reference.integratedLufs, 1) + " LUFS)");
+        }
+
         // Amount 0 changes nothing you can hear.
         analysis::applyMix (edit, plan, 0.0f);
         const auto eqInsert = daw::Edit::getInserts (edit.getTrack (voice)).getChild (0);

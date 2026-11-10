@@ -112,6 +112,31 @@ tracks instead of one live chain:
 - **Full screen**: the title bar's maximise button, the ⛶ button at the top, **View → Full screen**,
   **F11**, or **Ctrl+Cmd+F** on a Mac.
 
+### Auto Mix (DAW mode)
+
+**Auto Mix…** at the top of the DAW screen (or **Edit → Auto Mix…**) mixes your voice against the
+backing track for you, locally, with the effects you already have:
+
+1. Pick a **style**: Pop, Ballad, Rock, or Coaching (the voice further up front so you hear yourself).
+2. Press **Listen**. It renders every track offline (faster than real time) and measures loudness
+   (EBU R128), tone (1/3-octave bands), when each track plays, your lowest notes, and where the
+   backing covers your words.
+3. It guesses which track is the **voice** and which is the **backing** from their names and sound.
+   Change a role and the plan updates.
+4. It shows every change it wants to make, with the reason, e.g. "Cut 3.5 dB at 315 Hz: muddy":
+   - **Voice**: a Parametric EQ (low cut under your lowest note, mud/boxiness and harshness cuts or a
+     presence lift, boom and air shelves), a Compressor if your level swings a lot between phrases,
+     and a De-esser if the S's stand out.
+   - **Backing**: a small EQ dip where it covers your voice the most.
+   - **Balance**: your volume so the voice sits the style's amount over the backing.
+   - **Master**: towards −14 LUFS without clipping.
+5. **Apply** writes it as one undo step. **Hear before / Hear after** switches between the two while
+   the song plays, and **Amount** makes it gentler. Everything it changed is an ordinary insert or
+   fader you can tweak.
+
+**Match a reference…** picks a song you like and matches the master to it: a gentle master EQ
+towards its tonal balance, and the master volume towards its loudness (held below clipping).
+
 Press **?** in DAW mode for every keyboard shortcut (transport, ← → to move the playhead, ↑ ↓ to pick
 a track, M / Shift+S / A / I for mute, solo, arm and monitor, and more).
 

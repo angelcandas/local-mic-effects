@@ -44,6 +44,50 @@ struct DawBridge::ExportJob
     daw::Exporter::Result result;
 };
 
+struct DawBridge::AutoMixJob
+{
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> cancel { false }, finished { false };
+    juce::File reference;                     // set for a reference match
+    analysis::SessionAnalyser::Result result; // the tracks, or (reference) the mix
+    analysis::Profile referenceProfile;
+};
+
+namespace
+{
+    const char* roleKey (analysis::Role role)
+    {
+        return role == analysis::Role::voice ? "voice" : role == analysis::Role::backing ? "backing" : "other";
+    }
+
+    analysis::Role roleFromKey (const juce::String& key)
+    {
+        return key == "voice" ? analysis::Role::voice : key == "backing" ? analysis::Role::backing : analysis::Role::other;
+    }
+
+    const char* styleKey (analysis::MixStyle style)
+    {
+        switch (style)
+        {
+            case analysis::MixStyle::pop:      return "pop";
+            case analysis::MixStyle::ballad:   return "ballad";
+            case analysis::MixStyle::rock:     return "rock";
+            case analysis::MixStyle::coaching: return "coaching";
+        }
+        return "pop";
+    }
+
+    analysis::MixStyle styleFromKey (const juce::String& key)
+    {
+        for (auto style : { analysis::MixStyle::pop, analysis::MixStyle::ballad, analysis::MixStyle::rock, analysis::MixStyle::coaching })
+            if (key == styleKey (style))
+                return style;
+        return analysis::MixStyle::pop;
+    }
+
+    constexpr const char* autoMixUndoName = "Auto Mix";
+}
+
 //==============================================================================
 DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::function<juce::int64()> latency)
     : processor (p),
@@ -75,6 +119,8 @@ DawBridge::~DawBridge()
 
     if (exportJob != nullptr)
         exportJob->cancel = true;
+    if (autoMixJob != nullptr)
+        autoMixJob->cancel = true;
 }
 
 bool DawBridge::isAvailable()
@@ -257,6 +303,58 @@ void DawBridge::tick()
         emit ("dawStatus", describeStatus());
     }
 
+    if (autoMixJob != nullptr)
+    {
+        if (autoMixJob->finished)
+        {
+            auto job = std::move (autoMixJob);
+
+            if (job->result.cancelled)
+            {
+                emit ("dawAutoMix", object ({ { "state", "cancelled" } }));
+            }
+            else if (job->reference != juce::File())
+            {
+                if (! job->result.mix.has_value() || job->referenceProfile.getNumFrames() == 0)
+                {
+                    emit ("dawAutoMix", object ({ { "state", "error" }, { "error", "Couldn't read " + job->reference.getFileName() + "." } }));
+                }
+                else
+                {
+                    autoMixReference = true;
+                    autoMixReferenceName = job->reference.getFileNameWithoutExtension();
+                    autoMixPlan = analysis::planReferenceMatch (*job->result.mix, job->referenceProfile,
+                                                                (float) edit.getMaster().getProperty (ids::volume, 0.0f));
+                    emit ("dawAutoMix", describeAutoMix());
+                }
+            }
+            else
+            {
+                // New analysis: guess the roles of tracks we haven't seen, keep the user's picks.
+                autoMixAnalysis = std::move (job->result);
+                std::map<int, analysis::Role> roles;
+                const auto songSeconds = autoMixAnalysis->tracks.empty() ? 0.0
+                                       : autoMixAnalysis->tracks.front().second.getNumFrames() * analysis::Profile::hopSeconds;
+
+                for (const auto& [id, profile] : autoMixAnalysis->tracks)
+                {
+                    const auto known = autoMixRoles.find (id);
+                    roles[id] = known != autoMixRoles.end() ? known->second
+                                                            : analysis::guessRole (edit.getTrack (id)[ids::name].toString(), profile, songSeconds);
+                }
+
+                autoMixRoles = roles;
+                autoMixReference = false;
+                replanAutoMix();
+                emit ("dawAutoMix", describeAutoMix());
+            }
+        }
+        else
+        {
+            emit ("dawAutoMix", object ({ { "state", "analysing" }, { "progress", autoMixJob->progress.load() } }));
+        }
+    }
+
     if (exportJob != nullptr)
     {
         if (exportJob->finished)
@@ -359,6 +457,199 @@ void DawBridge::startExport (const juce::var& args, const juce::File& destinatio
 }
 
 //==============================================================================
+void DawBridge::startAutoMix (const juce::File& reference)
+{
+    auto job = std::make_shared<AutoMixJob>();
+    job->reference = reference;
+
+    // Snapshot on this thread. For a reference match only the mix is needed, without
+    // a master EQ an earlier match added (the new one replaces it).
+    std::shared_ptr<analysis::SessionAnalyser> analyser;
+    if (reference == juce::File())
+    {
+        analyser = std::make_shared<analysis::SessionAnalyser> (edit, analysis::SessionAnalyser::Point::source, false,
+                                                                engine.getSampleRate());
+    }
+    else
+    {
+        daw::Edit copy;
+        copy.replaceState (edit.getState().createCopy());
+        auto inserts = daw::Edit::getInserts (copy.getMaster());
+        for (int i = inserts.getNumChildren(); --i >= 0;)
+            if (inserts.getChild (i)[ids::type].toString() == fx::getModuleKey (fx::ModuleType::paraEq))
+            {
+                inserts.removeChild (i, nullptr);
+                break;
+            }
+
+        analyser = std::make_shared<analysis::SessionAnalyser> (copy, analysis::SessionAnalyser::Point::stem, true,
+                                                                engine.getSampleRate(), false);
+    }
+
+    autoMixJob = job;
+
+    juce::Thread::launch ([analyser, job]
+    {
+        const auto reading = job->reference != juce::File();
+        const auto progress = [job, reading] (double p) { job->progress = reading ? 0.5 * p : p; return ! job->cancel.load(); };
+        job->result = analyser->run (progress);
+
+        if (reading && ! job->result.cancelled)
+        {
+            job->progress = 0.6;
+            job->referenceProfile = analysis::analyseFile (job->reference, [job] { return ! job->cancel.load(); });
+            job->result.cancelled = job->cancel.load();
+        }
+
+        job->finished = true;
+    });
+}
+
+void DawBridge::replanAutoMix()
+{
+    if (! autoMixAnalysis.has_value())
+        return;
+
+    std::map<int, float> volumes;
+    for (const auto& track : edit.getTracks())
+        volumes[(int) track[ids::id]] = track.getProperty (ids::volume, 0.0f);
+
+    autoMixPlan = analysis::planMix (*autoMixAnalysis, autoMixRoles, volumes,
+                                     (float) edit.getMaster().getProperty (ids::volume, 0.0f), autoMixStyle);
+}
+
+juce::var DawBridge::describeAutoMix() const
+{
+    const auto nameOf = [this] (int trackId)
+    {
+        return trackId == daw::Edit::masterId ? juce::String ("Master") : edit.getTrack (trackId)[ids::name].toString();
+    };
+
+    juce::Array<juce::var> tracks, moves, notes;
+
+    if (autoMixAnalysis.has_value() && ! autoMixReference)
+        for (const auto& [id, profile] : autoMixAnalysis->tracks)
+        {
+            if (! edit.getTrack (id).isValid())
+                continue;
+
+            const auto role = autoMixRoles.count (id) > 0 ? autoMixRoles.at (id) : analysis::Role::other;
+            tracks.add (object ({ { "id", id }, { "name", nameOf (id) }, { "role", roleKey (role) },
+                                  { "lufs", profile.integratedLufs }, { "active", profile.getActiveSeconds() } }));
+        }
+
+    for (const auto& move : autoMixPlan.moves)
+    {
+        juce::String effect = "Volume";
+        if (move.insert.has_value())
+            effect = *move.insert == fx::ModuleType::paraEq     ? "Parametric EQ"
+                   : *move.insert == fx::ModuleType::compressor ? "Compressor"
+                   : *move.insert == fx::ModuleType::deEsser    ? "De-esser"
+                                                                : juce::String (fx::getModuleKey (*move.insert));
+
+        juce::Array<juce::var> reasons;
+        for (const auto& reason : move.reasons)
+            reasons.add (reason);
+
+        moves.add (object ({ { "track", move.trackId }, { "name", nameOf (move.trackId) }, { "effect", effect }, { "reasons", reasons } }));
+    }
+
+    for (const auto& note : autoMixPlan.notes)
+        notes.add (note);
+
+    return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
+                     { "style", styleKey (autoMixStyle) }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
+                     { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs } });
+}
+
+// The "autoMix" command; args.action is one of:
+//   analyse {style}     listen to every track (background); "dawAutoMix" brings the plan
+//   reference           pick a song and plan a master match to it (background)
+//   replan {style, roles: {trackId: "voice" | "backing" | "other"}}
+//   apply {amount, replace}  write the plan as one undo step ("Auto Mix"); with replace,
+//                       first undo the Auto Mix just applied (to change the amount)
+//   compare {after}     undo or redo the last Auto Mix, to hear before and after
+//   cancel
+juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
+{
+    auto& undo = edit.getUndoManager();
+    const auto action = args["action"].toString();
+
+    if (action == "cancel")
+    {
+        if (autoMixJob != nullptr)
+            autoMixJob->cancel = true;
+        return error ({});
+    }
+
+    if (action == "analyse" || action == "reference")
+    {
+        if (autoMixJob != nullptr)
+            return error ("Auto Mix is already listening.");
+        if (edit.getTracks().isEmpty() || engine.getLength() <= 0)
+            return error ("Record or import something first.");
+
+        if (args.hasProperty ("style"))
+            autoMixStyle = styleFromKey (args["style"].toString());
+
+        if (action == "analyse")
+        {
+            startAutoMix ({});
+            return error ({});
+        }
+
+        withChooser ("Pick a reference song", juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+                     "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3;*.m4a",
+                     juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                     [this] (const juce::File& file)
+                     {
+                         startAutoMix (file);
+                         return juce::String();
+                     },
+                     complete);
+        return {}; // the chooser completes
+    }
+
+    if (action == "replan")
+    {
+        if (args.hasProperty ("style"))
+            autoMixStyle = styleFromKey (args["style"].toString());
+
+        if (auto* roles = args["roles"].getDynamicObject())
+            for (const auto& property : roles->getProperties())
+                autoMixRoles[property.name.toString().getIntValue()] = roleFromKey (property.value.toString());
+
+        autoMixReference = false;
+        replanAutoMix();
+        return describeAutoMix();
+    }
+
+    if (action == "apply")
+    {
+        if (autoMixPlan.moves.empty())
+            return error ("Nothing to apply yet.");
+
+        if (arg (args, "replace", false) && undo.getUndoDescription() == autoMixUndoName)
+            undo.undo();
+
+        analysis::applyMix (edit, autoMixPlan, arg (args, "amount", 1.0f));
+        return error ({});
+    }
+
+    if (action == "compare")
+    {
+        const auto after = arg (args, "after", true);
+        if (after && undo.getRedoDescription() == autoMixUndoName)
+            undo.redo();
+        else if (! after && undo.getUndoDescription() == autoMixUndoName)
+            undo.undo();
+
+        return object ({ { "ok", true }, { "after", undo.getUndoDescription() == autoMixUndoName } });
+    }
+
+    return error ("Unknown Auto Mix action: " + action);
+}
+
 void DawBridge::handle (const juce::String& command, const juce::var& args, Complete complete)
 {
     auto& undo = edit.getUndoManager();
@@ -612,6 +903,13 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                          return juce::String();
                      },
                      complete);
+        return;
+    }
+
+    if (command == "autoMix")
+    {
+        if (auto result = handleAutoMix (args, complete); ! result.isVoid())
+            complete (result);
         return;
     }
 
