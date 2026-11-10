@@ -855,6 +855,142 @@ namespace
 
         folder.deleteRecursively();
     }
+    void testDawRecording()
+    {
+        std::cout << "\nDAW recording (dry takes, monitoring, metronome)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-daw-rec");
+        folder.createDirectory();
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+
+        const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto second = (int) edit.addTrack ("Double")[daw::ids::id];
+        const auto eq = (int) edit.addInsert (vocal, fx::ModuleType::saturation)[daw::ids::id];
+        juce::ignoreUnused (eq);
+        engine.rebuildNow();
+
+        check (engine.startRecording (folder).isNotEmpty() && ! engine.isRecording(), "refuses to record with no armed track");
+
+        edit.setTrackArm (vocal, true);
+        edit.setTrackArm (second, true);
+        edit.setTrackMonitor (vocal, true);
+        engine.setRecordingLatency (300);
+        engine.seek ((juce::int64) sampleRate); // record from 1 s
+
+        const auto mic = makeVoice (200.0f, 1.0);
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        float monitored = 0.0f;
+
+        check (engine.startRecording (folder).isEmpty() && engine.isRecording(), "starts recording on the armed tracks");
+
+        for (size_t start = 0; start + blockSize <= mic.size(); start += blockSize)
+        {
+            buffer.copyFrom (0, 0, mic.data() + start, blockSize); // input aliases the left output, as in the app
+            engine.process (buffer, 2, blockSize, buffer.getReadPointer (0));
+            monitored = std::max (monitored, buffer.getMagnitude (1, 0, blockSize));
+        }
+
+        const auto take = engine.stopRecording();
+        engine.rebuildNow();
+
+        check (! engine.isRecording() && ! engine.isPlaying(), "stopping ends the take and the transport");
+        check (monitored > 0.05f, "the monitored track plays the mic live (peak " + juce::String (monitored, 3) + ")");
+
+        double fileRate = 0.0;
+        const auto recorded = readWav (take.file, fileRate);
+        const auto length = (int) (mic.size() / blockSize * blockSize);
+        check (recorded.getNumChannels() == 1 && recorded.getNumSamples() == length
+                   && maxDifference (recorded.getReadPointer (0), mic.data(), length) < 1.0e-6f,
+               "the take is the dry mic (the saturation insert isn't printed)");
+
+        const auto clips = [&] (int trackId)
+        {
+            juce::Array<juce::ValueTree> result;
+            for (const auto& child : edit.getTrack (trackId))
+                if (child.hasType (daw::ids::CLIP))
+                    result.add (child);
+            return result;
+        };
+
+        const auto expectedStart = (sampleRate - 300.0) / sampleRate;
+        check (clips (vocal).size() == 1 && clips (second).size() == 1
+                   && std::abs ((double) clips (vocal)[0][daw::ids::start] - expectedStart) < 1.0e-9,
+               "the take lands on every armed track, at the playhead minus the round trip");
+
+        edit.getUndoManager().undo();
+        check (clips (vocal).isEmpty() && clips (second).isEmpty(), "one undo removes the take from every track");
+        edit.getUndoManager().redo();
+
+        // Playback applies the track's inserts to the dry take: the saturated vocal differs
+        // from the plain second track.
+        edit.setTrackArm (vocal, false);
+        edit.setTrackArm (second, false);
+        edit.setTrackMonitor (vocal, false);
+        edit.setTrackMute (second, true);
+        engine.getAudioPool().loadNow (take.file);
+        engine.rebuildNow();
+        engine.seek (0);
+        engine.play();
+        const auto wet = render (engine, 2.0);
+        engine.stop();
+
+        edit.setTrackMute (second, false);
+        edit.setTrackMute (vocal, true);
+        engine.seek (0);
+        engine.play();
+        const auto dry = render (engine, 2.0);
+        engine.stop();
+
+        const auto from = (size_t) (1.2 * sampleRate), to = (size_t) (1.8 * sampleRate);
+        check (rms (dry[0], from, to) > 0.05f && std::abs (rms (wet[0], from, to) - rms (dry[0], from, to)) > 0.01f,
+               "playback applies the track's inserts to the dry take");
+
+        // Metronome: a click on every beat at the project tempo.
+        edit.setTrackMute (second, true);
+        edit.setTempo (120.0);
+        engine.setMetronome (true);
+        engine.seek (0);
+        engine.play();
+        const auto clicks = render (engine, 1.01);
+        engine.stop();
+        engine.setMetronome (false);
+
+        const auto spb = (size_t) (sampleRate / 2.0);
+        check (std::abs (clicks[0][1] ) > 0.0f && std::abs (clicks[0][spb + 1]) > 0.0f
+                   && rms (clicks[0], spb / 2 - 100, spb / 2 + 100) < 1.0e-4f,
+               "metronome clicks on the beat at 120 BPM");
+
+        // Count-in: one bar of clicks before the take starts, not recorded.
+        edit.setTrackArm (second, true);
+        engine.setCountInBars (1);
+        engine.seek (0);
+        engine.startRecording (folder);
+        const auto countIn = (int) (4 * spb);
+        juce::AudioBuffer<float> silence (2, blockSize);
+        int blocks = 0;
+        float countInPeak = 0.0f;
+
+        for (; blocks * blockSize < countIn + (int) sampleRate / 2; ++blocks)
+        {
+            silence.clear();
+            const float* mute = silence.getReadPointer (1); // silent mic (not the click on the left)
+            engine.process (silence, 2, blockSize, mute);
+
+            if (blocks * blockSize < countIn)
+                countInPeak = std::max (countInPeak, silence.getMagnitude (0, 0, blockSize));
+        }
+
+        const auto countTake = engine.stopRecording();
+        const auto countFile = readWav (countTake.file, fileRate);
+        check (countFile.getNumSamples() > 0 && std::abs (countFile.getNumSamples() - (blocks * blockSize - countIn)) <= blockSize
+                   && countTake.timelineStart == 0 && countInPeak > 0.1f,
+               "count-in clicks for a bar first, and the take starts at the playhead");
+
+        folder.deleteRecursively();
+    }
 }
 
 int main()
@@ -869,6 +1005,7 @@ int main()
     testRecorder();
     testMultitrack();
     testDawEngine();
+    testDawRecording();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

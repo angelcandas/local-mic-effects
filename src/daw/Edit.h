@@ -65,6 +65,13 @@ public:
     void setTrackSolo (int trackId, bool);
     void setMasterVolume (float decibels);
 
+    // Recording: armed tracks get the take; monitored tracks hear the mic live.
+    void setTrackArm (int trackId, bool);
+    void setTrackMonitor (int trackId, bool);
+
+    void setTempo (double bpm);
+    double getTempo() const { return state.getProperty (ids::tempo, 120.0); }
+
     //==============================================================================
     juce::ValueTree addClip (int trackId, const juce::File&, double startSeconds, double lengthSeconds,
                              double offsetSeconds = 0.0);

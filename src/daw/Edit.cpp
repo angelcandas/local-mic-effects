@@ -138,6 +138,11 @@ void Edit::setTrackMute (int trackId, bool mute)        { getTrack (trackId).set
 void Edit::setTrackSolo (int trackId, bool solo)        { getTrack (trackId).setProperty (ids::solo, solo, &undoManager); }
 void Edit::setMasterVolume (float decibels)             { getMaster().setProperty (ids::volume, decibels, &undoManager); }
 
+// Arm and monitor are recording state, not edits: not undoable.
+void Edit::setTrackArm (int trackId, bool arm)          { getTrack (trackId).setProperty (ids::arm, arm, nullptr); }
+void Edit::setTrackMonitor (int trackId, bool monitor)  { getTrack (trackId).setProperty (ids::monitor, monitor, nullptr); }
+void Edit::setTempo (double bpm)                        { state.setProperty (ids::tempo, juce::jlimit (20.0, 400.0, bpm), &undoManager); }
+
 //==============================================================================
 juce::ValueTree Edit::addClip (int trackId, const juce::File& file, double startSeconds, double lengthSeconds,
                                double offsetSeconds)
