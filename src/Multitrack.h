@@ -68,7 +68,8 @@ public:
     std::function<void()> onTracksChanged;
     std::function<void (const juce::String&)> onError;
 
-private:
+    // Any thread. Reads a whole file (mono or stereo, at most 30 minutes) resampled to
+    // targetRate. On failure `audio` is empty and `error` says why.
     struct Decoded
     {
         juce::AudioBuffer<float> audio;
@@ -76,6 +77,8 @@ private:
     };
 
     static Decoded decode (const juce::File&, double targetRate);
+
+private:
     void startLoad (const juce::File&, bool isTake, juce::int64 startSample, int id);
     std::shared_ptr<Track> makeTrack (const juce::File&, bool isTake, juce::int64 startSample, int id, juce::AudioBuffer<float>&&);
     void install (std::shared_ptr<Track>);
