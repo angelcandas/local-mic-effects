@@ -14,11 +14,14 @@
 //   getRecorderSettings, startRecording, stopRecording, chooseRecordingFolder,
 //   setRecordDry (bool), revealRecording, getTracks, loadBackingTrack, setTrack (id, { gain, muted }),
 //   removeTrack (id), transport (action, seconds), getParameterInfo,
-//   daw (command, args) for the DAW screen (see DawBridge).
+//   daw (command, args) for the DAW screen (see DawBridge),
+//   window (action): "fullScreen" toggles full screen; returns { available, fullScreen }.
 // Pushed events: "meters" { input, output, note, target, preset, recording, transport } at 30 Hz
 // (recording = seconds recorded so far, or -1; transport = { position, length, playing } in
 // seconds), "tracks" when the track list changes, "trackError" (message), and the DAW
-// events "dawSession", "dawStatus" and "dawExport" (see DawBridge).
+// events "dawSession", "dawStatus" and "dawExport" (see DawBridge), "window" { available, fullScreen }
+// when the app window enters or leaves full screen, and "appMenu" (action) when an item of the
+// standalone app's menu bar is picked (see StandaloneApp.cpp).
 class PluginEditor final : public juce::AudioProcessorEditor,
                            private juce::Timer
 {
@@ -27,6 +30,15 @@ public:
     ~PluginEditor() override;
 
     void resized() override;
+
+    // For the standalone app's menu bar: hands a menu item to the page, which runs it like
+    // the matching button or shortcut.
+    void sendMenuCommand (const juce::String& action);
+    bool isDawMode() const noexcept { return processorRef.isDawMode(); }
+
+    // The standalone app's window, or nullptr inside a plugin host.
+    juce::ResizableWindow* getAppWindow() const;
+    void toggleFullScreen();
 
 private:
     void timerCallback() override;
@@ -39,9 +51,11 @@ private:
     juce::File getRecordingFolder();
     juce::var describeRecorderSettings();
     juce::var describeTracks();
+    juce::var describeWindow() const;
     juce::int64 getRoundTripLatency();
 
     juce::File lastTakeOnTimeline;
+    bool lastFullScreen = false;
 
     std::unique_ptr<juce::FileChooser> folderChooser;
 

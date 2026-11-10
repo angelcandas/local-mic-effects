@@ -314,8 +314,17 @@ class InsertRack {
     const signature = owner.inserts.map((insert) => `${insert.id}:${insert.type}`).join(",");
 
     if (signature !== this.signature) {
+      const grew = this.signature !== "" && owner.inserts.length > this.cards.size;
       this.signature = signature;
       this.build();
+      if (grew) {
+        // Bring the new effect into view without scrolling the rest of the page.
+        const card = this.element.lastElementChild, dock = this.element.closest(".inspector");
+        if (card && dock) {
+          const right = card.offsetLeft + card.offsetWidth - dock.offsetLeft;
+          if (right > dock.scrollLeft + dock.clientWidth) dock.scrollLeft = right - dock.clientWidth + 10;
+        }
+      }
     }
 
     for (const insert of owner.inserts) this.cards.get(insert.id)?.update(insert);
@@ -326,7 +335,7 @@ class InsertRack {
     this.cards.clear();
 
     if (this.owner.inserts.length === 0)
-      this.element.append(html("p", "inserts-empty", "No effects yet. The track plays dry; add one below."));
+      this.element.append(html("p", "inserts-empty", "No effects yet. The track plays dry; pick one from Add effect."));
 
     this.owner.inserts.forEach((insert, index) => {
       const card = new InsertCard(insert, index, this.owner.inserts.length);
@@ -346,7 +355,7 @@ class InsertCard {
     const main = parts[0];
     const category = CATEGORIES[main?.category] ?? CATEGORIES.cleanup;
 
-    this.element = html("section", "insert");
+    this.element = html("section", insert.type === "pitch" ? "insert is-wide" : "insert");
     this.element.style.setProperty("--cat", category.color);
 
     const head = html("header", "insert-head");
@@ -1238,6 +1247,57 @@ class DawScreen {
   buildInspector() {
     this.inspector = this.root.querySelector(".inspector");
     this.inspectorKey = "";
+
+    // The bar above the effects panel: drag to resize, double-click or its button to fold away.
+    const main = this.root.querySelector(".daw-main");
+    const splitter = this.root.querySelector(".dock-splitter");
+    this.dockToggle = splitter.querySelector(".dock-toggle");
+    const saved = (() => { try { return JSON.parse(localStorage.getItem("micfx.dock") ?? "null"); } catch { return null; } })();
+    this.dockHeight = saved?.height ?? 290;
+    this.setDock(saved?.hidden ? false : true, this.dockHeight);
+
+    this.dockToggle.addEventListener("click", () => this.setDock(this.root.classList.contains("dock-hidden")));
+    splitter.addEventListener("dblclick", (event) => { if (event.target !== this.dockToggle) this.setDock(this.root.classList.contains("dock-hidden")); });
+    splitter.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || event.target === this.dockToggle) return;
+      event.preventDefault();
+      splitter.setPointerCapture(event.pointerId);
+      splitter.classList.add("is-dragging");
+      const startY = event.clientY;
+      const startHeight = this.root.classList.contains("dock-hidden") ? 0 : this.dockHeight;
+      const move = (e) => {
+        const height = startHeight + startY - e.clientY;
+        if (height < 60) this.setDock(false, undefined, false);
+        else this.setDock(true, clamp(height, 140, Math.max(140, main.clientHeight - 160)), false);
+      };
+      const up = () => {
+        splitter.classList.remove("is-dragging");
+        splitter.removeEventListener("pointermove", move);
+        splitter.removeEventListener("pointerup", up);
+        splitter.removeEventListener("pointercancel", up);
+        this.setDock(!this.root.classList.contains("dock-hidden"));
+      };
+      splitter.addEventListener("pointermove", move);
+      splitter.addEventListener("pointerup", up);
+      splitter.addEventListener("pointercancel", up);
+    });
+    splitter.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      event.preventDefault();
+      event.stopPropagation();
+      const delta = event.key === "ArrowUp" ? 20 : -20;
+      this.setDock(true, clamp(this.dockHeight + delta, 140, Math.max(140, main.clientHeight - 160)));
+    });
+  }
+
+  // Shows or hides the effects panel, optionally at a new height; remembered between runs.
+  setDock(show, height = this.dockHeight, save = true) {
+    this.dockHeight = height;
+    this.root.style.setProperty("--dock", `${height}px`);
+    this.root.classList.toggle("dock-hidden", !show);
+    this.dockToggle.textContent = show ? "Hide" : "Show";
+    this.dockToggle.setAttribute("aria-expanded", String(show));
+    if (save) try { localStorage.setItem("micfx.dock", JSON.stringify({ height, hidden: !show })); } catch { /* not kept */ }
   }
 
   select(trackId, clipId, render = true, openAdd = false) {
@@ -1251,7 +1311,10 @@ class DawScreen {
       this.root.querySelector(`.track-row[data-track="${trackId}"]`)?.classList.add("is-selected");
       this.renderInspector();
     }
-    if (openAdd) this.inspector.querySelector(".add-effect")?.focus();
+    if (openAdd) {
+      this.setDock(true);
+      this.inspector.querySelector(".add-effect")?.focus();
+    }
   }
 
   findClip(id) {
@@ -1289,8 +1352,9 @@ class DawScreen {
 
   createClipPanel(clip) {
     const element = html("section", "panel clip-panel");
-    element.append(html("h3", "", "Clip"), html("p", "panel-caption", clip.name));
-    const row = html("div", "insert-controls");
+    const head = html("div", "panel-head");
+    head.append(html("h3", "", "Clip"), html("p", "panel-caption", clip.name));
+    const row = html("div", "insert-controls clip-controls");
     const id = clip.id;
     const current = () => this.findClip(id)?.clip ?? clip;
 
@@ -1308,7 +1372,8 @@ class DawScreen {
       button("tool", "Split", "Split at the playhead (S)", () => this.splitSelected()),
       button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
       button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected()));
-    element.append(row, actions);
+    head.append(actions);
+    element.append(head, row);
 
     return { element, update: (c) => { gain.update(c.gain); fadeIn.update(c.fadeIn); fadeOut.update(c.fadeOut); } };
   }
@@ -1316,7 +1381,9 @@ class DawScreen {
   createTrackPanel(owner) {
     const element = html("section", "panel track-panel");
     const isMaster = owner.id === 0;
-    element.append(html("h3", "", isMaster ? "Master effects" : `${owner.name} effects`),
+    const head = html("div", "panel-head");
+    element.append(head);
+    head.append(html("h3", "", isMaster ? "Master effects" : `${owner.name} effects`),
                    html("p", "panel-caption", isMaster ? "Applied to the whole mix, after the tracks." : "The take is recorded dry. These play on top, and you can change them any time."));
 
     if (!isMaster) {
@@ -1326,12 +1393,11 @@ class DawScreen {
         swatch.style.background = colour;
         colours.append(swatch);
       });
-      element.append(colours);
+      head.append(colours);
     }
 
     const list = html("div", "insert-list");
     this.rack = new InsertRack(list, owner);
-    element.append(list);
 
     const add = html("select", "dropdown add-effect");
     add.append(new Option("+ Add effect…", ""));
@@ -1364,7 +1430,8 @@ class DawScreen {
 
     const footer = html("div", "panel-actions");
     footer.append(add, preset);
-    element.append(footer);
+    head.append(footer);
+    element.append(list);
     this.rack.update(owner);
     return element;
   }
@@ -1533,8 +1600,8 @@ class DawScreen {
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
                ["V / B / G", "Select, cut and gain tools"], ["Alt+drag", "Move or trim without snapping"]]],
-    ["View", [["Tab", "Tracks / mixer"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
-              ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Ctrl+S", "Save (Shift: save as)"], ["?", "This list"], ["Esc", "Close, deselect, back to the select tool"]]],
+    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
+              ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Ctrl+S", "Save (Shift: save as)"], ["?", "This list"], ["F11 / Ctrl+Cmd+F", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
   ];
 
   toggleShortcuts(show) {
@@ -1626,6 +1693,47 @@ class DawScreen {
     if (found) daw("moveClip", { id: found.clip.id, start: Math.max(0, found.clip.start + seconds) });
   }
 
+  // What the buttons, the keyboard shortcuts and the app's menu bar (File, Edit, View,
+  // Transport) can do, by name, so all three always do the same thing.
+  get commands() {
+    return {
+      new: () => daw("new"),
+      open: () => daw("open"),
+      save: () => daw("save"),
+      saveAs: () => daw("saveAs"),
+      import: () => daw("import", { track: this.selectedTrack ?? -1 }),
+      export: () => this.toggleExportPanel(true),
+      undo: () => daw("undo"),
+      redo: () => daw("redo"),
+      cut: () => this.copySelected(true),
+      copy: () => this.copySelected(false),
+      paste: () => this.paste(),
+      duplicate: () => this.duplicateSelected(),
+      split: () => this.splitSelected(),
+      delete: () => this.deleteSelected(),
+      addTrack: () => this.addTrack(),
+      toggleView: () => this.setView(this.view === "arrange" ? "mixer" : "arrange"),
+      toggleDock: () => this.setDock(this.root.classList.contains("dock-hidden")),
+      follow: () => this.setFollow(!this.follow),
+      zoomIn: () => this.setZoom(this.zoom * 1.5),
+      zoomOut: () => this.setZoom(this.zoom / 1.5),
+      taller: () => this.setRowHeight(this.rowHeight + 12),
+      shorter: () => this.setRowHeight(this.rowHeight - 12),
+      shortcuts: () => this.toggleShortcuts(),
+      play: () => this.togglePlay(),
+      stop: () => daw("transport", { action: "stop" }),
+      record: () => this.toggleRecord(),
+      start: () => this.seek(0),
+      end: () => this.seek(this.songEnd()),
+      loop: () => this.toggleLoop(),
+      metronome: () => daw("metronome", { on: !this.session?.metronome }),
+    };
+  }
+
+  run(command) {
+    if (this.active) this.commands[command]?.();
+  }
+
   onKey(event) {
     if (!this.active || isTyping(event)) return;
     const mod = event.ctrlKey || event.metaKey;
@@ -1634,31 +1742,31 @@ class DawScreen {
     const onSlider = event.target.closest?.("[role=slider]");
     const step = event.shiftKey ? this.beat * 4 : this.beat;
 
-    if (mod && key === "z") { handled(); daw(event.shiftKey ? "redo" : "undo"); }
-    else if (mod && key === "y") { handled(); daw("redo"); }
-    else if (mod && key === "s") { handled(); daw(event.shiftKey ? "saveAs" : "save"); }
-    else if (mod && key === "d") { handled(); this.duplicateSelected(); }
-    else if (mod && key === "t") { handled(); this.addTrack(); }
-    else if (mod && key === "x") { handled(); this.copySelected(true); }
-    else if (mod && key === "c") { handled(); this.copySelected(false); }
-    else if (mod && key === "v") { handled(); this.paste(); }
+    if (mod && key === "z") { handled(); this.run(event.shiftKey ? "redo" : "undo"); }
+    else if (mod && key === "y") { handled(); this.run("redo"); }
+    else if (mod && key === "s") { handled(); this.run(event.shiftKey ? "saveAs" : "save"); }
+    else if (mod && key === "d") { handled(); this.run("duplicate"); }
+    else if (mod && key === "t") { handled(); this.run("addTrack"); }
+    else if (mod && key === "x") { handled(); this.run("cut"); }
+    else if (mod && key === "c") { handled(); this.run("copy"); }
+    else if (mod && key === "v") { handled(); this.run("paste"); }
     else if (mod) return;
     else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { handled(); this.nudgeSelected(event.key === "ArrowLeft" ? -step : step); }
     else if (event.altKey) return;
     else if (onSlider && event.key.startsWith("Arrow")) return;
-    else if (event.key === " ") { if (event.target.closest?.("button, [role=slider]")) return; handled(); this.togglePlay(); }
-    else if (event.key === "Enter") { if (event.target.closest?.("button")) return; handled(); daw("transport", { action: "stop" }); }
+    else if (event.key === " ") { if (event.target.closest?.("button, [role=slider]")) return; handled(); this.run("play"); }
+    else if (event.key === "Enter") { if (event.target.closest?.("button")) return; handled(); this.run("stop"); }
     else if (event.key === "ArrowLeft") { handled(); this.seek(Math.ceil(this.status.position / step - 1e-6) * step - step); }
     else if (event.key === "ArrowRight") { handled(); this.seek(Math.floor(this.status.position / step + 1e-6) * step + step); }
     else if (event.key === "ArrowUp") { handled(); event.shiftKey ? this.setRowHeight(this.rowHeight + 12) : this.selectTrackBy(-1); }
     else if (event.key === "ArrowDown") { handled(); event.shiftKey ? this.setRowHeight(this.rowHeight - 12) : this.selectTrackBy(1); }
-    else if (event.key === "Home") { handled(); this.seek(0); }
-    else if (event.key === "End") { handled(); this.seek(this.songEnd()); }
-    else if (event.key === "?" || event.key === "/") { handled(); this.toggleShortcuts(); }
-    else if (event.key === "Tab") { handled(); this.setView(this.view === "arrange" ? "mixer" : "arrange"); }
-    else if (event.key === "Delete" || event.key === "Backspace") { if (onSlider) return; handled(); this.deleteSelected(); }
-    else if (event.key === "+" || event.key === "=") { handled(); this.setZoom(this.zoom * 1.5); }
-    else if (event.key === "-" || event.key === "_") { handled(); this.setZoom(this.zoom / 1.5); }
+    else if (event.key === "Home") { handled(); this.run("start"); }
+    else if (event.key === "End") { handled(); this.run("end"); }
+    else if (event.key === "?" || event.key === "/") { handled(); this.run("shortcuts"); }
+    else if (event.key === "Tab") { handled(); this.run("toggleView"); }
+    else if (event.key === "Delete" || event.key === "Backspace") { if (onSlider) return; handled(); this.run("delete"); }
+    else if (event.key === "+" || event.key === "=") { handled(); this.run("zoomIn"); }
+    else if (event.key === "-" || event.key === "_") { handled(); this.run("zoomOut"); }
     else if (event.key === ",") { handled(); this.selectClipBy(-1); }
     else if (event.key === ".") { handled(); this.selectClipBy(1); }
     else if (event.key === "Escape") {
@@ -1669,17 +1777,18 @@ class DawScreen {
     }
     else if (event.shiftKey && key === "s") { handled(); this.toggleTrack("solo"); }
     else if (event.shiftKey) return;
-    else if (key === "r") { handled(); this.toggleRecord(); }
-    else if (key === "s") { handled(); this.splitSelected(); }
-    else if (key === "l") { handled(); this.toggleLoop(); }
-    else if (key === "c") { handled(); daw("metronome", { on: !this.session?.metronome }); }
-    else if (key === "f") { handled(); this.setFollow(!this.follow); }
+    else if (key === "r") { handled(); this.run("record"); }
+    else if (key === "s") { handled(); this.run("split"); }
+    else if (key === "l") { handled(); this.run("loop"); }
+    else if (key === "c") { handled(); this.run("metronome"); }
+    else if (key === "f") { handled(); this.run("follow"); }
     else if (key === "m") { handled(); this.toggleTrack("mute"); }
     else if (key === "a") { handled(); this.toggleTrack("arm"); }
     else if (key === "i") { handled(); this.toggleTrack("monitor"); }
     else if (key === "v") { handled(); this.setTool("select"); }
     else if (key === "b") { handled(); this.setTool("cut"); }
     else if (key === "g") { handled(); this.setTool("gain"); }
+    else if (key === "e") { handled(); this.run("toggleDock"); }
   }
 }
 
@@ -1719,5 +1828,31 @@ export function initDaw() {
     b.addEventListener("click", () => daw("mode", { daw: b.dataset.mode === "daw" }));
 
   document.addEventListener("daw-session", (event) => applyMode(event.detail));
+
+  // The app's menu bar (standalone only) sends the same commands as the buttons and keys.
+  window.__JUCE__.backend.addEventListener("appMenu", (action) => {
+    if (action === "mode:live" || action === "mode:daw") daw("mode", { daw: action === "mode:daw" });
+    else screen.run(action);
+  });
+
+  // Full screen: a header button, F11, or Ctrl+Cmd+F (the macOS shortcut). Standalone only.
+  const fullScreen = document.querySelector(".fullscreen-button");
+  const nativeWindow = Juce.getNativeFunction("window");
+  const applyWindow = (state) => {
+    fullScreen.hidden = !state?.available;
+    const on = Boolean(state?.fullScreen);
+    fullScreen.setAttribute("aria-pressed", String(on));
+    fullScreen.title = on ? "Leave full screen (F11)" : "Full screen (F11)";
+  };
+  const toggleFullScreen = () => nativeWindow("fullScreen").then(applyWindow);
+  fullScreen.addEventListener("click", toggleFullScreen);
+  window.__JUCE__.backend.addEventListener("window", applyWindow);
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "F11" || (event.ctrlKey && event.metaKey && event.key.toLowerCase() === "f")) {
+      event.preventDefault();
+      if (!fullScreen.hidden) toggleFullScreen();
+    }
+  });
+  nativeWindow("state").then(applyWindow);
   nativeDaw("session", {}).then((session) => session && screen.onSession(session));
 }
