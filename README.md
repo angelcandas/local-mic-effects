@@ -86,8 +86,15 @@ tracks instead of one live chain:
 - **Export** renders the mix, or one stem per track, to 16/24/32-bit WAV faster than real time,
   optionally normalised or limited to the loop range.
 
-Keys: Space play/pause, Enter back to start, R record, C click, L loop, Tab tracks/mixer, +/− zoom
-(or Ctrl+scroll), Ctrl+S save, Ctrl+T new track.
+- **Tools**: Select (V), Cut (B: click a clip to split it there) and Gain (G: drag a clip up or down).
+  Ctrl+X / C / V cut, copy and paste clips at the playhead.
+- **Navigation**: the ↔ and ↕ sliders (or Ctrl+scroll and Alt+scroll) zoom time and track height.
+  **Follow** keeps the playhead in view while playing; scrolling yourself switches it off so you can
+  look and edit elsewhere while the song plays. Clicking a lane while playing only selects.
+- Each track header has volume and pan; armed tracks show the take growing while you record.
+
+Press **?** in DAW mode for every keyboard shortcut (transport, ← → to move the playhead, ↑ ↓ to pick
+a track, M / Shift+S / A / I for mute, solo, arm and monitor, and more).
 
 ## Requirements
 

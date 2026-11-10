@@ -11,8 +11,8 @@ body.is-daw .chip--live { display: none; }
 
 .daw {
   --head: 210px;   /* HEAD_WIDTH in daw.js */
-  --row: 68px;
-  --clip: 60px;    /* CLIP_HEIGHT in daw.js */
+  --row: 84px;   /* rowHeight in daw.js (vertical zoom) */
+  --clip: 76px;
   position: relative;
   display: flex;
   flex-direction: column;
@@ -267,10 +267,11 @@ body.is-daw .chip--live { display: none; }
   display: flex;
   flex-direction: column;
   justify-content: center;
-  gap: 5px;
+  gap: 4px;
   flex: none;
   width: var(--head);
-  padding: 6px 8px 6px 0;
+  padding: 5px 8px 5px 0;
+  overflow: hidden;
   border-right: 1px solid var(--line);
   background: var(--panel);
   cursor: pointer;
@@ -640,3 +641,104 @@ body.is-daw .chip--live { display: none; }
 @media (max-width: 1100px) {
   .daw-main { grid-template-columns: 1fr 280px; }
 }
+
+/* ---------- Track header: volume and pan ---------- */
+
+.track-head-mix { display: flex; gap: 6px; padding-left: 12px; }
+
+.hslider {
+  position: relative;
+  flex: 1;
+  height: 16px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #0d1016;
+  cursor: ew-resize;
+  touch-action: none;
+}
+
+.hslider.is-pan { flex: 0 0 52px; }
+.hslider-fill { position: absolute; top: 0; bottom: 0; background: color-mix(in srgb, var(--track-color, var(--accent)) 45%, transparent); }
+.hslider.is-bipolar::after { content: ""; position: absolute; top: 2px; bottom: 2px; left: 50%; width: 1px; background: var(--line-strong); }
+.hslider-text { position: relative; z-index: 1; display: block; color: var(--text); font: 600 10px/14px var(--mono); text-align: center; pointer-events: none; }
+.hslider:hover, .hslider:focus-visible { border-color: var(--line-strong); outline: none; }
+
+.rows-medium .track-head-mix { display: none; }
+.rows-small .track-head-bottom { display: none; }
+.rows-small .level-meter { display: none; }
+
+/* ---------- Recording ---------- */
+
+.daw.is-recording .track-row.is-armed .track-swatch { background: var(--hot); animation: rec-pulse 1s infinite; }
+.daw.is-recording .track-row.is-armed .track-head { background: color-mix(in srgb, var(--hot) 8%, var(--panel)); }
+
+@keyframes rec-pulse { 50% { opacity: 0.35; } }
+
+.rec-region {
+  position: absolute;
+  top: 4px;
+  z-index: 2;
+  height: var(--clip);
+  overflow: hidden;
+  border: 1px solid var(--hot);
+  border-right-width: 2px;
+  border-radius: 7px 0 0 7px;
+  background: rgba(255, 93, 108, 0.14);
+  pointer-events: none;
+}
+
+.rec-region canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.rec-region.is-count-in { display: none; }
+.rec-label { position: absolute; top: 2px; left: 6px; color: #ffd3d8; font-size: 10.5px; font-weight: 700; white-space: nowrap; text-shadow: 0 1px 2px #000; }
+
+/* ---------- Tools, zoom ---------- */
+
+.tools button { padding: 5px 10px; }
+.arrange[data-tool="cut"] .clip { cursor: crosshair; }
+.arrange[data-tool="cut"] .clip .handle { display: none; }
+.arrange[data-tool="gain"] .clip { cursor: ns-resize; }
+.arrange[data-tool="gain"] .clip .handle { display: none; }
+
+.cut-guide {
+  position: absolute;
+  z-index: 6;
+  width: 0;
+  border-left: 1px dashed var(--text);
+  pointer-events: none;
+}
+
+.cut-guide[hidden] { display: none; }
+
+.zoom-slider { display: flex; align-items: center; gap: 4px; color: var(--faint); font-size: 13px; }
+.zoom-slider input { width: 74px; accent-color: var(--accent); }
+
+/* ---------- Shortcut list ---------- */
+
+.shortcuts {
+  position: absolute;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(5, 6, 9, 0.6);
+}
+
+.shortcuts[hidden] { display: none; }
+
+.shortcuts-panel {
+  width: min(860px, calc(100% - 32px));
+  max-height: calc(100% - 32px);
+  overflow-y: auto;
+  padding: 16px 18px;
+  border: 1px solid var(--line-strong);
+  border-radius: 16px;
+  background: rgba(21, 24, 33, 0.98);
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
+}
+
+.shortcuts-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr)); gap: 6px 24px; }
+.shortcuts-grid h4 { margin: 10px 0 4px; color: var(--faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; }
+.shortcut { display: grid; grid-template-columns: 140px 1fr; gap: 10px; padding: 3px 0; color: var(--muted); }
+.shortcut kbd { color: var(--text); font: 600 11px/1.6 var(--mono); }
