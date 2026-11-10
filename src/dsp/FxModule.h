@@ -10,7 +10,7 @@ namespace fx
 // The effects a chain can hold, in the order Live mode runs them.
 enum class ModuleType
 {
-    highPass, gate, pitch, eq, compressor, deEsser, exciter, saturation, radio, bitcrusher,
+    highPass, gate, pitch, eq, paraEq, compressor, deEsser, exciter, saturation, radio, bitcrusher,
     robot, filter, autoWah, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, width
 };
 

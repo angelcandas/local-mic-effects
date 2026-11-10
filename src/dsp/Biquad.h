@@ -79,6 +79,16 @@ public:
 
     void reset() noexcept { state = {}; }
 
+    // Gain of the current coefficients at `frequency`, in dB.
+    double getMagnitudeDb (double frequency, double sampleRate) const noexcept
+    {
+        const auto w = juce::MathConstants<double>::twoPi * frequency / sampleRate;
+        const auto c1 = std::cos (w), s1 = std::sin (w), c2 = std::cos (2 * w), s2 = std::sin (2 * w);
+        const auto nr = c[0] + c[1] * c1 + c[2] * c2, ni = -(c[1] * s1 + c[2] * s2);
+        const auto dr = 1.0 + c[3] * c1 + c[4] * c2,  di = -(c[3] * s1 + c[4] * s2);
+        return 10.0 * std::log10 ((nr * nr + ni * ni) / juce::jmax (1.0e-30, dr * dr + di * di));
+    }
+
 private:
     std::array<float, 5> c { 1.0f, 0.0f, 0.0f, 0.0f, 0.0f }; // b0 b1 b2 a1 a2
     std::array<std::array<float, 2>, 2> state {};

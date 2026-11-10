@@ -40,6 +40,16 @@ export const MODULES = [
     description: "Warmth, presence and air",
     controls: [bipolar("eqLow", "Low"), knob("eqMidFreq", "Mid Freq"), bipolar("eqMidGain", "Mid"), bipolar("eqHigh", "High")] },
 
+  { id: "peq", name: "Parametric EQ", category: "cleanup", power: "peqOn", wide: true,
+    description: "Seven precise bands for mixing. Drag the points; scroll on a bell to change its width",
+    controls: [toggle("peqLowCutOn", "Low cut"), knob("peqLowCutFreq", "Low cut"),
+               knob("peqLowFreq", "Low freq"), bipolar("peqLowGain", "Low"),
+               knob("peqBell1Freq", "Bell 1"), bipolar("peqBell1Gain", "Gain 1"), knob("peqBell1Q", "Q 1"),
+               knob("peqBell2Freq", "Bell 2"), bipolar("peqBell2Gain", "Gain 2"), knob("peqBell2Q", "Q 2"),
+               knob("peqBell3Freq", "Bell 3"), bipolar("peqBell3Gain", "Gain 3"), knob("peqBell3Q", "Q 3"),
+               knob("peqHighFreq", "High freq"), bipolar("peqHighGain", "High"),
+               toggle("peqHighCutOn", "High cut"), knob("peqHighCutFreq", "High cut")] },
+
   { id: "comp", name: "Compressor", category: "cleanup", power: "compOn",
     description: "Evens out loud and quiet moments",
     controls: [knob("compThreshold", "Threshold"), knob("compRatio", "Ratio")] },
@@ -118,7 +128,7 @@ export const MODULES = [
 // effect pictures (fxviews.js). The pitch module holds three entries (autotune, pitch shift,
 // harmonizer).
 export const MODULE_KEYS = {
-  hpf: "highPass", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq",
+  hpf: "highPass", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq", peq: "paraEq",
   comp: "compressor", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
   crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", tremolo: "tremolo",
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
