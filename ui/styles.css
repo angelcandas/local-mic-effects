@@ -76,6 +76,12 @@ button { font: inherit; color: inherit; }
 
 .chip--live { color: var(--text); }
 
+.fullscreen-button { padding: 5px 9px; cursor: pointer; font: inherit; }
+.fullscreen-button[hidden] { display: none; }
+.fullscreen-button:hover,
+.fullscreen-button[aria-pressed="true"] { color: var(--text); border-color: var(--line-strong); }
+.fullscreen-button svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 1.6; stroke-linecap: round; stroke-linejoin: round; }
+
 .chip .dot {
   width: 7px;
   height: 7px;

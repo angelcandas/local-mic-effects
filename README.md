@@ -92,6 +92,14 @@ tracks instead of one live chain:
   **Follow** keeps the playhead in view while playing; scrolling yourself switches it off so you can
   look and edit elsewhere while the song plays. Clicking a lane while playing only selects.
 - Each track header has volume and pan; armed tracks show the take growing while you record.
+- The **effects panel** sits under the tracks (and the mixer): the selected clip, then the selected
+  track's effects left to right, in chain order. Drag the bar above it to resize, or press **E** (or
+  its **Hide** button) to fold it away.
+- **Menus**: the standalone app has File (new, open, save, import, export, audio settings), Edit,
+  View and Transport menus, in the macOS menu bar at the top of the screen or under the title bar
+  on Windows and Linux. They do the same as the buttons and shortcuts.
+- **Full screen**: the title bar's maximise button, the ⛶ button at the top, **View → Full screen**,
+  **F11**, or **Ctrl+Cmd+F** on a Mac.
 
 Press **?** in DAW mode for every keyboard shortcut (transport, ← → to move the playhead, ↑ ↓ to pick
 a track, M / Shift+S / A / I for mute, solo, arm and monitor, and more).
@@ -120,7 +128,8 @@ On first launch (and after rebuilds, which change the app's signature):
 
 ## Updating
 
-**Options → Check for updates…** in the standalone app fetches the latest version, lists what's
+**Options → Check for updates…** in the standalone app (also in the MicFX menu on macOS, or
+**File** on Windows and Linux) fetches the latest version, lists what's
 new, and on **Update and rebuild** pulls it, updates JUCE and rebuilds the app. Then
 **Relaunch MicFX** restarts it. The new build has a new signature, so macOS asks for mic access again.
 

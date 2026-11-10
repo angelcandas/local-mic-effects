@@ -94,7 +94,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     webView->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
 
     setResizable (true, true);
-    setResizeLimits (900, 560, 1800, 1200);
+    setResizeLimits (900, 560, 10000, 10000); // no real maximum, so full screen fills any display
     setSize (1120, 780);
 
     startTimerHz (30);
@@ -184,6 +184,13 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                        })
 
                        // -> [{ name, category }]
+                       .withNativeFunction ("window", [this] (const auto& args, auto complete)
+                       {
+                           if (args.size() > 0 && args[0].toString() == "fullScreen")
+                               toggleFullScreen();
+
+                           complete (describeWindow());
+                       })
                        .withNativeFunction ("getPresets", [] (const auto&, auto complete)
                        {
                            juce::Array<juce::var> list;
@@ -389,10 +396,45 @@ void PluginEditor::resized()
     webView->setBounds (getLocalBounds());
 }
 
+void PluginEditor::sendMenuCommand (const juce::String& action)
+{
+    webView->emitEventIfBrowserIsVisible ("appMenu", action);
+}
+
+juce::ResizableWindow* PluginEditor::getAppWindow() const
+{
+    if (processorRef.wrapperType != juce::AudioProcessor::wrapperType_Standalone)
+        return nullptr;
+
+    return findParentComponentOfClass<juce::ResizableWindow>();
+}
+
+void PluginEditor::toggleFullScreen()
+{
+    if (auto* window = getAppWindow())
+        window->setFullScreen (! window->isFullScreen());
+}
+
+juce::var PluginEditor::describeWindow() const
+{
+    auto* window = getAppWindow();
+    auto* result = new juce::DynamicObject();
+    result->setProperty ("available", window != nullptr);
+    result->setProperty ("fullScreen", window != nullptr && window->isFullScreen());
+    return juce::var (result);
+}
+
 void PluginEditor::timerCallback()
 {
     if (daw != nullptr)
         daw->tick();
+
+    // The title bar button or the system can change full screen too; keep the page's button in step.
+    if (auto* window = getAppWindow(); window != nullptr && window->isFullScreen() != lastFullScreen)
+    {
+        lastFullScreen = window->isFullScreen();
+        webView->emitEventIfBrowserIsVisible ("window", describeWindow());
+    }
 
     const auto& pitch = processorRef.getPitchEngine();
 

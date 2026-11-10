@@ -49,6 +49,9 @@
         <button data-mode="live" class="is-selected">Live</button>
         <button data-mode="daw">DAW</button>
       </div>
+      <button class="chip fullscreen-button" type="button" hidden aria-pressed="false" aria-label="Full screen" title="Full screen (F11)">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" /></svg>
+      </button>
       <span class="chip chip--live"><span class="dot"></span>Live</span>
       <span class="chip">Headphones recommended</span>
     </div>
@@ -93,6 +96,10 @@
     <div class="daw-main">
       <div class="arrange"></div>
       <div class="mixer"></div>
+      <div class="dock-splitter" role="separator" aria-orientation="horizontal" aria-label="Drag to resize the effects panel" tabindex="0">
+        <span class="dock-title">Effects</span>
+        <button class="dock-toggle" type="button" title="Show or hide the effects panel (E)">Hide</button>
+      </div>
       <aside class="inspector" aria-label="Effects and clip settings"></aside>
     </div>
     <div class="export-panel" hidden>

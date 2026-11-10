@@ -1,5 +1,7 @@
 // The standalone app: JUCE's default StandaloneFilterApp, plus "Check for updates..." in the
-// window's Options menu. Built with JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP (see CMakeLists.txt).
+// window's Options menu, a maximise button, and a File / Edit / View / Transport menu bar (the
+// macOS menu bar at the top of the screen, or a bar under the title on Windows and Linux).
+// Built with JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP (see CMakeLists.txt).
 
 #include <juce_audio_utils/juce_audio_utils.h>
 
@@ -7,6 +9,8 @@
 
 #include <juce_audio_plugin_client/Standalone/juce_StandaloneFilterWindow.h>
 #include <unistd.h>
+
+#include "PluginEditor.h"
 
 namespace
 {
@@ -223,15 +227,201 @@ namespace
     }
 
     //==============================================================================
-    // JUCE's standalone window with one more item in its Options menu.
-    class MicFXWindow final : public juce::StandaloneFilterWindow
+    // The menu bar. Most items are handed to the page (PluginEditor::sendMenuCommand), which
+    // runs them exactly like its buttons and keyboard shortcuts, so the two never disagree.
+    // The shortcuts are shown as text only: the page keeps handling the keys (on macOS, Ctrl
+    // in the page's shortcuts is also Command).
+    struct MenuItem
+    {
+        const char* action;   // "" = separator
+        const char* name;
+        const char* keys;
+        bool dawOnly;
+    };
+
+    const std::vector<std::pair<const char*, std::vector<MenuItem>>>& getMenus()
+    {
+        static const std::vector<std::pair<const char*, std::vector<MenuItem>>> menus
+        {
+            { "File", {
+                { "new",       "New project",            "",             true },
+                { "open",      "Open project...",        "",             true },
+                { "save",      "Save",                   "Ctrl+S",       true },
+                { "saveAs",    "Save as...",             "Ctrl+Shift+S", true },
+                { "", "", "", false },
+                { "import",    "Import audio...",        "",             true },
+                { "export",    "Export...",              "",             true },
+                { "", "", "", false },
+                { "app:audio", "Audio settings...",      "",             false },
+               #if ! JUCE_MAC
+                { "app:updates", "Check for updates...", "",             false },
+                { "", "", "", false },
+                { "app:quit",  "Exit",                   "",             false },
+               #endif
+            } },
+            { "Edit", {
+                { "undo",      "Undo",                   "Ctrl+Z",       true },
+                { "redo",      "Redo",                   "Ctrl+Shift+Z", true },
+                { "", "", "", false },
+                { "cut",       "Cut clip",               "Ctrl+X",       true },
+                { "copy",      "Copy clip",              "Ctrl+C",       true },
+                { "paste",     "Paste at the playhead",  "Ctrl+V",       true },
+                { "duplicate", "Duplicate clip",         "Ctrl+D",       true },
+                { "split",     "Split at the playhead",  "S",            true },
+                { "delete",    "Delete clip",            "Delete",       true },
+                { "", "", "", false },
+                { "addTrack",  "New track",              "Ctrl+T",       true },
+            } },
+            { "View", {
+                { "mode:live", "Live",                   "",             false },
+                { "mode:daw",  "Multitrack (DAW)",       "",             false },
+                { "", "", "", false },
+                { "toggleView", "Tracks / mixer",        "Tab",          true },
+                { "toggleDock", "Effects panel",         "E",            true },
+                { "follow",    "Follow the playhead",    "F",            true },
+                { "", "", "", false },
+                { "zoomIn",    "Zoom in",                "+",            true },
+                { "zoomOut",   "Zoom out",               "-",            true },
+                { "taller",    "Taller tracks",          "Shift+Up",     true },
+                { "shorter",   "Shorter tracks",         "Shift+Down",   true },
+                { "", "", "", false },
+               #if JUCE_MAC
+                { "app:fullScreen", "Full screen",       "Ctrl+Cmd+F",   false },
+               #else
+                { "app:fullScreen", "Full screen",       "F11",          false },
+               #endif
+                { "shortcuts", "Keyboard shortcuts",     "?",            true },
+            } },
+            { "Transport", {
+                { "play",      "Play / pause",           "Space",        true },
+                { "stop",      "Stop",                   "Enter",        true },
+                { "record",    "Record",                 "R",            true },
+                { "", "", "", false },
+                { "start",     "Go to the start",        "Home",         true },
+                { "end",       "Go to the end",          "End",          true },
+                { "", "", "", false },
+                { "loop",      "Loop",                   "L",            true },
+                { "metronome", "Click (metronome)",      "C",            true },
+            } },
+        };
+        return menus;
+    }
+
+    //==============================================================================
+    // JUCE's standalone window with one more item in its Options menu, a maximise button and
+    // the menu bar.
+    class MicFXWindow final : public juce::StandaloneFilterWindow,
+                              private juce::MenuBarModel
     {
     public:
-        using StandaloneFilterWindow::StandaloneFilterWindow;
+        MicFXWindow (const juce::String& title, juce::Colour background, std::unique_ptr<juce::StandalonePluginHolder> holder)
+            : StandaloneFilterWindow (title, background, std::move (holder))
+        {
+            setTitleBarButtonsRequired (juce::DocumentWindow::allButtons, false);
+
+           #if JUCE_MAC
+            appleMenu.addItem (checkForUpdatesId, TRANS ("Check for updates..."));
+            juce::MenuBarModel::setMacMainMenu (this, &appleMenu);
+           #else
+            setMenuBar (this);
+           #endif
+        }
+
+        ~MicFXWindow() override
+        {
+           #if JUCE_MAC
+            juce::MenuBarModel::setMacMainMenu (nullptr);
+           #else
+            setMenuBar (nullptr);
+           #endif
+        }
 
     private:
         static constexpr int checkForUpdatesId = 100;
+        static constexpr int firstMenuItemId = 1000;
 
+        PluginEditor* getEditor() const
+        {
+            if (auto* processor = getAudioProcessor())
+                return dynamic_cast<PluginEditor*> (processor->getActiveEditor());
+
+            return nullptr;
+        }
+
+        //==============================================================================
+        juce::StringArray getMenuBarNames() override
+        {
+            juce::StringArray names;
+            for (const auto& [name, items] : getMenus())
+                names.add (name);
+            return names;
+        }
+
+        juce::PopupMenu getMenuForIndex (int index, const juce::String&) override
+        {
+            juce::PopupMenu menu;
+            const auto& menus = getMenus();
+            if (! juce::isPositiveAndBelow (index, (int) menus.size()))
+                return menu;
+
+            auto* editor = getEditor();
+            const auto isDaw = editor != nullptr && editor->isDawMode();
+            const auto action = [] (const MenuItem& item) { return juce::String (item.action); };
+
+            for (size_t i = 0; i < menus[(size_t) index].second.size(); ++i)
+            {
+                const auto& item = menus[(size_t) index].second[i];
+                if (action (item).isEmpty())
+                {
+                    menu.addSeparator();
+                    continue;
+                }
+
+                juce::PopupMenu::Item entry (item.name);
+                entry.itemID = firstMenuItemId + index * 100 + (int) i;
+                entry.shortcutKeyDescription = item.keys; // shown on Windows and Linux; the macOS bar leaves it out
+                entry.isEnabled = editor != nullptr && (isDaw || ! item.dawOnly);
+
+                if (action (item) == "mode:live")       entry.isTicked = ! isDaw;
+                else if (action (item) == "mode:daw")   entry.isTicked = isDaw;
+                else if (action (item) == "app:fullScreen")
+                {
+                    entry.isTicked = isFullScreen();
+                    entry.isEnabled = true;
+                }
+                else if (action (item).startsWith ("app:"))
+                    entry.isEnabled = true;
+
+                menu.addItem (std::move (entry));
+            }
+
+            return menu;
+        }
+
+        void menuItemSelected (int itemId, int) override
+        {
+            if (itemId == checkForUpdatesId)
+            {
+                showUpdateDialog (this);
+                return;
+            }
+
+            const auto index = (itemId - firstMenuItemId) / 100, position = (itemId - firstMenuItemId) % 100;
+            const auto& menus = getMenus();
+            if (! juce::isPositiveAndBelow (index, (int) menus.size())
+                || ! juce::isPositiveAndBelow (position, (int) menus[(size_t) index].second.size()))
+                return;
+
+            const juce::String action (menus[(size_t) index].second[(size_t) position].action);
+
+            if (action == "app:audio")            pluginHolder->showAudioSettingsDialog();
+            else if (action == "app:updates")     showUpdateDialog (this);
+            else if (action == "app:fullScreen")  setFullScreen (! isFullScreen());
+            else if (action == "app:quit")        juce::JUCEApplicationBase::getInstance()->systemRequestedQuit();
+            else if (auto* editor = getEditor())  editor->sendMenuCommand (action);
+        }
+
+        //==============================================================================
         void buttonClicked (juce::Button* button) override
         {
             juce::PopupMenu m;
@@ -256,6 +446,8 @@ namespace
                                      safe->handleMenuResult (result);
                              });
         }
+
+        juce::PopupMenu appleMenu;
     };
 
     //==============================================================================
