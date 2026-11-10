@@ -142,14 +142,15 @@ IntelliSense comes from `build/debug/compile_commands.json`, so run a configure 
 ```
 src/Parameters.*        every parameter: IDs, ranges, defaults
 src/Presets.*           factory voice presets
-src/PluginProcessor.*   audio thread: the effects chain
+src/PluginProcessor.*   audio thread: input gain, the effect chain, output gain, limiter
 src/Recorder.*          WAV recording of the output (and dry mic) on a background thread
 src/Multitrack.*        backing track + takes: loading, resampling, timeline playback
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/StandaloneApp.cpp   standalone app window, with Options → Check for updates…
 scripts/update.sh       update check / pull + rebuild, used by Check for updates…
 src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune/pitch/harmony),
-                        Effects (EQ, de-esser, saturation, echo…), Biquad
+                        Effects (EQ, de-esser, saturation, echo…), Biquad,
+                        FxModules (each effect + its values), FxChain (an ordered list of them)
 ui/modules.js           the effect catalog the UI is built from
 ui/app.js, styles.css   the interface
 tests/DspTests.cpp      headless DSP test runner
@@ -159,8 +160,10 @@ libs/JUCE               JUCE 9.0.2 (git submodule)
 ### Adding an effect
 
 1. Add its parameters in `src/Parameters.h/.cpp`.
-2. Add the DSP (e.g. in `src/dsp/Effects.h`). Update it in `updateDspParameters()` and `run()` it in
-   `processBlock()`.
+2. Add the DSP (e.g. in `src/dsp/Effects.h`), then wrap it as a module in `src/dsp/FxModules.h`: declare
+   its values with the same IDs and defaults as the parameters, add a `ModuleType`, and add it to
+   `createModule()` and `getModuleKey()`. Live mode runs every type in `ModuleType` order; the tests check
+   the module values and the parameters stay in sync.
 3. Add an entry to `ui/modules.js`. The card, sidebar item and parameter bindings are generated from it.
 
 ## Using the processed mic in other apps (Zoom, Discord, OBS)

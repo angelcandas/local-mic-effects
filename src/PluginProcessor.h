@@ -6,14 +6,16 @@
 #include "Parameters.h"
 #include "Multitrack.h"
 #include "Recorder.h"
-#include "dsp/Effects.h"
-#include "dsp/PitchEngine.h"
+#include "dsp/FxChain.h"
 
 // Signal chain, in order (every module except gain/reverb/limiter is skipped when off):
-//   input gain -> high-pass -> gate -> autotune / pitch shift / harmonizer -> EQ
-//   -> compressor -> de-esser -> exciter -> saturation -> radio -> bitcrusher -> robot
-//   -> filter -> auto-wah -> tremolo -> vibrato -> chorus -> flanger -> phaser
-//   -> doubler -> echo -> reverb -> stereo width -> output gain -> safety limiter
+//   input gain -> [effect chain] -> output gain -> safety limiter
+// where the effect chain (fx::FxChain, every module type) runs:
+//   high-pass -> gate -> autotune / pitch shift / harmonizer -> EQ -> compressor
+//   -> de-esser -> exciter -> saturation -> radio -> bitcrusher -> robot -> filter
+//   -> auto-wah -> tremolo -> vibrato -> chorus -> flanger -> phaser -> doubler
+//   -> echo -> reverb -> stereo width
+// The plugin parameters drive the chain's module values once per block.
 class PluginProcessor final : public juce::AudioProcessor
 {
 public:
@@ -49,7 +51,7 @@ public:
 
     //==============================================================================
     juce::AudioProcessorValueTreeState& getState() noexcept { return state; }
-    const fx::PitchEngine& getPitchEngine() const noexcept  { return pitchEngine; }
+    const fx::PitchEngine& getPitchEngine() const noexcept  { return pitchModule.getEngine(); }
 
     // Records the processed output (and optionally the dry mic) to WAV. Start/stop it
     // from the message thread; processBlock feeds it.
@@ -75,28 +77,8 @@ private:
     juce::AudioProcessorValueTreeState state;
 
     juce::dsp::Gain<float> inputGain, outputGain;
-    juce::dsp::StateVariableTPTFilter<float> highPass;
-    juce::dsp::NoiseGate<float> gate;
-    fx::PitchEngine pitchEngine;
-    fx::PitchEngine::Settings pitchSettings;
-    fx::Equalizer eq;
-    juce::dsp::Compressor<float> compressor;
-    fx::DeEsser deEsser;
-    fx::Exciter exciter;
-    fx::Saturation saturation;
-    fx::Radio radio;
-    fx::Bitcrusher bitcrusher;
-    fx::RingModulator robot;
-    fx::ResonantFilter filter;
-    fx::AutoWah autoWah;
-    fx::Tremolo tremolo;
-    fx::Vibrato vibrato;
-    juce::dsp::Chorus<float> chorus, flanger;
-    juce::dsp::Phaser<float> phaser;
-    fx::Doubler doubler;
-    fx::Echo echo;
-    juce::dsp::Reverb reverb;
-    fx::StereoWidth width;
+    fx::FxChain chain { fx::FxChain::getAllTypes() };
+    fx::modules::Pitch& pitchModule;
     juce::dsp::Limiter<float> limiter;
 
     Recorder recorder;
@@ -106,9 +88,17 @@ private:
     float mixGuardGain = 1.0f, mixGuardRelease = 0.0f;
     juce::AudioBuffer<float> dryInput; // the raw mic, kept for the recorder's dry file
 
-    // Which switchable modules ran last block, so one switched back on starts clean.
-    std::array<bool, 32> moduleWasOn {};
-    bool pitchWasOn = false;
+    // Each chain value and the plugin parameter that drives it.
+    struct Binding
+    {
+        enum class Kind { number, toggle, choice };
+
+        fx::Module::Value* value;
+        juce::RangedAudioParameter* parameter;
+        Kind kind;
+    };
+
+    std::vector<Binding> bindings;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
 };

@@ -49,6 +49,9 @@ set(MICFX_DSP_SOURCES
     src/Multitrack.cpp
     src/dsp/Biquad.h
     src/dsp/Effects.h
+    src/dsp/FxChain.h
+    src/dsp/FxModule.h
+    src/dsp/FxModules.h
     src/dsp/PitchDetector.h
     src/dsp/PitchEngine.h
     src/dsp/PsolaShifter.h)
