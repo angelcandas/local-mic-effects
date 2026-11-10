@@ -145,6 +145,8 @@ src/Presets.*           factory voice presets
 src/PluginProcessor.*   audio thread: input gain, the effect chain, output gain, limiter
 src/Recorder.*          WAV recording of the output (and dry mic) on a background thread
 src/Multitrack.*        backing track + takes: loading, resampling, timeline playback
+src/daw/                DAW mode: Edit (the session as an undoable ValueTree), AudioPool (decoded
+                        clip audio), DawEngine (tracks + inserts + master bus, lock-free graph swap)
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/StandaloneApp.cpp   standalone app window, with Options → Check for updates…
 scripts/update.sh       update check / pull + rebuild, used by Check for updates…

@@ -9,9 +9,11 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include <set>
+#include <thread>
 
 #include "PluginProcessor.h"
 #include "Presets.h"
+#include "daw/DawEngine.h"
 #include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
@@ -638,6 +640,221 @@ namespace
         tracks.pause();
         folder.deleteRecursively();
     }
+    //==========================================================================
+    // Renders `seconds` of the engine in device-sized blocks; returns {left, right}.
+    std::array<std::vector<float>, 2> render (daw::DawEngine& engine, double seconds)
+    {
+        std::array<std::vector<float>, 2> out;
+        juce::AudioBuffer<float> buffer (2, blockSize);
+
+        for (int done = 0; done < (int) (seconds * sampleRate); done += blockSize)
+        {
+            engine.process (buffer, 2, blockSize);
+            for (int ch = 0; ch < 2; ++ch)
+                out[(size_t) ch].insert (out[(size_t) ch].end(), buffer.getReadPointer (ch), buffer.getReadPointer (ch) + blockSize);
+        }
+
+        return out;
+    }
+
+    void testDawEngine()
+    {
+        std::cout << "\nDAW engine (tracks, inserts, master bus)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-daw");
+        folder.createDirectory();
+
+        juce::AudioBuffer<float> tone (2, (int) sampleRate);
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                tone.setSample (ch, i, 0.4f * (float) std::sin (juce::MathConstants<double>::twoPi * 330.0 * i / sampleRate));
+
+        const auto toneFile = folder.getChildFile ("tone.wav");
+        writeWav (toneFile, tone, sampleRate);
+
+        const auto slowFile = folder.getChildFile ("tone-44k.wav");
+        writeWav (slowFile, tone, 44100.0);
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+
+        const auto source = engine.getAudioPool().loadNow (toneFile);
+        check (source != nullptr && source->getNumSamples() == (int) sampleRate, "loads a clip's audio");
+
+        const auto resampled = engine.getAudioPool().loadNow (slowFile);
+        // The file holds 48000 samples at 44.1 kHz (1.088 s): 52245 samples at 48 kHz.
+        const auto expectedLength = (int) std::floor (sampleRate * sampleRate / 44100.0);
+        check (resampled != nullptr && std::abs (resampled->getNumSamples() - expectedLength) <= 1,
+               "a 44.1 kHz file is resampled to the session rate");
+
+        const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        edit.addClip (vocal, toneFile, 0.5, 1.0);
+        engine.rebuildNow();
+        check (engine.getLength() == (juce::int64) (1.5 * sampleRate), "the session ends where the last clip ends");
+
+        const auto clipStart = (size_t) (0.5 * sampleRate);
+        const auto matchesSource = [&] (const std::vector<float>& channel, float gain, float tolerance)
+        {
+            float worst = 0.0f;
+            for (size_t i = 0; i < (size_t) source->getNumSamples(); ++i)
+                worst = std::max (worst, std::abs (channel[clipStart + i] - gain * source->getSample (0, (int) i)));
+            return worst <= tolerance;
+        };
+
+        // Stopped: silence, playhead stays put.
+        auto out = render (engine, 0.1);
+        check (rms (out[0], 0, out[0].size()) == 0.0f && engine.getPosition() == 0, "silent and still while stopped");
+
+        engine.play();
+        out = render (engine, 2.0);
+        engine.stop();
+
+        check (rms (out[0], 0, clipStart) == 0.0f && matchesSource (out[0], 1.0f, 0.0f) && matchesSource (out[1], 1.0f, 0.0f),
+               "a clip plays sample-exact at its position");
+
+        const auto playFrom = [&] (double seconds)
+        {
+            engine.seek (0);
+            engine.play();
+            auto result = render (engine, seconds);
+            engine.stop();
+            return result;
+        };
+
+        const auto clipRms = [&] (const std::vector<float>& channel)
+        {
+            return rms (channel, clipStart + 4800, clipStart + 43200); // skip edges and smoothing
+        };
+
+        const auto unity = clipRms (out[0]);
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.setTrackVolume (vocal, -6.0f);
+        out = playFrom (1.6);
+        check (std::abs (clipRms (out[0]) / unity - juce::Decibels::decibelsToGain (-6.0f)) < 0.001f, "track volume (-6 dB)");
+
+        edit.getUndoManager().undo();
+        engine.rebuildNow();
+        out = playFrom (1.6);
+        check (std::abs (clipRms (out[0]) / unity - 1.0f) < 0.001f, "undo restores the volume");
+
+        edit.setTrackPan (vocal, -1.0f);
+        out = playFrom (1.6);
+        check (std::abs (clipRms (out[0]) / unity - 1.0f) < 0.001f && clipRms (out[1]) < 1.0e-4f, "pan hard left");
+        edit.setTrackPan (vocal, 0.0f);
+
+        const auto backing = (int) edit.addTrack ("Backing")[daw::ids::id];
+        edit.addClip (backing, toneFile, 0.5, 1.0);
+        engine.rebuildNow();
+        out = playFrom (1.6);
+        check (matchesSource (out[0], 2.0f, 1.0e-6f), "two tracks sum on the master bus");
+
+        edit.setTrackMute (backing, true);
+        out = playFrom (1.6);
+        check (std::abs (clipRms (out[0]) / unity - 1.0f) < 0.001f, "mute takes a track out of the mix");
+
+        edit.setTrackMute (backing, false);
+        edit.setTrackSolo (backing, true);
+        out = playFrom (1.6);
+        check (std::abs (clipRms (out[0]) / unity - 1.0f) < 0.001f, "solo plays only the soloed track");
+        edit.setTrackSolo (backing, false);
+        edit.removeTrack (backing);
+        engine.rebuildNow();
+
+        // A track insert sounds like the same module run on its own.
+        const auto eq = (int) edit.addInsert (vocal, fx::ModuleType::eq)[daw::ids::id];
+        edit.setInsertValue (eq, "eqHigh", -12.0f);
+        edit.setInsertValue (eq, "eqLow", 6.0f);
+        engine.rebuildNow();
+        out = playFrom (1.6);
+
+        fx::FxChain reference ({ fx::ModuleType::eq });
+        reference.setValue ("eqOn", 1.0f);
+        reference.setValue ("eqHigh", -12.0f);
+        reference.setValue ("eqLow", 6.0f);
+        std::vector<float> clipSignal ((size_t) (1.6 * sampleRate) / blockSize * blockSize + blockSize, 0.0f);
+        for (int i = 0; i < source->getNumSamples() && clipStart + (size_t) i < clipSignal.size(); ++i)
+            clipSignal[clipStart + (size_t) i] = source->getSample (0, i);
+        const auto expected = runChain (reference, clipSignal);
+
+        float worst = 0.0f;
+        for (size_t i = 0; i < out[0].size() && i < expected.size() / 2; ++i)
+            worst = std::max (worst, std::abs (out[0][i] - expected[(i / blockSize) * blockSize * 2 + i % blockSize]));
+        check (worst < 1.0e-6f, "a track insert matches the module run on its own (max error " + juce::String (worst, 8) + ")");
+
+        // Changing an insert value reaches the running module without a rebuild.
+        edit.setInsertValue (eq, "eqOn", 0.0f);
+        out = playFrom (1.6);
+        check (matchesSource (out[0], 1.0f, 0.0f), "switching an insert off from the edit bypasses it");
+
+        edit.removeInsert (eq);
+        engine.rebuildNow();
+
+        // Master bus: its inserts and volume apply to the sum.
+        edit.setMasterVolume (-100.0f);
+        out = playFrom (1.6);
+        check (rms (out[0], clipStart + 4800, clipStart + 43200) < 1.0e-6f, "master volume");
+        edit.setMasterVolume (0.0f);
+
+        edit.addInsert (daw::Edit::masterId, fx::ModuleType::radio);
+        engine.rebuildNow();
+        out = playFrom (1.6);
+        check (std::abs (clipRms (out[0]) / unity - 1.0f) > 0.05f && std::isfinite (clipRms (out[0])), "master inserts process the mix");
+
+        check (engine.takePeak (vocal) > 0.3f && engine.takePeak (daw::Edit::masterId) > 0.0f
+                   && engine.takePeak (vocal) == 0.0f, "track and master meters (reset after reading)");
+
+        // Real-time safety: edit the session while another thread renders non-stop.
+        {
+            std::atomic<bool> running { true };
+            std::atomic<bool> finite { true };
+            engine.play();
+
+            std::thread audio ([&]
+            {
+                juce::AudioBuffer<float> buffer (2, blockSize);
+                while (running)
+                {
+                    engine.process (buffer, 2, blockSize);
+                    if (! std::isfinite (buffer.getMagnitude (0, blockSize)))
+                        finite = false;
+                    if (engine.getPosition() > engine.getLength())
+                        engine.seek (0);
+                }
+            });
+
+            juce::Random random (42);
+            for (int i = 0; i < 300; ++i)
+            {
+                const auto track = (int) edit.addTrack ("T" + juce::String (i))[daw::ids::id];
+                edit.addClip (track, toneFile, random.nextDouble(), 0.5);
+                edit.addInsert (track, (fx::ModuleType) random.nextInt (fx::numModuleTypes));
+                edit.setTrackVolume (track, -12.0f);
+                engine.rebuildNow();
+
+                if (edit.getTracks().size() > 6)
+                    edit.removeTrack ((int) edit.getTracks()[1][daw::ids::id]);
+            }
+
+            running = false;
+            audio.join();
+            engine.stop();
+            check (finite, "300 edits while the audio thread renders: no glitches into NaN, no crash");
+        }
+
+        // The whole session reloads from a copy of its tree (what opening a project does).
+        {
+            daw::Edit copy;
+            copy.replaceState (edit.getState().createCopy());
+            check (copy.getTracks().size() == edit.getTracks().size()
+                       && daw::Edit::getInserts (copy.getMaster()).getNumChildren() == 1
+                       && copy.addTrack ("New")[daw::ids::id].operator int() > (int) edit.getTracks().getLast()[daw::ids::id],
+                   "a session copies into a new edit, and new ids don't collide");
+        }
+
+        folder.deleteRecursively();
+    }
 }
 
 int main()
@@ -651,6 +868,7 @@ int main()
     testFxChain();
     testRecorder();
     testMultitrack();
+    testDawEngine();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

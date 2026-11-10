@@ -1,0 +1,101 @@
+#pragma once
+
+#include <juce_data_structures/juce_data_structures.h>
+
+#include "dsp/FxModule.h"
+
+#include <optional>
+
+// The DAW session as a ValueTree, so every change can be undone and the whole thing
+// saves to a file as it is:
+//
+//   PROJECT  version, tempo
+//     MASTER  volume (dB)
+//       INSERTS
+//         INSERT  type ("eq", "echo", ...), id, plus one property per module value
+//     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor
+//       INSERTS ...
+//       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut
+//
+// Times are in seconds, so a project survives a sample-rate change. Insert values use
+// the plugin parameter IDs (see Parameters.cpp) in real units, as presets do.
+//
+// Message thread only. DawEngine listens to the tree and keeps the audio in step.
+namespace daw
+{
+namespace ids
+{
+#define MICFX_DAW_ID(name) inline const juce::Identifier name { #name };
+    MICFX_DAW_ID (PROJECT) MICFX_DAW_ID (MASTER) MICFX_DAW_ID (TRACK) MICFX_DAW_ID (CLIP)
+    MICFX_DAW_ID (INSERTS) MICFX_DAW_ID (INSERT)
+    MICFX_DAW_ID (version) MICFX_DAW_ID (tempo) MICFX_DAW_ID (id) MICFX_DAW_ID (name) MICFX_DAW_ID (colour)
+    MICFX_DAW_ID (volume) MICFX_DAW_ID (pan) MICFX_DAW_ID (mute) MICFX_DAW_ID (solo) MICFX_DAW_ID (arm)
+    MICFX_DAW_ID (monitor) MICFX_DAW_ID (type) MICFX_DAW_ID (file) MICFX_DAW_ID (start) MICFX_DAW_ID (offset)
+    MICFX_DAW_ID (length) MICFX_DAW_ID (gain) MICFX_DAW_ID (fadeIn) MICFX_DAW_ID (fadeOut)
+#undef MICFX_DAW_ID
+}
+
+class Edit
+{
+public:
+    static constexpr int formatVersion = 1;
+
+    Edit();
+
+    juce::ValueTree& getState() noexcept           { return state; }
+    juce::UndoManager& getUndoManager() noexcept   { return undoManager; }
+    juce::ValueTree getMaster() const              { return state.getChildWithName (ids::MASTER); }
+
+    // Replaces the whole session (e.g. when opening a project). Clears the undo history.
+    void replaceState (const juce::ValueTree& newState);
+
+    //==============================================================================
+    // Tracks are identified by their `id` property, which stays the same for the
+    // track's lifetime (and in saved projects).
+    juce::ValueTree addTrack (const juce::String& name, int index = -1);
+    void removeTrack (int trackId);
+    void moveTrack (int trackId, int newIndex);
+    juce::ValueTree getTrack (int trackId) const;
+    juce::Array<juce::ValueTree> getTracks() const;
+
+    // Mixer controls. Volume in dB (-inf is muted), pan -1 (left) .. 1 (right).
+    void setTrackVolume (int trackId, float decibels);
+    void setTrackPan (int trackId, float pan);
+    void setTrackMute (int trackId, bool);
+    void setTrackSolo (int trackId, bool);
+    void setMasterVolume (float decibels);
+
+    //==============================================================================
+    juce::ValueTree addClip (int trackId, const juce::File&, double startSeconds, double lengthSeconds,
+                             double offsetSeconds = 0.0);
+    void removeClip (int clipId);
+    juce::ValueTree getClip (int clipId) const;
+
+    //==============================================================================
+    // Inserts on a track, or on the master bus with trackId == masterId. A new insert
+    // starts from the module's defaults and switched on.
+    static constexpr int masterId = 0;
+
+    juce::ValueTree addInsert (int trackId, fx::ModuleType, int index = -1);
+    void removeInsert (int insertId);
+    void moveInsert (int insertId, int newIndex);
+    void setInsertValue (int insertId, const juce::String& valueId, float value);
+    juce::ValueTree getInsert (int insertId) const;
+
+    static juce::ValueTree getInserts (const juce::ValueTree& trackOrMaster);
+
+    // Every module type by its project-file key ("eq", "echo", ...).
+    static std::optional<fx::ModuleType> moduleTypeFromKey (const juce::String&);
+
+private:
+    int takeNextId();
+    juce::ValueTree findById (const juce::Identifier& type, int id) const;
+    juce::ValueTree getTrackOrMaster (int trackId) const;
+
+    juce::ValueTree state;
+    juce::UndoManager undoManager;
+    int nextId = 1; // shared by tracks, clips and inserts; never reused
+
+    JUCE_DECLARE_NON_COPYABLE (Edit)
+};
+}
