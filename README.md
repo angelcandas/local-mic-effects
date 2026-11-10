@@ -202,6 +202,9 @@ src/daw/                DAW mode: Edit (the session as an undoable ValueTree), A
                         clip audio), DawEngine (tracks + inserts + master bus, lock-free graph swap,
                         dry recording, metronome), Project (.micfx folders, autosave, recovery),
                         Exporter (offline mixdown and stems to WAV)
+src/analysis/           Auto Mix measurements: loudness (BS.1770 / EBU R128), 1/3-octave spectrum,
+                        activity, how a backing track masks the voice, and offline per-track analysis
+                        of a DAW session
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/DawBridge.*         the DAW screen's commands and events (session, status, export)
 src/StandaloneApp.cpp   standalone app window, with Options → Check for updates…

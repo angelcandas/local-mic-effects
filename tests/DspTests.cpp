@@ -12,6 +12,7 @@
 #include <thread>
 
 #include "PluginProcessor.h"
+#include "analysis/Analysis.h"
 #include "Presets.h"
 #include "daw/DawEngine.h"
 #include "daw/Exporter.h"
@@ -526,6 +527,150 @@ namespace
                 worst = std::max (worst, std::abs (predicted - measureGainDb (chain, f)));
             }
             check (worst < 0.3, "predicted response matches the measured one (worst " + juce::String (worst, 3) + " dB)");
+        }
+    }
+
+
+    //==========================================================================
+    // Stereo sines: each part is { seconds, frequency, amplitude per channel }.
+    void writeWav (const juce::File&, const juce::AudioBuffer<float>&, double rate);
+
+    struct TonePart { double seconds, frequency; float left, right; };
+
+    juce::AudioBuffer<float> makeTones (std::initializer_list<TonePart> parts)
+    {
+        double total = 0.0;
+        for (auto& part : parts) total += part.seconds;
+
+        juce::AudioBuffer<float> buffer (2, (int) std::lround (total * sampleRate));
+        buffer.clear();
+        int start = 0;
+
+        for (auto& part : parts)
+        {
+            const auto length = (int) std::lround (part.seconds * sampleRate);
+            for (int i = 0; i < length && start + i < buffer.getNumSamples(); ++i)
+            {
+                const auto v = (float) std::sin (juce::MathConstants<double>::twoPi * part.frequency * i / sampleRate);
+                buffer.setSample (0, start + i, part.left * v);
+                buffer.setSample (1, start + i, part.right * v);
+            }
+            start += length;
+        }
+
+        return buffer;
+    }
+
+    void testAnalysis()
+    {
+        std::cout << "\nAnalysis (loudness, spectrum, activity, masking)\n";
+
+        // BS.1770: a 0 dBFS 997 Hz sine reads -3.01 LUFS in one channel, 0 in both.
+        {
+            const auto both = analysis::analyse (makeTones ({ { 5.0, 997.0, 1.0f, 1.0f } }), sampleRate);
+            const auto left = analysis::analyse (makeTones ({ { 5.0, 997.0, 1.0f, 0.0f } }), sampleRate);
+            check (std::abs (both.integratedLufs) < 0.1f && std::abs (left.integratedLufs + 3.01f) < 0.1f,
+                   "997 Hz full-scale sine: " + juce::String (both.integratedLufs, 2) + " LUFS stereo, "
+                       + juce::String (left.integratedLufs, 2) + " LUFS one channel");
+        }
+
+        // Gating: silence and a much quieter part don't pull the integrated loudness down.
+        {
+            const auto withSilence = analysis::analyse (makeTones ({ { 4.0, 997.0, 0.1f, 0.1f }, { 4.0, 997.0, 0.0f, 0.0f } }), sampleRate);
+            const auto withQuiet = analysis::analyse (makeTones ({ { 4.0, 997.0, 0.1f, 0.1f }, { 4.0, 997.0, 0.01f, 0.01f } }), sampleRate);
+            check (std::abs (withSilence.integratedLufs + 20.0f) < 0.2f && std::abs (withQuiet.integratedLufs + 20.0f) < 0.3f,
+                   "gating: -20 LUFS tone plus silence reads " + juce::String (withSilence.integratedLufs, 2)
+                       + ", plus a -40 part reads " + juce::String (withQuiet.integratedLufs, 2));
+            check (std::abs (withQuiet.shortTermMaxLufs + 20.0f) < 0.2f && std::abs (withQuiet.peakDb + 20.0f) < 0.1f,
+                   "short-term max and sample peak");
+        }
+
+        // Spectrum: a sine lands in its own band at its mean-square level.
+        {
+            for (auto frequency : { 63.0, 250.0, 3150.0, 12500.0 })
+            {
+                const auto profile = analysis::analyse (makeTones ({ { 2.0, frequency, 0.5f, 0.5f } }), sampleRate);
+                const auto spectrum = profile.getAverageSpectrum();
+                const auto band = analysis::findBand (frequency);
+                double total = 0.0;
+                for (auto db : spectrum) total += std::pow (10.0, db / 10.0);
+
+                const auto expected = 10.0f * std::log10 (0.125f); // a 0.5 sine's mean square
+                check (std::abs (spectrum[(size_t) band] - expected) < 0.5f && std::abs (10.0 * std::log10 (total) - expected) < 0.5,
+                       juce::String (frequency, 0) + " Hz sine: " + juce::String (spectrum[(size_t) band], 2) + " dB in its band (expected "
+                           + juce::String (expected, 2) + "), " + juce::String (10.0 * std::log10 (total), 2) + " dB in all bands");
+            }
+        }
+
+        // Activity: only the parts with sound count.
+        {
+            const auto profile = analysis::analyse (makeTones ({ { 1.0, 440.0, 0.3f, 0.3f }, { 1.5, 440.0, 0.0f, 0.0f },
+                                                                 { 1.0, 440.0, 0.1f, 0.1f }, { 0.5, 440.0, 0.0f, 0.0f } }), sampleRate);
+            check (std::abs (profile.getActiveSeconds() - 2.0) <= 0.35, "active for " + juce::String (profile.getActiveSeconds(), 1) + " s of 2 s of sound");
+        }
+
+        // Masking: a backing 6 dB louder than the voice at the voice's frequency, plus a
+        // low note the voice doesn't use. Only counted while the voice sings.
+        {
+            const auto voice = analysis::analyse (makeTones ({ { 3.0, 2000.0, 0.1f, 0.1f }, { 3.0, 2000.0, 0.0f, 0.0f } }), sampleRate);
+            auto backingAudio = makeTones ({ { 6.0, 2000.0, 0.2f, 0.2f } });
+            const auto low = makeTones ({ { 6.0, 125.0, 0.2f, 0.2f } });
+            for (int ch = 0; ch < 2; ++ch)
+                backingAudio.addFrom (ch, 0, low, ch, 0, low.getNumSamples());
+            const auto backing = analysis::analyse (backingAudio, sampleRate);
+
+            const auto masking = analysis::measureMasking (voice, backing);
+            const auto at2k = masking.backingOverVoiceDb[(size_t) analysis::findBand (2000.0)];
+            check (std::abs (at2k - 6.02f) < 0.5f && masking.worstBand == analysis::findBand (2000.0),
+                   "backing covers the voice by " + juce::String (at2k, 2) + " dB at 2 kHz, the worst band");
+            check (std::abs (masking.overlapSeconds - 3.0) <= 0.35, "masking counts only while the voice sings ("
+                       + juce::String (masking.overlapSeconds, 1) + " s)");
+            const auto expected = analysis::analyse (makeTones ({ { 3.0, 2000.0, 0.1f, 0.1f } }), sampleRate).integratedLufs - backing.integratedLufs;
+            check (std::abs (masking.voiceOverBackingLu - expected) < 0.3f,
+                   "voice sits " + juce::String (masking.voiceOverBackingLu, 2) + " LU against the backing (expected " + juce::String (expected, 2) + ")");
+        }
+
+        // A DAW session: each track's source (no inserts, unity fader) or its stem.
+        {
+            const auto folder = juce::File::createTempFile ("micfx-analysis");
+            folder.createDirectory();
+            const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav");
+            writeWav (voiceFile, makeTones ({ { 2.0, 997.0, 0.1f, 0.1f } }), sampleRate);
+            writeWav (backingFile, makeTones ({ { 4.0, 220.0, 0.2f, 0.2f } }), sampleRate);
+
+            daw::Edit edit;
+            const auto voice = (int) edit.addTrack ("Voice")[daw::ids::id];
+            const auto backing = (int) edit.addTrack ("Backing")[daw::ids::id];
+            edit.addClip (voice, voiceFile, 1.0, 2.0);
+            edit.addClip (backing, backingFile, 0.0, 4.0);
+            edit.setTrackVolume (voice, -10.0f);
+            edit.setTrackMute (backing, true);
+            const auto eq = (int) edit.addInsert (voice, fx::ModuleType::eq)[daw::ids::id];
+            edit.setInsertValue (eq, "eqMidFreq", 997.0f);
+            edit.setInsertValue (eq, "eqMidGain", 6.0f);
+
+            auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, true).run();
+            auto stem = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+
+            const auto& voiceSource = source.tracks[0].second;
+            const auto frames = voiceSource.getNumFrames();
+            check (source.tracks.size() == 2 && source.tracks[0].first == voice && source.mix.has_value()
+                       && source.tracks[1].second.getNumFrames() == frames && source.mix->getNumFrames() == frames
+                       && std::abs (frames - 40) <= 1,
+                   "one profile per track and one for the mix, all on the same 4 s grid");
+            const auto clipAlone = analysis::analyse (makeTones ({ { 1.0, 997.0, 0.0f, 0.0f }, { 2.0, 997.0, 0.1f, 0.1f }, { 1.0, 997.0, 0.0f, 0.0f } }),
+                                                      sampleRate).integratedLufs;
+            check (std::abs (voiceSource.integratedLufs - clipAlone) < 0.1f && std::abs (voiceSource.getActiveSeconds() - 2.0) <= 0.35,
+                   "source: the voice's clip without its fader or inserts (" + juce::String (voiceSource.integratedLufs, 2) + " LUFS)");
+            check (std::abs (source.tracks[1].second.integratedLufs - analysis::analyse (makeTones ({ { 4.0, 220.0, 0.2f, 0.2f } }), sampleRate).integratedLufs) < 0.2f,
+                   "a muted track is still analysed");
+            const auto stemLufs = stem.tracks[0].second.integratedLufs;
+            check (std::abs (stemLufs - (voiceSource.integratedLufs - 10.0f + 6.0f)) < 0.3f && ! stem.mix.has_value(),
+                   "stem: through the track's EQ (+6 dB) and fader (-10 dB): " + juce::String (stemLufs - voiceSource.integratedLufs, 2) + " dB");
+            check (std::abs (source.mix->integratedLufs - stem.tracks[0].second.integratedLufs) < 0.3f,
+                   "mix: the session as it plays (the voice's stem, backing muted)");
+
+            folder.deleteRecursively();
         }
     }
 
@@ -1519,6 +1664,7 @@ int main()
     testExport();
     testClipEditing();
     testDawMode();
+    testAnalysis();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;
