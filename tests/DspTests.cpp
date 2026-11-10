@@ -8,8 +8,11 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
 
+#include <set>
+
 #include "PluginProcessor.h"
 #include "Presets.h"
+#include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
 
@@ -270,6 +273,167 @@ namespace
     }
 
     //==========================================================================
+    // Runs `signal` (mono, copied to both channels) through a chain; returns both channels.
+    std::vector<float> runChain (fx::FxChain& chain, const std::vector<float>& signal)
+    {
+        chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+
+        std::vector<float> output;
+        juce::AudioBuffer<float> buffer (2, blockSize);
+
+        for (size_t start = 0; start + blockSize <= signal.size(); start += blockSize)
+        {
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.copyFrom (ch, 0, signal.data() + start, blockSize);
+
+            juce::dsp::AudioBlock<float> block (buffer);
+            chain.process (fx::Module::Context (block));
+
+            for (int ch = 0; ch < 2; ++ch)
+                output.insert (output.end(), buffer.getReadPointer (ch), buffer.getReadPointer (ch) + blockSize);
+        }
+
+        return output;
+    }
+
+    void switchAll (fx::FxChain& chain, bool on)
+    {
+        for (int m = 0; m < chain.size(); ++m)
+            for (int v = 0; v < chain[m].getNumValues(); ++v)
+                if (chain[m].isSwitch (v))
+                    chain[m].getValue (v).store (on ? 1.0f : 0.0f);
+    }
+
+    void testFxChain()
+    {
+        std::cout << "\nEffect chain (the building block for track inserts)\n";
+
+        // Every module value is a plugin parameter with the same default, and every
+        // parameter except the input/output gains belongs to exactly one module.
+        {
+            PluginProcessor processor;
+            std::map<juce::String, juce::RangedAudioParameter*> byId;
+            for (auto* parameter : processor.getParameters())
+                if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (parameter))
+                    byId[ranged->getParameterID()] = ranged;
+
+            fx::FxChain chain (fx::FxChain::getAllTypes());
+            std::set<juce::String> covered { "inputGain", "outputGain" };
+            juce::StringArray problems;
+
+            for (int m = 0; m < chain.size(); ++m)
+            {
+                for (int v = 0; v < chain[m].getNumValues(); ++v)
+                {
+                    const auto& id = chain[m].getValueId (v);
+                    const auto it = byId.find (id);
+
+                    if (it == byId.end())
+                    {
+                        problems.add (id + " has no plugin parameter");
+                        continue;
+                    }
+
+                    const auto* parameter = it->second;
+                    const auto expected = parameter->convertFrom0to1 (parameter->getDefaultValue());
+
+                    if (std::abs (expected - chain[m].getValue (v).load()) > 1.0e-4f)
+                        problems.add (id + " default " + juce::String (chain[m].getValue (v).load()) + " != " + juce::String (expected));
+
+                    if (! covered.insert (id).second)
+                        problems.add (id + " is used by two modules");
+                }
+            }
+
+            for (const auto& [id, parameter] : byId)
+                if (covered.count (id) == 0)
+                    problems.add (id + " isn't driven by any module");
+
+            for (const auto& problem : problems)
+                std::cout << "        " << problem << "\n";
+
+            check (problems.isEmpty(), "module values match the plugin parameters (IDs and defaults)");
+        }
+
+        const auto voice = makeVoice (180.0f, 1.0);
+
+        // An insert chain holding a few modules sounds the same as the full chain with
+        // only those modules switched on, so track inserts reuse Live mode's sound.
+        {
+            const std::vector<fx::ModuleType> inserts { fx::ModuleType::eq, fx::ModuleType::compressor,
+                                                        fx::ModuleType::echo, fx::ModuleType::reverb };
+            fx::FxChain full (fx::FxChain::getAllTypes()), partial (inserts);
+            switchAll (full, false);
+            switchAll (partial, true);
+
+            for (auto type : inserts)
+                full.find (type)->getValue (0).store (1.0f);
+
+            check (runChain (full, voice) == runChain (partial, voice), "an insert chain matches the full chain with the same modules on");
+        }
+
+        // Chains don't share state: one chain processing doesn't change another's output.
+        {
+            fx::FxChain a (fx::FxChain::getAllTypes()), b (fx::FxChain::getAllTypes()), reference (fx::FxChain::getAllTypes());
+
+            for (auto* chain : { &a, &b, &reference })
+            {
+                chain->setValue ("delayOn", 1.0f);
+                chain->setValue ("chorusOn", 1.0f);
+                chain->setValue ("tuneOn", 1.0f);
+            }
+
+            const auto expected = runChain (reference, voice);
+
+            // Interleave a and b block by block, a fed with a different signal.
+            const auto other = makeVoice (310.0f, 1.0);
+            a.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            b.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            juce::AudioBuffer<float> bufferA (2, blockSize), bufferB (2, blockSize);
+            std::vector<float> outputB;
+
+            for (size_t start = 0; start + blockSize <= voice.size(); start += blockSize)
+            {
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    bufferA.copyFrom (ch, 0, other.data() + start, blockSize);
+                    bufferB.copyFrom (ch, 0, voice.data() + start, blockSize);
+                }
+
+                juce::dsp::AudioBlock<float> blockA (bufferA), blockB (bufferB);
+                a.process (fx::Module::Context (blockA));
+                b.process (fx::Module::Context (blockB));
+
+                for (int ch = 0; ch < 2; ++ch)
+                    outputB.insert (outputB.end(), bufferB.getReadPointer (ch), bufferB.getReadPointer (ch) + blockSize);
+            }
+
+            check (outputB == expected, "two chains running side by side don't affect each other");
+        }
+
+        // Switched-off modules leave the signal untouched (reverb off is a pure dry path,
+        // once its dry gain has faded in from the first prepare).
+        {
+            fx::FxChain chain (fx::FxChain::getAllTypes());
+            switchAll (chain, false);
+            const auto output = runChain (chain, voice);
+            float worst = 0.0f;
+
+            for (size_t i = (size_t) (0.1 * sampleRate); i < voice.size() / blockSize * blockSize; ++i)
+                worst = std::max (worst, std::abs (output[(i / blockSize) * blockSize * 2 + i % blockSize] - voice[i]));
+
+            check (worst < 1.0e-5f, "every module off passes the signal through (max error " + juce::String (worst, 7) + ")");
+        }
+
+        {
+            fx::FxChain chain (fx::FxChain::getAllTypes());
+            check (! chain.setValue ("noSuchValue", 1.0f) && chain.setValue ("eqLow", 3.0f)
+                       && chain.find (fx::ModuleType::eq)->findValue ("eqLow")->load() == 3.0f,
+                   "values are set by plugin parameter ID");
+        }
+    }
+
+    //==========================================================================
     // Reads a whole WAV file; empty if it can't be opened.
     juce::AudioBuffer<float> readWav (const juce::File& file, double& fileRate)
     {
@@ -484,6 +648,7 @@ int main()
     testPitchShift();
     testAutotune();
     testPresets();
+    testFxChain();
     testRecorder();
     testMultitrack();
 
