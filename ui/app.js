@@ -2,6 +2,8 @@
 // parameter through the relays created in src/PluginEditor.cpp (relay name = parameter ID).
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULES, NOTE_NAMES, SCALES } from "./modules.js";
+import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
+import { initDaw } from "./daw.js";
 
 // Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
 // builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
@@ -9,14 +11,9 @@ const logError = Juce.getNativeFunction("logError");
 window.addEventListener("error", (event) => logError(`${event.message} (${event.filename}:${event.lineno})`));
 window.addEventListener("unhandledrejection", (event) => logError(`Unhandled rejection: ${event.reason}`));
 
-const ARC_START = -135;
-const ARC_END = 135;
 const METER_FLOOR_DB = -60;
-const SVG_NS = "http://www.w3.org/2000/svg";
 
 let parameterDefaults = {};
-
-const clamp = (value, min = 0, max = 1) => Math.min(max, Math.max(min, value));
 
 // Scaled value -> [0, 1], mirroring juce::NormalisableRange (range + skew).
 function toNormalised(state, scaled) {
@@ -24,47 +21,8 @@ function toNormalised(state, scaled) {
   return end === start ? 0 : Math.pow(clamp((scaled - start) / (end - start)), skew);
 }
 
-function formatValue(value, label) {
-  const signed = (text) => (value > 0.05 ? `+${text}` : text);
-
-  switch (label) {
-    case "Hz": return value >= 1000 ? `${(value / 1000).toFixed(value >= 10000 ? 1 : 2)} kHz`
-                                    : `${value < 10 ? value.toFixed(2) : Math.round(value)} Hz`;
-    case "dB": return `${signed(value.toFixed(1))} dB`;
-    case "st": return `${signed(value.toFixed(Number.isInteger(value) ? 0 : 1))} st`;
-    case "%": return `${Math.round(value)}%`;
-    case "ms": return `${Math.round(value)} ms`;
-    case "bit": return `${value.toFixed(1)} bit`;
-    case ":1": return `${value.toFixed(1)}:1`;
-    default: return value.toFixed(2);
-  }
-}
-
 function noteName(note) {
   return `${NOTE_NAMES[((note % 12) + 12) % 12]}${Math.floor(note / 12) - 1}`;
-}
-
-function svg(tag, attributes = {}) {
-  const element = document.createElementNS(SVG_NS, tag);
-  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
-  return element;
-}
-
-function html(tag, className = "", text = "") {
-  return Object.assign(document.createElement(tag), { className, textContent: text });
-}
-
-// Point on a circle in the knob's 100x100 viewBox; 0 degrees is straight up.
-function polar(angleDeg, radius) {
-  const angle = (angleDeg * Math.PI) / 180;
-  return [50 + radius * Math.sin(angle), 50 - radius * Math.cos(angle)];
-}
-
-function arcPath(fromDeg, toDeg, radius) {
-  const [a, b] = fromDeg <= toDeg ? [fromDeg, toDeg] : [toDeg, fromDeg];
-  const [x1, y1] = polar(a, radius);
-  const [x2, y2] = polar(b, radius);
-  return `M ${x1} ${y1} A ${radius} ${radius} 0 ${b - a > 180 ? 1 : 0} 1 ${x2} ${y2}`;
 }
 
 //==============================================================================
@@ -794,7 +752,9 @@ class RecorderBar {
   }
 }
 
+// Typing in a field, or the Studio screen is showing (it has its own shortcuts).
 function isTyping(event) {
+  if (document.body.classList.contains("is-daw")) return true;
   return Boolean(event.target.closest?.("input:not([type=range]), select, textarea"));
 }
 
@@ -998,12 +958,6 @@ class Tracks {
   }
 }
 
-function formatDuration(seconds) {
-  const tenths = Math.floor(Math.max(0, seconds) * 10);
-  const minutes = Math.floor(tenths / 600);
-  return `${minutes}:${((tenths % 600) / 10).toFixed(1).padStart(4, "0")}`;
-}
-
 const recorderBar = new RecorderBar(document.querySelector(".recorder"));
 const tracks = new Tracks(document.querySelector(".studio"));
 
@@ -1031,3 +985,5 @@ requestAnimationFrame(function frame(now) {
 Juce.getNativeFunction("getParameterDefaults")().then((defaults) => {
   parameterDefaults = defaults ?? {};
 });
+
+initDaw();

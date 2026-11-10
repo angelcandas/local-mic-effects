@@ -39,7 +39,8 @@ public:
     explicit DawEngine (Edit&, bool realtime = true);
     ~DawEngine() override;
 
-    // Message thread, with the audio stopped (e.g. from prepareToPlay).
+    // With the audio stopped (e.g. from prepareToPlay). Called off the message thread,
+    // the work is posted to it; until then the old graph keeps playing safely.
     void prepare (double sampleRate, int maximumBlockSize);
     double getSampleRate() const noexcept { return sampleRate; }
 
@@ -143,6 +144,7 @@ private:
     {
         std::vector<Track> tracks;
         std::shared_ptr<Strip> master;
+        int blockSize = 512; // the strips' buffer size: the most one chunk can render
     };
 
     // ValueTree::Listener
@@ -191,6 +193,7 @@ private:
     std::atomic<bool> playing { false };
     std::atomic<juce::int64> position { 0 }, length { 0 };
     std::atomic<int> latency { 0 };
+    std::shared_ptr<bool> alive = std::make_shared<bool> (true);
 
     Recorder recorder;
     std::atomic<bool> countingIn { false };

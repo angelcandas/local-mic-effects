@@ -1240,6 +1240,62 @@ namespace
 
         folder.deleteRecursively();
     }
+    void testDawMode()
+    {
+        std::cout << "\nDAW mode in the processor\n";
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+
+        auto& edit = processor.getDawEdit();
+        const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        edit.setTrackMonitor (vocal, true);
+        processor.getDawEngine().rebuildNow();
+
+        const auto mic = makeVoice (200.0f, 1.0);
+        const auto run = [&]
+        {
+            std::vector<float> left, right;
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            juce::MidiBuffer midi;
+
+            for (size_t start = 0; start + blockSize <= mic.size(); start += blockSize)
+            {
+                buffer.clear();
+                buffer.copyFrom (0, 0, mic.data() + start, blockSize); // the mic arrives on channel 0
+                processor.processBlock (buffer, midi);
+                left.insert (left.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+                right.insert (right.end(), buffer.getReadPointer (1), buffer.getReadPointer (1) + blockSize);
+            }
+
+            return std::pair { left, right };
+        };
+
+        processor.setDawMode (true);
+        const auto [left, right] = run();
+        const auto skip = (size_t) (0.1 * sampleRate); // past the gain smoothing
+        const auto inLevel = rms (mic, skip, left.size());
+        const auto ratio = rms (left, skip, left.size()) / inLevel;
+
+        float error = 0.0f;
+        for (auto i = skip; i < left.size(); ++i)
+            error = std::max ({ error, std::abs (left[i] - mic[i] * ratio), std::abs (right[i] - left[i]) });
+
+        check (ratio > 0.5f && ratio < 1.5f && error < 1.0e-3f,
+               "the mic plays through the monitored track, centred and untouched (gain " + juce::String (ratio, 3)
+                   + ", error " + juce::String (error, 6) + ")");
+
+        edit.setTrackMonitor (vocal, false);
+        const auto [quietLeft, quietRight] = run();
+        check (rms (quietLeft, skip, quietLeft.size()) < 1.0e-6f && rms (quietRight, skip, quietRight.size()) < 1.0e-6f,
+               "nothing is heard when no track monitors the mic");
+
+        processor.setDawMode (false);
+        const auto [liveLeft, liveRight] = run();
+        juce::ignoreUnused (liveRight);
+        check (rms (liveLeft, skip, liveLeft.size()) > 0.01f, "back in Live mode the mic goes through the Live chain again");
+    }
+
     void testClipEditing()
     {
         std::cout << "\nDAW clip editing (move, trim, split, fades, snap, loop)\n";
@@ -1369,6 +1425,7 @@ int main()
     testProjects();
     testExport();
     testClipEditing();
+    testDawMode();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

@@ -85,6 +85,11 @@ PluginEditor::PluginEditor (PluginProcessor& p)
             sliderAttachments.push_back (std::make_unique<juce::WebSliderParameterAttachment> (ranged, *sliderRelays[slider++], undoManager));
     }
 
+    daw = std::make_unique<DawBridge> (processorRef, settings,
+                                       [this] (const juce::Identifier& event, const juce::var& payload)
+                                       { webView->emitEventIfBrowserIsVisible (event, payload); },
+                                       [this] { return getRoundTripLatency(); });
+
     addAndMakeVisible (*webView);
     webView->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
 
@@ -97,6 +102,8 @@ PluginEditor::PluginEditor (PluginProcessor& p)
 
 PluginEditor::~PluginEditor()
 {
+    daw.reset();
+
     // The processor (and its tracks) outlive the editor.
     auto& multitrack = processorRef.getMultitrack();
     multitrack.onTracksChanged = nullptr;
@@ -123,6 +130,57 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                           ranged->convertFrom0to1 (ranged->getDefaultValue()));
 
                            complete (juce::var (defaults));
+                       })
+
+                       // -> { [parameterId]: { min, max, skew, step, label, default, choices?, bool? } }, for controls the
+                       // DAW screen draws itself (track inserts aren't host parameters).
+                       .withNativeFunction ("getParameterInfo", [this] (const auto&, auto complete)
+                       {
+                           auto* info = new juce::DynamicObject();
+
+                           for (auto* parameter : processorRef.getParameters())
+                           {
+                               auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (parameter);
+                               if (ranged == nullptr)
+                                   continue;
+
+                               auto* entry = new juce::DynamicObject();
+                               const auto& range = ranged->getNormalisableRange();
+                               entry->setProperty ("min", range.start);
+                               entry->setProperty ("max", range.end);
+                               entry->setProperty ("skew", range.skew);
+                               entry->setProperty ("step", range.interval);
+                               entry->setProperty ("label", ranged->getLabel());
+                               entry->setProperty ("default", ranged->convertFrom0to1 (ranged->getDefaultValue()));
+
+                               if (auto* choice = dynamic_cast<juce::AudioParameterChoice*> (parameter))
+                               {
+                                   juce::Array<juce::var> choices;
+                                   for (const auto& c : choice->choices)
+                                       choices.add (c);
+                                   entry->setProperty ("choices", choices);
+                               }
+
+                               if (dynamic_cast<juce::AudioParameterBool*> (parameter) != nullptr)
+                                   entry->setProperty ("bool", true);
+
+                               info->setProperty (ranged->getParameterID(), juce::var (entry));
+                           }
+
+                           complete (juce::var (info));
+                       })
+
+                       // (command, args) -> depends on the command; see DawBridge::handle
+                       .withNativeFunction ("daw", [this] (const auto& args, auto complete)
+                       {
+                           if (daw == nullptr || args.size() == 0)
+                           {
+                               complete ({});
+                               return;
+                           }
+
+                           daw->handle (args[0].toString(), args.size() > 1 ? args[1] : juce::var (new juce::DynamicObject()),
+                                        std::move (complete));
                        })
 
                        // -> [{ name, category }]
@@ -333,6 +391,9 @@ void PluginEditor::resized()
 
 void PluginEditor::timerCallback()
 {
+    if (daw != nullptr)
+        daw->tick();
+
     const auto& pitch = processorRef.getPitchEngine();
 
     auto* status = new juce::DynamicObject();

@@ -1,0 +1,616 @@
+#include "DawBridge.h"
+
+#include "Presets.h"
+#include "dsp/FxModules.h"
+
+
+namespace
+{
+    namespace ids = daw::ids;
+
+    constexpr double peakSeconds = 0.02;
+    constexpr int autosaveSeconds = 60;
+
+    juce::var object (std::initializer_list<std::pair<const char*, juce::var>> properties)
+    {
+        auto* result = new juce::DynamicObject();
+        for (const auto& [name, value] : properties)
+            result->setProperty (name, value);
+        return juce::var (result);
+    }
+
+    juce::var error (const juce::String& message)
+    {
+        return object ({ { "ok", message.isEmpty() }, { "error", message } });
+    }
+
+    float peakToDecibels (float gain)
+    {
+        return juce::Decibels::gainToDecibels (gain, -100.0f);
+    }
+
+    // args.name, or fallback when it's missing.
+    template <typename T>
+    T arg (const juce::var& args, const char* name, T fallback)
+    {
+        return args.hasProperty (name) ? (T) args[name] : fallback;
+    }
+}
+
+struct DawBridge::ExportJob
+{
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> cancel { false }, finished { false };
+    daw::Exporter::Result result;
+};
+
+//==============================================================================
+DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::function<juce::int64()> latency)
+    : processor (p),
+      edit (p.getDawEdit()),
+      engine (p.getDawEngine()),
+      project (p.getDawProject()),
+      settings (s),
+      emit (std::move (e)),
+      roundTripLatency (std::move (latency))
+{
+    edit.getState().addListener (this);
+    project.setAutosaveInterval (autosaveSeconds);
+
+    // Pick up where the app left off: the mode, and the last project if none is open.
+    if (isAvailable())
+    {
+        if (! project.isOpen())
+            if (const juce::File last (settings.getValue ("dawProject")); daw::Project::isProjectFolder (last))
+                project.open (last);
+
+        if (settings.getBoolValue ("dawMode", false))
+            setMode (true);
+    }
+}
+
+DawBridge::~DawBridge()
+{
+    edit.getState().removeListener (this);
+
+    if (exportJob != nullptr)
+        exportJob->cancel = true;
+}
+
+bool DawBridge::isAvailable()
+{
+   #if JucePlugin_Build_Standalone
+    return juce::JUCEApplicationBase::isStandaloneApp();
+   #else
+    return false;
+   #endif
+}
+
+void DawBridge::setMode (bool daw)
+{
+    if (daw && ! isAvailable())
+        return;
+
+    if (daw && edit.getTracks().isEmpty())
+    {
+        // A new session starts with one track, ready to sing on.
+        auto track = edit.addTrack ("Vocal");
+        track.setProperty (ids::arm, true, nullptr);
+        track.setProperty (ids::monitor, true, nullptr);
+        edit.getUndoManager().clearUndoHistory();
+    }
+
+    if (! daw)
+        engine.stop();
+
+    processor.setDawMode (daw);
+    settings.setValue ("dawMode", daw);
+    sessionChanged = true;
+}
+
+void DawBridge::rememberProject()
+{
+    settings.setValue ("dawProject", project.isOpen() ? project.getFolder().getFullPathName() : juce::String());
+}
+
+juce::File DawBridge::getRecordingFolder() const
+{
+    return project.isOpen() ? project.getAudioFolder() : Recorder::getDefaultFolder();
+}
+
+//==============================================================================
+juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
+{
+    juce::Array<juce::var> list;
+
+    for (const auto& insert : daw::Edit::getInserts (owner))
+    {
+        auto* values = new juce::DynamicObject();
+        for (int i = 0; i < insert.getNumProperties(); ++i)
+            if (const auto name = insert.getPropertyName (i); name != ids::id && name != ids::type)
+                values->setProperty (name, insert[name]);
+
+        list.add (object ({ { "id", insert[ids::id] }, { "type", insert[ids::type] }, { "values", juce::var (values) } }));
+    }
+
+    return list;
+}
+
+juce::var DawBridge::describeSession()
+{
+    const auto& state = edit.getState();
+    juce::Array<juce::var> tracks;
+
+    for (const auto& track : edit.getTracks())
+    {
+        juce::Array<juce::var> clips;
+
+        for (const auto& clip : track)
+        {
+            if (! clip.hasType (ids::CLIP))
+                continue;
+
+            const juce::File file (clip[ids::file].toString());
+            const auto audio = engine.getAudioPool().get (file);
+
+            clips.add (object ({ { "id", clip[ids::id] }, { "name", clip[ids::name] }, { "file", file.getFullPathName() },
+                                 { "start", clip[ids::start] }, { "offset", clip[ids::offset] }, { "length", clip[ids::length] },
+                                 { "gain", clip[ids::gain] }, { "fadeIn", clip[ids::fadeIn] }, { "fadeOut", clip[ids::fadeOut] },
+                                 { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
+                                 { "missing", ! file.existsAsFile() } }));
+        }
+
+        tracks.add (object ({ { "id", track[ids::id] }, { "name", track[ids::name] }, { "colour", track[ids::colour] },
+                              { "volume", track[ids::volume] }, { "pan", track[ids::pan] }, { "mute", track[ids::mute] },
+                              { "solo", track[ids::solo] }, { "arm", track[ids::arm] }, { "monitor", track[ids::monitor] },
+                              { "inserts", describeInserts (track) }, { "clips", clips } }));
+    }
+
+    const auto master = edit.getMaster();
+    auto& undo = edit.getUndoManager();
+
+    return object ({
+        { "available", isAvailable() },
+        { "mode", processor.isDawMode() ? "daw" : "live" },
+        { "project", object ({ { "open", project.isOpen() }, { "name", project.isOpen() ? project.getName() : juce::String ("Untitled") },
+                               { "path", project.getFolder().getFullPathName() }, { "dirty", project.hasUnsavedChanges() },
+                               { "recoverable", project.getRecoverableBackup().getFileName() },
+                               { "missing", project.getMissingFiles().size() } }) },
+        { "tempo", edit.getTempo() },
+        { "loop", object ({ { "on", state.getProperty (ids::loopOn, false) }, { "start", state.getProperty (ids::loopStart, 0.0) },
+                            { "end", state.getProperty (ids::loopEnd, 0.0) } }) },
+        { "metronome", engine.getMetronome() },
+        { "countIn", engine.getCountInBars() },
+        { "canUndo", undo.canUndo() },
+        { "canRedo", undo.canRedo() },
+        { "master", object ({ { "volume", master[ids::volume] }, { "inserts", describeInserts (master) } }) },
+        { "tracks", tracks },
+    });
+}
+
+juce::var DawBridge::describeStatus()
+{
+    const auto rate = engine.getSampleRate();
+    auto* peaks = new juce::DynamicObject();
+
+    for (const auto& track : edit.getTracks())
+        peaks->setProperty (juce::String ((int) track[ids::id]), peakToDecibels (engine.takePeak ((int) track[ids::id])));
+
+    return object ({
+        { "position", (double) engine.getPosition() / rate },
+        { "length", (double) engine.getLength() / rate },
+        { "playing", engine.isPlaying() },
+        { "recording", engine.isRecording() },
+        { "input", peakToDecibels (processor.inputPeak.exchange (0.0f)) },
+        { "master", peakToDecibels (engine.takePeak (daw::Edit::masterId)) },
+        { "tracks", juce::var (peaks) },
+        { "loading", engine.getAudioPool().isLoading() },
+    });
+}
+
+juce::var DawBridge::getPeaks (const juce::File& file)
+{
+    const auto key = file.getFullPathName();
+
+    if (const auto it = peakCache.find (key); it != peakCache.end())
+        return it->second;
+
+    const auto audio = engine.getAudioPool().get (file);
+    if (audio == nullptr)
+        return {}; // still decoding: the UI asks again
+
+    const auto step = juce::jmax (1, (int) (peakSeconds * engine.getSampleRate()));
+    juce::Array<juce::var> peaks;
+    peaks.ensureStorageAllocated (audio->getNumSamples() / step + 1);
+
+    for (int i = 0; i < audio->getNumSamples(); i += step)
+        peaks.add (std::round (audio->getMagnitude (i, juce::jmin (step, audio->getNumSamples() - i)) * 1000.0f) / 1000.0f);
+
+    auto result = object ({ { "seconds", peakSeconds }, { "peaks", peaks } });
+    peakCache[key] = result;
+    return result;
+}
+
+//==============================================================================
+void DawBridge::tick()
+{
+    auto& undo = edit.getUndoManager();
+    const auto dirty = project.hasUnsavedChanges();
+
+    if (sessionChanged || dirty != lastDirty || undo.canUndo() != lastCanUndo || undo.canRedo() != lastCanRedo)
+    {
+        sessionChanged = false;
+        lastDirty = dirty;
+        lastCanUndo = undo.canUndo();
+        lastCanRedo = undo.canRedo();
+        emit ("dawSession", describeSession());
+    }
+
+    if (processor.isDawMode())
+    {
+        // Stop at the end of the song, unless recording or looping.
+        if (engine.isPlaying() && ! engine.isRecording() && engine.getLength() > 0 && engine.getPosition() >= engine.getLength()
+            && ! (bool) edit.getState().getProperty (ids::loopOn, false))
+            engine.stop();
+
+        emit ("dawStatus", describeStatus());
+    }
+
+    if (exportJob != nullptr)
+    {
+        if (exportJob->finished)
+        {
+            const auto& result = exportJob->result;
+            juce::Array<juce::var> files;
+            for (const auto& file : result.files)
+                files.add (file.getFullPathName());
+
+            emit ("dawExport", object ({ { "done", true }, { "cancelled", result.cancelled }, { "error", result.error },
+                                         { "files", files }, { "peak", result.peakDecibels } }));
+            exportJob.reset();
+        }
+        else
+        {
+            emit ("dawExport", object ({ { "progress", exportJob->progress.load() } }));
+        }
+    }
+}
+
+//==============================================================================
+juce::String DawBridge::withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
+                                     std::function<juce::String (const juce::File&)> action, Complete complete)
+{
+    chooser = std::make_unique<juce::FileChooser> (title, start, patterns);
+    chooser->launchAsync (flags, [action = std::move (action), complete = std::move (complete)] (const juce::FileChooser& fc)
+    {
+        const auto file = fc.getResult();
+
+        if (file == juce::File())
+            complete (object ({ { "ok", false }, { "cancelled", true } }));
+        else
+            complete (error (action (file)));
+    });
+
+    return {};
+}
+
+void DawBridge::loadPresetInto (int trackId, int presetIndex)
+{
+    const auto& presets = getPresets();
+    if (! juce::isPositiveAndBelow (presetIndex, (int) presets.size()))
+        return;
+
+    const auto& preset = presets[(size_t) presetIndex];
+    auto inserts = daw::Edit::getInserts (trackId == daw::Edit::masterId ? edit.getMaster() : edit.getTrack (trackId));
+    if (! inserts.isValid())
+        return;
+
+    // Replace the chain with the preset's switched-on modules, in Live mode order.
+    inserts.removeAllChildren (&edit.getUndoManager());
+
+    for (int t = 0; t < fx::numModuleTypes; ++t)
+    {
+        const auto type = (fx::ModuleType) t;
+        auto module = fx::createModule (type);
+
+        // Live mode defaults, then the preset's values.
+        for (int v = 0; v < module->getNumValues(); ++v)
+            for (const auto& [id, value] : preset.values)
+                if (module->getValueId (v) == id)
+                    module->getValue (v).store (value);
+
+        // Reverb is on by default but at 0 mix it's inaudible; a preset's reverb counts.
+        if (! module->isOn())
+            continue;
+
+        const auto insert = edit.addInsert (trackId, type);
+        for (int v = 0; v < module->getNumValues(); ++v)
+            edit.setInsertValue ((int) insert[ids::id], module->getValueId (v), module->getValue (v).load());
+    }
+}
+
+void DawBridge::startExport (const juce::var& args, const juce::File& destination)
+{
+    daw::Exporter::Settings exportSettings;
+    exportSettings.sampleRate = engine.getSampleRate();
+    exportSettings.bitDepth = arg (args, "bitDepth", 24);
+    exportSettings.normalise = arg (args, "normalise", false);
+    exportSettings.tail = arg (args, "tail", 2.0);
+
+    if (arg (args, "loopOnly", false) && (bool) edit.getState().getProperty (ids::loopOn, false))
+    {
+        exportSettings.start = edit.getState()[ids::loopStart];
+        exportSettings.end = edit.getState()[ids::loopEnd];
+        exportSettings.tail = 0.0;
+    }
+
+    auto exporter = std::make_shared<daw::Exporter> (edit, exportSettings); // snapshot on this thread
+    auto job = std::make_shared<ExportJob>();
+    const auto stems = args["kind"].toString() == "stems";
+    exportJob = job;
+
+    juce::Thread::launch ([exporter, job, stems, destination]
+    {
+        const auto progress = [job] (double p) { job->progress = p; return ! job->cancel.load(); };
+        job->result = stems ? exporter->exportStems (destination, progress) : exporter->exportMix (destination, progress);
+        job->finished = true;
+    });
+}
+
+//==============================================================================
+void DawBridge::handle (const juce::String& command, const juce::var& args, Complete complete)
+{
+    auto& undo = edit.getUndoManager();
+
+    // Each command is one undo step, unless it continues a drag (args.continue).
+    if (! arg (args, "continue", false))
+        undo.beginNewTransaction (command);
+
+    const auto id = arg (args, "id", -1);
+    const auto ok = [&] { complete (error ({})); };
+
+    if (command == "session")               { complete (describeSession()); return; }
+    if (command == "mode")                  { setMode (arg (args, "daw", false)); ok(); return; }
+    if (command == "undo")                  { undo.undo(); ok(); return; }
+    if (command == "redo")                  { undo.redo(); ok(); return; }
+    if (command == "peaks")                 { complete (getPeaks (juce::File (args["file"].toString()))); return; }
+
+    //================================================================ tracks
+    if (command == "addTrack")
+    {
+        const auto track = edit.addTrack (arg (args, "name", juce::String ("Track ") + juce::String (edit.getTracks().size() + 1)));
+        complete (track[ids::id]);
+        return;
+    }
+
+    if (command == "removeTrack") { edit.removeTrack (id); ok(); return; }
+    if (command == "moveTrack")   { edit.moveTrack (id, arg (args, "index", 0)); ok(); return; }
+
+    if (command == "setTrack")
+    {
+        auto track = edit.getTrack (id);
+
+        if (track.isValid())
+        {
+            if (args.hasProperty ("name"))    track.setProperty (ids::name, args["name"].toString().substring (0, 60), &undo);
+            if (args.hasProperty ("colour"))  track.setProperty (ids::colour, args["colour"], &undo);
+            if (args.hasProperty ("volume"))  edit.setTrackVolume (id, args["volume"]);
+            if (args.hasProperty ("pan"))     edit.setTrackPan (id, args["pan"]);
+            if (args.hasProperty ("mute"))    edit.setTrackMute (id, args["mute"]);
+            if (args.hasProperty ("solo"))    edit.setTrackSolo (id, args["solo"]);
+            if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
+            if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
+        }
+
+        ok();
+        return;
+    }
+
+    if (command == "setMaster") { edit.setMasterVolume (arg (args, "volume", 0.0f)); ok(); return; }
+
+    //================================================================ inserts
+    if (command == "addInsert")
+    {
+        const auto type = daw::Edit::moduleTypeFromKey (args["type"].toString());
+        complete (type.has_value() ? edit.addInsert (arg (args, "track", -1), *type, arg (args, "index", -1))[ids::id] : juce::var (-1));
+        return;
+    }
+
+    if (command == "removeInsert") { edit.removeInsert (id); ok(); return; }
+    if (command == "moveInsert")   { edit.moveInsert (id, arg (args, "index", 0)); ok(); return; }
+    if (command == "setInsert")    { edit.setInsertValue (id, args["param"].toString(), args["value"]); ok(); return; }
+    if (command == "loadPreset")   { loadPresetInto (arg (args, "track", -1), arg (args, "preset", -1)); ok(); return; }
+
+    //================================================================ clips
+    if (command == "moveClip")   { edit.moveClip (id, args["start"], arg (args, "track", -1)); ok(); return; }
+    if (command == "trimStart")  { edit.trimClipStart (id, args["start"]); ok(); return; }
+    if (command == "trimEnd")    { edit.trimClipEnd (id, args["end"]); ok(); return; }
+    if (command == "split")      { complete (edit.splitClip (id, args["time"])); return; }
+    if (command == "duplicate")  { complete (edit.duplicateClip (id)); return; }
+    if (command == "removeClip") { edit.removeClip (id); ok(); return; }
+    if (command == "clipGain")   { edit.setClipGain (id, args["gain"]); ok(); return; }
+    if (command == "clipFades")  { edit.setClipFades (id, args["fadeIn"], args["fadeOut"]); ok(); return; }
+
+    //================================================================ timeline and transport
+    if (command == "tempo")     { edit.setTempo (args["bpm"]); ok(); return; }
+    if (command == "loop")      { edit.setLoop (args["on"], args["start"], args["end"]); ok(); return; }
+    if (command == "metronome") { engine.setMetronome (args["on"]); sessionChanged = true; ok(); return; }
+    if (command == "countIn")   { engine.setCountInBars (args["bars"]); sessionChanged = true; ok(); return; }
+
+    if (command == "transport")
+    {
+        const auto action = args["action"].toString();
+        const auto rate = engine.getSampleRate();
+
+        if (action == "play")
+        {
+            if (engine.getLength() > 0 && engine.getPosition() >= engine.getLength())
+                engine.seek (0);
+            engine.play();
+        }
+        else if (action == "pause") { engine.stop(); }
+        else if (action == "stop")  { engine.stop(); engine.seek (0); }
+        else if (action == "seek")  { engine.seek ((juce::int64) ((double) args["time"] * rate)); }
+
+        ok();
+        return;
+    }
+
+    if (command == "record")
+    {
+        if (arg (args, "on", false))
+        {
+            engine.setRecordingLatency (roundTripLatency());
+            complete (error (engine.startRecording (getRecordingFolder())));
+        }
+        else
+        {
+            const auto take = engine.stopRecording();
+            complete (object ({ { "ok", true }, { "file", take.file.getFullPathName() }, { "dropped", take.droppedAudio } }));
+        }
+
+        return;
+    }
+
+    //================================================================ files
+    const auto documents = juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+    const auto projectsFolder = project.isOpen() ? project.getFolder().getParentDirectory() : documents.getChildFile ("MicFX Projects");
+    projectsFolder.createDirectory();
+
+    using Flags = juce::FileBrowserComponent::FileChooserFlags;
+    const auto saveFlags = Flags::saveMode | Flags::canSelectFiles | Flags::warnAboutOverwriting;
+
+    if (command == "new" || command == "saveAs" || (command == "save" && ! project.isOpen()))
+    {
+        const auto isNew = command == "new";
+        withChooser (isNew ? "New project" : "Save project as", projectsFolder.getChildFile (isNew ? "New Song" : project.getName()), {},
+                     Flags::saveMode | Flags::canSelectFiles,
+                     [this, isNew] (const juce::File& file)
+                     {
+                         engine.stop();
+                         const auto result = isNew ? project.createNew (file) : project.saveAs (file);
+                         if (result.isEmpty() && isNew)
+                             setMode (true); // adds the first track
+                         if (result.isEmpty())
+                             project.save();
+                         rememberProject();
+                         sessionChanged = true;
+                         return result;
+                     },
+                     complete);
+        return;
+    }
+
+    if (command == "save")
+    {
+        const auto result = project.save();
+        sessionChanged = true;
+        complete (error (result));
+        return;
+    }
+
+    if (command == "open")
+    {
+        withChooser ("Open project", projectsFolder, "*.micfx;project.xml", Flags::openMode | Flags::canSelectFiles | Flags::canSelectDirectories,
+                     [this] (const juce::File& picked)
+                     {
+                         const auto folder = picked.existsAsFile() ? picked.getParentDirectory() : picked;
+                         engine.stop();
+                         const auto result = project.open (folder);
+                         peakCache.clear();
+                         rememberProject();
+                         sessionChanged = true;
+                         return result;
+                     },
+                     complete);
+        return;
+    }
+
+    if (command == "restore")
+    {
+        const auto result = project.restoreBackup (project.getRecoverableBackup());
+        sessionChanged = true;
+        complete (error (result));
+        return;
+    }
+
+    if (command == "dismissRestore")
+    {
+        project.save(); // the saved version wins; the backup stays in Backups/
+        sessionChanged = true;
+        ok();
+        return;
+    }
+
+    if (command == "import")
+    {
+        withChooser ("Import audio", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3",
+                     Flags::openMode | Flags::canSelectFiles,
+                     [this, args] (const juce::File& file)
+                     {
+                         const auto source = project.isOpen() ? project.importAudio (file) : file;
+                         if (! source.existsAsFile())
+                             return juce::String ("Couldn't import " + file.getFileName() + ".");
+
+                         auto decoded = Multitrack::decode (source, engine.getSampleRate());
+                         if (decoded.error.isNotEmpty())
+                             return decoded.error;
+
+                         auto trackId = arg (args, "track", -1);
+                         if (! edit.getTrack (trackId).isValid())
+                             trackId = (int) edit.addTrack (source.getFileNameWithoutExtension())[ids::id];
+
+                         const auto start = (double) engine.getPosition() / engine.getSampleRate();
+                         edit.addClip (trackId, source, juce::jmax (0.0, start),
+                                       (double) decoded.audio.getNumSamples() / engine.getSampleRate());
+                         return juce::String();
+                     },
+                     complete);
+        return;
+    }
+
+    if (command == "export")
+    {
+        if (exportJob != nullptr)
+        {
+            complete (error ("An export is already running."));
+            return;
+        }
+
+        const auto stems = args["kind"].toString() == "stems";
+        const auto exports = project.isOpen() ? project.getExportsFolder() : documents;
+        const auto name = project.isOpen() ? project.getName() : juce::String ("Mix");
+
+        withChooser (stems ? "Export stems to a folder" : "Export the mix",
+                     stems ? exports.getChildFile (name + " stems") : exports.getChildFile (name + ".wav"),
+                     stems ? juce::String() : "*.wav", saveFlags,
+                     [this, args, stems] (const juce::File& file)
+                     {
+                         startExport (args, stems ? file : file.withFileExtension ("wav"));
+                         return juce::String();
+                     },
+                     complete);
+        return;
+    }
+
+    if (command == "cancelExport")
+    {
+        if (exportJob != nullptr)
+            exportJob->cancel = true;
+        ok();
+        return;
+    }
+
+    if (command == "reveal")
+    {
+        const juce::File file (args["path"].toString());
+        if (file.exists())
+            file.revealToUser();
+        else if (project.isOpen())
+            project.getFolder().revealToUser();
+        ok();
+        return;
+    }
+
+    complete (error ("Unknown command: " + command));
+}
