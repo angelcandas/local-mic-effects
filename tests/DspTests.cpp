@@ -1967,6 +1967,96 @@ namespace
 
         folder.deleteRecursively();
     }
+
+    // A module that only multiplies by its "gain" value, to watch the smoothing.
+    struct GainModule final : public fx::Module
+    {
+        GainModule() : Module (fx::ModuleType::width) {}
+
+        Value& on   = addSwitch ("on", true);
+        Value& gain = addValue ("gain", 0.0f);
+        Value& mode = addChoice ("mode", 0.0f);
+
+        float seenMode = 0.0f;
+
+    private:
+        void prepareModule (const juce::dsp::ProcessSpec&) override {}
+        void resetModule() override {}
+        void update() noexcept override { g = get (gain); seenMode = get (mode); }
+        void render (const Context& c) noexcept override { c.getOutputBlock().multiplyBy (g); }
+
+        float g = 0.0f;
+    };
+
+    void testSmoothing()
+    {
+        std::cout << "\nSmooth knob changes\n";
+
+        GainModule module;
+        module.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+
+        const auto run = [&] (double seconds)
+        {
+            std::vector<float> out;
+            juce::AudioBuffer<float> buffer (1, blockSize);
+
+            for (int done = 0; done < (int) (seconds * sampleRate); done += blockSize)
+            {
+                for (int i = 0; i < blockSize; ++i)
+                    buffer.setSample (0, i, 1.0f);
+                juce::dsp::AudioBlock<float> block (buffer);
+                module.process (fx::Module::Context (block));
+                out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+            }
+
+            return out;
+        };
+
+        run (0.05);
+        module.gain.store (1.0f);
+        module.mode.store (2.0f);
+        const auto out = run (0.3);
+
+        float biggestStep = out[0];
+        bool rising = true;
+        for (size_t i = 1; i < out.size(); ++i)
+        {
+            biggestStep = std::max (biggestStep, out[i] - out[i - 1]);
+            rising = rising && out[i] >= out[i - 1];
+        }
+
+        check (rising && biggestStep < 0.05f, "a knob jump from 0 to 1 glides up in small steps (largest "
+                                                  + juce::String (biggestStep, 3) + ")");
+        check (out[(size_t) (0.04 * sampleRate)] > 0.9f && out.back() == 1.0f,
+               "and gets there quickly (" + juce::String (out[(size_t) (0.04 * sampleRate)], 3) + " after 40 ms, exactly 1 later)");
+        check (juce::approximatelyEqual (module.seenMode, 2.0f), "choices change at once");
+
+        module.gain.store (0.25f);
+        module.reset();
+        check (run (0.01).front() == 0.25f, "after a reset the value starts at its target");
+
+        // Every value that's a switch or a list on the plugin steps; knobs glide.
+        PluginProcessor processor;
+        fx::FxChain chain { fx::FxChain::getAllTypes() };
+        bool allMatch = true;
+
+        for (int m = 0; m < chain.size(); ++m)
+            for (int v = 0; v < chain[m].getNumValues(); ++v)
+            {
+                auto* parameter = processor.getState().getParameter (chain[m].getValueId (v));
+                const auto stepped = dynamic_cast<juce::AudioParameterBool*> (parameter) != nullptr
+                                  || dynamic_cast<juce::AudioParameterChoice*> (parameter) != nullptr;
+
+                if (parameter != nullptr && stepped == chain[m].getValue (v).isSmoothed())
+                {
+                    allMatch = false;
+                    std::cout << "        " << chain[m].getValueId (v) << ": "
+                              << (stepped ? "a switch or list, but it glides" : "a knob, but it steps") << "\n";
+                }
+            }
+
+        check (allMatch, "switches and lists step, knobs glide");
+    }
 }
 
 int main()
@@ -1990,6 +2080,7 @@ int main()
     testAnalysis();
     testMixAssistant();
     testLatency();
+    testSmoothing();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

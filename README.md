@@ -257,7 +257,8 @@ libs/JUCE               JUCE 9.0.2 (git submodule)
 
 1. Add its parameters in `src/Parameters.h/.cpp`.
 2. Add the DSP (e.g. in `src/dsp/Effects.h`), then wrap it as a module in `src/dsp/FxModules.h`: declare
-   its values with the same IDs and defaults as the parameters, add a `ModuleType`, and add it to
+   its values with the same IDs and defaults as the parameters (`addValue` for knobs, which glide over ~15 ms
+   so they never click; `addChoice` for lists and on/off options, which step), add a `ModuleType`, and add it to
    `createModule()` and `getModuleKey()`. Live mode runs every type in `ModuleType` order; the tests check
    the module values and the parameters stay in sync.
 3. Add an entry to `ui/modules.js`. The card, sidebar item and parameter bindings are generated from it.

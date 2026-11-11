@@ -2,7 +2,9 @@
 
 #include <juce_dsp/juce_dsp.h>
 
+#include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <deque>
 
 namespace fx
@@ -30,7 +32,36 @@ class Module
 {
 public:
     using Context = juce::dsp::ProcessContextReplacing<float>;
-    using Value = std::atomic<float>;
+
+    // A parameter value. store() and load() are the target, set from any thread. Knob
+    // values glide towards a new target over ~15 ms on the audio thread (see process()),
+    // so turning a knob or switching preset doesn't click or crackle; switches and
+    // choices (key, scale, filter type...) change at once.
+    class Value
+    {
+    public:
+        Value (float initial, bool isSmoothed) : target (initial), current (initial), smoothed (isSmoothed) {}
+
+        void store (float v, std::memory_order order = std::memory_order_seq_cst) noexcept { target.store (v, order); }
+        float load (std::memory_order order = std::memory_order_seq_cst) const noexcept    { return target.load (order); }
+
+        bool isSmoothed() const noexcept { return smoothed; }
+
+    private:
+        friend class Module;
+
+        // What the DSP uses: the target for switches and choices, the gliding value for knobs.
+        float getForDsp() const noexcept
+        {
+            return smoothed ? current.load (std::memory_order_relaxed) : target.load (std::memory_order_relaxed);
+        }
+
+        std::atomic<float> target;
+        std::atomic<float> current; // audio thread writes; atomic only so other threads may read it
+        const bool smoothed;
+
+        JUCE_DECLARE_NON_COPYABLE (Value)
+    };
 
     virtual ~Module() = default;
 
@@ -66,6 +97,8 @@ public:
     //==============================================================================
     void prepare (const juce::dsp::ProcessSpec& spec)
     {
+        sampleRate = spec.sampleRate;
+        snapToTargets();
         prepareModule (spec);
         update();
         resetModule();
@@ -74,6 +107,7 @@ public:
 
     void reset()
     {
+        snapToTargets();
         resetModule();
         wasOn = false;
     }
@@ -81,23 +115,43 @@ public:
     // Audio thread.
     void process (const Context& context) noexcept
     {
-        update();
+        const auto on = alwaysProcesses() || isOn();
 
-        if (alwaysProcesses())
+        if (! alwaysProcesses())
         {
-            render (context);
+            if (on && ! wasOn)
+            {
+                // Coming back on: start from the current settings rather than gliding from
+                // wherever the values were when it was switched off.
+                snapToTargets();
+                resetModule();
+            }
+
+            wasOn = on;
+        }
+
+        if (! on)
+        {
+            snapToTargets();
+            update();
             return;
         }
 
-        const auto on = isOn();
+        // While a knob value is gliding, render in short slices and push the values into
+        // the DSP before each one, so gains and filters move smoothly instead of in
+        // block-sized steps. Settled, it's one update per block as before.
+        auto& block = context.getOutputBlock();
+        const auto numSamples = block.getNumSamples();
 
-        if (on && ! wasOn)
-            resetModule();
+        for (size_t start = 0; start < numSamples;)
+        {
+            const auto length = advanceSmoothing() ? std::min (smoothingSliceSamples, numSamples - start) : numSamples - start;
+            update();
 
-        wasOn = on;
-
-        if (on)
-            render (context);
+            auto slice = block.getSubBlock (start, length);
+            render (Context (slice));
+            start += length;
+        }
     }
 
 protected:
@@ -105,10 +159,15 @@ protected:
 
     // Declare values in the order the UI should list them. Call from member
     // initialisers only (before the module is shared with the audio thread).
-    Value& addSwitch (const char* id, bool defaultOn = false) { return add (id, true, defaultOn ? 1.0f : 0.0f); }
-    Value& addValue (const char* id, float defaultValue)      { return add (id, false, defaultValue); }
+    // A switch turns the module on; a choice is a value that steps (key, scale, filter
+    // type, an on/off option that doesn't switch the module); every other value glides.
+    Value& addSwitch (const char* id, bool defaultOn = false) { return add (id, true, defaultOn ? 1.0f : 0.0f, false); }
+    Value& addChoice (const char* id, float defaultValue)     { return add (id, false, defaultValue, false); }
+    Value& addValue (const char* id, float defaultValue)      { return add (id, false, defaultValue, true); }
 
-    static float get (const Value& value) noexcept      { return value.load (std::memory_order_relaxed); }
+    // The value for the DSP. In update() that's the gliding value; switches and choices
+    // read their target, so any thread can check them (e.g. getLatencySamples()).
+    static float get (const Value& value) noexcept      { return value.getForDsp(); }
     static float fraction (const Value& value) noexcept { return get (value) / 100.0f; }
     static bool  flag (const Value& value) noexcept     { return get (value) >= 0.5f; }
     static int   index (const Value& value) noexcept    { return juce::roundToInt (get (value)); }
@@ -124,21 +183,63 @@ protected:
 private:
     struct Entry
     {
-        Entry (const char* i, bool s, float v) : id (i), isSwitch (s), value (v) {}
+        Entry (const char* i, bool s, float v, bool smoothed) : id (i), isSwitch (s), value (v, smoothed) {}
 
         juce::String id;
         bool isSwitch;
         Value value;
     };
 
-    Value& add (const char* id, bool isSwitchValue, float defaultValue)
+    Value& add (const char* id, bool isSwitchValue, float defaultValue, bool smoothed)
     {
-        return entries.emplace_back (id, isSwitchValue, defaultValue).value;
+        return entries.emplace_back (id, isSwitchValue, defaultValue, smoothed).value;
     }
+
+    void snapToTargets() noexcept
+    {
+        for (auto& entry : entries)
+            entry.value.current.store (entry.value.target.load (std::memory_order_relaxed), std::memory_order_relaxed);
+    }
+
+    // Moves every gliding value one slice towards its target. Returns false when they
+    // have all arrived (then nothing moves and the block renders in one go).
+    bool advanceSmoothing() noexcept
+    {
+        const auto coefficient = 1.0f - std::exp (-(float) smoothingSliceSamples / (smoothingSeconds * (float) sampleRate));
+        bool moving = false;
+
+        for (auto& entry : entries)
+        {
+            auto& value = entry.value;
+            if (! value.smoothed)
+                continue;
+
+            const auto target = value.target.load (std::memory_order_relaxed);
+            auto current = value.current.load (std::memory_order_relaxed);
+
+            if (current == target)
+                continue;
+
+            current += coefficient * (target - current);
+
+            if (std::abs (target - current) <= 1.0e-4f * (1.0f + std::abs (target)))
+                current = target;
+            else
+                moving = true;
+
+            value.current.store (current, std::memory_order_relaxed);
+        }
+
+        return moving;
+    }
+
+    static constexpr size_t smoothingSliceSamples = 32;
+    static constexpr float smoothingSeconds = 0.015f; // time constant: ~90% of the way in 35 ms
 
     const ModuleType type;
     std::deque<Entry> entries; // a deque keeps references stable as values are added
     bool wasOn = false;
+    double sampleRate = 48000.0;
 
     JUCE_DECLARE_NON_COPYABLE (Module)
 };
