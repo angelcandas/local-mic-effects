@@ -1924,7 +1924,8 @@ class DawScreen {
     head.append(html("h3", "", "Clip"));
     element.append(head, html("p", "panel-caption",
       owner?.id === 0 ? "The master has no clips. Select a clip on a track to edit it here."
-                      : "Select a clip to change its gain and fades, split, loop or strip silence."));
+      : owner?.kind === "midi" ? "Select a MIDI clip to edit its notes here, or double-click the lane for a new one."
+      : "Select a clip to change its gain and fades, split, loop or strip silence."));
     return element;
   }
 
