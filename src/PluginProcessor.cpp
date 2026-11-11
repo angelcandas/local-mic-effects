@@ -46,6 +46,9 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
         }
     }
 
+    // Saves and backups keep the instruments' current settings (plugin knobs, sounds).
+    dawProject.onBeforeWrite = [this] { dawEngine.captureInstrumentStates(); };
+
     startTimerHz (5);
 }
 
@@ -124,7 +127,7 @@ void PluginProcessor::updateDspParameters()
     }
 }
 
-void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer&)
+void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
 
@@ -137,7 +140,9 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         // The raw mic goes to the DAW engine (recorded dry, monitored through the
         // armed track's inserts); the engine writes the mix over the buffer.
         updatePeak (inputPeak, numIn > 0 ? buffer.getMagnitude (0, 0, numSamples) : 0.0f);
-        dawEngine.process (buffer, numOut, numSamples, numIn > 0 ? buffer.getReadPointer (0) : nullptr);
+        // The standalone app passes the MIDI input here (MIDI tracks play and record it).
+        dawEngine.process (buffer, numOut, numSamples, numIn > 0 ? buffer.getReadPointer (0) : nullptr, &midi);
+        midi.clear();
         applyPeakGuard (buffer, numOut, numSamples);
         updatePeak (outputPeak, buffer.getMagnitude (0, numSamples));
         return;

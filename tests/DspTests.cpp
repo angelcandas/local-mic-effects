@@ -20,6 +20,8 @@
 #include "daw/DawEngine.h"
 #include "daw/ClipTools.h"
 #include "daw/Exporter.h"
+#include "daw/Instruments.h"
+#include "daw/PluginHost.h"
 #include "daw/Project.h"
 #include "daw/Warp.h"
 #include "daw/Quantize.h"
@@ -1999,6 +2001,355 @@ namespace
     // The DAW screen's commands, through DawBridge as the page sends them: tracks, import,
     // new / save as / open (the file chooser's part is skipped: the tests call what runs
     // after a file is picked), and the session events the page redraws from.
+    //==========================================================================
+    // Fundamental frequency (80..1000 Hz) over a stretch of a channel, from the first
+    // strong autocorrelation peak, refined by parabolic interpolation.
+    double estimateFrequency (const std::vector<float>& channel, size_t from, size_t to)
+    {
+        to = std::min (to, channel.size());
+        const auto n = (int) (to - from);
+        const auto minLag = (int) (sampleRate / 1000.0), maxLag = (int) (sampleRate / 80.0);
+        if (n <= maxLag * 2)
+            return 0.0;
+
+        std::vector<double> r ((size_t) maxLag + 2, 0.0);
+        for (int lag = 0; lag <= maxLag + 1; ++lag)
+            for (int i = 0; i + lag < n; ++i)
+                r[(size_t) lag] += (double) channel[from + (size_t) i] * channel[from + (size_t) (i + lag)];
+
+        if (r[0] <= 0.0)
+            return 0.0;
+
+        double best = 0.0;
+        int bestLag = 0;
+        for (int lag = minLag; lag <= maxLag; ++lag)
+        {
+            if (r[(size_t) lag] > r[(size_t) lag - 1] && r[(size_t) lag] >= r[(size_t) lag + 1] && r[(size_t) lag] > 0.8 * r[0] * (n - lag) / n)
+            {
+                best = r[(size_t) lag];
+                bestLag = lag;
+                break;
+            }
+        }
+
+        if (bestLag == 0 || best <= 0.0)
+            return 0.0;
+
+        const auto a = r[(size_t) bestLag - 1], b = r[(size_t) bestLag], c = r[(size_t) bestLag + 1];
+        const auto shift = 0.5 * (a - c) / (a - 2.0 * b + c);
+        return sampleRate / ((double) bestLag + shift);
+    }
+
+    // Plays the engine with MIDI input given as (sample, message) pairs; returns {left, right}.
+    std::array<std::vector<float>, 2> renderWithMidi (daw::DawEngine& engine, double seconds,
+                                                      const std::vector<std::pair<int, juce::MidiMessage>>& input,
+                                                      juce::int64 firstSample = 0)
+    {
+        std::array<std::vector<float>, 2> out;
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+
+        for (int done = 0; done < (int) (seconds * sampleRate); done += blockSize)
+        {
+            midi.clear();
+            for (const auto& [at, message] : input)
+                if (at - firstSample >= done && at - firstSample < done + blockSize)
+                    midi.addEvent (message, (int) (at - firstSample - done));
+
+            engine.process (buffer, 2, blockSize, nullptr, &midi);
+            for (int ch = 0; ch < 2; ++ch)
+                out[(size_t) ch].insert (out[(size_t) ch].end(), buffer.getReadPointer (ch), buffer.getReadPointer (ch) + blockSize);
+        }
+
+        return out;
+    }
+
+    void testMidiTracks()
+    {
+        std::cout << "\nMIDI tracks (notes, built-in instruments, recording, projects, export)\n";
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-midi", {});
+        folder.createDirectory();
+
+        const auto builtins = daw::instruments::getBuiltins();
+        check (builtins.size() >= 5 && builtins[0].id == "builtin:keys" && daw::instruments::findBuiltin ("builtin:pad").has_value(),
+               "built-in instruments are listed (" + juce::String (builtins.size()) + ")");
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+
+        const auto keys = (int) edit.addMidiTrack ("Keys", daw::instruments::getDefault())[daw::ids::id];
+        check (daw::Edit::isMidiTrack (edit.getTrack (keys)) && edit.getInstrument (keys)[daw::ids::plugin].toString() == "builtin:keys",
+               "a MIDI track has an instrument");
+
+        const auto clip = (int) edit.addMidiClip (keys, 0.5, 1.0)[daw::ids::id];
+        const auto note = (int) edit.addNote (clip, 69, 0.25, 0.5, 100)[daw::ids::id];
+        check (clip > 0 && note > 0 && edit.addMidiClip (edit.addTrack ("Audio")[daw::ids::id], 0.0, 1.0).isValid() == false,
+               "MIDI clips go on MIDI tracks only");
+        engine.rebuildNow();
+
+        check (engine.getInstrument (keys) != nullptr && engine.getInstrumentError (keys).isEmpty(), "the engine makes the instrument");
+        check (engine.getLength() == (juce::int64) (1.5 * sampleRate), "a MIDI clip counts towards the song's length");
+
+        engine.play();
+        auto out = render (engine, 2.0);
+        engine.stop();
+
+        const auto at = [] (double seconds) { return (size_t) (seconds * sampleRate); };
+        check (rms (out[0], 0, at (0.75)) == 0.0f, "silent before the note");
+        check (rms (out[0], at (0.8), at (1.2)) > 0.01f && rms (out[1], at (0.8), at (1.2)) > 0.01f,
+               "the note plays at the clip's start + its time (rms " + juce::String (rms (out[0], at (0.8), at (1.2)), 4) + ")");
+        const auto f = estimateFrequency (out[0], at (0.8), at (1.2));
+        check (std::abs (f - 440.0) < 3.0, "the built-in synth plays the note's pitch (" + juce::String (f, 1) + " Hz)");
+        check (rms (out[0], at (1.8), at (2.0)) < 1.0e-4f, "the note ends (with its release)");
+
+        edit.getTrack (keys).setProperty (daw::ids::transpose, 12.0, nullptr);
+        engine.rebuildNow();
+        engine.seek (0);
+        engine.play();
+        out = render (engine, 1.3);
+        engine.stop();
+        const auto up = estimateFrequency (out[0], at (0.8), at (1.2));
+        check (std::abs (up - 880.0) < 6.0, "the track's transpose moves its MIDI notes (" + juce::String (up, 1) + " Hz)");
+        edit.getTrack (keys).removeProperty (daw::ids::transpose, nullptr);
+        engine.rebuildNow();
+        render (engine, 1.0); // let the release ring out
+
+        // Outside the clip's window: not played.
+        edit.getUndoManager().beginNewTransaction();
+        edit.trimClipStart (clip, 0.9); // the window now starts after the note's start
+        engine.rebuildNow();
+        engine.seek (0);
+        engine.play();
+        out = render (engine, 2.0);
+        engine.stop();
+        check (rms (out[0], 0, at (2.0)) == 0.0f, "a note that starts before the clip's window doesn't play");
+        edit.getUndoManager().undo();
+        check (std::abs ((double) edit.getClip (clip)[daw::ids::start] - 0.5) < 1.0e-9, "(undo the trim)");
+
+        // Stopping mid-note: the note stops.
+        engine.rebuildNow();
+        engine.seek (0);
+        engine.play();
+        render (engine, 0.9);
+        engine.stop();
+        out = render (engine, 1.0);
+        check (rms (out[0], at (0.6), at (1.0)) < 1.0e-4f, "stopping releases the notes that were playing");
+
+        // Split and duplicate copy the notes with ids of their own.
+        const auto right = edit.splitClip (clip, 1.0);
+        const auto copy = edit.duplicateClip (clip);
+        std::set<int> noteIds;
+        int notes = 0;
+        for (const auto& c : edit.getTrack (keys))
+            for (const auto& n : c)
+                if (n.hasType (daw::ids::NOTE))
+                {
+                    noteIds.insert ((int) n[daw::ids::id]);
+                    ++notes;
+                }
+        check (right > 0 && copy > 0 && notes == 3 && (int) noteIds.size() == 3, "split and duplicate give copied notes their own ids");
+        edit.removeClip (right);
+        edit.removeClip (copy);
+
+        // Live MIDI: an armed MIDI track plays the MIDI input, even while stopped.
+        edit.setTrackArm (keys, true);
+        out = renderWithMidi (engine, 0.5, { { 0, juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100) },
+                                             { (int) at (0.3), juce::MidiMessage::noteOff (1, 60) } });
+        check (rms (out[0], at (0.05), at (0.25)) > 0.01f, "an armed MIDI track plays the MIDI input live");
+
+        engine.addLiveMidi (juce::MidiMessage::noteOn (1, 64, (juce::uint8) 90));
+        out = render (engine, 0.1);
+        check (rms (out[0], at (0.02), at (0.1)) > 0.01f && engine.getHeldNotes()[64], "notes from the on-screen keyboard play too");
+        engine.addLiveMidi (juce::MidiMessage::noteOff (1, 64));
+        render (engine, 0.6);
+        check (! engine.getHeldNotes()[64], "and stop");
+
+        // Recording MIDI: armed MIDI tracks get a clip with what was played.
+        engine.setMidiRecordingLatency (480); // 10 ms
+        engine.seek ((juce::int64) (2.0 * sampleRate));
+        check (engine.startRecording (folder).isEmpty() && engine.isRecording(), "records with only a MIDI track armed");
+
+        const auto start = (int) (2.0 * sampleRate);
+        renderWithMidi (engine, 1.5,
+                        { { start + (int) at (0.25), juce::MidiMessage::noteOn (1, 62, (juce::uint8) 80) },
+                          { start + (int) at (0.5), juce::MidiMessage::controllerEvent (1, 64, 127) },  // pedal down
+                          { start + (int) at (0.6), juce::MidiMessage::noteOff (1, 62) },               // held by the pedal
+                          { start + (int) at (0.7), juce::MidiMessage::noteOn (1, 65, (juce::uint8) 110) },
+                          { start + (int) at (0.8), juce::MidiMessage::noteOff (1, 65) },
+                          { start + (int) at (1.0), juce::MidiMessage::controllerEvent (1, 64, 0) } },  // pedal up
+                        start);
+        engine.stopRecording();
+
+        juce::ValueTree take;
+        for (const auto& c : edit.getTrack (keys))
+            if (c.hasType (daw::ids::CLIP) && std::abs ((double) c[daw::ids::start] - 2.0) < 1.0e-6)
+                take = c;
+
+        check (take.isValid() && daw::Edit::isMidiClip (take) && std::abs ((double) take[daw::ids::length] - 1.5) < 0.01,
+               "the take is a MIDI clip from the record start to the stop");
+
+        if (take.isValid())
+        {
+            const auto first = take.getChild (0), second = take.getChild (1);
+            check (take.getNumChildren() == 2 && (int) first[daw::ids::pitch] == 62 && (int) first[daw::ids::velocity] == 80
+                       && std::abs ((double) first[daw::ids::time] - 0.24) < 0.002,
+                   "notes are recorded with their pitch, velocity and time (minus the output latency): "
+                       + juce::String ((double) first[daw::ids::time], 3) + " s");
+            check (std::abs ((double) first[daw::ids::length] - 0.75) < 0.002 && std::abs ((double) second[daw::ids::length] - 0.3) < 0.002,
+                   "the sustain pedal holds notes until it lifts");
+        }
+
+        check (edit.getUndoManager().getUndoDescription() == "Record", "the take is one undo step");
+        edit.setTrackArm (keys, false);
+
+        // Projects: MIDI tracks, instruments and notes survive a save and open.
+        {
+            daw::Project project (edit);
+            check (project.createNew (folder.getChildFile ("Song")).isEmpty(), "new project");
+            const auto instrument = edit.addMidiTrack ("Pad", *daw::instruments::findBuiltin ("builtin:pad"));
+            const auto padClip = edit.addMidiClip ((int) instrument[daw::ids::id], 0.0, 2.0);
+            edit.addNote ((int) padClip[daw::ids::id], 48, 0.0, 1.0, 64);
+            check (project.save().isEmpty() && project.getMissingFiles().isEmpty(), "saves (MIDI clips aren't missing files)");
+
+            daw::Edit reopened;
+            daw::Project second (reopened);
+            check (second.open (project.getFolder()).isEmpty(), "opens");
+
+            juce::ValueTree pad;
+            for (const auto& t : reopened.getTracks())
+                if (t[daw::ids::name].toString() == "Pad")
+                    pad = t;
+
+            const auto reNote = pad.getChildWithName (daw::ids::CLIP).getChildWithName (daw::ids::NOTE);
+            check (daw::Edit::isMidiTrack (pad) && pad.getChildWithName (daw::ids::INSTRUMENT)[daw::ids::plugin].toString() == "builtin:pad"
+                       && daw::Edit::isMidiClip (pad.getChildWithName (daw::ids::CLIP)) && (int) reNote[daw::ids::pitch] == 48
+                       && second.getMissingFiles().isEmpty(),
+                   "MIDI tracks, instruments and notes come back from the project file");
+
+            // Export renders the instruments offline.
+            daw::Exporter::Settings settings;
+            settings.end = 1.0;
+            settings.tail = 0.5;
+            daw::Exporter exporter (reopened, settings);
+            const auto result = exporter.exportMix (folder.getChildFile ("midi.wav"));
+            check (result.error.isEmpty() && result.peakDecibels > -40.0f,
+                   "the mix export plays the MIDI tracks (peak " + juce::String (result.peakDecibels, 1) + " dB)");
+            second.close();
+            project.close();
+        }
+
+        folder.deleteRecursively();
+    }
+
+    void testPluginHosting()
+    {
+        std::cout << "\nInstrument plugins (scan, load, play, keep settings)\n";
+
+        const auto pluginFile = juce::File (MICFX_TEST_SYNTH);
+        check (pluginFile.exists(), "the test instrument was built: " + pluginFile.getFullPathName());
+
+        const auto data = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-plugins", {});
+        const auto plugins = data.getChildFile ("Plugins");
+        plugins.createDirectory();
+        pluginFile.copyDirectoryTo (plugins.getChildFile (pluginFile.getFileName()));
+
+        {
+            daw::PluginHost host (data);
+            host.setExtraFolders ({ plugins.getFullPathName() });
+            host.startScan();
+
+            for (int i = 0; i < 600 && host.isScanning(); ++i)
+                juce::Thread::sleep (50);
+
+            juce::Optional<daw::Edit::InstrumentInfo> found;
+            for (const auto& info : host.getInstruments())
+                if (info.name == "MicFX Test Synth")
+                    found = info;
+
+            check (! host.isScanning() && found.hasValue() && found->format == "VST3",
+                   "a scan finds a VST3 instrument in an added folder" + (host.getFailedFiles().isEmpty() ? juce::String() : " (failed: " + host.getFailedFiles().joinIntoString (", ") + ")"));
+
+            if (! found.hasValue())
+            {
+                data.deleteRecursively();
+                return;
+            }
+
+            check (host.findInstrument (found->id).has_value() && host.getInstruments()[0].format == "builtin",
+                   "the list has the built-in synths first, then plugins");
+
+            daw::Edit edit;
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+
+            const auto track = (int) edit.addMidiTrack ("Plugin", *found)[daw::ids::id];
+            const auto clip = (int) edit.addMidiClip (track, 0.0, 1.0)[daw::ids::id];
+            edit.addNote (clip, 57, 0.1, 0.5); // A3, 220 Hz
+            engine.rebuildNow();
+
+            auto instrument = engine.getInstrument (track);
+            check (instrument != nullptr && engine.getInstrumentError (track).isEmpty(),
+                   "a MIDI track loads the plugin " + engine.getInstrumentError (track));
+
+            if (instrument == nullptr)
+            {
+                data.deleteRecursively();
+                return;
+            }
+
+            engine.play();
+            auto out = render (engine, 1.0);
+            engine.stop();
+            const auto f = estimateFrequency (out[0], (size_t) (0.15 * sampleRate), (size_t) (0.55 * sampleRate));
+            check (std::abs (f - 220.0) < 2.0 && rms (out[0], 0, (size_t) (0.09 * sampleRate)) == 0.0f
+                       && rms (out[0], (size_t) (0.62 * sampleRate), (size_t) (1.0 * sampleRate)) == 0.0f,
+                   "the plugin plays the clip's note on time (" + juce::String (f, 1) + " Hz)");
+
+            // Its settings are kept: change the level, capture, reload.
+            auto* level = instrument->getParameters()[0];
+            level->setValueNotifyingHost (0.25f);
+            instrument.reset();
+            engine.captureInstrumentStates();
+            const auto state = edit.getInstrument (track)[daw::ids::state].toString();
+            check (state.isNotEmpty(), "the plugin's settings are stored in the project");
+
+            daw::Edit copy;
+            copy.replaceState (edit.getState().createCopy());
+            daw::DawEngine second (copy);
+            second.prepare (sampleRate, blockSize);
+            second.rebuildNow();
+            const auto restored = second.getInstrument (track);
+            check (restored != nullptr && std::abs (restored->getParameters()[0]->getValue() - 0.25f) < 1.0e-3f,
+                   "and come back when the project loads");
+
+            // A plugin that isn't installed: the track stays, silent, with the reason.
+            daw::Edit missing;
+            daw::DawEngine third (missing);
+            third.prepare (sampleRate, blockSize);
+            auto info = *found;
+            info.id = "VST3-Not Installed-0-0";
+            info.name = "Not Installed";
+            info.description = {};
+            const auto lost = (int) missing.addMidiTrack ("Lost", info)[daw::ids::id];
+            third.rebuildNow();
+            check (third.getInstrument (lost) == nullptr && third.getInstrumentError (lost).contains ("isn't installed"),
+                   "a missing plugin leaves the track silent and says why");
+
+            // Offline: the export loads its own copy of the plugin.
+            daw::Exporter::Settings settings;
+            settings.end = 1.0;
+            settings.tail = 0.0;
+            daw::Exporter exporter (edit, settings);
+            const auto result = exporter.exportMix (data.getChildFile ("plugin.wav"));
+            check (result.error.isEmpty() && std::abs (result.peakDecibels - juce::Decibels::gainToDecibels (0.25f)) < 0.5f,
+                   "the export plays the plugin with its settings (peak " + juce::String (result.peakDecibels, 1) + " dB)");
+        }
+
+        data.deleteRecursively();
+    }
+
     void testDawBridge()
     {
         std::cout << "\nDAW screen commands (DawBridge)\n";
@@ -2278,6 +2629,55 @@ namespace
                "an older project's tracks take effects");
         check (trackCount (session) == 1 && run ("addTrack").isInt() && trackCount (lastSession()) == 2,
                "Add track works in an older project");
+
+        // MIDI tracks: instruments for the library, a MIDI track, a clip, notes.
+        {
+            const auto list = run ("instruments");
+            check ((bool) list["ok"] && list["instruments"].size() >= 7 && list["instruments"][0]["kind"].toString() == "builtin",
+                   "\"instruments\" lists the built-in synths (for the library)");
+
+            const auto added = run ("addInstrument", args ({ { "track", -1 }, { "instrument", "builtin:bass" } }));
+            const auto midiTrack = (int) added["track"];
+            auto session = lastSession();
+            juce::var described;
+            for (int i = 0; i < session["tracks"].size(); ++i)
+                if ((int) session["tracks"][i]["id"] == midiTrack)
+                    described = session["tracks"][i];
+            check ((bool) added["ok"] && described["kind"].toString() == "midi" && described["instrument"]["name"].toString() == "Synth Bass",
+                   "dropping an instrument below the tracks makes a MIDI track with it");
+
+            const auto clipId = (int) run ("addMidiClip", args ({ { "track", midiTrack }, { "start", 1.0 }, { "length", 2.0 } }));
+            auto notes = juce::Array<juce::var> { args ({ { "pitch", 60 }, { "time", 0.0 }, { "length", 0.5 }, { "velocity", 90 } }),
+                                                  args ({ { "pitch", 64 }, { "time", 0.5 }, { "length", 0.5 } }) };
+            const auto edited = run ("editNotes", args ({ { "clip", clipId }, { "add", notes } }));
+            check (clipId > 0 && (bool) edited["ok"] && edited["added"].size() == 2, "a MIDI clip takes notes");
+
+            const auto firstNote = (int) edited["added"][0];
+            run ("editNotes", args ({ { "clip", clipId }, { "change", juce::Array<juce::var> { args ({ { "id", firstNote }, { "pitch", 62 } }) } },
+                                      { "remove", juce::Array<juce::var> { edited["added"][1] } } }));
+            session = lastSession();
+            juce::var clip;
+            for (int i = 0; i < session["tracks"].size(); ++i)
+                if ((int) session["tracks"][i]["id"] == midiTrack)
+                    clip = session["tracks"][i]["clips"][0];
+            check ((bool) clip["midi"] && ! (bool) clip["missing"] && clip["notes"].size() == 1 && (int) clip["notes"][0]["pitch"] == 62
+                       && (int) clip["notes"][0]["velocity"] == 90,
+                   "notes can be changed and removed, and the session describes them");
+
+            check (! (bool) run ("normaliseClip", args ({ { "id", clipId } }))["ok"], "audio-only clip tools refuse MIDI clips");
+            const auto pasted = (int) run ("pasteClip", args ({ { "midi", true }, { "track", midiTrack }, { "start", 4.0 }, { "length", 1.0 },
+                                                                 { "offset", 0.0 }, { "notes", juce::Array<juce::var> { args ({ { "pitch", 70 }, { "time", 0.1 }, { "length", 0.2 } }) } } }));
+            check (pasted > 0 && daw::Edit::isMidiClip (edit.getClip (pasted)) && edit.getClip (pasted).getNumChildren() == 1,
+                   "a copied MIDI clip pastes with its notes");
+
+            const auto swapped = run ("addInstrument", args ({ { "track", midiTrack }, { "instrument", "builtin:organ" } }));
+            check ((int) swapped["track"] == midiTrack && edit.getInstrument (midiTrack)[daw::ids::name].toString() == "Organ",
+                   "dropping an instrument on a MIDI track swaps its instrument");
+            check (! (bool) run ("addInstrument", args ({ { "track", -1 }, { "instrument", "VST3-Nothing" } }))["ok"],
+                   "an unknown instrument is refused");
+            check ((bool) run ("liveNote", args ({ { "note", 60 }, { "velocity", 100 } }))["ok"]
+                       && (bool) run ("liveNote", args ({ { "note", 60 }, { "velocity", 0 } }))["ok"], "liveNote plays notes");
+        }
 
         // Starting the app again reopens the last project.
         {
@@ -3461,6 +3861,8 @@ int main()
     testMultitrack();
     testDawEngine();
     testDawRecording();
+    testMidiTracks();
+    testPluginHosting();
     testProjects();
     testExport();
     testClipEditing();

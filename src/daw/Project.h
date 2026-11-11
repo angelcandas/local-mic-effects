@@ -79,6 +79,10 @@ public:
 
     static bool isProjectFolder (const juce::File&);
 
+    // Called right before the project (or a backup) is written, e.g. so the engine can
+    // store its instruments' current settings in the Edit.
+    std::function<void()> onBeforeWrite;
+
 private:
     juce::File getProjectFile() const   { return folder.getChildFile ("project.xml"); }
     juce::File getLockFile() const      { return getBackupsFolder().getChildFile (".open"); }

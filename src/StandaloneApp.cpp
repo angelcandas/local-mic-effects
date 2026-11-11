@@ -535,7 +535,7 @@ namespace
                                                                    juce::String{},
                                                                    nullptr,
                                                                    juce::Array<juce::StandalonePluginHolder::PluginInOuts>{},
-                                                                   false);
+                                                                   true); // open every MIDI input (MIDI tracks in DAW mode)
         }
 
         juce::ApplicationProperties appProperties;
