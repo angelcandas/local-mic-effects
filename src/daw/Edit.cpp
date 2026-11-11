@@ -261,6 +261,55 @@ void Edit::setClipGain (int clipId, float decibels)
     getClip (clipId).setProperty (ids::gain, juce::jlimit (-60.0f, 24.0f, decibels), &undoManager);
 }
 
+void Edit::setClipName (int clipId, const juce::String& name)
+{
+    if (auto clip = getClip (clipId); clip.isValid() && name.trim().isNotEmpty())
+        clip.setProperty (ids::name, name.trim().substring (0, 80), &undoManager);
+}
+
+void Edit::setClipMute (int clipId, bool mute)
+{
+    if (auto clip = getClip (clipId); clip.isValid())
+        clip.setProperty (ids::mute, mute, &undoManager);
+}
+
+juce::Array<int> Edit::keepClipParts (int clipId, const std::vector<std::pair<double, double>>& parts, double fadeSeconds)
+{
+    juce::Array<int> created;
+    auto clip = getClip (clipId);
+    if (! clip.isValid() || parts.empty())
+        return created;
+
+    const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+    auto parent = clip.getParent();
+    auto index = parent.indexOf (clip);
+
+    for (const auto& [from, to] : parts)
+    {
+        const auto a = juce::jlimit (0.0, length, from), b = juce::jlimit (0.0, length, to);
+        if (b - a < minClipSeconds)
+            continue;
+
+        auto part = clip.createCopy();
+        const auto id = takeNextId();
+        part.setProperty (ids::id, id, nullptr);
+        part.setProperty (ids::start, start + a, nullptr);
+        part.setProperty (ids::offset, offset + a, nullptr);
+        part.setProperty (ids::length, b - a, nullptr);
+        const auto fade = juce::jmin (fadeSeconds, (b - a) / 2.0);
+        const auto half = (b - a) / 2.0;
+        part.setProperty (ids::fadeIn, a > 0.0 ? fade : juce::jmin (half, (double) clip[ids::fadeIn]), nullptr);
+        part.setProperty (ids::fadeOut, b < length ? fade : juce::jmin (half, (double) clip[ids::fadeOut]), nullptr);
+        parent.addChild (part, ++index, &undoManager);
+        created.add (id);
+    }
+
+    if (! created.isEmpty())
+        parent.removeChild (clip, &undoManager);
+
+    return created;
+}
+
 void Edit::setClipFades (int clipId, double fadeInSeconds, double fadeOutSeconds)
 {
     auto clip = getClip (clipId);

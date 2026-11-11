@@ -274,7 +274,36 @@ void DawEngine::rebuild()
                 continue;
 
             end = juce::jmax (end, clip.start + clip.length);
+
+            if ((bool) clipTree.getProperty (ids::mute, false))
+                continue; // muted: still part of the song's length, but silent
+
             track.clips.push_back (std::move (clip));
+        }
+
+        // Anti-click: a clip edge that cuts into the file's audio gets a short fade, unless
+        // the next part of the same audio carries straight on there (a plain split stays
+        // seamless).
+        {
+            const auto edgeFade = (juce::int64) std::llround (antiClickSeconds * sampleRate);
+            auto& clips = track.clips;
+
+            const auto continues = [&] (const Clip& a, const Clip& b) // b picks up where a stops
+            {
+                return a.audio == b.audio && b.start == a.start + a.length && b.offset == a.offset + a.length;
+            };
+
+            for (auto& clip : clips)
+            {
+                const auto cutsIn = clip.offset > 0
+                    && std::none_of (clips.begin(), clips.end(), [&] (const Clip& other) { return continues (other, clip); });
+                const auto cutsOut = clip.offset + clip.length < (juce::int64) clip.audio->getNumSamples()
+                    && std::none_of (clips.begin(), clips.end(), [&] (const Clip& other) { return continues (clip, other); });
+                const auto most = clip.length / 2;
+
+                if (cutsIn)  clip.fadeIn  = juce::jmin (most, juce::jmax (clip.fadeIn, edgeFade));
+                if (cutsOut) clip.fadeOut = juce::jmin (most, juce::jmax (clip.fadeOut, edgeFade));
+            }
         }
 
         graph->tracks.push_back (std::move (track));
