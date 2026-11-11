@@ -63,6 +63,8 @@ set(MICFX_DSP_SOURCES
     src/daw/Instruments.cpp
     src/daw/PluginHost.cpp
     src/daw/Project.cpp
+    src/daw/Warp.cpp
+    src/daw/Warp.h
     src/dsp/Biquad.h
     src/dsp/Effects.h
     src/dsp/FxChain.h

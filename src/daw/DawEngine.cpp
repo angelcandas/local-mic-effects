@@ -90,7 +90,7 @@ void DawEngine::loadAllNow()
     for (const auto& track : edit.getTracks())
         for (const auto& clip : track)
             if (clip.hasType (ids::CLIP))
-                pool.loadNow (juce::File (clip[ids::file].toString()));
+                pool.loadNow (juce::File (clip[ids::file].toString()), Edit::getWarpSettings (clip));
 
     rebuildNow();
 }
@@ -215,6 +215,12 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         else if (property == ids::loopOn || property == ids::loopStart || property == ids::loopEnd)
             updateLoop();
 
+        return;
+    }
+
+    if (tree.hasType (ids::TRACK) && property == ids::transpose)
+    {
+        triggerAsyncUpdate(); // its clips play other rendered copies
         return;
     }
 
@@ -362,6 +368,8 @@ void DawEngine::rebuild()
 
     juce::int64 end = 0;
     int maxLatency = 0;
+    std::set<juce::String> warpsInUse;
+    std::map<int, AudioPool::Audio> clipAudio;
 
     for (const auto& trackTree : edit.getTracks())
     {
@@ -378,9 +386,25 @@ void DawEngine::rebuild()
                 continue;
 
             Clip clip;
-            clip.audio = pool.get (juce::File (clipTree[ids::file].toString()));
+            const juce::File file (clipTree[ids::file].toString());
+            const auto warpSettings = Edit::getWarpSettings (clipTree);
+            const auto clipId = (int) clipTree[ids::id];
+            clip.audio = pool.get (file, warpSettings);
+
+            if (! warpSettings.isNeutral())
+                warpsInUse.insert (AudioPool::getWarpKey (file, warpSettings));
+
             if (clip.audio == nullptr)
-                continue; // still loading (rebuilds when it's ready) or unreadable
+            {
+                // A new warp or transpose is rendering: keep playing what the clip played
+                // until now, rather than dropping out.
+                if (const auto it = lastClipAudio.find (clipId); it != lastClipAudio.end())
+                    clip.audio = it->second;
+                else
+                    continue; // still loading (rebuilds when it's ready) or unreadable
+            }
+
+            clipAudio[clipId] = clip.audio;
 
             const auto toSamples = [this] (const juce::var& seconds) { return (juce::int64) std::llround ((double) seconds * sampleRate); };
             clip.start   = toSamples (clipTree[ids::start]);
@@ -441,6 +465,9 @@ void DawEngine::rebuild()
             track.delayBuffer.clear();
         }
     }
+
+    lastClipAudio = std::move (clipAudio);
+    pool.releaseUnusedWarps (warpsInUse);
 
     length = end;
     graph->master->latencyAtBuild = graph->master->chain.getLatencySamples();
