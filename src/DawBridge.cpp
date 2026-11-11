@@ -261,6 +261,7 @@ juce::var DawBridge::describeSession()
 
         tracks.add (object ({ { "id", (int) track[ids::id] }, { "name", track[ids::name].toString() }, { "colour", track[ids::colour].toString() },
                               { "volume", number (track, ids::volume) }, { "pan", number (track, ids::pan) },
+                              { "inGain", number (track, ids::inGain) }, { "outGain", number (track, ids::outGain) },
                               { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
                               { "inserts", describeInserts (track) }, { "clips", clips } }));
@@ -293,7 +294,8 @@ juce::var DawBridge::describeSession()
         { "countIn", engine.getCountInBars() },
         { "canUndo", undo.canUndo() },
         { "canRedo", undo.canRedo() },
-        { "master", object ({ { "volume", number (master, ids::volume) }, { "inserts", describeInserts (master) } }) },
+        { "master", object ({ { "volume", number (master, ids::volume) }, { "inGain", number (master, ids::inGain) },
+                              { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) } }) },
         { "tracks", tracks },
     });
 }
@@ -303,8 +305,29 @@ juce::var DawBridge::describeStatus()
     const auto rate = engine.getSampleRate();
     auto* peaks = new juce::DynamicObject();
 
+    auto* chains = new juce::DynamicObject();
+
+    const auto addChain = [&] (int id)
+    {
+        const auto [in, out] = engine.takeChainPeaks (id);
+        chains->setProperty (juce::String (id), object ({ { "in", fx::peakToDecibels (in) }, { "out", fx::peakToDecibels (out) } }));
+    };
+
     for (const auto& track : edit.getTracks())
+    {
         peaks->setProperty (juce::String ((int) track[ids::id]), peakToDecibels (engine.takePeak ((int) track[ids::id])));
+        addChain ((int) track[ids::id]);
+    }
+
+    addChain (daw::Edit::masterId);
+
+    // The live readings of the inserts on screen (one track's, or the master's).
+    auto* inserts = new juce::DynamicObject();
+    if (watchedTrack >= 0)
+        engine.forEachInsert (watchedTrack, [&] (int insertId, fx::Module& module)
+        {
+            inserts->setProperty (juce::String (insertId), fx::describeMeter (module, spectrumAnalyser));
+        });
 
     return object ({
         { "position", (double) engine.getPosition() / rate },
@@ -315,6 +338,8 @@ juce::var DawBridge::describeStatus()
         { "input", peakToDecibels (processor.inputPeak.exchange (0.0f)) },
         { "master", peakToDecibels (engine.takePeak (daw::Edit::masterId)) },
         { "tracks", juce::var (peaks) },
+        { "chains", juce::var (chains) },
+        { "inserts", juce::var (inserts) },
         { "loading", engine.getAudioPool().isLoading() },
     });
 }
@@ -585,7 +610,7 @@ namespace
     }
 }
 
-juce::var DawBridge::importAudio (const juce::File& file, int trackId)
+juce::var DawBridge::importAudio (const juce::File& file, int trackId, double start)
 {
     // Check the file before copying it anywhere. Only the header is read: the audio
     // itself loads in the background (AudioPool), so a long song doesn't freeze the app.
@@ -603,7 +628,9 @@ juce::var DawBridge::importAudio (const juce::File& file, int trackId)
     if (! edit.getTrack (trackId).isValid())
         trackId = (int) edit.addTrack (file.getFileNameWithoutExtension())[ids::id];
 
-    const auto start = juce::jmax (0.0, (double) engine.getPosition() / engine.getSampleRate());
+    if (start < 0.0)
+        start = (double) engine.getPosition() / engine.getSampleRate();
+    start = juce::jmax (0.0, start);
     const auto clip = edit.addClip (trackId, source, start, std::get<double> (length));
     sessionChanged = true;
 
@@ -719,6 +746,91 @@ juce::var DawBridge::handleStems (const juce::var& args)
     });
 
     return error ({});
+}
+
+//==============================================================================
+namespace
+{
+    constexpr int maxBrowseEntries = 2000;
+
+    bool isAudioFile (const juce::File& file)
+    {
+        static const auto extensions = []
+        {
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            juce::StringArray list;
+            for (auto* format : formats)
+                for (const auto& extension : format->getFileExtensions())
+                    list.addIfNotAlreadyThere (extension.toLowerCase());
+            return list;
+        }();
+
+        return extensions.contains (file.getFileExtension().toLowerCase());
+    }
+}
+
+juce::var DawBridge::describePlaces() const
+{
+    juce::Array<juce::var> list;
+    juce::StringArray seen;
+
+    const auto add = [&] (const juce::String& name, const juce::File& folder, const juce::String& kind, bool removable)
+    {
+        if (! folder.isDirectory() || seen.contains (folder.getFullPathName()))
+            return;
+        seen.add (folder.getFullPathName());
+        list.add (object ({ { "name", name }, { "path", folder.getFullPathName() }, { "kind", kind }, { "removable", removable } }));
+    };
+
+    if (project.isOpen())
+        add ("This project", project.getAudioFolder(), "project", false);
+
+    add ("Recordings", Recorder::getDefaultFolder(), "recordings", false);
+    add ("Music", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "music", false);
+    add ("Downloads", juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile ("Downloads"), "downloads", false);
+    add ("Desktop", juce::File::getSpecialLocation (juce::File::userDesktopDirectory), "desktop", false);
+
+    for (const auto& path : juce::StringArray::fromLines (settings.getValue ("dawBrowserPlaces")))
+        if (juce::File::isAbsolutePath (path))
+            add (juce::File (path).getFileName(), juce::File (path), "folder", true);
+
+    return object ({ { "ok", true }, { "error", juce::String() }, { "places", list } });
+}
+
+juce::var DawBridge::browseFolder (const juce::File& folder) const
+{
+    if (! folder.isDirectory())
+        return error ("That folder isn't there any more.");
+
+    juce::Array<juce::File> folders, files;
+    bool truncated = false;
+
+    for (const auto& entry : juce::RangedDirectoryIterator (folder, false, "*", juce::File::findFilesAndDirectories | juce::File::ignoreHiddenFiles))
+    {
+        if (folders.size() + files.size() >= maxBrowseEntries) { truncated = true; break; }
+
+        const auto file = entry.getFile();
+        if (file.getFileName().startsWithChar ('.'))
+            continue;
+        if (entry.isDirectory())
+            folders.add (file);
+        else if (isAudioFile (file))
+            files.add (file);
+    }
+
+    const auto byName = [] (const juce::File& a, const juce::File& b) { return a.getFileName().compareNatural (b.getFileName()) < 0; };
+    std::sort (folders.begin(), folders.end(), byName);
+    std::sort (files.begin(), files.end(), byName);
+
+    juce::Array<juce::var> folderList, fileList;
+    for (const auto& f : folders)
+        folderList.add (object ({ { "name", f.getFileName() }, { "path", f.getFullPathName() } }));
+    for (const auto& f : files)
+        fileList.add (object ({ { "name", f.getFileName() }, { "path", f.getFullPathName() }, { "size", (double) f.getSize() } }));
+
+    return object ({ { "ok", true }, { "error", juce::String() }, { "path", folder.getFullPathName() }, { "name", folder.getFileName() },
+                     { "folders", folderList }, { "files", fileList }, { "truncated", truncated } });
 }
 
 void DawBridge::loadPresetInto (int trackId, int presetIndex)
@@ -990,6 +1102,10 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
     auto& undo = edit.getUndoManager();
 
+    // The track (or master, 0) whose inserts are on screen gets live readings in
+    // "dawStatus" (-1: none). Not an edit.
+    if (command == "watchInserts") { watchedTrack = arg (args, "track", -1); complete (object ({ { "ok", true } })); return; }
+
     // Each command is one undo step, unless it continues a drag (args.continue).
     if (! arg (args, "continue", false))
         undo.beginNewTransaction (command);
@@ -1038,13 +1154,22 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("solo"))    edit.setTrackSolo (id, args["solo"]);
             if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
             if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
+            if (args.hasProperty ("inGain"))  edit.setChainGain (id, false, args["inGain"]);
+            if (args.hasProperty ("outGain")) edit.setChainGain (id, true, args["outGain"]);
         }
 
         ok();
         return;
     }
 
-    if (command == "setMaster") { edit.setMasterVolume (arg (args, "volume", 0.0f)); ok(); return; }
+    if (command == "setMaster")
+    {
+        if (args.hasProperty ("volume"))  edit.setMasterVolume (args["volume"]);
+        if (args.hasProperty ("inGain"))  edit.setChainGain (daw::Edit::masterId, false, args["inGain"]);
+        if (args.hasProperty ("outGain")) edit.setChainGain (daw::Edit::masterId, true, args["outGain"]);
+        ok();
+        return;
+    }
 
     //================================================================ inserts
     if (command == "addInsert")
@@ -1281,6 +1406,49 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                      Flags::openMode | Flags::canSelectFiles,
                      [this, trackId] (const juce::File& file) { return importAudio (file, trackId); },
                      complete);
+        return;
+    }
+
+    //================================================================ library sidebar
+    if (command == "places") { complete (describePlaces()); return; }
+    if (command == "browse") { complete (browseFolder (juce::File (args["path"].toString()))); return; }
+
+    if (command == "importFile")
+    {
+        const juce::File file (args["file"].toString());
+        complete (juce::File::isAbsolutePath (args["file"].toString()) && file.existsAsFile()
+                      ? importAudio (file, arg (args, "track", -1), arg (args, "start", -1.0))
+                      : error ("That file isn't there any more."));
+        return;
+    }
+
+    if (command == "addPlace")
+    {
+        withChooser ("Add a folder to the library", juce::File::getSpecialLocation (juce::File::userMusicDirectory), {},
+                     Flags::openMode | Flags::canSelectDirectories,
+                     [this] (const juce::File& folder)
+                     {
+                         if (! folder.isDirectory())
+                             return error (folder.getFileName() + " isn't a folder.");
+                         auto places = juce::StringArray::fromLines (settings.getValue ("dawBrowserPlaces"));
+                         places.removeEmptyStrings();
+                         places.addIfNotAlreadyThere (folder.getFullPathName());
+                         settings.setValue ("dawBrowserPlaces", places.joinIntoString ("\n"));
+                         auto result = describePlaces();
+                         result.getDynamicObject()->setProperty ("added", folder.getFullPathName());
+                         return result;
+                     },
+                     complete);
+        return;
+    }
+
+    if (command == "removePlace")
+    {
+        auto places = juce::StringArray::fromLines (settings.getValue ("dawBrowserPlaces"));
+        places.removeString (args["path"].toString());
+        places.removeEmptyStrings();
+        settings.setValue ("dawBrowserPlaces", places.joinIntoString ("\n"));
+        complete (describePlaces());
         return;
     }
 

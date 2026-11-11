@@ -43,7 +43,13 @@ public:
     juce::var openProject (const juce::File& picked);       // a project folder, or any file in one
     juce::var newProject (const juce::File& folder);
     juce::var saveProjectAs (const juce::File& folder);
-    juce::var importAudio (const juce::File& file, int trackId); // -> { ok, error, track, clip }
+    // start < 0: at the playhead. trackId not a track: on a new track.
+    juce::var importAudio (const juce::File& file, int trackId, double start = -1.0); // -> { ok, error, track, clip, start }
+
+    // The library sidebar (ui/browser.js): the places it shows, and one folder's
+    // subfolders and audio files.
+    juce::var describePlaces() const;                  // -> { ok, places: [{ name, path, kind, removable }] }
+    juce::var browseFolder (const juce::File&) const;  // -> { ok, error, path, name, folders, files }
 
     // Puts finished stems (in stems::Stem order) on new tracks under the clip's track,
     // lined up with the clip, and mutes the clip. One undo step. -> { ok, error, tracks }
@@ -92,6 +98,8 @@ private:
     std::function<juce::int64()> roundTripLatency;
 
     bool sessionChanged = true;
+    int watchedTrack = -1;                    // whose inserts get live readings
+    fx::SpectrumAnalyser spectrumAnalyser;
     bool lastDirty = false, lastCanUndo = false, lastCanRedo = false;
 
     std::unique_ptr<juce::FileChooser> chooser;

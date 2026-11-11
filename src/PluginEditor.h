@@ -56,6 +56,7 @@ private:
 
     juce::File lastTakeOnTimeline;
     bool lastFullScreen = false;
+    fx::SpectrumAnalyser spectrumAnalyser; // for the effect cards' live spectra
 
     std::unique_ptr<juce::FileChooser> folderChooser;
 

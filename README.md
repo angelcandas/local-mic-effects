@@ -84,6 +84,10 @@ tracks instead of one live chain:
 - **Tracks** hold clips on a timeline with a bar ruler. Each track has its own **effect inserts**
   (any of the Live effects, in any order, or a preset loaded into the track), volume, pan,
   **M**ute, **S**olo, **●** arm and **In** (hear the mic through the track's effects while you play).
+- Each effects chain (every track's, and the master's) has its own **In** and **Out** gain with
+  meters, either side of its inserts. In both modes, effect cards move with your voice: the
+  spectrum behind the EQ and filter curves, a dot riding the compressor and gate curves with the
+  gain reduction (or gate open/closed), echo taps replaying what you sang, and in/out level bars.
 - Every track feeds the **master** bus, which has its own inserts and volume. **Mixer** shows a
   channel strip per track plus the master.
 - **Recording is always dry.** Arm one or more tracks and press **Rec** (or **R**). The take is the
@@ -108,6 +112,12 @@ tracks instead of one live chain:
 - The **effects panel** sits under the tracks (and the mixer): the selected clip, then the selected
   track's effects left to right, in chain order. Drag the bar above it to resize, or press **E** (or
   its **Hide** button) to fold it away.
+- The **library** on the left lists audio files (this project, Recordings, Music, Downloads,
+  Desktop and any folder you add with **+ Add folder…**), the effects, instruments (with MIDI
+  tracks) and presets. Drag a file onto a track to put a clip where you drop it, or below the
+  tracks for a new track; drag an effect or preset onto a track, the master, a mixer strip or the
+  effects panel. Double-click (or Enter) adds to the selected track. **Shift+B** folds it to a thin
+  strip, **Ctrl+F** searches it, and its right edge drags to resize.
 - **Menus**: the standalone app has File (new, open, save, import, export, audio settings), Edit,
   View and Transport menus, in the macOS menu bar at the top of the screen or under the title bar
   on Windows and Linux. They do the same as the buttons and shortcuts.
@@ -261,12 +271,15 @@ src/StandaloneApp.cpp   standalone app window, with Options → Check for update
 scripts/update.sh       update check / pull + rebuild, used by Check for updates…
 src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune/pitch/harmony),
                         Effects (EQ, de-esser, saturation, echo…), ParametricEq, Biquad,
-                        FxModules (each effect + its values), FxChain (an ordered list of them)
+                        FxModules (each effect + its values), FxChain (an ordered list of them,
+                        with input/output gain), FxMeter (lock-free levels and spectra for the UI)
 ui/modules.js           the effect catalog the UI is built from
 ui/app.js, styles.css   the interface (Live mode)
 ui/daw.js, daw.css      the DAW screen: tracks, clips, inserts, mixer, transport
+ui/browser.js           the DAW screen's library sidebar (files, effects, instruments, presets)
 ui/widgets.js           helpers shared by both screens
-ui/fxviews.js           effect pictures (EQ/filter curves, dynamics, echo taps…) for both screens
+ui/fxviews.js           effect pictures (EQ/filter curves, dynamics, echo taps…) for both screens,
+                        animated from each effect's live readings
 tests/DspTests.cpp      headless DSP test runner
 libs/JUCE               JUCE 9.0.2 (git submodule)
 libs/demucs.cpp         Demucs v4 inference in C++, MIT (git submodule; optional: without it the

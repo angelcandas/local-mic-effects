@@ -76,8 +76,27 @@ public:
         return false;
     }
 
+    // Gain before and after the modules (the chain's input and output trims), in dB.
+    // Any thread; they glide over ~50 ms on the audio thread.
+    void setGains (float inputDecibels, float outputDecibels) noexcept
+    {
+        inputGain.store (juce::Decibels::decibelsToGain (inputDecibels, -100.0f), std::memory_order_relaxed);
+        outputGain.store (juce::Decibels::decibelsToGain (outputDecibels, -100.0f), std::memory_order_relaxed);
+    }
+
+    // Peak levels (linear) after the input gain and after the output gain, since the
+    // last call. Any thread.
+    float takeInputPeak() noexcept  { return inputPeak.exchange (0.0f, std::memory_order_relaxed); }
+    float takeOutputPeak() noexcept { return outputPeak.exchange (0.0f, std::memory_order_relaxed); }
+
     void prepare (const juce::dsp::ProcessSpec& spec)
     {
+        for (auto* smoothed : { &inputSmoothed, &outputSmoothed })
+            smoothed->reset (spec.sampleRate, 0.05);
+
+        inputSmoothed.setCurrentAndTargetValue (inputGain.load (std::memory_order_relaxed));
+        outputSmoothed.setCurrentAndTargetValue (outputGain.load (std::memory_order_relaxed));
+
         for (auto& module : modules)
             module->prepare (spec);
     }
@@ -91,8 +110,16 @@ public:
     // Audio thread.
     void process (const Module::Context& context) noexcept
     {
+        auto& block = context.getOutputBlock();
+
+        applyGain (block, inputSmoothed, inputGain);
+        raisePeak (inputPeak, blockPeak (block));
+
         for (auto& module : modules)
             module->process (context);
+
+        applyGain (block, outputSmoothed, outputGain);
+        raisePeak (outputPeak, blockPeak (block));
     }
 
     int getLatencySamples() const noexcept
@@ -104,8 +131,54 @@ public:
     }
 
 private:
+    static void applyGain (juce::dsp::AudioBlock<float>& block, juce::SmoothedValue<float>& smoothed,
+                           const std::atomic<float>& target) noexcept
+    {
+        smoothed.setTargetValue (target.load (std::memory_order_relaxed));
+
+        if (smoothed.isSmoothing())
+            block.multiplyBy (smoothed);
+        else if (! juce::approximatelyEqual (smoothed.getTargetValue(), 1.0f))
+            block.multiplyBy (smoothed.getTargetValue());
+    }
+
     std::vector<std::unique_ptr<Module>> modules;
+
+    std::atomic<float> inputGain { 1.0f }, outputGain { 1.0f };
+    std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
+    juce::SmoothedValue<float> inputSmoothed { 1.0f }, outputSmoothed { 1.0f }; // audio thread
 
     JUCE_DECLARE_NON_COPYABLE (FxChain)
 };
+
+//==============================================================================
+// Effects whose picture is a frequency response; the UI draws the spectrum behind it.
+inline bool hasSpectrumView (ModuleType type) noexcept
+{
+    return type == ModuleType::highPass || type == ModuleType::eq || type == ModuleType::paraEq
+        || type == ModuleType::deEsser || type == ModuleType::radio || type == ModuleType::filter;
+}
+
+// One module's live readings for the UI: { in, out } peak dB since the last call, plus
+// { pre, post } spectrum bands for the frequency pictures (which keeps their capture
+// running). Null while the module is off. Message thread.
+inline juce::var describeMeter (Module& module, SpectrumAnalyser& analyser)
+{
+    const auto in = module.takeInputPeak(), out = module.takeOutputPeak();
+
+    if (! module.isOn())
+        return {};
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty ("in", peakToDecibels (in));
+    result->setProperty ("out", peakToDecibels (out));
+
+    if (hasSpectrumView (module.getType()))
+    {
+        module.getScope().request();
+        result->setProperty ("spectrum", analyser.analyse (module.getScope(), module.getSampleRate()));
+    }
+
+    return juce::var (result);
+}
 }

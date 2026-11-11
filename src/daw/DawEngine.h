@@ -102,6 +102,12 @@ public:
     // Edit::masterId, since the last call.
     float takePeak (int trackId);
 
+    // Message thread. A track's (or the master's) insert chain: its peak levels (linear)
+    // after the input gain and after the output gain since the last call, and each
+    // insert's module by insert id, for the UI's live pictures.
+    std::pair<float, float> takeChainPeaks (int trackId);
+    void forEachInsert (int trackId, const std::function<void (int insertId, fx::Module&)>& visit);
+
     //==============================================================================
     // Audio thread. Renders numSamples into the first numChannels of `output`
     // (overwriting them) and advances the playhead while playing. Inserts keep running
