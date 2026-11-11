@@ -776,6 +776,7 @@ class DawScreen {
       return input;
     };
     // Logarithmic, so each step of the slider zooms by the same factor.
+    zoom.append(button("tool fit-button", "Fit", "Zoom to fit the whole song (Z)", () => this.run("zoomFit")));
     this.zoomSlider = slider("↔", "Horizontal zoom (+ / − or Ctrl+scroll)", (p) => this.setZoom(MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, p), true));
     this.heightSlider = slider("↕", "Track height (Shift+↑ / Shift+↓)", (p) => this.setRowHeight(MIN_ROW + (MAX_ROW - MIN_ROW) * p));
 
@@ -1135,6 +1136,7 @@ class DawScreen {
     element.dataset.clip = clip.id;
     element.classList.toggle("is-selected", this.selectedClip === clip.id);
     element.classList.toggle("is-missing", clip.missing);
+    element.classList.toggle("is-muted", Boolean(clip.mute));
     element.title = clip.missing ? `Missing file: ${clip.file}` : `${clip.name}\nDrag to move · Edges to trim · Corners to fade · S splits at the playhead`;
 
     const place = (start, length) => {
@@ -1145,7 +1147,7 @@ class DawScreen {
 
     const canvas = html("canvas", "clip-wave");
     canvas.dataset.color = trackColour(track, this.session.tracks.indexOf(track));
-    const label = html("span", "clip-name", clip.missing ? `⚠ ${clip.name}` : clip.name);
+    const label = html("span", "clip-name", clip.missing ? `⚠ ${clip.name}` : clip.mute ? `🔇 ${clip.name}` : clip.name);
     if (clip.gain && Math.abs(clip.gain) > 0.05) label.textContent += `  ${dbText(clip.gain)} dB`;
     const fades = svg("svg", { class: "clip-fades", preserveAspectRatio: "none" });
     const fadeIn = svg("path"), fadeOut = svg("path");
@@ -1541,9 +1543,13 @@ class DawScreen {
   createClipPanel(clip) {
     const element = html("section", "panel clip-panel");
     const head = html("div", "panel-head");
-    head.append(html("h3", "", "Clip"), html("p", "panel-caption", clip.name));
-    const row = html("div", "insert-controls clip-controls");
     const id = clip.id;
+    const nameInput = html("input", "clip-name-input");
+    Object.assign(nameInput, { value: clip.name, spellcheck: false, title: "Rename the clip" });
+    nameInput.addEventListener("change", () => { if (nameInput.value.trim()) daw("setClip", { id, name: nameInput.value.trim() }); });
+    nameInput.addEventListener("keydown", (event) => { if (event.key === "Enter") nameInput.blur(); });
+    head.append(html("h3", "", "Clip"), nameInput);
+    const row = html("div", "insert-controls clip-controls");
     const current = () => this.findClip(id)?.clip ?? clip;
 
     const gain = new ValueKnob({ label: "Gain", min: -24, max: 24, value: clip.gain, defaultValue: 0, bipolar: true, unit: "dB",
@@ -1555,15 +1561,34 @@ class DawScreen {
                                     format: fadeFormat, onChange: (v, first) => daw("clipFades", { id, fadeIn: current().fadeIn, fadeOut: v, continue: !first }) });
     row.append(gain.element, fadeIn.element, fadeOut.element);
 
+    const muteButton = button("toggle", "Mute", "Silence this clip without deleting it (Shift+M)", () => this.run("muteClip"));
+    const threshold = html("select", "dropdown strip-threshold");
+    threshold.title = "What counts as silence for Strip silence";
+    [[-55, "Quiet room (−55 dB)"], [-45, "Normal (−45 dB)"], [-35, "Noisy (−35 dB)"]].forEach(([v, t]) => threshold.append(new Option(t, v)));
+    threshold.value = String(this.stripThreshold ?? -45);
+    threshold.addEventListener("change", () => { this.stripThreshold = Number(threshold.value); });
+
+    const tools = html("div", "panel-actions clip-tools");
+    tools.append(muteButton,
+      button("tool", "Normalise", "Set the clip gain so its loudest peak is −1 dB", () => this.run("normaliseClip")),
+      button("tool", "Strip silence", "Split the clip into phrases and remove the silent gaps between them", () => this.run("stripSilence")),
+      threshold,
+      button("tool", "Loop clip", "Loop the clip's range (Shift+L)", () => this.run("loopClip")),
+      button("tool", "Zoom to clip", "Fit the clip in the view (Shift+Z)", () => this.run("zoomClip")));
+
     const actions = html("div", "panel-actions");
     actions.append(
       button("tool", "Split", "Split at the playhead (S)", () => this.splitSelected()),
       button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
       button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected()));
     head.append(actions);
-    element.append(head, row);
+    element.append(head, row, tools);
 
-    return { element, update: (c) => { gain.update(c.gain); fadeIn.update(c.fadeIn); fadeOut.update(c.fadeOut); } };
+    return { element, update: (c) => {
+      gain.update(c.gain); fadeIn.update(c.fadeIn); fadeOut.update(c.fadeOut);
+      if (document.activeElement !== nameInput) nameInput.value = c.name;
+      muteButton.setAttribute("aria-pressed", String(Boolean(c.mute)));
+    } };
   }
 
   createTrackPanel(owner) {
@@ -1927,8 +1952,9 @@ class DawScreen {
     ["Clips", [[", / .", "Select the previous / next clip on the track"], ["S", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
-               ["V / B / G", "Select, cut and gain tools"], ["Alt+drag", "Move or trim without snapping"]]],
-    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
+               ["V / B / G", "Select, cut and gain tools"], ["Shift+M", "Mute / unmute the selected clip"],
+               ["Shift+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
+    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Z / Shift+Z", "Zoom to fit the song / the selected clip"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
               ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Ctrl+S", "Save (Shift: save as)"], ["?", "This list"], ["F11 / Ctrl+Cmd+F", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
   ];
 
@@ -2016,6 +2042,22 @@ class DawScreen {
     if (id >= 0) this.select(track.id, id);
   }
 
+  withClip(action) {
+    const found = this.findClip(this.selectedClip);
+    if (!found) return toast("Select a clip first.");
+    return action(found.clip);
+  }
+
+  // Zooms so start..end fills the view, with a little room on both sides.
+  zoomToRange(start, end) {
+    const visible = Math.max(100, this.arrange.clientWidth - HEAD_WIDTH);
+    const span = Math.max(0.05, end - start);
+    this.zoom = clamp((visible * 0.92) / span, MIN_ZOOM, MAX_ZOOM);
+    this.renderArrange(true);
+    this.scrollTo((start - span * 0.04) * this.zoom);
+    this.renderTransport();
+  }
+
   nudgeSelected(seconds) {
     const found = this.findClip(this.selectedClip);
     if (found) daw("moveClip", { id: found.clip.id, start: Math.max(0, found.clip.start + seconds) });
@@ -2057,6 +2099,21 @@ class DawScreen {
       loop: () => this.toggleLoop(),
       metronome: () => daw("metronome", { on: !this.session?.metronome }),
       addMarker: () => this.addMarker(),
+      muteClip: () => this.withClip((clip) => daw("setClip", { id: clip.id, mute: !clip.mute })),
+      normaliseClip: () => this.withClip(async (clip) => {
+        const result = await daw("normaliseClip", { id: clip.id });
+        if (result?.ok) toast(`Clip gain set to ${dbText(result.gain)} dB (peak at −1 dB).`);
+      }),
+      stripSilence: () => this.withClip(async (clip) => {
+        const result = await daw("stripSilence", { id: clip.id, threshold: this.stripThreshold ?? -45 });
+        if (result?.ok) {
+          this.selectedClip = null;
+          toast(`Kept ${result.clips} phrase${result.clips === 1 ? "" : "s"}. Ctrl+Z puts the clip back.`);
+        }
+      }),
+      loopClip: () => this.withClip((clip) => daw("loop", { on: true, start: clip.start, end: clip.start + clip.length })),
+      zoomClip: () => this.withClip((clip) => this.zoomToRange(clip.start, clip.start + clip.length)),
+      zoomFit: () => this.zoomToRange(0, Math.max(this.songEnd(), 10)),
       previousMarker: () => this.jumpMarker(-1),
       nextMarker: () => this.jumpMarker(1),
       tapTempo: () => this.tapTempo(),
@@ -2111,9 +2168,13 @@ class DawScreen {
       this.select(this.selectedTrack, null);
     }
     else if (event.shiftKey && key === "s") { handled(); this.toggleTrack("solo"); }
+    else if (event.shiftKey && key === "m") { handled(); this.run("muteClip"); }
+    else if (event.shiftKey && key === "l") { handled(); this.run("loopClip"); }
+    else if (event.shiftKey && key === "z") { handled(); this.run("zoomClip"); }
     else if (event.shiftKey) return;
     else if (key === "r") { handled(); this.run("record"); }
     else if (key === "k") { handled(); this.run("addMarker"); }
+    else if (key === "z") { handled(); this.run("zoomFit"); }
     else if (event.key === "[") { handled(); this.run("previousMarker"); }
     else if (event.key === "]") { handled(); this.run("nextMarker"); }
     else if (key === "t") { handled(); this.run("tapTempo"); }

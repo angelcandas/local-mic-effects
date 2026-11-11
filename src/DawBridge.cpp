@@ -1,4 +1,5 @@
 #include "DawBridge.h"
+#include "daw/ClipTools.h"
 
 #include "Presets.h"
 #include "dsp/FxModules.h"
@@ -204,6 +205,7 @@ juce::var DawBridge::describeSession()
             clips.add (object ({ { "id", clip[ids::id] }, { "name", clip[ids::name] }, { "file", file.getFullPathName() },
                                  { "start", clip[ids::start] }, { "offset", clip[ids::offset] }, { "length", clip[ids::length] },
                                  { "gain", clip[ids::gain] }, { "fadeIn", clip[ids::fadeIn] }, { "fadeOut", clip[ids::fadeOut] },
+                                 { "mute", clip.getProperty (ids::mute, false) },
                                  { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
                                  { "missing", ! file.existsAsFile() } }));
         }
@@ -753,6 +755,59 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
     if (command == "clipGain")   { edit.setClipGain (id, args["gain"]); ok(); return; }
+    if (command == "setClip")
+    {
+        if (args.hasProperty ("name")) edit.setClipName (id, args["name"].toString());
+        if (args.hasProperty ("mute")) edit.setClipMute (id, args["mute"]);
+        ok();
+        return;
+    }
+
+    // Clip commands that read the clip's audio: normalise (gain so the peak is -1 dBFS)
+    // and strip silence (keep only the parts with sound, as separate clips).
+    if (command == "normaliseClip" || command == "stripSilence")
+    {
+        const auto clip = edit.getClip (id);
+        const auto audio = clip.isValid() ? engine.getAudioPool().get (juce::File (clip[ids::file].toString())) : nullptr;
+        if (audio == nullptr)
+        {
+            complete (error (clip.isValid() ? "The clip's audio is still loading. Try again in a moment." : "Select a clip first."));
+            return;
+        }
+
+        const auto rate = engine.getAudioPool().getSampleRate();
+        const auto offset = (juce::int64) std::llround ((double) clip[ids::offset] * rate);
+        const auto length = (juce::int64) std::llround ((double) clip[ids::length] * rate);
+
+        if (command == "normaliseClip")
+        {
+            if (daw::cliptools::getPeak (*audio, offset, length) < 1.0e-5f)
+            {
+                complete (error ("The clip is silent."));
+                return;
+            }
+
+            const auto gain = daw::cliptools::getNormaliseGain (*audio, offset, length, arg (args, "target", -1.0f));
+            edit.setClipGain (id, gain);
+            complete (object ({ { "ok", true }, { "gain", gain } }));
+            return;
+        }
+
+        const auto regions = daw::cliptools::findSound (*audio, offset, length, rate, arg (args, "threshold", -45.0f));
+        if (regions.empty())
+        {
+            complete (error ("No sound above the threshold in this clip."));
+            return;
+        }
+
+        std::vector<std::pair<double, double>> parts;
+        for (const auto& r : regions)
+            parts.emplace_back (r.start, r.end);
+
+        const auto created = edit.keepClipParts (id, parts);
+        complete (object ({ { "ok", true }, { "clips", created.size() } }));
+        return;
+    }
     if (command == "clipFades")  { edit.setClipFades (id, args["fadeIn"], args["fadeOut"]); ok(); return; }
 
     //================================================================ timeline and transport

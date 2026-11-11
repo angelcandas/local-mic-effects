@@ -16,7 +16,7 @@
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value
 //     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor
 //       INSERTS ...
-//       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut
+//       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute
 //
 // Times are in seconds, so a project survives a sample-rate change. Insert values use
 // the plugin parameter IDs (see Parameters.cpp) in real units, as presets do.
@@ -104,6 +104,12 @@ public:
     int duplicateClip (int clipId);                    // placed right after the original
     void setClipGain (int clipId, float decibels);
     void setClipFades (int clipId, double fadeInSeconds, double fadeOutSeconds);
+    void setClipName (int clipId, const juce::String&);
+    void setClipMute (int clipId, bool);
+
+    // Replaces a clip with copies that play only the given parts of it (seconds from the
+    // clip's start), each with short fades. For strip silence. Returns the new clip ids.
+    juce::Array<int> keepClipParts (int clipId, const std::vector<std::pair<double, double>>& parts, double fadeSeconds = 0.01);
 
     // The nearest grid line at the project tempo, `beats` apart (1 = quarter notes,
     // 4 = bars in 4/4, 0.5 = eighths).

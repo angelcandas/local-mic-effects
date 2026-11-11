@@ -37,6 +37,9 @@ public:
     // An offline engine (for exports) runs entirely on the thread that drives it: no
     // timer, and replaced graphs are freed straight away.
     explicit DawEngine (Edit&, bool realtime = true);
+
+    // Clip edges that cut into a file's audio fade over this long, so edits don't click.
+    static constexpr double antiClickSeconds = 0.004;
     ~DawEngine() override;
 
     // With the audio stopped (e.g. from prepareToPlay). Called off the message thread,

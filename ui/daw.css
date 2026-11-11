@@ -906,3 +906,23 @@ body.is-daw .chip--live { display: none; }
   border-left: 1px dashed color-mix(in srgb, var(--warn) 45%, transparent);
   pointer-events: none;
 }
+
+/* ---------- Clip tools ---------- */
+
+.clip.is-muted { opacity: 0.35; filter: grayscale(0.8); }
+.clip.is-muted.is-selected { opacity: 0.6; }
+.clip-name-input {
+  min-width: 0;
+  width: 220px;
+  height: 26px;
+  padding: 0 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0d1016;
+  color: var(--text);
+  font-size: 12px;
+}
+.clip-name-input:focus { border-color: var(--accent-2); outline: none; }
+.clip-tools { flex-wrap: wrap; margin-top: 8px; }
+.daw select.strip-threshold { width: 150px; }
+.fit-button { height: 24px; padding: 0 8px; font-size: 11px; }
