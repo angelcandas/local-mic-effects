@@ -3,6 +3,7 @@
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, SCALES } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
+import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 import { initDaw } from "./daw.js";
 
@@ -715,7 +716,7 @@ class Rack {
       card.live.view = view;
     }
 
-    card.append(controls);
+    card.append(controls, this.buildCardFooter(module, card));
     return card;
   }
 
@@ -732,25 +733,65 @@ class Rack {
     }
   }
 
-  // Every control of the module back to its default (the power stays on).
+  // Every control of the module, and its in/out gain, back to its default (the power stays on).
   resetModule(module) {
+    const key = MODULE_KEYS[module.id];
     for (const control of module.controls) {
       const params = [control.param, control.scaleParam].filter(Boolean);
-      for (const param of params) {
-        const value = parameterDefaults[param];
-        if (value === undefined) continue;
-        const kind = parameterKinds[param] ?? "slider";
-        if (kind === "toggle") Juce.getToggleState(param).setValue(Boolean(value));
-        else if (kind === "choice") Juce.getComboBoxState(param).setChoiceIndex(Math.round(value));
-        else {
-          const state = Juce.getSliderState(param);
-          state.sliderDragStarted();
-          state.setNormalisedValue(toNormalised(state, value));
-          state.sliderDragEnded();
-        }
-      }
+      for (const param of params) this.setParameter(param, parameterDefaults[param]);
     }
+    for (const param of [`${key}InGain`, `${key}OutGain`]) this.setParameter(param, parameterDefaults[param]);
     this.onUserChange();
+  }
+
+  // Sets a parameter in real units (as a host gesture, so it's one undo step).
+  setParameter(param, value) {
+    if (value === undefined) return;
+    const kind = parameterKinds[param] ?? "slider";
+    if (kind === "toggle") Juce.getToggleState(param).setValue(Boolean(value));
+    else if (kind === "choice") Juce.getComboBoxState(param).setChoiceIndex(Math.round(value));
+    else {
+      const state = Juce.getSliderState(param);
+      state.sliderDragStarted();
+      state.setNormalisedValue(toNormalised(state, value));
+      state.sliderDragEnded();
+    }
+  }
+
+  getParameter(param) {
+    const kind = parameterKinds[param] ?? "slider";
+    if (kind === "toggle") return Juce.getToggleState(param).getValue() ? 1 : 0;
+    if (kind === "choice") return Juce.getComboBoxState(param).getChoiceIndex();
+    return Juce.getSliderState(param).getScaledValue();
+  }
+
+  // The bottom row of a card: the effect's presets, and its own input and output gain.
+  buildCardFooter(module, card) {
+    const footer = html("div", "card-footer");
+    const picker = createPresetPicker({
+      getNativeFunction: Juce.getNativeFunction,
+      ids: [module.id],
+      read: () => Object.fromEntries(presetParams(module.id).map((param) => [param, this.getParameter(param)])),
+      apply: (values) => {
+        for (const [param, value] of Object.entries(values)) this.setParameter(param, value);
+        this.onUserChange();
+        card.dispatchEvent(new Event("knob-change"));
+      },
+      defaultOf: (param) => parameterDefaults[param],
+    });
+
+    const key = MODULE_KEYS[module.id];
+    const gains = html("div", "card-gains");
+    const shared = key === "pitch" ? " (shared by autotune, pitch shift and harmonizer)" : "";
+    for (const [suffix, label, title] of [["InGain", "In", "Input gain: the level going into this effect"],
+                                          ["OutGain", "Out", "Output gain: the level coming out of this effect"]]) {
+      const element = html("div", "card-gain");
+      new Knob(element, { param: `${key}${suffix}`, label, bipolar: true, onUserChange: this.onUserChange });
+      element.title = `${title}${shared}. Drag or scroll · Double-click to reset`;
+      gains.append(element);
+    }
+    footer.append(picker.element, gains);
+    return footer;
   }
 
   // Tap tempo for the echo: the average gap between taps becomes the echo time.

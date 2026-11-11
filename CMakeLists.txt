@@ -41,7 +41,9 @@ juce_add_binary_data(MicFX_WebUI
         ui/modules.js
         ui/widgets.js
         ui/fxviews.js
+        ui/fxpresets.js
         ui/daw.js
+        ui/rhythm.js
         ui/browser.js
         ui/daw.css
         libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js)
@@ -53,6 +55,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/Key.h
     src/analysis/MixAssistant.cpp
     src/analysis/MixAssistant.h
+    src/analysis/Beats.cpp
+    src/analysis/Beats.h
     src/Parameters.cpp
     src/Presets.cpp
     src/PluginProcessor.cpp
@@ -63,6 +67,8 @@ set(MICFX_DSP_SOURCES
     src/daw/Edit.cpp
     src/daw/Exporter.cpp
     src/daw/Project.cpp
+    src/daw/Quantize.cpp
+    src/daw/Quantize.h
     src/daw/Warp.cpp
     src/daw/Warp.h
     src/dsp/Biquad.h

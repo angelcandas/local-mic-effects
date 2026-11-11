@@ -1,5 +1,6 @@
 #include "Parameters.h"
 #include "dsp/PitchEngine.h"
+#include "dsp/FxModule.h"
 
 namespace
 {
@@ -192,4 +193,17 @@ Parameters::Parameters (Layout& l)
 
       outputGain (decibels (l, "outputGain", "Output Gain", -24.0f, 24.0f, 0.0f))
 {
+    // Every effect's own input and output gain ("compressorInGain"...), after the rest
+    // so hosts keep the parameter order they already had.
+    for (int i = 0; i < fx::numModuleTypes; ++i)
+    {
+        const juce::String key (fx::getModuleKey ((fx::ModuleType) i));
+        juce::String name;
+        for (auto c : key)
+            name << (juce::CharacterFunctions::isUpperCase (c) ? juce::String (" ") : juce::String()) << juce::String::charToString (c);
+        name = name.substring (0, 1).toUpperCase() + name.substring (1);
+
+        decibels (l, key + "InGain", name + " In Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
+        decibels (l, key + "OutGain", name + " Out Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
+    }
 }

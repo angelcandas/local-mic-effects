@@ -645,14 +645,4 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
     return {};
 }
 
-// A stable name for each type, for project files and the UI.
-inline const char* getModuleKey (ModuleType type)
-{
-    static constexpr const char* keys[] = {
-        "highPass", "gate", "pitch", "eq", "paraEq", "compressor", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
-        "robot", "filter", "autoWah", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "width"
-    };
-    static_assert (std::size (keys) == numModuleTypes);
-    return keys[(size_t) type];
-}
 }

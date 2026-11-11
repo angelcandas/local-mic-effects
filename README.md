@@ -88,6 +88,8 @@ tracks instead of one live chain:
   meters, either side of its inserts. In both modes, effect cards move with your voice: the
   spectrum behind the EQ and filter curves, a dot riding the compressor and gate curves with the
   gain reduction (or gate open/closed), echo taps replaying what you sang, and in/out level bars.
+- Every effect also has its own **In** and **Out** gain and a **Presets** menu (factory settings, plus
+  your own saved with *Save current as…*, shared between Live and DAW).
 - Every track feeds the **master** bus, which has its own inserts and volume. **Mixer** shows a
   channel strip per track plus the master.
 - **Recording is always dry.** Arm one or more tracks and press **Rec** (or **R**). The take is the
@@ -281,6 +283,7 @@ ui/app.js, styles.css   the interface (Live mode)
 ui/daw.js, daw.css      the DAW screen: tracks, clips, inserts, mixer, transport
 ui/browser.js           the DAW screen's library sidebar (files, effects, instruments, presets)
 ui/widgets.js           helpers shared by both screens
+ui/fxpresets.js         per-effect presets (factory + your own) and the card's preset menu
 ui/fxviews.js           effect pictures (EQ/filter curves, dynamics, echo taps…) for both screens,
                         animated from each effect's live readings
 tests/DspTests.cpp      headless DSP test runner

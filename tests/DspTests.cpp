@@ -22,6 +22,8 @@
 #include "daw/Exporter.h"
 #include "daw/Project.h"
 #include "daw/Warp.h"
+#include "daw/Quantize.h"
+#include "analysis/Beats.h"
 #include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
@@ -377,7 +379,15 @@ namespace
             switchAll (partial, true);
 
             for (auto type : inserts)
-                full.find (type)->getValue (0).store (1.0f);
+            {
+                auto& module = *full.find (type);
+                for (int v = 0; v < module.getNumValues(); ++v)
+                    if (module.isSwitch (v))
+                    {
+                        module.getValue (v).store (1.0f);
+                        break;
+                    }
+            }
 
             check (runChain (full, voice) == runChain (partial, voice), "an insert chain matches the full chain with the same modules on");
         }
@@ -536,6 +546,7 @@ namespace
     }
 
 
+    juce::AudioBuffer<float> makeHits (const std::vector<double>& times, double seconds, int accentEvery = 0);
     //==========================================================================
     // Stereo sines: each part is { seconds, frequency, amplitude per channel }.
     void writeWav (const juce::File&, const juce::AudioBuffer<float>&, double rate);
@@ -2093,6 +2104,54 @@ namespace
             check (! edit.getClip (clipId).hasProperty (daw::ids::warp), "and each undoes");
         }
 
+        // Rhythm commands: tempo from a leading track (lined up with the bars), quantize
+        // to the grid and to its groove, clear the warp. Each is one undo step.
+        {
+            std::vector<double> beats;
+            for (int b = 0; b < 24; ++b)
+                beats.push_back (0.25 + b * 0.5);
+            const auto drumsFile = folder.getChildFile ("drums.wav");
+            writeWav (drumsFile, makeHits (beats, 12.5, 4), sampleRate);
+            std::vector<double> loose;
+            for (int b = 0; b < 10; ++b)
+                loose.push_back (0.27 + b * 0.5 + (b % 2 == 0 ? 0.03 : -0.02));
+            const auto voiceFile = folder.getChildFile ("loose.wav");
+            writeWav (voiceFile, makeHits (loose, 6.0), sampleRate);
+
+            const auto drums = bridge.importAudio (drumsFile, -1);
+            const auto voice = bridge.importAudio (voiceFile, -1);
+            const auto drumsTrack = (int) drums["track"], voiceTrack = (int) voice["track"];
+            const auto otherClip = (int) edit.getTracks()[0].getChildWithName (daw::ids::CLIP)[daw::ids::id];
+            const auto otherStart = (double) edit.getClip (otherClip)[daw::ids::start];
+
+            const auto detected = run ("detectTempo", args ({ { "track", drumsTrack }, { "apply", true }, { "lineUp", true } }));
+            check (ok (detected) && std::abs ((double) detected["bpm"] - 120.0) < 0.3 && std::abs (edit.getTempo() - (double) detected["bpm"]) < 1e-9
+                       && std::abs ((double) edit.getClip (otherClip)[daw::ids::start] - otherStart - (double) detected["shift"]) < 1e-9,
+                   "detectTempo sets the tempo from the leading track and slides the song onto the bars ("
+                       + detected["bpm"].toString() + " BPM, shift " + detected["shift"].toString() + " s)");
+            run ("undo");
+            check (std::abs ((double) edit.getClip (otherClip)[daw::ids::start] - otherStart) < 1e-9, "and undoes in one step");
+
+            check (! ok (run ("detectTempo", args ({ { "track", 9999 } })))
+                       && ! ok (run ("quantize", args ({ { "track", 9999 } }))), "rhythm commands need a track");
+
+            edit.setTempo (120.0);
+            const auto quantized = run ("quantize", args ({ { "track", voiceTrack }, { "steps", 0.5 } }));
+            const auto voiceClip = (int) edit.getTrack (voiceTrack).getChildWithName (daw::ids::CLIP)[daw::ids::id];
+            check (ok (quantized) && (int) quantized["onsets"] == 10 && (int) quantized["moved"] == 5 // half were played on the grid
+                       && edit.getClip (voiceClip).hasProperty (daw::ids::warp),
+                   "quantize warps a track's clips to the grid (" + quantized["moved"].toString() + " onsets moved)");
+
+            const auto grooved = run ("quantize", args ({ { "track", voiceTrack }, { "groove", drumsTrack }, { "steps", 1.0 }, { "strength", 0.8 } }));
+            check (ok (grooved) && (int) grooved["moved"] == 5, "quantize to the leading track's groove");
+
+            check (ok (run ("clearWarp", args ({ { "clips", juce::Array<juce::var> { voiceClip } } })))
+                       && ! edit.getClip (voiceClip).hasProperty (daw::ids::warp), "clearWarp puts the clip back as recorded");
+
+            run ("removeTrack", args ({ { "id", voiceTrack } }));
+            run ("removeTrack", args ({ { "id", drumsTrack } }));
+        }
+
         // ...and with no track picked, on a new track named after the file.
         imported = bridge.importAudio (song, -1);
         session = lastSession();
@@ -2686,6 +2745,142 @@ namespace
         folder.deleteRecursively();
     }
 
+    // Percussive hits (a decaying tone with a click) at the given times; the first of
+    // every `accentEvery` is louder.
+    juce::AudioBuffer<float> makeHits (const std::vector<double>& times, double seconds, int accentEvery)
+    {
+        juce::AudioBuffer<float> audio (1, (int) (seconds * sampleRate));
+        audio.clear();
+        juce::Random random (7);
+
+        for (size_t h = 0; h < times.size(); ++h)
+        {
+            const auto level = accentEvery > 0 && h % (size_t) accentEvery == 0 ? 0.8f : 0.4f;
+            const auto start = (int) std::round (times[h] * sampleRate);
+            for (int i = 0; i < (int) (0.15 * sampleRate) && start + i < audio.getNumSamples(); ++i)
+            {
+                const auto decay = (float) std::exp (-i / (0.03 * sampleRate));
+                const auto click = i < (int) (0.004 * sampleRate) ? (random.nextFloat() - 0.5f) : 0.0f;
+                audio.addSample (0, start + i, level * decay * (0.6f * (float) std::sin (0.04 * i) + click));
+            }
+        }
+
+        return audio;
+    }
+
+    void testRhythm()
+    {
+        std::cout << "\nRhythm: onsets, tempo, grooves and audio quantize\n";
+        namespace rhythm = analysis::rhythm;
+
+        // Onsets land on the attacks.
+        const std::vector<double> times { 0.5, 0.83, 1.4, 1.62, 2.3 };
+        const auto hits = makeHits (times, 3.0);
+        const auto onsets = rhythm::findOnsets (hits, sampleRate);
+        auto worst = 0.0;
+        for (size_t i = 0; i < times.size() && i < onsets.size(); ++i)
+            worst = std::max (worst, std::abs (onsets[i].time - times[i]));
+        check (onsets.size() == times.size() && worst < 0.003,
+               "finds every hit, within 3 ms (" + juce::String ((int) onsets.size()) + " found, worst " + juce::String (worst * 1000.0, 1) + " ms)");
+        check (rhythm::findOnsets (hits, sampleRate, 1.0, 2.0).size() == 2, "only between the times asked for");
+
+        // Tempo: 100 BPM played a little loosely, accent on beat one, starting at 0.3 s.
+        std::vector<double> beats;
+        juce::Random jitter (3);
+        for (int b = 0; b < 40; ++b)
+            beats.push_back (0.3 + b * 0.6 + (jitter.nextDouble() - 0.5) * 0.02);
+        const auto song = makeHits (beats, 25.0, 4);
+        const auto tempo = rhythm::detectTempo (song, sampleRate, 4);
+        check (std::abs (tempo.bpm - 100.0) < 0.5, "detects 100 BPM (" + juce::String (tempo.bpm, 2) + ")");
+        auto followed = tempo.beats.size() >= 38;
+        for (const auto b : tempo.beats)
+            followed = followed && std::any_of (beats.begin(), beats.end(), [b] (double t) { return std::abs (t - b) < 0.02; });
+        check (followed, "follows the played beats (" + juce::String ((int) tempo.beats.size()) + " beats)");
+        check (tempo.firstDownbeat == 0 && std::abs (tempo.gridStart - 0.3) < 0.02, "finds the accented downbeat and where the grid starts");
+
+        // Grids.
+        const auto grid = rhythm::makeGrid (120.0, 0.5, 1.0, 2.0);
+        check (std::find_if (grid.begin(), grid.end(), [] (double t) { return std::abs (t - 1.25) < 1e-9; }) != grid.end()
+                   && grid.front() < 1.0 && grid.back() > 2.0, "a straight eighth-note grid at 120 BPM");
+        const auto swung = rhythm::makeGrid (120.0, 0.5, 0.0, 1.0, 0.0, 1.0);
+        check (std::find_if (swung.begin(), swung.end(), [] (double t) { return std::abs (t - (0.25 + 0.25 / 3.0)) < 1e-9; }) != swung.end(),
+               "full swing moves the off-beat eighths to the triplet");
+        const auto groove = rhythm::makeGroove ({ 1.0, 1.5, 2.1, 2.6 }, 0.5, 0.0, 3.0);
+        check (std::find_if (groove.begin(), groove.end(), [] (double t) { return std::abs (t - 1.8) < 1e-9; }) != groove.end()
+                   && groove.front() <= 0.0 && groove.back() >= 3.0,
+               "a groove divides the played beats and carries on past them");
+
+        // Quantize a sloppy take on the timeline to the project's beat grid.
+        const auto folder = juce::File::createTempFile ("micfx-rhythm");
+        folder.createDirectory();
+        const std::vector<double> played { 0.53, 0.97, 1.52, 2.04, 2.47, 3.03 }; // meant for every 0.5 s
+        const auto takeFile = folder.getChildFile ("take.wav");
+        writeWav (takeFile, makeHits (played, 4.0), sampleRate);
+
+        daw::Edit edit;
+        daw::AudioPool pool;
+        pool.setSampleRate (sampleRate);
+        edit.setTempo (120.0);
+        const auto track = (int) edit.addTrack ("Drums")[daw::ids::id];
+        const auto clip = (int) edit.addClip (track, takeFile, 1.0, 4.0)[daw::ids::id]; // the take starts at bar 1 + 2 beats
+
+        const auto onTimeline = [&]
+        {
+            double rate = 0.0;
+            const auto audio = daw::rhythm::renderTrack (edit, pool, track, rate, 1);
+            std::vector<double> found;
+            for (const auto& onset : rhythm::findOnsets (audio, rate))
+                found.push_back (onset.time);
+            return found;
+        };
+
+        const auto beatGrid = rhythm::makeGrid (120.0, 1.0, 0.0, 6.0);
+        auto result = daw::rhythm::quantizeClips (edit, pool, { clip }, beatGrid, {});
+        auto after = onTimeline();
+        worst = 0.0;
+        for (size_t i = 0; i < after.size(); ++i)
+            worst = std::max (worst, std::abs (after[i] - (1.5 + 0.5 * (double) i)));
+        check (result.onsets == 6 && result.moved == 6 && after.size() == 6 && worst < 0.004,
+               "quantize puts every hit on the beat (worst " + juce::String (worst * 1000.0, 1) + " ms)");
+        check (daw::AudioPool::getWarpKey (takeFile, daw::Edit::getWarpSettings (edit.getClip (clip))).contains ("#")
+                   && takeFile.getSize() > 0, "by warping the clip; the take itself is untouched");
+
+        daw::rhythm::Options half;
+        half.strength = 0.5;
+        daw::rhythm::quantizeClips (edit, pool, { clip }, beatGrid, half);
+        after = onTimeline();
+        check (after.size() == 6 && std::abs (after[0] - 1.515) < 0.004 && std::abs (after[1] - 1.985) < 0.004,
+               "50% strength moves them halfway, from the unwarped take (" + juce::String (after[0], 3) + ", " + juce::String (after[1], 3) + ")");
+
+        // Split pieces of one take share one warp (and one rendered copy).
+        edit.setClipWarp (clip, {});
+        const auto right = edit.splitClip (clip, 3.25);
+        daw::rhythm::quantizeClips (edit, pool, daw::rhythm::getClipIds (edit, track), beatGrid, {});
+        check (daw::Edit::getClipWarp (edit.getClip (clip)) == daw::Edit::getClipWarp (edit.getClip (right))
+                   && ! daw::Edit::getClipWarp (edit.getClip (right)).isIdentity(),
+               "pieces of one take are quantized together");
+
+        // A groove from a leading track, and lining the song up with the bar lines.
+        daw::Edit song2;
+        const auto leaderFile = folder.getChildFile ("leader.wav");
+        writeWav (leaderFile, song, sampleRate);
+        const auto leader = (int) song2.addTrack ("Guitar")[daw::ids::id];
+        song2.addClip (leader, leaderFile, 0.0, 25.0);
+        const auto analysed = daw::rhythm::analyseTrack (song2, pool, leader);
+        check (std::abs (analysed.bpm - 100.0) < 0.5, "analyses the leading track on the timeline (" + juce::String (analysed.bpm, 2) + " BPM)");
+
+        song2.setTempo (analysed.bpm);
+        const auto shift = daw::rhythm::getLineUpShift (song2, analysed);
+        const auto bar = 4 * 60.0 / analysed.bpm;
+        check (std::abs (shift - (bar - 0.3)) < 0.02, "lines the first downbeat up with a bar line, never before 0 s (shift "
+                                                         + juce::String (shift, 3) + " s)");
+        daw::rhythm::shiftSong (song2, shift);
+        check (std::abs ((double) song2.getTracks()[0].getChildWithName (daw::ids::CLIP)[daw::ids::start] - shift) < 1e-9,
+               "shifting the song moves its clips");
+
+        folder.deleteRecursively();
+    }
+
     void testClipTools()
     {
         std::cout << "\nDAW clip tools (mute, normalise, strip silence, anti-click edges)\n";
@@ -3160,6 +3355,41 @@ namespace
             check (fx::describeMeter (chain[0], analyser).isVoid(), "a module that's off has no readings");
         }
 
+        // Every effect's own input and output gain: in before it, out after it, and
+        // nothing while it's off.
+        {
+            fx::FxChain chain { { fx::ModuleType::saturation } };
+            auto& module = chain[0];
+            module.findValue ("satOn")->store (1.0f);
+            module.findValue ("satMix")->store (0.0f); // a clean pass, so the gains are all that change
+            module.getInputGain().store (6.0f);
+            module.getOutputGain().store (-12.0f);
+            check (module.findValue ("saturationInGain") == &module.getInputGain()
+                   && module.findValue ("saturationOutGain") == &module.getOutputGain(), "each effect has <key>InGain and <key>OutGain values");
+            chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            int phase = 0;
+            const auto run = [&]
+            {
+                for (int b = 0; b < 40; ++b)
+                {
+                    sineBlock (buffer, 440.0, 0.25f, phase);
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    chain.process (fx::Module::Context (block));
+                }
+                return juce::Decibels::gainToDecibels (buffer.getMagnitude (0, blockSize) / 0.25f);
+            };
+
+            const auto onDb = run();
+            const auto in = module.takeInputPeak();
+            check (std::abs (juce::Decibels::gainToDecibels (in / 0.25f) - 6.0f) < 0.2f, "an effect's input gain sets what it hears");
+            check (std::abs (onDb + 6.0f) < 0.2f, "and its output gain what it passes on (" + juce::String (onDb, 1) + " dB)");
+
+            module.findValue ("satOn")->store (0.0f);
+            check (std::abs (run()) < 0.05f, "switched off, its gains are bypassed too");
+        }
+
         // The chain's input and output gain.
         {
             fx::FxChain chain { { fx::ModuleType::eq } };
@@ -3237,6 +3467,7 @@ int main()
     testDawMode();
     testClipTools();
     testWarp();
+    testRhythm();
     testTrackTools();
     testDawBridge();
     testLiveControls();

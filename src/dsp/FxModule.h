@@ -20,6 +20,17 @@ enum class ModuleType
 
 inline constexpr int numModuleTypes = (int) ModuleType::width + 1;
 
+// A stable name for each type, for project files, parameter IDs and the UI.
+inline const char* getModuleKey (ModuleType type)
+{
+    static constexpr const char* keys[] = {
+        "highPass", "gate", "pitch", "eq", "paraEq", "compressor", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
+        "robot", "filter", "autoWah", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "width"
+    };
+    static_assert (std::size (keys) == numModuleTypes);
+    return keys[(size_t) type];
+}
+
 //==============================================================================
 // One effect in an FxChain: a DSP processor plus its own parameter values.
 //
@@ -155,13 +166,14 @@ public:
         auto& block = context.getOutputBlock();
         const auto numSamples = block.getNumSamples();
 
-        raisePeak (inputPeak, blockPeak (block));
+        // The input and output gain only act while the effect is switched on (a module
+        // that runs while off, to let a tail ring out, passes its input untouched).
+        const auto gainsOn = ! alwaysProcesses() || isOn();
 
-        // The spectrum wants the signal before and after; keep the input aside.
+        // The spectrum wants the signal before and after; the input is kept aside after
+        // the input gain, as the effect hears it.
         const auto capture = scope.isWanted() && block.getNumChannels() > 0;
         const auto captureLength = juce::jmin (numSamples, scopeInput.size());
-        if (capture)
-            std::copy_n (block.getChannelPointer (0), captureLength, scopeInput.begin());
 
         for (size_t start = 0; start < numSamples;)
         {
@@ -169,7 +181,20 @@ public:
             update();
 
             auto slice = block.getSubBlock (start, length);
+
+            if (gainsOn)
+                applyGainDb (slice, get (*inputGainDb));
+
+            raisePeak (inputPeak, blockPeak (slice));
+
+            if (capture && start < captureLength)
+                std::copy_n (slice.getChannelPointer (0), std::min (length, captureLength - start), scopeInput.begin() + (std::ptrdiff_t) start);
+
             render (Context (slice));
+
+            if (gainsOn)
+                applyGainDb (slice, get (*outputGainDb));
+
             start += length;
         }
 
@@ -179,8 +204,21 @@ public:
             scope.push (scopeInput.data(), block.getChannelPointer (0), (int) captureLength);
     }
 
+    // Every module's own input and output gain (dB), before and after its effect.
+    // Their IDs are the module key + "InGain" / "OutGain" ("compressorInGain").
+    Value& getInputGain() noexcept  { return *inputGainDb; }
+    Value& getOutputGain() noexcept { return *outputGainDb; }
+
+    static constexpr float maxGainDb = 24.0f;
+
 protected:
-    explicit Module (ModuleType t) : type (t) {}
+    // The gains are declared first, so every module has them.
+    explicit Module (ModuleType t) : type (t)
+    {
+        const juce::String key (getModuleKey (t));
+        inputGainDb = &add (key + "InGain", false, 0.0f, true);
+        outputGainDb = &add (key + "OutGain", false, 0.0f, true);
+    }
 
     // Declare values in the order the UI should list them. Call from member
     // initialisers only (before the module is shared with the audio thread).
@@ -208,14 +246,20 @@ protected:
 private:
     struct Entry
     {
-        Entry (const char* i, bool s, float v, bool smoothed) : id (i), isSwitch (s), value (v, smoothed) {}
+        Entry (const juce::String& i, bool s, float v, bool smoothed) : id (i), isSwitch (s), value (v, smoothed) {}
 
         juce::String id;
         bool isSwitch;
         Value value;
     };
 
-    Value& add (const char* id, bool isSwitchValue, float defaultValue, bool smoothed)
+    static void applyGainDb (juce::dsp::AudioBlock<float>& block, float decibels) noexcept
+    {
+        if (std::abs (decibels) > 0.001f)
+            block.multiplyBy (juce::Decibels::decibelsToGain (decibels, -100.0f));
+    }
+
+    Value& add (const juce::String& id, bool isSwitchValue, float defaultValue, bool smoothed)
     {
         return entries.emplace_back (id, isSwitchValue, defaultValue, smoothed).value;
     }
@@ -262,6 +306,8 @@ private:
     static constexpr float smoothingSeconds = 0.015f; // time constant: ~90% of the way in 35 ms
 
     const ModuleType type;
+    Value* inputGainDb = nullptr;
+    Value* outputGainDb = nullptr;
     std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
     Scope scope;
     std::array<float, 4096> scopeInput {}; // audio thread: this block's input, while capturing
