@@ -102,6 +102,17 @@ struct DawBridge::ExportJob
     daw::Exporter::Result result;
 };
 
+struct DawBridge::StemJob
+{
+    enum Phase { downloading, loading, splitting };
+    std::atomic<int> phase { loading };
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> cancel { false }, finished { false };
+    juce::ValueTree clip; // a copy, taken when the split started
+    int trackId = -1;
+    stems::Result result;
+};
+
 struct DawBridge::AutoMixJob
 {
     std::atomic<double> progress { 0.0 };
@@ -199,6 +210,8 @@ DawBridge::~DawBridge()
         exportJob->cancel = true;
     if (autoMixJob != nullptr)
         autoMixJob->cancel = true;
+    if (stemJob != nullptr)
+        stemJob->cancel = true;
     if (keyJob != nullptr)
         keyJob->cancel = true;
 }
@@ -631,6 +644,31 @@ void DawBridge::tick()
         }
     }
 
+    if (stemJob != nullptr)
+    {
+        if (stemJob->finished)
+        {
+            auto job = std::move (stemJob);
+
+            if (job->result.cancelled)
+                emit ("dawStems", object ({ { "state", "cancelled" } }));
+            else if (job->result.error.isNotEmpty())
+                emit ("dawStems", object ({ { "state", "error" }, { "error", job->result.error } }));
+            else
+            {
+                const auto added = addStemTracks (job->clip, job->trackId, job->result.files);
+                emit ("dawStems", (bool) added["ok"] ? object ({ { "state", "done" }, { "tracks", added["tracks"] } })
+                                                     : object ({ { "state", "error" }, { "error", added["error"] } }));
+            }
+        }
+        else
+        {
+            static constexpr const char* phases[] { "downloading", "loading", "splitting" };
+            emit ("dawStems", object ({ { "state", phases[juce::jlimit (0, 2, stemJob->phase.load())] },
+                                        { "progress", stemJob->progress.load() } }));
+        }
+    }
+
     if (keyJob != nullptr)
     {
         if (keyJob->finished)
@@ -772,6 +810,113 @@ juce::var DawBridge::importAudio (const juce::File& file, int trackId, double st
 
     return object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId }, { "clip", clip[ids::id] },
                      { "start", start } });
+}
+
+juce::var DawBridge::addStemTracks (const juce::ValueTree& clip, int trackId,
+                                    const std::array<juce::File, stems::numStems>& files)
+{
+    for (const auto& file : files)
+        if (! file.existsAsFile())
+            return error ("A stem file is missing: " + file.getFullPathName());
+
+    auto& undo = edit.getUndoManager();
+    undo.beginNewTransaction ("Split into stems");
+
+    // Right under the song's track (or at the end if it has gone), vocals first.
+    const auto tracks = edit.getTracks();
+    auto index = tracks.size();
+    for (int i = 0; i < tracks.size(); ++i)
+        if ((int) tracks[i][ids::id] == trackId)
+            index = i + 1;
+
+    juce::Array<juce::var> added;
+    for (const auto stem : { stems::Stem::vocals, stems::Stem::drums, stems::Stem::bass, stems::Stem::other })
+    {
+        const auto track = edit.addTrack (stems::stemNames[(size_t) stem], index++);
+        const auto id = (int) track[ids::id];
+        auto copy = edit.addClip (id, files[(size_t) stem], number (clip, ids::start), number (clip, ids::length),
+                                  number (clip, ids::offset));
+        if (! copy.isValid())
+            continue;
+
+        edit.setClipGain ((int) copy[ids::id], (float) number (clip, ids::gain));
+        edit.setClipFades ((int) copy[ids::id], number (clip, ids::fadeIn), number (clip, ids::fadeOut));
+        added.add (id);
+    }
+
+    // The stems replace the song, so stop it playing on top of them.
+    if (const auto original = edit.getClip ((int) clip[ids::id]); original.isValid())
+        edit.setClipMute ((int) clip[ids::id], true);
+
+    sessionChanged = true;
+    return object ({ { "ok", true }, { "error", juce::String() }, { "tracks", added } });
+}
+
+juce::var DawBridge::handleStems (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+
+    if (action == "cancel")
+    {
+        if (stemJob != nullptr)
+            stemJob->cancel = true;
+        return error ({});
+    }
+
+    if (stemJob != nullptr)
+        return error ("A song is already splitting into stems.");
+    if (! stems::Model::isBuiltIn())
+        return error ("This build of MicFX doesn't include the stem splitter.");
+
+    const auto clip = edit.getClip (arg (args, "id", -1));
+    if (! clip.isValid())
+        return error ("Select the song's clip first.");
+
+    const juce::File source (clip[ids::file].toString());
+    if (! source.existsAsFile())
+        return error ("Couldn't find " + source.getFullPathName() + ".");
+
+    auto job = std::make_shared<StemJob>();
+    job->clip = clip.createCopy();
+    job->trackId = (int) clip.getParent()[ids::id];
+    stemJob = job;
+
+    const auto folder = getRecordingFolder();
+    const auto name = source.getFileNameWithoutExtension();
+    const auto model = stems::Model::getDefaultFile();
+
+    juce::Thread::launch ([job, source, folder, name, model]
+    {
+        const auto progress = [job] (double p) { job->progress = p; return ! job->cancel.load(); };
+        auto& result = job->result;
+
+        if (! model.existsAsFile() || stems::Model::verify (model).isNotEmpty())
+        {
+            job->phase = StemJob::downloading;
+            if (const auto problem = stems::Model::download (model, progress); problem.isNotEmpty())
+            {
+                result.cancelled = job->cancel.load();
+                result.error = result.cancelled ? juce::String() : problem;
+                job->finished = true;
+                return;
+            }
+        }
+
+        job->phase = StemJob::loading;
+        job->progress = 0.0;
+        const auto separator = stems::Model::load (model, result.error);
+
+        if (separator != nullptr && ! job->cancel.load())
+        {
+            job->phase = StemJob::splitting;
+            result = stems::split (source, folder, name, separator, progress);
+        }
+
+        result.cancelled = result.cancelled || job->cancel.load();
+        job->finished = true;
+    });
+
+    return error ({});
 }
 
 //==============================================================================
@@ -1895,6 +2040,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         if (auto result = handleAutoMix (args, complete); ! result.isVoid())
             complete (result);
+        return;
+    }
+
+    if (command == "stems")
+    {
+        complete (handleStems (args));
         return;
     }
 

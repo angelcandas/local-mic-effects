@@ -168,6 +168,22 @@ backing track for you, locally, with the effects you already have:
 **Match a reference…** picks a song you like and matches the master to it: a gentle master EQ
 towards its tonal balance, and the master volume towards its loudness (held below clipping).
 
+### Split into stems (DAW mode)
+
+Select a song's clip and press **Split into stems** in the clip panel. MicFX separates it into
+**Vocals**, **Drums**, **Bass** and **Other**, each on its own track right under the song and lined
+up with the clip (same start, trim, gain and fades), and mutes the song's clip. One undo takes it back.
+
+- It runs on your computer with [Demucs v4](https://github.com/facebookresearch/demucs) (the hybrid
+  transformer model by Meta AI Research) through [demucs.cpp](https://github.com/sevagh/demucs.cpp).
+  Nothing is uploaded.
+- The first split downloads the model weights once (about 84 MB) to
+  `~/Library/Application Support/MicFX/Models/`, and checks them against their SHA-256.
+- It takes a few minutes for a 4-minute song: the song is cut into 30-second chunks that up to four
+  CPU cores separate at once, crossfaded back together. Cancel any time.
+- The stems are 24-bit 44.1 kHz WAVs (`Song - Vocals.wav`, ...) in the project's `Audio` folder, or
+  next to your recordings when no project is open.
+
 ### Song key
 
 **Key** next to the time signature (or **Edit → Song key…**) finds the key the song is in, locally:
@@ -288,7 +304,9 @@ src/analysis/           Auto Mix measurements: loudness (BS.1770 / EBU R128), 1/
                         volume moves (Auto Mix); Key finds the song's key from chroma and key
                         profiles
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
-src/DawBridge.*         the DAW screen's commands and events (session, status, export)
+src/stems/              Split into stems: chunked, multi-threaded separation, model download and
+                        check (StemSplitter), and the Demucs adapter (DemucsSeparator)
+src/DawBridge.*         the DAW screen's commands and events (session, status, export, stems)
 src/StandaloneApp.cpp   standalone app window, with Options → Check for updates…
 scripts/update.sh       update check / pull + rebuild, used by Check for updates…
 src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune/pitch/harmony),
@@ -305,6 +323,8 @@ ui/fxviews.js           effect pictures (EQ/filter curves, dynamics, echo taps�
                         animated from each effect's live readings
 tests/DspTests.cpp      headless DSP test runner
 libs/JUCE               JUCE 9.0.2 (git submodule)
+libs/demucs.cpp         Demucs v4 inference in C++, MIT (git submodule; optional: without it the
+libs/eigen              app builds but can't split stems), on Eigen, MPL 2.0 (git submodule)
 ```
 
 ### Adding an effect
@@ -328,3 +348,6 @@ To hear yourself too, create a Multi-Output Device in *Audio MIDI Setup*.
 
 MicFX is released under the [GNU AGPL v3](LICENSE). It is built on [JUCE](https://juce.com), whose free
 license is also AGPLv3. If you want to ship a closed-source build, you need a commercial JUCE license.
+
+Stem splitting uses [demucs.cpp](https://github.com/sevagh/demucs.cpp) (MIT), [Eigen](https://eigen.tuxfamily.org)
+(MPL 2.0) and the Demucs v4 weights (MIT, downloaded at first use); all three are compatible with the AGPL.
