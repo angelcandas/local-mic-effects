@@ -120,6 +120,17 @@ tracks instead of one live chain:
   tracks for a new track; drag an effect or preset onto a track, the master, a mixer strip or the
   effects panel. Double-click (or Enter) adds to the selected track. **Shift+B** folds it to a thin
   strip, **Ctrl+F** searches it, and its right edge drags to resize.
+- **MIDI tracks**: **+ MIDI** (Ctrl+Shift+T) adds one with a built-in synth (Keys, Soft Piano,
+  Warm Pad, Strings, Synth Bass, Lead, Organ); drop an instrument from the library on a track, or
+  below the tracks, to use another. VST3 instruments (and AU on macOS) are found by a scan of the
+  usual plug-in folders (**Rescan plug-ins** in the library); open-source ones such as Surge XT,
+  Dexed, Vital or OB-Xd work, and so do commercial ones like Kontakt, which opens in its own window
+  from the ♫ button on the track. Their settings are saved in the project.
+  Arm a MIDI track to play it from your MIDI keyboard (every MIDI input is opened) and record: the
+  take becomes a MIDI clip (the sustain pedal is kept). Double-click a MIDI track's lane for an
+  empty clip, and select a MIDI clip to edit its notes in the **piano roll** in the effects panel:
+  click to add, drag to move, drag the end to resize, double-click to delete, box-select, ↑↓ to
+  transpose, Q to quantize to the grid. Exports play the instruments too.
 - **Menus**: the standalone app has File (new, open, save, import, export, audio settings), Edit,
   View and Transport menus, in the macOS menu bar at the top of the screen or under the title bar
   on Windows and Linux. They do the same as the buttons and shortcuts.

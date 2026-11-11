@@ -45,6 +45,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/daw.js
         ui/rhythm.js
         ui/browser.js
+        ui/pianoroll.js
         ui/daw.css
         libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js)
 
@@ -66,6 +67,8 @@ set(MICFX_DSP_SOURCES
     src/daw/DawEngine.cpp
     src/daw/Edit.cpp
     src/daw/Exporter.cpp
+    src/daw/Instruments.cpp
+    src/daw/PluginHost.cpp
     src/daw/Project.cpp
     src/daw/Quantize.cpp
     src/daw/Quantize.h
@@ -95,6 +98,9 @@ target_compile_definitions(MicFX
         JUCE_WEB_BROWSER=1
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
+        # MIDI tracks in DAW mode host instrument plugins (src/daw/PluginHost).
+        JUCE_PLUGINHOST_VST3=1
+        JUCE_PLUGINHOST_AU=1
         # Our own standalone app (src/StandaloneApp.cpp) adds "Check for updates..." to the Options menu.
         JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1
     PRIVATE
@@ -119,7 +125,26 @@ target_link_libraries(MicFX
 option(MICFX_BUILD_TESTS "Build the DSP test runner" ON)
 
 if(MICFX_BUILD_TESTS)
+    # A tiny VST3 instrument the tests scan and load (plugin hosting for MIDI tracks).
+    juce_add_plugin(MicFXTestSynth
+        COMPANY_NAME "MicFX Tests"
+        BUNDLE_ID "com.angelcandas.micfx.testsynth"
+        PLUGIN_MANUFACTURER_CODE Mfxt
+        PLUGIN_CODE Mfts
+        FORMATS VST3
+        PRODUCT_NAME "MicFX Test Synth"
+        IS_SYNTH TRUE
+        NEEDS_MIDI_INPUT TRUE
+        VST3_CATEGORIES Instrument Synth)
+
+    target_sources(MicFXTestSynth PRIVATE tests/TestSynth.cpp)
+    target_compile_definitions(MicFXTestSynth PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+    target_link_libraries(MicFXTestSynth
+        PRIVATE juce::juce_audio_utils
+        PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
     juce_add_console_app(MicFXTests PRODUCT_NAME "MicFXTests")
+    add_dependencies(MicFXTests MicFXTestSynth_VST3)
 
     target_sources(MicFXTests PRIVATE tests/DspTests.cpp src/DawBridge.cpp ${MICFX_DSP_SOURCES})
     target_include_directories(MicFXTests PRIVATE src)
@@ -127,6 +152,9 @@ if(MICFX_BUILD_TESTS)
     target_compile_definitions(MicFXTests
         PRIVATE
             JucePlugin_Name="MicFX"
+            MICFX_TEST_SYNTH="$<GENEX_EVAL:$<TARGET_PROPERTY:MicFXTestSynth_VST3,JUCE_PLUGIN_ARTEFACT_FILE>>"
+            JUCE_PLUGINHOST_VST3=1
+            JUCE_PLUGINHOST_AU=1
             JUCE_WEB_BROWSER=0
             JUCE_USE_CURL=0)
 

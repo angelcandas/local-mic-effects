@@ -13,6 +13,8 @@
 //                 any change
 //   "dawStatus"   transport, recording and meters, 30 times a second (while in DAW mode)
 //   "dawExport"   { progress } while an export runs, then { done, error, files }
+//   "dawPlugins"  { scanning, progress, count, failed } while an instrument plugin scan
+//                 runs and when it ends (refresh the "instruments" list then)
 //   "dawAutoMix"  { state: "analysing", progress } while Auto Mix listens, then
 //                 { state: "ready", plan... } (see describeAutoMix), or "cancelled"/"error"
 //   "dawKey"      { state: "analysing", progress } while the key is detected, then
@@ -55,6 +57,16 @@ public:
 private:
     juce::var describeStatus();
     juce::var describeInserts (const juce::ValueTree& trackOrMaster) const;
+    juce::var describeInstrument (const juce::ValueTree& track) const;
+    juce::var describeNotes (const juce::ValueTree& clip) const;
+
+    // MIDI tracks, notes and instruments (see the commands in DawBridge.cpp). Returns
+    // false if `command` isn't one of them.
+    bool handleMidi (const juce::String& command, const juce::var& args, Complete&);
+    juce::var describeInstruments() const;
+    juce::var addInstrument (int trackId, const juce::String& instrumentId);
+    void showInstrumentWindow (int trackId);
+    void updateInstrumentWindows();
     juce::var getPeaks (const juce::File&, const daw::warp::Settings& = {});
     juce::var getDetailPeaks (const juce::File&, double start, double end, double seconds, const daw::warp::Settings& = {});
 
@@ -100,6 +112,12 @@ private:
     bool lastDirty = false, lastCanUndo = false, lastCanRedo = false;
 
     std::unique_ptr<juce::FileChooser> chooser;
+
+    // Instrument plugin editors, one window per MIDI track, and what the tracks' instruments
+    // were last tick (a change redraws the session and closes stale windows).
+    std::map<int, std::unique_ptr<juce::Component>> instrumentWindows;
+    juce::String instrumentsSeen;
+    int scanTicks = 0;
     std::map<juce::String, juce::var> peakCache;
 
     // A running export (at most one).
