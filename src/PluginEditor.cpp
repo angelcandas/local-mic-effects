@@ -206,6 +206,30 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            complete (list);
                        })
 
+                       // (action, on) -> { muted, dry }. "mute": the panic button; "dry": hear the mic without effects.
+                       .withNativeFunction ("liveControl", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           const auto on = args.size() > 1 && (bool) args[1];
+                           if (action == "mute") processorRef.outputMuted = on;
+                           if (action == "dry")  processorRef.dryCompare = on;
+
+                           auto* state = new juce::DynamicObject();
+                           state->setProperty ("muted", processorRef.outputMuted.load());
+                           state->setProperty ("dry", processorRef.dryCompare.load());
+                           complete (juce::var (state));
+                       })
+
+                       // (key) -> the stored string, or "" / (key, value) -> value. Small UI preferences
+                       // (favourite presets) kept in the app's settings file.
+                       .withNativeFunction ("uiPref", [this] (const auto& args, auto complete)
+                       {
+                           const auto key = "ui." + (args.size() > 0 ? args[0].toString().retainCharacters ("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_") : juce::String());
+                           if (args.size() > 1)
+                               settings.setValue (key, args[1].toString().substring (0, 20000));
+                           complete (settings.getValue (key));
+                       })
+
                        // (index) -> index
                        .withNativeFunction ("loadPreset", [this] (const auto& args, auto complete)
                        {

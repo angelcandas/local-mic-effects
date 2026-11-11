@@ -1950,6 +1950,66 @@ namespace
         check (rms (liveLeft, skip, liveLeft.size()) > 0.01f, "back in Live mode the mic goes through the Live chain again");
     }
 
+    void testLiveControls()
+    {
+        std::cout << "\nLive controls (panic mute, dry compare)\n";
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        processor.getState().getParameter ("satOn")->setValueNotifyingHost (1.0f);
+        processor.getState().getParameter ("satDrive")->setValueNotifyingHost (1.0f);
+        processor.getState().getParameter ("reverbOn")->setValueNotifyingHost (1.0f);
+
+        const auto mic = makeVoice (200.0f, 0.5);
+        const auto run = [&]
+        {
+            std::vector<float> out;
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            juce::MidiBuffer midi;
+            for (size_t start = 0; start + blockSize <= mic.size(); start += blockSize)
+            {
+                buffer.clear();
+                buffer.copyFrom (0, 0, mic.data() + start, blockSize);
+                processor.processBlock (buffer, midi);
+                out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+            }
+            return out;
+        };
+
+        const auto skip = (size_t) (0.15 * sampleRate);
+        const auto wet = run();
+        processor.dryCompare = true;
+        const auto dry = run();
+        processor.dryCompare = false;
+
+        // The reference: every effect switched off (input/output gain and the limiter still run).
+        juce::StringArray wasOn;
+        for (auto* p : processor.getParameters())
+            if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (p); ranged != nullptr && ranged->getParameterID().endsWith ("On") && ranged->getValue() > 0.5f)
+            {
+                wasOn.add (ranged->getParameterID());
+                ranged->setValueNotifyingHost (0.0f);
+            }
+        const auto plain = run();
+        for (const auto& id : wasOn)
+            processor.getState().getParameter (id)->setValueNotifyingHost (1.0f);
+
+        float worstDry = 0.0f, worstWet = 0.0f;
+        for (auto i = skip; i < dry.size(); ++i)
+        {
+            worstDry = std::max (worstDry, std::abs (dry[i] - plain[i]));
+            worstWet = std::max (worstWet, std::abs (wet[i] - plain[i]));
+        }
+        check (worstDry < 1.0e-3f && worstWet > 0.05f, "dry compare skips the effects (dry error " + juce::String (worstDry, 5)
+                                                         + ", with effects " + juce::String (worstWet, 3) + ")");
+
+        processor.outputMuted = true;
+        const auto muted = run();
+        processor.outputMuted = false;
+        check (rms (muted, 0, muted.size()) == 0.0f, "the panic mute silences the output");
+        check (rms (run(), skip, mic.size() - blockSize) > 0.01f, "and unmuting brings it back");
+    }
+
     void testTrackTools()
     {
         std::cout << "\nDAW track tools (duplicate, copy effects, solo, clear)\n";
@@ -2409,6 +2469,7 @@ int main()
     testClipTools();
     testTrackTools();
     testDawBridge();
+    testLiveControls();
     testAnalysis();
     testMixAssistant();
     testLatency();

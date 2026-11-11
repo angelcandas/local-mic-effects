@@ -434,16 +434,76 @@ class PresetBar {
       if (event.key === "Escape") this.close();
     });
 
-    Juce.getNativeFunction("getPresets")().then((presets) => {
+    // Favourites (preset names, in the order they were starred), kept in the app settings.
+    this.favourites = [];
+    this.uiPref = Juce.getNativeFunction("uiPref");
+
+    Promise.all([Juce.getNativeFunction("getPresets")(), this.uiPref("favouritePresets").catch(() => "")]).then(([presets, saved]) => {
       this.presets = presets ?? [];
+      try { this.favourites = (JSON.parse(saved || "[]") ?? []).filter((name) => this.presets.some((p) => p.name === name)); } catch { this.favourites = []; }
       this.buildMenu();
       this.render();
     });
   }
 
-  buildMenu() {
-    const groups = new Map();
+  // Indices of the favourite presets, in favourite order.
+  get favouriteIndices() {
+    return this.favourites.map((name) => this.presets.findIndex((p) => p.name === name)).filter((i) => i >= 0);
+  }
 
+  toggleFavourite(index) {
+    const name = this.presets[index]?.name;
+    if (!name) return;
+    this.favourites = this.favourites.includes(name) ? this.favourites.filter((n) => n !== name) : [...this.favourites, name];
+    this.uiPref("favouritePresets", JSON.stringify(this.favourites));
+    this.buildMenu();
+    this.render();
+  }
+
+  buildMenu() {
+    const query = this.search?.value ?? "";
+    this.menu.replaceChildren();
+
+    this.search = html("input", "preset-search");
+    Object.assign(this.search, { type: "search", placeholder: "Search presets…", value: query, spellcheck: false });
+    this.search.addEventListener("input", () => this.filter());
+    this.search.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        const first = this.menu.querySelector(".preset-item:not([hidden]) [data-index]");
+        if (first) this.load(Number(first.dataset.index));
+      }
+      if (event.key === "Escape") this.close();
+      event.stopPropagation();
+    });
+    this.search.addEventListener("click", (event) => event.stopPropagation());
+    const top = html("div", "preset-search-row");
+    top.append(this.search, html("span", "preset-hint", "☆ adds a favourite · keys 1–9 load favourites"));
+    this.menu.append(top);
+
+    const item = (index, number) => {
+      const preset = this.presets[index];
+      const row = html("div", "preset-item");
+      row.dataset.search = `${preset.name} ${preset.category}`.toLowerCase();
+      const load = html("button", "preset-load", number ? `${number}  ${preset.name}` : preset.name);
+      load.dataset.index = index;
+      load.addEventListener("click", () => this.load(index));
+      const starred = this.favourites.includes(preset.name);
+      const star = html("button", `preset-star${starred ? " is-on" : ""}`, starred ? "★" : "☆");
+      star.title = starred ? "Remove from favourites" : "Add to favourites";
+      star.addEventListener("click", (event) => { event.stopPropagation(); this.toggleFavourite(index); });
+      row.append(load, star);
+      return row;
+    };
+
+    const favourites = this.favouriteIndices;
+    if (favourites.length) {
+      const group = html("div", "preset-group is-favourites");
+      group.append(html("h3", "", "★ Favourites"));
+      favourites.forEach((index, i) => group.append(item(index, i < 9 ? i + 1 : 0)));
+      this.menu.append(group);
+    }
+
+    const groups = new Map();
     this.presets.forEach((preset, index) => {
       if (!groups.has(preset.category)) {
         const group = html("div", "preset-group");
@@ -451,17 +511,40 @@ class PresetBar {
         groups.set(preset.category, group);
         this.menu.append(group);
       }
-
-      const button = html("button", "", preset.name);
-      button.dataset.index = index;
-      button.addEventListener("click", () => this.load(index));
-      groups.get(preset.category).append(button);
+      groups.get(preset.category).append(item(index, 0));
     });
+
+    this.filter();
+  }
+
+  filter() {
+    const words = (this.search?.value ?? "").toLowerCase().split(/\s+/).filter(Boolean);
+    for (const group of this.menu.querySelectorAll(".preset-group")) {
+      let visible = 0;
+      for (const row of group.querySelectorAll(".preset-item")) {
+        row.hidden = !words.every((w) => row.dataset.search.includes(w));
+        if (!row.hidden) visible++;
+      }
+      group.hidden = visible === 0;
+    }
   }
 
   open() {
     this.menu.hidden = false;
     this.button.setAttribute("aria-expanded", "true");
+    if (this.search) {
+      this.search.value = "";
+      this.filter();
+      this.search.focus();
+    }
+  }
+
+  // Stage keys 1–9: the favourites in order.
+  loadFavourite(number) {
+    const index = this.favouriteIndices[number - 1];
+    if (index === undefined) return false;
+    this.load(index);
+    return true;
   }
 
   close() {
@@ -503,7 +586,7 @@ class PresetBar {
   render() {
     this.nameLabel.textContent = this.presets[this.current]?.name ?? "—";
     this.element.classList.toggle("is-modified", this.modified);
-    this.menu.querySelectorAll("button").forEach((button) =>
+    this.menu.querySelectorAll("[data-index]").forEach((button) =>
       button.classList.toggle("is-current", Number(button.dataset.index) === this.current));
   }
 }
@@ -559,7 +642,19 @@ class Rack {
       this.refresh();
     });
 
-    header.append(html("span", "step"), html("h2", "", module.name), powerButton);
+    const reset = html("button", "card-reset", "↺");
+    reset.title = `Reset ${module.name} to its default settings`;
+    reset.setAttribute("aria-label", reset.title);
+    reset.addEventListener("click", () => this.resetModule(module));
+
+    header.append(html("span", "step"), html("h2", "", module.name));
+    if (module.id === "echo") {
+      const tap = html("button", "card-tap", "Tap");
+      tap.title = "Tap the beat a few times to set the echo time";
+      tap.addEventListener("click", () => this.tapEcho(tap));
+      header.append(tap);
+    }
+    header.append(reset, powerButton);
 
     const controls = html("div", "controls");
     for (const control of module.controls)
@@ -576,6 +671,48 @@ class Rack {
 
     card.append(controls);
     return card;
+  }
+
+  // Every control of the module back to its default (the power stays on).
+  resetModule(module) {
+    for (const control of module.controls) {
+      const params = [control.param, control.scaleParam].filter(Boolean);
+      for (const param of params) {
+        const value = parameterDefaults[param];
+        if (value === undefined) continue;
+        const kind = parameterKinds[param] ?? "slider";
+        if (kind === "toggle") Juce.getToggleState(param).setValue(Boolean(value));
+        else if (kind === "choice") Juce.getComboBoxState(param).setChoiceIndex(Math.round(value));
+        else {
+          const state = Juce.getSliderState(param);
+          state.sliderDragStarted();
+          state.setNormalisedValue(toNormalised(state, value));
+          state.sliderDragEnded();
+        }
+      }
+    }
+    this.onUserChange();
+  }
+
+  // Tap tempo for the echo: the average gap between taps becomes the echo time.
+  tapEcho(button) {
+    const now = performance.now();
+    if (this.echoTaps?.length && now - this.echoTaps[this.echoTaps.length - 1] > 2000) this.echoTaps = [];
+    this.echoTaps = [...(this.echoTaps ?? []), now].slice(-6);
+    button.classList.remove("is-tapped");
+    void button.offsetWidth;
+    button.classList.add("is-tapped");
+    if (this.echoTaps.length < 2) return;
+    const gaps = this.echoTaps.slice(1).map((t, i) => t - this.echoTaps[i]);
+    const ms = clamp(gaps.reduce((a, b) => a + b, 0) / gaps.length, 20, 1500);
+    const state = Juce.getSliderState("delayTime");
+    state.sliderDragStarted();
+    state.setNormalisedValue(toNormalised(state, ms));
+    state.sliderDragEnded();
+    button.textContent = `${Math.round(ms)} ms`;
+    clearTimeout(this.tapLabelTimer);
+    this.tapLabelTimer = setTimeout(() => { button.textContent = "Tap"; }, 2500);
+    this.onUserChange();
   }
 
   // How an effect picture reads and writes parameters on the Live screen: through
@@ -1018,6 +1155,7 @@ const meters = Object.fromEntries(
 
 window.__JUCE__.backend.addEventListener("meters", (status) => {
   meters.input.push(status.input);
+  if (micCheck) micCheck.peak = Math.max(micCheck.peak, status.input);
   meters.output.push(status.output);
   rack.tuner?.update(status.note, status.target);
   rack.keyPicker?.setTarget(status.target);
@@ -1032,6 +1170,108 @@ requestAnimationFrame(function frame(now) {
   lastFrame = now;
   requestAnimationFrame(frame);
 });
+
+//==============================================================================
+// Performance controls: panic mute, hold-for-dry, mic check and stage keys.
+const liveControl = Juce.getNativeFunction("liveControl");
+const panicButton = document.querySelector(".panic-button");
+const dryButton = document.querySelector(".dry-button");
+const micCheckButton = document.querySelector(".mic-check");
+const liveState = { muted: false, dry: false };
+
+function applyLiveState(state) {
+  if (!state) return;
+  Object.assign(liveState, state);
+  panicButton.setAttribute("aria-pressed", String(liveState.muted));
+  panicButton.textContent = liveState.muted ? "Muted" : "Mute";
+  document.body.classList.toggle("is-muted", liveState.muted);
+  dryButton.setAttribute("aria-pressed", String(liveState.dry));
+  document.body.classList.toggle("is-dry", liveState.dry);
+}
+
+const setMuted = (on) => liveControl("mute", on).then(applyLiveState);
+const setDry = (on) => { if (on !== liveState.dry) { liveState.dry = on; liveControl("dry", on).then(applyLiveState); } };
+panicButton.addEventListener("click", () => setMuted(!liveState.muted));
+
+dryButton.addEventListener("pointerdown", (event) => { dryButton.setPointerCapture?.(event.pointerId); setDry(true); });
+for (const type of ["pointerup", "pointercancel", "lostpointercapture"]) dryButton.addEventListener(type, () => setDry(false));
+window.addEventListener("blur", () => setDry(false));
+
+// Mic check: listens for 5 s, then moves the input gain so the loudest peak sits at -12 dB.
+let micCheck = null;
+const MIC_CHECK_TARGET = -12;
+micCheckButton.addEventListener("click", () => {
+  if (micCheck) return;
+  micCheck = { peak: -100, until: performance.now() + 5000 };
+  micCheckButton.classList.add("is-busy");
+  const tick = () => {
+    const left = Math.ceil((micCheck.until - performance.now()) / 1000);
+    if (left > 0) {
+      micCheckButton.textContent = `Sing… ${left}`;
+      return setTimeout(tick, 200);
+    }
+    const { peak } = micCheck;
+    micCheck = null;
+    micCheckButton.classList.remove("is-busy");
+    const state = Juce.getSliderState("inputGain");
+    const current = state.getScaledValue();
+    if (peak < -60) {
+      micCheckButton.textContent = "No sound";
+    } else {
+      const gain = clamp(current + (MIC_CHECK_TARGET - peak), state.properties.start, state.properties.end);
+      state.sliderDragStarted();
+      state.setNormalisedValue(toNormalised(state, gain));
+      state.sliderDragEnded();
+      micCheckButton.textContent = `${gain >= 0 ? "+" : ""}${gain.toFixed(1)} dB`;
+    }
+    setTimeout(() => { micCheckButton.textContent = "Mic check"; }, 3000);
+  };
+  tick();
+});
+
+// The "?" overlay with the Live keys.
+const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["← / →", "Previous / next preset"],
+                   ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"], ["M", "Mute the output (panic)"],
+                   ["Hold D", "Hear your voice without effects"], ["?", "This list"], ["Esc", "Close"]];
+function toggleLiveKeys(show) {
+  let overlay = document.querySelector(".live-keys");
+  if (!overlay) {
+    overlay = html("div", "live-keys");
+    overlay.hidden = true;
+    const panel = html("div", "live-keys-panel");
+    const close = html("button", "live-keys-close", "×");
+    close.setAttribute("aria-label", "Close");
+    close.addEventListener("click", () => toggleLiveKeys(false));
+    panel.append(html("h2", "", "Stage keys"), close);
+    for (const [keys, action] of LIVE_KEYS) {
+      const row = html("div", "live-key");
+      row.append(html("kbd", "", keys), html("span", "", action));
+      panel.append(row);
+    }
+    overlay.append(panel);
+    overlay.addEventListener("pointerdown", (event) => { if (event.target === overlay) toggleLiveKeys(false); });
+    document.body.append(overlay);
+  }
+  overlay.hidden = !(show ?? overlay.hidden);
+}
+document.querySelector(".keys-button").addEventListener("click", () => toggleLiveKeys());
+
+document.addEventListener("keydown", (event) => {
+  if (isTyping(event) || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (event.target.closest?.("[role=slider]") && event.key.startsWith("Arrow")) return;
+  const key = event.key.toLowerCase();
+  if (key === "m" && !event.repeat) { event.preventDefault(); setMuted(!liveState.muted); }
+  else if (key === "d") { event.preventDefault(); setDry(true); }
+  else if (event.key === "ArrowLeft") { event.preventDefault(); presetBar.step(-1); }
+  else if (event.key === "ArrowRight") { event.preventDefault(); presetBar.step(1); }
+  else if (/^[1-9]$/.test(event.key)) {
+    event.preventDefault();
+    if (!presetBar.loadFavourite(Number(event.key))) recorderBar.setStatus(`No favourite ${event.key} yet: star presets in the preset menu.`);
+  }
+  else if (event.key === "?" || event.key === "/") { event.preventDefault(); toggleLiveKeys(); }
+  else if (event.key === "Escape") toggleLiveKeys(false);
+});
+document.addEventListener("keyup", (event) => { if (event.key.toLowerCase() === "d") setDry(false); });
 
 Juce.getNativeFunction("getParameterDefaults")().then((defaults) => {
   parameterDefaults = defaults ?? {};
