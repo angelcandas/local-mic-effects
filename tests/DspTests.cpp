@@ -17,6 +17,7 @@
 #include "analysis/MixAssistant.h"
 #include "Presets.h"
 #include "daw/DawEngine.h"
+#include "daw/ClipTools.h"
 #include "daw/Exporter.h"
 #include "daw/Project.h"
 #include "dsp/FxChain.h"
@@ -1379,6 +1380,31 @@ namespace
                    && rms (clicks[0], spb / 2 - 100, spb / 2 + 100) < 1.0e-4f,
                "metronome clicks on the beat at 120 BPM");
 
+        // Time signature: in 3/4 the accent (higher, louder click) is on every third beat.
+        {
+            edit.setBeatsPerBar (3);
+            engine.setMetronome (true);
+            engine.seek (0);
+            engine.play();
+            const auto bar = render (engine, 2.1);
+            engine.stop();
+            const auto peakAt = [&] (size_t beat) { return std::abs (*std::max_element (bar[0].begin() + (long) (beat * spb), bar[0].begin() + (long) (beat * spb + 200),
+                                                                                        [] (float a, float b) { return std::abs (a) < std::abs (b); })); };
+            check (peakAt (3) > peakAt (1) * 1.3f && peakAt (3) > peakAt (2) * 1.3f && peakAt (0) > peakAt (1) * 1.3f,
+                   "3/4: the click accents beats 1 and 4, not 2 and 3");
+
+            engine.setMetronomeVolume (0.5f);
+            engine.seek (0);
+            engine.play();
+            const auto quieter = render (engine, 0.2);
+            engine.stop();
+            const auto loud = rms (bar[0], 0, 400), soft = rms (quieter[0], 0, 400);
+            check (std::abs (soft / loud - 0.5f) < 0.05f, "click volume scales the click (" + juce::String (soft / loud, 2) + ")");
+            engine.setMetronomeVolume (1.0f);
+            engine.setMetronome (false);
+            edit.setBeatsPerBar (4);
+        }
+
         // Count-in: one bar of clicks before the take starts, not recorded.
         edit.setTrackArm (second, true);
         engine.setCountInBars (1);
@@ -1441,6 +1467,10 @@ namespace
         edit.setInsertValue (insert, "delayTime", 420.0f);
         edit.addInsert (daw::Edit::masterId, fx::ModuleType::compressor);
         edit.setTempo (96.0);
+        edit.setBeatsPerBar (3);
+        const auto chorus = (int) edit.addMarker (8.5, "Chorus")[daw::ids::id];
+        edit.addMarker (2.0);
+        edit.setMarkerName (chorus, "  Chorus 1 ");
 
         check (project.hasUnsavedChanges() && project.save().isEmpty() && ! project.hasUnsavedChanges(), "saves, and tracks unsaved changes");
 
@@ -1470,6 +1500,19 @@ namespace
         check (juce::File (reClip[daw::ids::file].toString()) == moved.getChildFile ("Audio/loop.wav") && second.getMissingFiles().isEmpty(),
                "a moved project still finds its audio");
         check (! reopened.getUndoManager().canUndo() && ! second.hasUnsavedChanges(), "opening starts with a clean undo history");
+
+        {
+            const auto markers = reopened.getMarkers();
+            check (reopened.getBeatsPerBar() == 3 && markers.size() == 2 && (double) markers[0][daw::ids::time] == 2.0
+                       && markers[0][daw::ids::name].toString() == "Marker 2" && markers[1][daw::ids::name].toString() == "Chorus 1"
+                       && (double) markers[1][daw::ids::time] == 8.5,
+                   "the time signature and markers come back, markers in time order");
+            reopened.setMarkerTime (chorus, 1.0);
+            check (reopened.getMarkers()[0][daw::ids::id].equals (chorus), "moving a marker keeps the list in time order");
+            reopened.removeMarker (chorus);
+            reopened.getUndoManager().undo();
+            check (reopened.getMarkers().size() == 2, "deleting a marker can be undone");
+        }
 
         // The engine plays the reopened project.
         {
@@ -1907,6 +1950,89 @@ namespace
         check (rms (liveLeft, skip, liveLeft.size()) > 0.01f, "back in Live mode the mic goes through the Live chain again");
     }
 
+    void testClipTools()
+    {
+        std::cout << "\nDAW clip tools (mute, normalise, strip silence, anti-click edges)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-cliptools");
+        folder.createDirectory();
+
+        // 0.5 s silence, 1 s tone (with a 0.1 s gap in it), 1 s silence, 0.5 s tone, 0.5 s silence.
+        juce::AudioBuffer<float> take (1, (int) (sampleRate * 3.5));
+        take.clear();
+        const auto tone = [&] (double from, double to, float level)
+        {
+            for (auto i = (int) (from * sampleRate); i < (int) (to * sampleRate); ++i)
+                take.setSample (0, i, level * (float) std::sin (0.06 * i));
+        };
+        tone (0.5, 1.0, 0.25f);
+        tone (1.1, 1.5, 0.25f);
+        tone (2.5, 3.0, 0.5f);
+        const auto file = folder.getChildFile ("take.wav");
+        writeWav (file, take, sampleRate);
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        const auto audio = engine.getAudioPool().loadNow (file);
+
+        const auto total = (juce::int64) take.getNumSamples();
+        const auto gain = daw::cliptools::getNormaliseGain (*audio, 0, total);
+        check (std::abs (gain - (-1.0f - juce::Decibels::gainToDecibels (0.5f))) < 0.1f, "normalise sets the gain so the peak lands on -1 dB ("
+                                                                                             + juce::String (gain, 2) + " dB)");
+        check (daw::cliptools::getNormaliseGain (*audio, 0, (juce::int64) (0.4 * sampleRate)) == 0.0f, "normalising silence leaves the gain alone");
+
+        const auto regions = daw::cliptools::findSound (*audio, 0, total, sampleRate);
+        check (regions.size() == 2 && std::abs (regions[0].start - 0.44) < 0.03 && std::abs (regions[0].end - 1.56) < 0.03
+                   && std::abs (regions[1].start - 2.44) < 0.03 && std::abs (regions[1].end - 3.06) < 0.03,
+               "finds the two phrases, bridging the short gap and padding the edges");
+
+        const auto track = (int) edit.addTrack ("Vox")[daw::ids::id];
+        const auto clip = (int) edit.addClip (track, file, 1.0, 3.5)[daw::ids::id];
+        std::vector<std::pair<double, double>> parts;
+        for (const auto& r : regions)
+            parts.emplace_back (r.start, r.end);
+        edit.getUndoManager().beginNewTransaction();
+        const auto created = edit.keepClipParts (clip, parts);
+        const auto first = edit.getClip (created[0]), second = edit.getClip (created[1]);
+        check (created.size() == 2 && ! edit.getClip (clip).isValid()
+                   && std::abs ((double) first[daw::ids::start] - (1.0 + regions[0].start)) < 1e-9
+                   && std::abs ((double) second[daw::ids::offset] - regions[1].start) < 1e-9
+                   && (double) first[daw::ids::fadeIn] > 0.0 && (double) second[daw::ids::fadeOut] > 0.0,
+               "strip silence keeps the phrases as clips in place, with short fades");
+        edit.getUndoManager().undo();
+        check (edit.getClip (clip).isValid() && edit.getTracks()[0].getNumChildren() == 2, "strip silence is one undo step");
+
+        // Muting a clip silences it but keeps it.
+        engine.loadAllNow();
+        const auto loudness = [&]
+        {
+            engine.seek ((juce::int64) (3.5 * sampleRate));
+            engine.play();
+            const auto out = render (engine, 0.5);
+            engine.stop();
+            return rms (out[0], 0, out[0].size());
+        };
+        const auto before = loudness();
+        edit.setClipMute (clip, true);
+        engine.rebuildNow();
+        check (before > 0.1f && loudness() < 1.0e-6f && edit.getClip (clip).isValid(), "a muted clip is silent but stays");
+        edit.setClipMute (clip, false);
+
+        // A clip that starts inside its file fades in over a few ms instead of clicking.
+        edit.trimClipStart (clip, 1.0 + 2.6); // in the middle of the loud tone
+        engine.rebuildNow();
+        engine.seek ((juce::int64) (3.6 * sampleRate));
+        engine.play();
+        const auto edge = render (engine, 0.02);
+        engine.stop();
+        const auto fade = (size_t) (daw::DawEngine::antiClickSeconds * sampleRate);
+        check (std::abs (edge[0][0]) < 0.01f && rms (edge[0], fade, fade * 3) > 0.2f,
+               "a clip cut into the audio fades in at its edge (no click)");
+
+        folder.deleteRecursively();
+    }
+
     void testClipEditing()
     {
         std::cout << "\nDAW clip editing (move, trim, split, fades, snap, loop)\n";
@@ -1958,8 +2084,9 @@ namespace
         auto out = render (engine, 2.6);
         engine.stop();
 
+        // (The clip's trimmed end cuts into the file, so its last few ms fade out: compare up to there.)
         float worst = 0.0f;
-        for (int i = 0; i < (int) (1.5 * sampleRate); ++i)
+        for (int i = 0; i < (int) ((1.5 - daw::DawEngine::antiClickSeconds) * sampleRate); ++i)
             worst = std::max (worst, std::abs (out[0][(size_t) sampleRate + (size_t) i] - source->getSample (0, i)));
         check (worst == 0.0f, "the split is seamless (sample-exact across the cut)");
 
@@ -2018,6 +2145,111 @@ namespace
         edit.setLoop (false, 1.0, 1.1);
         folder.deleteRecursively();
     }
+
+    void testLatency()
+    {
+        std::cout << "\nLatency (autotune and pitch shift)\n";
+
+        const auto nominal = fx::PsolaShifter::getNominalLatency (sampleRate);
+
+        fx::modules::Pitch pitch;
+        pitch.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+        check (pitch.getLatencySamples() == 0, "no delay while the pitch effects are off");
+        pitch.harmonyOn.store (1.0f);
+        check (pitch.getLatencySamples() == 0, "the harmonizer alone leaves the lead undelayed");
+        pitch.harmonyOn.store (0.0f);
+        pitch.tuneOn.store (1.0f);
+        check (pitch.getLatencySamples() == nominal, "autotune reports " + juce::String (nominal) + " samples ("
+                                                         + juce::String (1000.0 * nominal / sampleRate, 2) + " ms)");
+        pitch.tuneOn.store (0.0f);
+        pitch.shiftOn.store (1.0f);
+        check (pitch.getLatencySamples() == nominal, "pitch shift reports the same delay");
+
+        // The real delay of a 200 Hz voice through the shifter (at 0 semitones the output is
+        // the input, delayed). A steady tone only shows it modulo one period, which is enough
+        // here: the delay is shorter than a period.
+        const auto input = makeVoice ((float) fx::PsolaShifter::nominalVoiceHz, 1.0);
+        fx::PitchEngine::Settings settings;
+        settings.shiftOn = true;
+        const auto output = runPitchEngine (input, settings);
+        const auto period = (int) std::lround (sampleRate / fx::PsolaShifter::nominalVoiceHz);
+
+        auto measured = 0;
+        auto bestError = std::numeric_limits<double>::max();
+        for (int delay = 0; delay < period; ++delay)
+        {
+            double error = 0.0;
+            for (size_t i = 24000; i < 40000; ++i)
+                error += juce::square ((double) output[i] - (double) input[i - (size_t) delay]);
+            if (error < bestError)
+            {
+                bestError = error;
+                measured = delay;
+            }
+        }
+
+        // It wanders within half a period of the reported value, depending on where the
+        // first grain landed.
+        check (std::abs (measured - nominal) <= period / 2, "a 200 Hz voice comes out " + juce::String (measured)
+                                                              + " samples late (reported " + juce::String (nominal) + ")");
+
+        // The plugin tells the host.
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        check (processor.getLatencySamples() == 0, "the plugin reports no latency by default");
+
+        processor.getState().getParameter ("tuneOn")->setValueNotifyingHost (1.0f);
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        buffer.clear();
+        juce::MidiBuffer midi;
+        processor.processBlock (buffer, midi);
+        processor.updateLatency();
+        check (processor.getLatencySamples() == nominal, "with autotune on, the plugin reports its delay to the host");
+
+        processor.getState().getParameter ("tuneOn")->setValueNotifyingHost (0.0f);
+        processor.processBlock (buffer, midi);
+        processor.updateLatency();
+        check (processor.getLatencySamples() == 0, "and goes back to 0 when it's switched off");
+
+        // DAW mode: a track with autotune delays the others to match.
+        const auto folder = juce::File::createTempFile ("micfx-latency");
+        folder.createDirectory();
+        juce::AudioBuffer<float> click (1, (int) sampleRate / 2);
+        click.clear();
+        click.setSample (0, 0, 0.5f);
+        const auto clickFile = folder.getChildFile ("click.wav");
+        writeWav (clickFile, click, sampleRate);
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        const auto plain = (int) edit.addTrack ("Backing")[daw::ids::id];
+        const auto tuned = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        edit.addClip (plain, clickFile, 0.1, 0.5);
+        const auto tune = (int) edit.addInsert (tuned, fx::ModuleType::pitch)[daw::ids::id];
+        engine.loadAllNow();
+        check (engine.getLatencySamples() == nominal, "a track with autotune sets the session's delay");
+
+        const auto clickAt = [&]
+        {
+            engine.seek (0);
+            engine.play();
+            const auto out = render (engine, 0.3);
+            engine.stop();
+            for (size_t i = 0; i < out[0].size(); ++i)
+                if (std::abs (out[0][i]) > 0.1f)
+                    return (int) i - (int) (0.1 * sampleRate);
+            return -1;
+        };
+
+        check (clickAt() == nominal, "the other tracks are delayed by the same amount");
+
+        edit.setInsertValue (tune, "tuneOn", 0.0f);
+        engine.rebuildNow();
+        check (engine.getLatencySamples() == 0 && clickAt() == 0, "switching autotune off removes the delay");
+
+        folder.deleteRecursively();
+    }
 }
 
 int main()
@@ -2038,9 +2270,11 @@ int main()
     testExport();
     testClipEditing();
     testDawMode();
+    testClipTools();
     testDawBridge();
     testAnalysis();
     testMixAssistant();
+    testLatency();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

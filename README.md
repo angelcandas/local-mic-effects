@@ -37,7 +37,9 @@ They also appear as programs in DAWs.
 - A TD-PSOLA shifter moves your voice to that note while keeping your vocal character (formants).
 - **Speed** at 0 ms gives the robotic "hard tune" sound. 20–60 ms sounds natural.
 - **Amount** below 100% only partially corrects the pitch.
-- Added latency is roughly half a pitch period (~3–6 ms).
+- Added latency is roughly half a pitch period (~1–5 ms). While Autotune or Pitch Shift is on, MicFX
+  reports about 2.6 ms (the delay for a typical 200 Hz voice) to the host, so DAWs line the track up with
+  the others. DAW mode delays the other tracks by the same amount, and recorded takes are placed to match.
 
 The Pitch Shift and Harmonizer use the same engine, so they're tuned too when Autotune is on.
 Chromatic works for any song. Pick the song's key and scale for a tighter, more musical tune.
@@ -201,6 +203,10 @@ also runs every preset through the full processor, checking for NaNs, clipping a
 cmake --build --preset debug --target MicFXTests
 ./build/debug/MicFXTests_artefacts/Debug/MicFXTests
 ```
+
+GitHub Actions (`.github/workflows/ci.yml`) runs them on every pull request: a Linux build of the
+tests, the standalone app and the VST3, plus a syntax check of the UI scripts. Pushes to `main` (and
+**Run workflow** in the Actions tab) also build and test on macOS, including the AU.
 
 ## VS Code
 

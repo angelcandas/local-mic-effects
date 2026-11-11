@@ -116,6 +116,11 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
             if (const auto module = modules.find ((int) tree[ids::id]); module != modules.end())
                 if (auto* value = module->second->findValue (property.toString()))
                     value->store ((float) tree[property]);
+
+            // Switching autotune or pitch shift on or off changes the track's delay, so
+            // the latency compensation is worked out again.
+            if (it->second->chain.getLatencySamples() != it->second->latencyAtBuild)
+                triggerAsyncUpdate();
         }
 
         return;
@@ -123,7 +128,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
 
     if (tree.hasType (ids::PROJECT))
     {
-        if (property == ids::tempo)
+        if (property == ids::tempo || property == ids::beatsPerBar)
             updateTempo();
         else if (property == ids::loopOn || property == ids::loopStart || property == ids::loopEnd)
             updateLoop();
@@ -274,7 +279,36 @@ void DawEngine::rebuild()
                 continue;
 
             end = juce::jmax (end, clip.start + clip.length);
+
+            if ((bool) clipTree.getProperty (ids::mute, false))
+                continue; // muted: still part of the song's length, but silent
+
             track.clips.push_back (std::move (clip));
+        }
+
+        // Anti-click: a clip edge that cuts into the file's audio gets a short fade, unless
+        // the next part of the same audio carries straight on there (a plain split stays
+        // seamless).
+        {
+            const auto edgeFade = (juce::int64) std::llround (antiClickSeconds * sampleRate);
+            auto& clips = track.clips;
+
+            const auto continues = [&] (const Clip& a, const Clip& b) // b picks up where a stops
+            {
+                return a.audio == b.audio && b.start == a.start + a.length && b.offset == a.offset + a.length;
+            };
+
+            for (auto& clip : clips)
+            {
+                const auto cutsIn = clip.offset > 0
+                    && std::none_of (clips.begin(), clips.end(), [&] (const Clip& other) { return continues (other, clip); });
+                const auto cutsOut = clip.offset + clip.length < (juce::int64) clip.audio->getNumSamples()
+                    && std::none_of (clips.begin(), clips.end(), [&] (const Clip& other) { return continues (clip, other); });
+                const auto most = clip.length / 2;
+
+                if (cutsIn)  clip.fadeIn  = juce::jmin (most, juce::jmax (clip.fadeIn, edgeFade));
+                if (cutsOut) clip.fadeOut = juce::jmin (most, juce::jmax (clip.fadeOut, edgeFade));
+            }
         }
 
         graph->tracks.push_back (std::move (track));
@@ -283,6 +317,7 @@ void DawEngine::rebuild()
     // Delay every track to line up with the slowest chain.
     for (auto& track : graph->tracks)
     {
+        track.strip->latencyAtBuild = track.strip->chain.getLatencySamples();
         track.delaySamples = maxLatency - track.strip->chain.getLatencySamples();
 
         if (track.delaySamples > 0)
@@ -293,7 +328,8 @@ void DawEngine::rebuild()
     }
 
     length = end;
-    latency = maxLatency + graph->master->chain.getLatencySamples();
+    graph->master->latencyAtBuild = graph->master->chain.getLatencySamples();
+    latency = maxLatency + graph->master->latencyAtBuild;
 
     updateMix();
     publish (std::move (graph));
@@ -322,6 +358,7 @@ void DawEngine::updateTempo()
 {
     const auto bpm = juce::jlimit (20.0, 400.0, (double) edit.getState().getProperty (ids::tempo, 120.0));
     samplesPerBeat = sampleRate * 60.0 / bpm;
+    beatsPerBar = edit.getBeatsPerBar();
     updateLoop();
 }
 
@@ -353,7 +390,7 @@ juce::String DawEngine::startRecording (const juce::File& folder)
     if (const auto bars = countInBars.load(); bars > 0)
     {
         countingIn = true;
-        position = start - (juce::int64) std::llround (bars * 4 * samplesPerBeat.load());
+        position = start - (juce::int64) std::llround (bars * beatsPerBar.load() * samplesPerBeat.load());
     }
 
     playing = true;
@@ -398,6 +435,8 @@ void DawEngine::renderClick (juce::AudioBuffer<float>& output, int offset, int n
     const auto counting = countingIn.load();
     const auto start = recordStart.load();
     const auto clickOn = metronome.load();
+    const auto barLength = (juce::int64) beatsPerBar.load();
+    const auto volume = metronomeVolume.load();
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -409,10 +448,10 @@ void DawEngine::renderClick (juce::AudioBuffer<float>& output, int offset, int n
 
             if ((double) t - (double) beat * spb < 1.0) // a beat starts on this sample
             {
-                const auto downbeat = ((beat % 4) + 4) % 4 == 0;
+                const auto downbeat = ((beat % barLength) + barLength) % barLength == 0;
                 clickPhase = 0.0f;
                 clickIncrement = (downbeat ? 1500.0f : 1000.0f) / (float) sampleRate;
-                clickLevel = downbeat ? 0.35f : 0.22f;
+                clickLevel = (downbeat ? 0.35f : 0.22f) * volume;
                 clickDecay = (float) std::exp (-1.0 / (0.012 * sampleRate));
             }
         }

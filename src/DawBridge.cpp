@@ -1,4 +1,5 @@
 #include "DawBridge.h"
+#include "daw/ClipTools.h"
 
 #include "Presets.h"
 #include "dsp/FxModules.h"
@@ -122,6 +123,8 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
         if (settings.getBoolValue ("dawMode", false))
             setMode (true);
     }
+
+    engine.setMetronomeVolume ((float) settings.getDoubleValue ("dawClickVolume", 1.0));
 }
 
 DawBridge::~DawBridge()
@@ -218,6 +221,7 @@ juce::var DawBridge::describeSession()
                                  { "start", number (clip, ids::start) }, { "offset", number (clip, ids::offset) },
                                  { "length", number (clip, ids::length) }, { "gain", number (clip, ids::gain) },
                                  { "fadeIn", number (clip, ids::fadeIn) }, { "fadeOut", number (clip, ids::fadeOut) },
+                                 { "mute", (bool) clip.getProperty (ids::mute, false) },
                                  { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
                                  { "missing", ! file.existsAsFile() } }));
         }
@@ -240,6 +244,15 @@ juce::var DawBridge::describeSession()
                                { "recoverable", project.getRecoverableBackup().getFileName() },
                                { "missing", project.getMissingFiles().size() } }) },
         { "tempo", edit.getTempo() },
+        { "beatsPerBar", edit.getBeatsPerBar() },
+        { "markers", [this]
+          {
+              juce::Array<juce::var> markers;
+              for (const auto& m : edit.getMarkers())
+                  markers.add (object ({ { "id", (int) m[ids::id] }, { "name", m[ids::name].toString() }, { "time", number (m, ids::time) } }));
+              return juce::var (markers);
+          }() },
+        { "metronomeVolume", engine.getMetronomeVolume() },
         { "loop", object ({ { "on", (bool) state.getProperty (ids::loopOn, false) }, { "start", number (state, ids::loopStart) },
                             { "end", number (state, ids::loopEnd) } }) },
         { "metronome", engine.getMetronome() },
@@ -862,6 +875,59 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
     if (command == "clipGain")   { edit.setClipGain (id, args["gain"]); ok(); return; }
+    if (command == "setClip")
+    {
+        if (args.hasProperty ("name")) edit.setClipName (id, args["name"].toString());
+        if (args.hasProperty ("mute")) edit.setClipMute (id, args["mute"]);
+        ok();
+        return;
+    }
+
+    // Clip commands that read the clip's audio: normalise (gain so the peak is -1 dBFS)
+    // and strip silence (keep only the parts with sound, as separate clips).
+    if (command == "normaliseClip" || command == "stripSilence")
+    {
+        const auto clip = edit.getClip (id);
+        const auto audio = clip.isValid() ? engine.getAudioPool().get (juce::File (clip[ids::file].toString())) : nullptr;
+        if (audio == nullptr)
+        {
+            complete (error (clip.isValid() ? "The clip's audio is still loading. Try again in a moment." : "Select a clip first."));
+            return;
+        }
+
+        const auto rate = engine.getAudioPool().getSampleRate();
+        const auto offset = (juce::int64) std::llround ((double) clip[ids::offset] * rate);
+        const auto length = (juce::int64) std::llround ((double) clip[ids::length] * rate);
+
+        if (command == "normaliseClip")
+        {
+            if (daw::cliptools::getPeak (*audio, offset, length) < 1.0e-5f)
+            {
+                complete (error ("The clip is silent."));
+                return;
+            }
+
+            const auto gain = daw::cliptools::getNormaliseGain (*audio, offset, length, arg (args, "target", -1.0f));
+            edit.setClipGain (id, gain);
+            complete (object ({ { "ok", true }, { "gain", gain } }));
+            return;
+        }
+
+        const auto regions = daw::cliptools::findSound (*audio, offset, length, rate, arg (args, "threshold", -45.0f));
+        if (regions.empty())
+        {
+            complete (error ("No sound above the threshold in this clip."));
+            return;
+        }
+
+        std::vector<std::pair<double, double>> parts;
+        for (const auto& r : regions)
+            parts.emplace_back (r.start, r.end);
+
+        const auto created = edit.keepClipParts (id, parts);
+        complete (object ({ { "ok", true }, { "clips", created.size() } }));
+        return;
+    }
     if (command == "clipFades")  { edit.setClipFades (id, args["fadeIn"], args["fadeOut"]); ok(); return; }
 
     //================================================================ timeline and transport
@@ -869,6 +935,25 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "loop")      { edit.setLoop (args["on"], args["start"], args["end"]); ok(); return; }
     if (command == "metronome") { engine.setMetronome (args["on"]); sessionChanged = true; ok(); return; }
     if (command == "countIn")   { engine.setCountInBars (args["bars"]); sessionChanged = true; ok(); return; }
+    if (command == "beatsPerBar") { edit.setBeatsPerBar (args["beats"]); ok(); return; }
+    if (command == "metronomeVolume")
+    {
+        engine.setMetronomeVolume (args["volume"]);
+        settings.setValue ("dawClickVolume", engine.getMetronomeVolume());
+        sessionChanged = true;
+        ok();
+        return;
+    }
+
+    if (command == "addMarker")    { complete (edit.addMarker (args["time"], args["name"].toString())[ids::id]); return; }
+    if (command == "removeMarker") { edit.removeMarker (id); ok(); return; }
+    if (command == "setMarker")
+    {
+        if (args.hasProperty ("time")) edit.setMarkerTime (id, args["time"]);
+        if (args.hasProperty ("name")) edit.setMarkerName (id, args["name"].toString());
+        ok();
+        return;
+    }
 
     if (command == "transport")
     {

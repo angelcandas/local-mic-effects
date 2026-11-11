@@ -14,6 +14,15 @@ const MIN_ROW = 44, MAX_ROW = 200; // track height range, px (vertical zoom)
 const MIN_ZOOM = 4, MAX_ZOOM = 400; // pixels per second
 const METER_FLOOR_DB = -60;
 const FADER_MIN_DB = -60, FADER_MAX_DB = 6;
+const GRIDS = [["bar", "Bar"], [1, "Beat"], [0.5, "1/2 beat"], [0.25, "1/4 beat"]];
+const SIGNATURES = [[2, "2/4"], [3, "3/4"], [4, "4/4"], [5, "5/4"], [6, "6/8"], [7, "7/8"], [9, "9/8"], [12, "12/8"]];
+
+// Per-viewer UI preferences (grid, return on stop). The page may have no storage.
+const prefs = {
+  get(key, fallback) { try { const v = localStorage.getItem(`micfx.daw.${key}`); return v == null ? fallback : JSON.parse(v); } catch { return fallback; } },
+  set(key, value) { try { localStorage.setItem(`micfx.daw.${key}`, JSON.stringify(value)); } catch { /* no storage */ } },
+};
+
 const TRACK_COLOURS = ["#8c7bff", "#3fd9c6", "#ffb547", "#ff6fb1", "#5aafff", "#9be15d", "#ff8a5c", "#c78bff"];
 
 
@@ -488,6 +497,10 @@ class DawScreen {
     this.clipboard = null;     // a copied clip
     this.recLevels = [];       // [seconds, gain] of the input while recording, for the live take
     this.snap = true;
+    this.grid = prefs.get("grid", 1);           // snap step in beats, or "bar"
+    this.returnOnStop = prefs.get("returnOnStop", false);
+    this.playStart = null;     // where play was pressed, for Return on stop
+    this.taps = [];            // tap tempo times, ms
     this.view = "arrange";     // or "mixer"
     this.selectedTrack = null; // track id, 0 = master
     this.selectedClip = null;
@@ -521,16 +534,144 @@ class DawScreen {
   get active() { return document.body.classList.contains("is-daw"); }
   get tempo() { return this.session?.tempo ?? 120; }
   get beat() { return 60 / this.tempo; }
+  get beatsPerBar() { return this.session?.beatsPerBar ?? 4; }
+  get bar() { return this.beat * this.beatsPerBar; }
+  get gridSeconds() { return this.grid === "bar" ? this.bar : this.beat * this.grid; }
+  get markers() { return this.session?.markers ?? []; }
 
-  // Seconds snapped to the beat grid (unless snap is off or Alt is held).
+  // Seconds snapped to the grid (unless snap is off or Alt is held).
   snapTime(seconds, event) {
     if (!this.snap || event?.altKey) return Math.max(0, seconds);
-    return Math.max(0, Math.round(seconds / this.beat) * this.beat);
+    const step = this.gridSeconds;
+    return Math.max(0, Math.round(seconds / step) * step);
   }
 
   barsBeats(seconds) {
     const beats = Math.max(0, seconds) / this.beat;
-    return `${Math.floor(beats / 4) + 1}.${Math.floor(beats % 4) + 1}`;
+    return `${Math.floor(beats / this.beatsPerBar) + 1}.${Math.floor(beats % this.beatsPerBar) + 1}`;
+  }
+
+  // "12" or "12.3" (bar.beat), "1:23.4" or "83.4" (time) -> seconds, or null.
+  parsePosition(text) {
+    const t = text.trim().toLowerCase();
+    let m;
+    if ((m = t.match(/^(\d+):(\d+(?:\.\d*)?)$/))) return Number(m[1]) * 60 + Number(m[2]);
+    if ((m = t.match(/^(\d+(?:\.\d*)?)\s*s$/))) return Number(m[1]);
+    if ((m = t.match(/^(\d+)(?:\.(\d+))?$/))) {
+      const bar = Number(m[1]), beat = Number(m[2] ?? 1);
+      if (bar < 1 || beat < 1 || beat > this.beatsPerBar) return null;
+      return (bar - 1) * this.bar + (beat - 1) * this.beat;
+    }
+    return null;
+  }
+
+  // Click the clock to type where to go.
+  editClock() {
+    if (this.clockInput) return;
+    const input = (this.clockInput = html("input", "clock-input"));
+    Object.assign(input, { value: this.barsBeats(this.status.position), spellcheck: false, title: "Bar (12 or 12.3), time (1:23.4) or seconds (83s)" });
+    const done = (go) => {
+      if (!this.clockInput) return;
+      const seconds = go ? this.parsePosition(input.value) : null;
+      this.clockInput = null;
+      input.remove();
+      this.clock.classList.remove("is-editing");
+      if (go && seconds == null) toast("Type a bar like 12 or 12.3, or a time like 1:23.4 or 83s");
+      else if (seconds != null) this.seek(seconds);
+    };
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") { event.preventDefault(); done(true); }
+      else if (event.key === "Escape") { event.preventDefault(); done(false); }
+      event.stopPropagation();
+    });
+    input.addEventListener("blur", () => done(false));
+    this.clock.classList.add("is-editing");
+    this.clock.append(input);
+    input.focus();
+    input.select();
+  }
+
+  tapTempo() {
+    const now = performance.now();
+    if (this.taps.length && now - this.taps[this.taps.length - 1] > 2000) this.taps = [];
+    this.taps.push(now);
+    this.taps = this.taps.slice(-8);
+    if (this.taps.length < 3) return toast(this.taps.length === 1 ? "Keep tapping on the beat…" : "One more…");
+    const gaps = this.taps.slice(1).map((t, i) => t - this.taps[i]);
+    const bpm = Math.round(60000 / (gaps.reduce((a, b) => a + b, 0) / gaps.length));
+    daw("tempo", { bpm: clamp(bpm, 20, 400), continue: this.taps.length > 3 });
+  }
+
+  //============================================================================ markers
+  addMarker() {
+    const time = this.snapTime(this.status.position);
+    const existing = this.markers.find((m) => Math.abs(m.time - time) < 0.01);
+    if (existing) return toast(`"${existing.name}" is already here.`);
+    daw("addMarker", { time });
+  }
+
+  jumpMarker(step) {
+    const now = this.status.position;
+    const sorted = [...this.markers].sort((a, b) => a.time - b.time);
+    const target = step > 0 ? sorted.find((m) => m.time > now + 0.01)
+                            : [...sorted].reverse().find((m) => m.time < now - (this.status.playing ? 0.5 : 0.01));
+    if (target) this.seek(target.time);
+    else if (step < 0) this.seek(0);
+  }
+
+  renderMarkers() {
+    this.ruler.querySelectorAll(".marker").forEach((m) => m.remove());
+    this.inner.querySelectorAll(".marker-line").forEach((m) => m.remove());
+    for (const marker of this.markers) {
+      const flag = html("div", "marker");
+      flag.style.left = `${marker.time * this.zoom}px`;
+      flag.title = `${marker.name}\nClick to go here · Drag to move · Double-click to rename`;
+      const name = html("span", "marker-name", marker.name);
+      const remove = button("marker-remove", "×", "Delete the marker", (event) => { event.stopPropagation(); daw("removeMarker", { id: marker.id }); });
+      remove.addEventListener("pointerdown", (event) => event.stopPropagation());
+      flag.append(name, remove);
+      flag.addEventListener("pointerdown", (event) => {
+        if (event.button !== 0) return;
+        event.stopPropagation();
+        let time = marker.time;
+        drag(event, (dx, dy, e) => {
+          time = this.snapTime(marker.time + dx / this.zoom, e);
+          flag.style.left = `${time * this.zoom}px`;
+          line.style.left = `${HEAD_WIDTH + time * this.zoom}px`;
+        }, (moved) => {
+          if (moved) daw("setMarker", { id: marker.id, time });
+          else this.seek(marker.time);
+        });
+      });
+      flag.addEventListener("dblclick", (event) => {
+        event.stopPropagation();
+        const input = html("input", "marker-input");
+        Object.assign(input, { value: marker.name, spellcheck: false });
+        let finished = false;
+        const finish = (save) => {
+          if (finished) return;
+          finished = true;
+          if (save && input.value.trim() && input.value.trim() !== marker.name) daw("setMarker", { id: marker.id, name: input.value.trim() });
+          input.remove();
+          name.hidden = false;
+        };
+        input.addEventListener("keydown", (e) => {
+          e.stopPropagation();
+          if (e.key === "Enter") finish(true);
+          if (e.key === "Escape") finish(false);
+        });
+        input.addEventListener("pointerdown", (e) => e.stopPropagation());
+        input.addEventListener("blur", () => finish(true));
+        name.hidden = true;
+        flag.append(input);
+        input.focus();
+        input.select();
+      });
+      const line = html("div", "marker-line");
+      line.style.left = `${HEAD_WIDTH + marker.time * this.zoom}px`;
+      this.ruler.append(flag);
+      this.inner.append(line);
+    }
   }
 
   //============================================================================ transport
@@ -560,7 +701,9 @@ class DawScreen {
     this.recordButton.setAttribute("aria-label", "Record");
     this.playButton.setAttribute("aria-label", "Play");
 
-    const clock = html("div", "daw-clock");
+    const clock = (this.clock = html("div", "daw-clock"));
+    clock.title = "Click to type a bar or time to go to";
+    clock.addEventListener("click", (event) => { if (event.target === clock || !event.target.closest("input")) this.editClock(); });
     clock.append((this.clockBars = html("span", "clock-bars", "1.1")), (this.clockTime = html("span", "clock-time", "0:00.0")));
 
     const timing = html("div", "daw-group");
@@ -569,18 +712,49 @@ class DawScreen {
     this.tempoInput.addEventListener("change", () => daw("tempo", { bpm: Number(this.tempoInput.value) || 120 }));
     const tempo = html("label", "tempo");
     tempo.append(this.tempoInput, html("span", "", "BPM"));
+    const tap = button("tool tap-tempo", "Tap", "Tap tempo: click (or press T) on the beat a few times", () => this.tapTempo());
+
+    this.signature = html("select", "dropdown signature");
+    this.signature.title = "Time signature (beats in a bar). In x/8 the tempo counts eighth notes.";
+    SIGNATURES.forEach(([beats, text]) => this.signature.append(new Option(text, beats)));
+    this.signature.addEventListener("change", () => daw("beatsPerBar", { beats: Number(this.signature.value) }));
+
+    this.clickVolume = html("input", "click-volume");
+    Object.assign(this.clickVolume, { type: "range", min: 0, max: 200, step: 1, title: "Click volume" });
+    let clickFirst = true;
+    this.clickVolume.addEventListener("input", () => {
+      daw("metronomeVolume", { volume: Number(this.clickVolume.value) / 100, continue: !clickFirst });
+      clickFirst = false;
+    });
+    this.clickVolume.addEventListener("change", () => { clickFirst = true; });
+
+    this.gridSelect = html("select", "dropdown grid-size");
+    this.gridSelect.title = "Snap grid";
+    GRIDS.forEach(([value, text]) => this.gridSelect.append(new Option(text, value)));
+    this.gridSelect.addEventListener("change", () => {
+      this.grid = this.gridSelect.value === "bar" ? "bar" : Number(this.gridSelect.value);
+      prefs.set("grid", this.grid);
+    });
 
     this.countIn = html("select", "dropdown count-in");
     this.countIn.title = "Count-in before recording";
     ["No count-in", "1 bar count-in", "2 bar count-in", "4 bar count-in"].forEach((text, i) => this.countIn.append(new Option(text, [0, 1, 2, 4][i])));
     this.countIn.addEventListener("change", () => daw("countIn", { bars: Number(this.countIn.value) }));
 
-    timing.append(tempo,
-      (this.metronomeButton = button("toggle", "Click", "Metronome (C)", () => daw("metronome", { on: !this.session?.metronome }))),
+    const click = html("div", "click-group");
+    click.append((this.metronomeButton = button("toggle", "Click", "Metronome (C)", () => daw("metronome", { on: !this.session?.metronome }))),
+                 this.clickVolume);
+    timing.append(tempo, tap, this.signature, click,
       this.countIn,
       (this.loopButton = button("toggle", "Loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop())),
       (this.snapButton = button("toggle", "Snap", "Snap edits to the beat (hold Alt to drag freely)", () => {
         this.snap = !this.snap;
+        this.renderTransport();
+      })),
+      this.gridSelect,
+      (this.returnButton = button("toggle", "Return", "Return on stop: pausing goes back to where you pressed play", () => {
+        this.returnOnStop = !this.returnOnStop;
+        prefs.set("returnOnStop", this.returnOnStop);
         this.renderTransport();
       })),
       (this.followButton = button("toggle", "Follow", "Scroll with the playhead while playing (F). Scrolling yourself switches it off.", () => this.setFollow(!this.follow))));
@@ -606,6 +780,7 @@ class DawScreen {
       return input;
     };
     // Logarithmic, so each step of the slider zooms by the same factor.
+    zoom.append(button("tool fit-button", "Fit", "Zoom to fit the whole song (Z)", () => this.run("zoomFit")));
     this.zoomSlider = slider("↔", "Horizontal zoom (+ / − or Ctrl+scroll)", (p) => this.setZoom(MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, p), true));
     this.heightSlider = slider("↕", "Track height (Shift+↑ / Shift+↓)", (p) => this.setRowHeight(MIN_ROW + (MAX_ROW - MIN_ROW) * p));
 
@@ -636,6 +811,11 @@ class DawScreen {
     this.saveButton.classList.toggle("is-dirty", s.project.dirty || !s.project.open);
     if (document.activeElement !== this.tempoInput) this.tempoInput.value = Math.round(s.tempo * 100) / 100;
     this.countIn.value = String(s.countIn);
+    this.signature.value = String(s.beatsPerBar ?? 4);
+    if (document.activeElement !== this.clickVolume) this.clickVolume.value = String(Math.round((s.metronomeVolume ?? 1) * 100));
+    this.gridSelect.value = String(this.grid);
+    this.gridSelect.disabled = !this.snap;
+    this.returnButton.setAttribute("aria-pressed", String(this.returnOnStop));
     this.metronomeButton.setAttribute("aria-pressed", String(s.metronome));
     this.loopButton.setAttribute("aria-pressed", String(s.loop.on));
     this.snapButton.setAttribute("aria-pressed", String(this.snap));
@@ -651,7 +831,13 @@ class DawScreen {
   }
 
   togglePlay() {
-    daw("transport", { action: this.status.playing ? "pause" : "play" });
+    if (this.status.playing) {
+      daw("transport", { action: "pause" });
+      if (this.returnOnStop && this.playStart != null && !this.status.recording) this.seek(this.playStart);
+    } else {
+      this.playStart = this.status.position;
+      daw("transport", { action: "play" });
+    }
   }
 
   async toggleRecord() {
@@ -669,7 +855,7 @@ class DawScreen {
     else {
       // No range yet: loop the next 4 bars from the playhead.
       const start = this.snapTime(this.status.position);
-      daw("loop", { on: true, start, end: start + 16 * this.beat });
+      daw("loop", { on: true, start, end: start + 4 * this.bar });
     }
   }
 
@@ -840,7 +1026,7 @@ class DawScreen {
     const width = this.timelineSeconds() * this.zoom;
     const signature = JSON.stringify([
       session.tracks.map(({ inserts, ...track }) => [track, inserts.length]),
-      session.master.volume, session.master.inserts.length, session.tempo, session.loop,
+      session.master.volume, session.master.inserts.length, session.tempo, session.loop, session.beatsPerBar, session.markers,
       this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight,
     ]);
     if (!force && signature === this.arrangeSignature) return this.movePlayhead();
@@ -851,11 +1037,12 @@ class DawScreen {
     this.root.style.setProperty("--clip", `${this.rowHeight - 8}px`);
     this.inner.classList.toggle("rows-medium", this.rowHeight < 76);
     this.inner.classList.toggle("rows-small", this.rowHeight < 58);
-    this.inner.style.setProperty("--bar", `${this.beat * 4 * this.zoom}px`);
+    this.inner.style.setProperty("--bar", `${this.bar * this.zoom}px`);
     this.inner.style.setProperty("--beat", `${this.beat * this.zoom}px`);
     this.inner.classList.toggle("dense", this.beat * this.zoom < 8);
     this.renderRuler(width);
     this.showLoop(session.loop);
+    this.renderMarkers();
 
     this.meters.clear();
     const scroll = this.arrange.scrollLeft;
@@ -870,7 +1057,7 @@ class DawScreen {
 
   renderRuler(width) {
     [...this.ruler.querySelectorAll(".bar-label")].forEach((label) => label.remove());
-    const barSeconds = this.beat * 4;
+    const barSeconds = this.bar;
     const barPixels = barSeconds * this.zoom;
     const every = [1, 2, 4, 8, 16, 32, 64].find((n) => n * barPixels >= 44) ?? 128;
 
@@ -983,6 +1170,7 @@ class DawScreen {
     element.dataset.clip = clip.id;
     element.classList.toggle("is-selected", this.selectedClip === clip.id);
     element.classList.toggle("is-missing", clip.missing);
+    element.classList.toggle("is-muted", Boolean(clip.mute));
     element.title = clip.missing ? `Missing file: ${clip.file}` : `${clip.name}\nDrag to move · Edges to trim · Corners to fade · S splits at the playhead`;
 
     const place = (start, length) => {
@@ -993,7 +1181,7 @@ class DawScreen {
 
     const canvas = html("canvas", "clip-wave");
     canvas.dataset.color = trackColour(track, this.session.tracks.indexOf(track));
-    const label = html("span", "clip-name", clip.missing ? `⚠ ${clip.name}` : clip.name);
+    const label = html("span", "clip-name", clip.missing ? `⚠ ${clip.name}` : clip.mute ? `🔇 ${clip.name}` : clip.name);
     if (clip.gain && Math.abs(clip.gain) > 0.05) label.textContent += `  ${dbText(clip.gain)} dB`;
     const fades = svg("svg", { class: "clip-fades", preserveAspectRatio: "none" });
     const fadeIn = svg("path"), fadeOut = svg("path");
@@ -1389,9 +1577,13 @@ class DawScreen {
   createClipPanel(clip) {
     const element = html("section", "panel clip-panel");
     const head = html("div", "panel-head");
-    head.append(html("h3", "", "Clip"), html("p", "panel-caption", clip.name));
-    const row = html("div", "insert-controls clip-controls");
     const id = clip.id;
+    const nameInput = html("input", "clip-name-input");
+    Object.assign(nameInput, { value: clip.name, spellcheck: false, title: "Rename the clip" });
+    nameInput.addEventListener("change", () => { if (nameInput.value.trim()) daw("setClip", { id, name: nameInput.value.trim() }); });
+    nameInput.addEventListener("keydown", (event) => { if (event.key === "Enter") nameInput.blur(); });
+    head.append(html("h3", "", "Clip"), nameInput);
+    const row = html("div", "insert-controls clip-controls");
     const current = () => this.findClip(id)?.clip ?? clip;
 
     const gain = new ValueKnob({ label: "Gain", min: -24, max: 24, value: clip.gain, defaultValue: 0, bipolar: true, unit: "dB",
@@ -1403,15 +1595,34 @@ class DawScreen {
                                     format: fadeFormat, onChange: (v, first) => daw("clipFades", { id, fadeIn: current().fadeIn, fadeOut: v, continue: !first }) });
     row.append(gain.element, fadeIn.element, fadeOut.element);
 
+    const muteButton = button("toggle", "Mute", "Silence this clip without deleting it (Shift+M)", () => this.run("muteClip"));
+    const threshold = html("select", "dropdown strip-threshold");
+    threshold.title = "What counts as silence for Strip silence";
+    [[-55, "Quiet room (−55 dB)"], [-45, "Normal (−45 dB)"], [-35, "Noisy (−35 dB)"]].forEach(([v, t]) => threshold.append(new Option(t, v)));
+    threshold.value = String(this.stripThreshold ?? -45);
+    threshold.addEventListener("change", () => { this.stripThreshold = Number(threshold.value); });
+
+    const tools = html("div", "panel-actions clip-tools");
+    tools.append(muteButton,
+      button("tool", "Normalise", "Set the clip gain so its loudest peak is −1 dB", () => this.run("normaliseClip")),
+      button("tool", "Strip silence", "Split the clip into phrases and remove the silent gaps between them", () => this.run("stripSilence")),
+      threshold,
+      button("tool", "Loop clip", "Loop the clip's range (Shift+L)", () => this.run("loopClip")),
+      button("tool", "Zoom to clip", "Fit the clip in the view (Shift+Z)", () => this.run("zoomClip")));
+
     const actions = html("div", "panel-actions");
     actions.append(
       button("tool", "Split", "Split at the playhead (S)", () => this.splitSelected()),
       button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
       button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected()));
     head.append(actions);
-    element.append(head, row);
+    element.append(head, row, tools);
 
-    return { element, update: (c) => { gain.update(c.gain); fadeIn.update(c.fadeIn); fadeOut.update(c.fadeOut); } };
+    return { element, update: (c) => {
+      gain.update(c.gain); fadeIn.update(c.fadeIn); fadeOut.update(c.fadeOut);
+      if (document.activeElement !== nameInput) nameInput.value = c.name;
+      muteButton.setAttribute("aria-pressed", String(Boolean(c.mute)));
+    } };
   }
 
   createTrackPanel(owner) {
@@ -1781,14 +1992,17 @@ class DawScreen {
   static SHORTCUTS = [
     ["Transport", [["Space", "Play / pause"], ["Enter", "Stop and go back to the start"], ["R", "Record on the armed tracks"],
                    ["← / →", "Move the playhead a beat (Shift: a bar)"], ["Home / End", "Go to the start / end of the song"],
-                   ["L", "Loop on / off"], ["C", "Click (metronome) on / off"], ["F", "Follow the playhead on / off"]]],
+                   ["L", "Loop on / off"], ["C", "Click (metronome) on / off"], ["F", "Follow the playhead on / off"],
+                   ["K", "Add a marker at the playhead"], ["[ / ]", "Previous / next marker"], ["T", "Tap tempo"],
+                   ["Click the clock", "Type a bar or time to go to"]]],
     ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["M", "Mute the selected track"],
                 ["Shift+S", "Solo the selected track"], ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track"]]],
     ["Clips", [[", / .", "Select the previous / next clip on the track"], ["S", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
-               ["V / B / G", "Select, cut and gain tools"], ["Alt+drag", "Move or trim without snapping"]]],
-    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
+               ["V / B / G", "Select, cut and gain tools"], ["Shift+M", "Mute / unmute the selected clip"],
+               ["Shift+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
+    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Z / Shift+Z", "Zoom to fit the song / the selected clip"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
               ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Ctrl+S", "Save (Shift: save as)"], ["?", "This list"], ["F11 / Ctrl+Cmd+F", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
   ];
 
@@ -1876,6 +2090,22 @@ class DawScreen {
     if (id >= 0) this.select(track.id, id);
   }
 
+  withClip(action) {
+    const found = this.findClip(this.selectedClip);
+    if (!found) return toast("Select a clip first.");
+    return action(found.clip);
+  }
+
+  // Zooms so start..end fills the view, with a little room on both sides.
+  zoomToRange(start, end) {
+    const visible = Math.max(100, this.arrange.clientWidth - HEAD_WIDTH);
+    const span = Math.max(0.05, end - start);
+    this.zoom = clamp((visible * 0.92) / span, MIN_ZOOM, MAX_ZOOM);
+    this.renderArrange(true);
+    this.scrollTo((start - span * 0.04) * this.zoom);
+    this.renderTransport();
+  }
+
   nudgeSelected(seconds) {
     const found = this.findClip(this.selectedClip);
     if (found) daw("moveClip", { id: found.clip.id, start: Math.max(0, found.clip.start + seconds) });
@@ -1916,6 +2146,26 @@ class DawScreen {
       end: () => this.seek(this.songEnd()),
       loop: () => this.toggleLoop(),
       metronome: () => daw("metronome", { on: !this.session?.metronome }),
+      addMarker: () => this.addMarker(),
+      muteClip: () => this.withClip((clip) => daw("setClip", { id: clip.id, mute: !clip.mute })),
+      normaliseClip: () => this.withClip(async (clip) => {
+        const result = await daw("normaliseClip", { id: clip.id });
+        if (result?.ok) toast(`Clip gain set to ${dbText(result.gain)} dB (peak at −1 dB).`);
+      }),
+      stripSilence: () => this.withClip(async (clip) => {
+        const result = await daw("stripSilence", { id: clip.id, threshold: this.stripThreshold ?? -45 });
+        if (result?.ok) {
+          this.selectedClip = null;
+          toast(`Kept ${result.clips} phrase${result.clips === 1 ? "" : "s"}. Ctrl+Z puts the clip back.`);
+        }
+      }),
+      loopClip: () => this.withClip((clip) => daw("loop", { on: true, start: clip.start, end: clip.start + clip.length })),
+      zoomClip: () => this.withClip((clip) => this.zoomToRange(clip.start, clip.start + clip.length)),
+      zoomFit: () => this.zoomToRange(0, Math.max(this.songEnd(), 10)),
+      previousMarker: () => this.jumpMarker(-1),
+      nextMarker: () => this.jumpMarker(1),
+      tapTempo: () => this.tapTempo(),
+      goTo: () => this.editClock(),
     };
   }
 
@@ -1929,7 +2179,7 @@ class DawScreen {
     const key = event.key.toLowerCase();
     const handled = () => event.preventDefault();
     const onSlider = event.target.closest?.("[role=slider]");
-    const step = event.shiftKey ? this.beat * 4 : this.beat;
+    const step = event.shiftKey ? this.bar : this.beat;
 
     if (mod && key === "z") { handled(); this.run(event.shiftKey ? "redo" : "undo"); }
     else if (mod && key === "y") { handled(); this.run("redo"); }
@@ -1966,8 +2216,16 @@ class DawScreen {
       this.select(this.selectedTrack, null);
     }
     else if (event.shiftKey && key === "s") { handled(); this.toggleTrack("solo"); }
+    else if (event.shiftKey && key === "m") { handled(); this.run("muteClip"); }
+    else if (event.shiftKey && key === "l") { handled(); this.run("loopClip"); }
+    else if (event.shiftKey && key === "z") { handled(); this.run("zoomClip"); }
     else if (event.shiftKey) return;
     else if (key === "r") { handled(); this.run("record"); }
+    else if (key === "k") { handled(); this.run("addMarker"); }
+    else if (key === "z") { handled(); this.run("zoomFit"); }
+    else if (event.key === "[") { handled(); this.run("previousMarker"); }
+    else if (event.key === "]") { handled(); this.run("nextMarker"); }
+    else if (key === "t") { handled(); this.run("tapTempo"); }
     else if (key === "s") { handled(); this.run("split"); }
     else if (key === "l") { handled(); this.run("loop"); }
     else if (key === "c") { handled(); this.run("metronome"); }

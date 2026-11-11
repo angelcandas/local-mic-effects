@@ -37,6 +37,9 @@ public:
     // An offline engine (for exports) runs entirely on the thread that drives it: no
     // timer, and replaced graphs are freed straight away.
     explicit DawEngine (Edit&, bool realtime = true);
+
+    // Clip edges that cut into a file's audio fade over this long, so edits don't click.
+    static constexpr double antiClickSeconds = 0.004;
     ~DawEngine() override;
 
     // With the audio stopped (e.g. from prepareToPlay). Called off the message thread,
@@ -83,9 +86,13 @@ public:
     // Interface input + output latency, so takes line up with what was heard.
     void setRecordingLatency (juce::int64 samples) noexcept { recordingLatency = samples; }
 
-    // Click on every beat at the project tempo while playing (accent on the bar, 4/4).
+    // Click on every beat at the project tempo while playing (accent on the first beat
+    // of each bar, from the Edit's time signature).
     void setMetronome (bool on) noexcept    { metronome = on; }
     bool getMetronome() const noexcept      { return metronome.load(); }
+    // Click loudness, 0 (silent) .. 1 (the default) .. 2.
+    void setMetronomeVolume (float v) noexcept { metronomeVolume = juce::jlimit (0.0f, 2.0f, v); }
+    float getMetronomeVolume() const noexcept  { return metronomeVolume.load(); }
     // Bars of click before recording starts (0 = none). The click plays during the
     // count-in even when the metronome is off.
     void setCountInBars (int bars) noexcept { countInBars = juce::jlimit (0, 4, bars); }
@@ -114,6 +121,7 @@ private:
         juce::String insertLayout; // insert ids in order: a different layout needs a new strip
         fx::FxChain chain;
         std::map<int, fx::Module*> modulesByInsertId;
+        int latencyAtBuild = 0; // the chain's delay when the current graph was built (message thread)
 
         std::atomic<float> targetLeft { 1.0f }, targetRight { 1.0f };
         std::atomic<float> peak { 0.0f };
@@ -150,8 +158,9 @@ private:
 
     // ValueTree::Listener
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
-    void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree&) override        { triggerAsyncUpdate(); }
-    void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree&, int) override { triggerAsyncUpdate(); }
+    // Markers don't change what plays, so they don't need a new graph.
+    void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree& child) override        { if (! child.hasType (ids::MARKER)) triggerAsyncUpdate(); }
+    void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree& child, int) override { if (! child.hasType (ids::MARKER)) triggerAsyncUpdate(); }
     void valueTreeChildOrderChanged (juce::ValueTree&, int, int) override         { triggerAsyncUpdate(); }
     void valueTreeRedirected (juce::ValueTree&) override                          { triggerAsyncUpdate(); }
 
@@ -207,6 +216,8 @@ private:
     std::atomic<bool> metronome { false };
     std::atomic<int> countInBars { 0 };
     std::atomic<double> samplesPerBeat { 24000.0 };
+    std::atomic<int> beatsPerBar { 4 };
+    std::atomic<float> metronomeVolume { 1.0f };
     float clickPhase = 0.0f, clickIncrement = 0.0f, clickLevel = 0.0f, clickDecay = 0.0f; // audio thread
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (DawEngine)

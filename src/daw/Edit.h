@@ -9,13 +9,14 @@
 // The DAW session as a ValueTree, so every change can be undone and the whole thing
 // saves to a file as it is:
 //
-//   PROJECT  version, tempo, loopOn, loopStart, loopEnd
+//   PROJECT  version, tempo, beatsPerBar, loopOn, loopStart, loopEnd
+//     MARKER  id, name, time
 //     MASTER  volume (dB)
 //       INSERTS
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value
 //     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor
 //       INSERTS ...
-//       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut
+//       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute
 //
 // Times are in seconds, so a project survives a sample-rate change. Insert values use
 // the plugin parameter IDs (see Parameters.cpp) in real units, as presets do.
@@ -33,6 +34,7 @@ namespace ids
     MICFX_DAW_ID (monitor) MICFX_DAW_ID (type) MICFX_DAW_ID (file) MICFX_DAW_ID (start) MICFX_DAW_ID (offset)
     MICFX_DAW_ID (length) MICFX_DAW_ID (gain) MICFX_DAW_ID (fadeIn) MICFX_DAW_ID (fadeOut)
     MICFX_DAW_ID (loopOn) MICFX_DAW_ID (loopStart) MICFX_DAW_ID (loopEnd)
+    MICFX_DAW_ID (beatsPerBar) MICFX_DAW_ID (MARKER) MICFX_DAW_ID (time)
 #undef MICFX_DAW_ID
 }
 
@@ -74,6 +76,19 @@ public:
     void setTempo (double bpm);
     double getTempo() const { return state.getProperty (ids::tempo, 120.0); }
 
+    // Time signature: beats in a bar (2..12), for the click's accent, bar numbers and
+    // the count-in. The tempo counts these beats.
+    void setBeatsPerBar (int beats);
+    int getBeatsPerBar() const { return juce::jlimit (2, 12, (int) state.getProperty (ids::beatsPerBar, 4)); }
+
+    //==============================================================================
+    // Markers: named points on the timeline (verse, chorus...). Times in seconds.
+    juce::ValueTree addMarker (double timeSeconds, const juce::String& name = {});
+    void removeMarker (int markerId);
+    void setMarkerTime (int markerId, double timeSeconds);
+    void setMarkerName (int markerId, const juce::String& name);
+    juce::Array<juce::ValueTree> getMarkers() const; // in time order
+
     //==============================================================================
     juce::ValueTree addClip (int trackId, const juce::File&, double startSeconds, double lengthSeconds,
                              double offsetSeconds = 0.0);
@@ -89,6 +104,12 @@ public:
     int duplicateClip (int clipId);                    // placed right after the original
     void setClipGain (int clipId, float decibels);
     void setClipFades (int clipId, double fadeInSeconds, double fadeOutSeconds);
+    void setClipName (int clipId, const juce::String&);
+    void setClipMute (int clipId, bool);
+
+    // Replaces a clip with copies that play only the given parts of it (seconds from the
+    // clip's start), each with short fades. For strip silence. Returns the new clip ids.
+    juce::Array<int> keepClipParts (int clipId, const std::vector<std::pair<double, double>>& parts, double fadeSeconds = 0.01);
 
     // The nearest grid line at the project tempo, `beats` apart (1 = quarter notes,
     // 4 = bars in 4/4, 0.5 = eighths).
