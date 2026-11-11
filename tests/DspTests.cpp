@@ -687,7 +687,7 @@ namespace
 
     // A sung line: phrases of a 160 Hz voice-like tone (harmonics at 1/h) with a muddy
     // second harmonic (+9.5 dB at 320 Hz), alternating loud and soft, with gaps.
-    juce::AudioBuffer<float> makeSungLine (double seconds)
+    juce::AudioBuffer<float> makeSungLine (double seconds, double period = 1.25, double sung = 1.0)
     {
         juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
         buffer.clear();
@@ -696,8 +696,8 @@ namespace
         for (int i = 0; i < buffer.getNumSamples(); ++i)
         {
             const auto t = i / sampleRate;
-            const auto phrase = (int) std::floor (t / 1.25);
-            if (std::fmod (t, 1.25) > 1.0)
+            const auto phrase = (int) std::floor (t / period);
+            if (std::fmod (t, period) > sung)
                 continue; // a breath between phrases
 
             const auto level = phrase % 2 == 0 ? 0.3 : 0.07;
@@ -733,6 +733,156 @@ namespace
         return buffer;
     }
 
+    // A guitar-ish part: plucked 196 Hz notes (decaying harmonics) every half second,
+    // a loud bar then a quiet one, so its level swings; a little rumble at 30 Hz.
+    juce::AudioBuffer<float> makePlucks (double seconds)
+    {
+        juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto since = std::fmod (t, 0.5);
+            const auto level = (int) std::floor (t / 2.0) % 2 == 0 ? 0.25 : 0.04;
+            double value = 0.0;
+            for (int h = 1; h <= 12; ++h)
+                value += std::sin (twoPi * 196.0 * h * t) / h * std::exp (-since * (3.0 + h));
+            value = value * level + 0.002 * std::sin (twoPi * 30.0 * t);
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.setSample (ch, i, (float) value);
+        }
+
+        return buffer;
+    }
+
+    // Auto Mix adding effects: reverb on a dry voice (at the end of its chain), EQ and a
+    // compressor on an instrument, none on a voice that rings already, and only the
+    // effects it's allowed.
+    void testAutoMixEffects()
+    {
+        std::cout << "\nAuto Mix adds effects\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-automix-fx");
+        folder.createDirectory();
+        const auto voiceFile = folder.getChildFile ("voice.wav"), guitarFile = folder.getChildFile ("guitar.wav"),
+                   backingFile = folder.getChildFile ("backing.wav"), roomyFile = folder.getChildFile ("roomy.wav");
+        writeWav (voiceFile, makeSungLine (12.0, 2.5, 1.5), sampleRate);
+        writeWav (guitarFile, makePlucks (12.0), sampleRate);
+        writeWav (backingFile, makeBacking (12.0), sampleRate);
+        {
+            auto roomy = makeSungLine (12.0, 2.5, 1.5);
+            fx::FxChain room ({ fx::ModuleType::reverb });
+            room.setValue ("reverbMix", 45.0f);
+            room.setValue ("reverbSize", 90.0f);
+            room.setValue ("reverbDamping", 20.0f);
+            room.prepare ({ sampleRate, (juce::uint32) roomy.getNumSamples(), 2 });
+            juce::dsp::AudioBlock<float> block (roomy);
+            room.process (fx::Module::Context (block));
+            writeWav (roomyFile, roomy, sampleRate);
+        }
+
+        daw::Edit edit;
+        const auto voice = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto guitar = (int) edit.addTrack ("Guitar")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Backing")[daw::ids::id];
+        const auto roomy = (int) edit.addTrack ("Harmony vocal")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 12.0);
+        edit.addClip (guitar, guitarFile, 0.0, 12.0);
+        edit.addClip (backing, backingFile, 0.0, 12.0);
+        edit.addClip (roomy, roomyFile, 0.0, 12.0);
+        const auto own = (int) edit.addInsert (guitar, fx::ModuleType::chorus)[daw::ids::id];
+        juce::ignoreUnused (own);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        std::map<int, analysis::Role> roles;
+        std::map<int, float> volumes;
+        for (const auto& [id, profile] : source.tracks)
+        {
+            roles[id] = analysis::guessRole (edit.getTrack (id)[daw::ids::name].toString(), profile, 12.0);
+            volumes[id] = 0.0f;
+        }
+        check (roles[guitar] == analysis::Role::instrument && roles[voice] == analysis::Role::voice && roles[roomy] == analysis::Role::voice,
+               "guesses the guitar is an instrument");
+
+        analysis::MixOptions options;
+        options.existingInserts[guitar] = { fx::ModuleType::chorus };
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options);
+
+        for (const auto& move : plan.moves)
+            for (const auto& reason : move.reasons)
+                std::cout << "        " << edit.getTrack (move.trackId)[daw::ids::name].toString() << ": " << reason << "\n";
+        for (const auto& note : plan.notes)
+            std::cout << "        note: " << note << "\n";
+
+        const auto find = [] (const analysis::MixPlan& p, int track, fx::ModuleType type) -> const analysis::MixMove*
+        {
+            for (const auto& move : p.moves)
+                if (move.trackId == track && move.insert == type)
+                    return &move;
+            return nullptr;
+        };
+
+        const auto* reverb = find (plan, voice, fx::ModuleType::reverb);
+        check (reverb != nullptr && reverb->atEnd && juce::exactlyEqual (reverb->values.at ("reverbMix"), 20.0f),
+               "dry voice: a ballad-sized reverb");
+        check (find (plan, roomy, fx::ModuleType::reverb) == nullptr && find (plan, roomy, fx::ModuleType::paraEq) != nullptr,
+               "a voice that rings on already gets no reverb (but still its EQ)");
+
+        const auto* guitarEq = find (plan, guitar, fx::ModuleType::paraEq);
+        check (guitarEq != nullptr && juce::exactlyEqual (guitarEq->values.at ("peqLowCutOn"), 1.0f)
+                   && guitarEq->values.at ("peqLowCutFreq") >= 60.0f && guitarEq->values.at ("peqLowCutFreq") <= 120.0f,
+               "instrument: low cut under its lowest note (196 Hz)");
+        check (find (plan, guitar, fx::ModuleType::compressor) != nullptr, "instrument: compresses its loud and quiet bars");
+        check (find (plan, backing, fx::ModuleType::compressor) == nullptr && find (plan, backing, fx::ModuleType::reverb) == nullptr,
+               "a full backing gets no compressor or reverb");
+
+        // Applied: the reverb goes after the track's own effects, the rest before them.
+        edit.addInsert (voice, fx::ModuleType::chorus);
+        analysis::applyMix (edit, plan);
+        const auto voiceInserts = daw::Edit::getInserts (edit.getTrack (voice));
+        const auto guitarInserts = daw::Edit::getInserts (edit.getTrack (guitar));
+        check (voiceInserts.getChild (voiceInserts.getNumChildren() - 1)[daw::ids::type].toString() == "reverb"
+                   && voiceInserts.getChild (voiceInserts.getNumChildren() - 2)[daw::ids::type].toString() == "chorus"
+                   && voiceInserts.getChild (0)[daw::ids::type].toString() == "paraEq",
+               "reverb goes at the end of the voice's chain, EQ at the start");
+        check (guitarInserts.getNumChildren() == 3 && guitarInserts.getChild (0)[daw::ids::type].toString() == "paraEq"
+                   && guitarInserts.getChild (1)[daw::ids::type].toString() == "compressor"
+                   && guitarInserts.getChild (2)[daw::ids::type].toString() == "chorus",
+               "instrument: EQ and compressor before its own chorus");
+
+        // Half the amount: half the reverb.
+        edit.getUndoManager().undo();
+        analysis::applyMix (edit, plan, 0.5f);
+        {
+            const auto inserts = daw::Edit::getInserts (edit.getTrack (voice));
+            check (juce::exactlyEqual ((float) inserts.getChild (inserts.getNumChildren() - 1)["reverbMix"], 10.0f),
+                   "amount 50% halves the reverb");
+        }
+
+        // Only what it's allowed to add.
+        analysis::MixOptions eqOnly;
+        eqOnly.compressor = eqOnly.deEsser = eqOnly.reverb = false;
+        const auto limited = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, eqOnly);
+        bool onlyEq = true;
+        for (const auto& move : limited.moves)
+            onlyEq = onlyEq && (! move.insert.has_value() || *move.insert == fx::ModuleType::paraEq);
+        analysis::MixOptions none;
+        none.eq = none.compressor = none.deEsser = none.reverb = false;
+        const auto volumesOnly = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, none);
+        bool onlyVolumes = ! volumesOnly.moves.empty();
+        for (const auto& move : volumesOnly.moves)
+            onlyVolumes = onlyVolumes && ! move.insert.has_value();
+        check (onlyEq && find (limited, voice, fx::ModuleType::paraEq) != nullptr && onlyVolumes,
+               "adds only the effects you allow (volumes always)");
+
+        // Coaching keeps the voice dry.
+        const auto coaching = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::coaching, options);
+        check (find (coaching, voice, fx::ModuleType::reverb) == nullptr, "coaching: no reverb");
+
+        folder.deleteRecursively();
+    }
+
     void testMixAssistant()
     {
         std::cout << "\nAuto Mix (mix assistant)\n";
@@ -761,7 +911,9 @@ namespace
                "guesses voice and backing (pitched " + juce::String (voiceProfile.getPitchedFraction() * 100.0, 0) + "% of the voice)");
 
         const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { backing, analysis::Role::backing } };
-        const auto plan = analysis::planMix (source, roles, { { voice, 0.0f }, { backing, 0.0f } }, 0.0f, analysis::MixStyle::pop);
+        analysis::MixOptions existing; // as DawBridge passes them: the voice has its own reverb
+        existing.existingInserts[voice] = { fx::ModuleType::reverb };
+        const auto plan = analysis::planMix (source, roles, { { voice, 0.0f }, { backing, 0.0f } }, 0.0f, analysis::MixStyle::pop, existing);
 
         for (const auto& move : plan.moves)
             for (const auto& reason : move.reasons)
@@ -799,6 +951,8 @@ namespace
                    && inserts.getChild (0)[daw::ids::type].toString() == "paraEq"
                    && inserts.getChild (inserts.getNumChildren() - 1)[daw::ids::type].toString() == "reverb",
                "adds its inserts before the track's own effects");
+        check (juce::exactlyEqual ((float) inserts.getChild (inserts.getNumChildren() - 1)["reverbMix"], 0.0f),
+               "leaves the voice's own reverb as it was");
 
         const auto after = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, true).run();
         const auto masking = analysis::measureMasking (after.tracks[0].second, after.tracks[1].second);
@@ -2684,6 +2838,7 @@ int main()
     testLiveControls();
     testAnalysis();
     testMixAssistant();
+    testAutoMixEffects();
     testLatency();
     testSmoothing();
     testLiveMeters();

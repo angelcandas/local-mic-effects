@@ -69,12 +69,14 @@ namespace
 {
     const char* roleKey (analysis::Role role)
     {
-        return role == analysis::Role::voice ? "voice" : role == analysis::Role::backing ? "backing" : "other";
+        return role == analysis::Role::voice ? "voice" : role == analysis::Role::backing ? "backing"
+             : role == analysis::Role::instrument ? "instrument" : "other";
     }
 
     analysis::Role roleFromKey (const juce::String& key)
     {
-        return key == "voice" ? analysis::Role::voice : key == "backing" ? analysis::Role::backing : analysis::Role::other;
+        return key == "voice" ? analysis::Role::voice : key == "backing" ? analysis::Role::backing
+             : key == "instrument" ? analysis::Role::instrument : analysis::Role::other;
     }
 
     const char* styleKey (analysis::MixStyle style)
@@ -809,8 +811,35 @@ void DawBridge::replanAutoMix()
     for (const auto& track : edit.getTracks())
         volumes[(int) track[ids::id]] = track.getProperty (ids::volume, 0.0f);
 
+    auto options = autoMixOptions;
+    for (const auto& track : edit.getTracks())
+    {
+        const auto id = (int) track[ids::id];
+        options.trackNames[id] = track[ids::name].toString();
+        for (const auto& insert : daw::Edit::getInserts (track))
+            for (int type = 0; type < fx::numModuleTypes; ++type)
+                if (insert[ids::type].toString() == fx::getModuleKey ((fx::ModuleType) type))
+                    options.existingInserts[id].push_back ((fx::ModuleType) type);
+    }
+
     autoMixPlan = analysis::planMix (*autoMixAnalysis, autoMixRoles, volumes,
-                                     (float) edit.getMaster().getProperty (ids::volume, 0.0f), autoMixStyle);
+                                     (float) edit.getMaster().getProperty (ids::volume, 0.0f), autoMixStyle, options);
+}
+
+void DawBridge::readAutoMixEffects (const juce::var& effects)
+{
+    if (! effects.isObject())
+        return;
+
+    const auto read = [&effects] (const char* key, bool& flag)
+    {
+        if (effects.hasProperty (key))
+            flag = (bool) effects[key];
+    };
+    read ("eq", autoMixOptions.eq);
+    read ("compressor", autoMixOptions.compressor);
+    read ("deEsser", autoMixOptions.deEsser);
+    read ("reverb", autoMixOptions.reverb);
 }
 
 juce::var DawBridge::describeAutoMix() const
@@ -840,6 +869,7 @@ juce::var DawBridge::describeAutoMix() const
             effect = *move.insert == fx::ModuleType::paraEq     ? "Parametric EQ"
                    : *move.insert == fx::ModuleType::compressor ? "Compressor"
                    : *move.insert == fx::ModuleType::deEsser    ? "De-esser"
+                   : *move.insert == fx::ModuleType::reverb     ? "Reverb"
                                                                 : juce::String (fx::getModuleKey (*move.insert));
 
         juce::Array<juce::var> reasons;
@@ -852,15 +882,19 @@ juce::var DawBridge::describeAutoMix() const
     for (const auto& note : autoMixPlan.notes)
         notes.add (note);
 
+    const auto effects = object ({ { "eq", autoMixOptions.eq }, { "compressor", autoMixOptions.compressor },
+                                   { "deEsser", autoMixOptions.deEsser }, { "reverb", autoMixOptions.reverb } });
+
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
-                     { "style", styleKey (autoMixStyle) }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
+                     { "style", styleKey (autoMixStyle) }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
                      { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs } });
 }
 
 // The "autoMix" command; args.action is one of:
-//   analyse {style}     listen to every track (background); "dawAutoMix" brings the plan
+//   analyse {style, effects}  listen to every track (background); "dawAutoMix" brings the plan
 //   reference           pick a song and plan a master match to it (background)
-//   replan {style, roles: {trackId: "voice" | "backing" | "other"}}
+//   replan {style, effects, roles: {trackId: "voice" | "backing" | "instrument" | "other"}}
+//                       effects: {eq, compressor, deEsser, reverb}, the effects it may add
 //   apply {amount, replace}  write the plan as one undo step ("Auto Mix"); with replace,
 //                       first undo the Auto Mix just applied (to change the amount)
 //   compare {after}     undo or redo the last Auto Mix, to hear before and after
@@ -886,6 +920,7 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
 
         if (args.hasProperty ("style"))
             autoMixStyle = styleFromKey (args["style"].toString());
+        readAutoMixEffects (args["effects"]);
 
         if (action == "analyse")
         {
@@ -909,6 +944,7 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
     {
         if (args.hasProperty ("style"))
             autoMixStyle = styleFromKey (args["style"].toString());
+        readAutoMixEffects (args["effects"]);
 
         if (auto* roles = args["roles"].getDynamicObject())
             for (const auto& property : roles->getProperties())
