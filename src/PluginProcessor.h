@@ -79,6 +79,12 @@ public:
 
     std::atomic<int> currentPreset { 0 };
 
+    // Live mode performance controls (not saved, not parameters):
+    // outputMuted silences the output (panic button); dryCompare skips the effect chain
+    // so you hear the plain mic, to compare.
+    std::atomic<bool> outputMuted { false };
+    std::atomic<bool> dryCompare { false };
+
     // Tells the host (and the recorder's take alignment) how late the output is: the
     // Live chain's delay (autotune, pitch shift), or the DAW engine's in DAW mode.
     // Runs on a timer, since switching autotune on or off changes it. Message thread.

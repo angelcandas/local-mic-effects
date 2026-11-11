@@ -170,7 +170,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     inputGain.process (context);
     updatePeak (inputPeak, buffer.getMagnitude (0, numSamples));
 
-    chain.process (context);
+    if (! dryCompare.load())
+        chain.process (context);
 
     outputGain.process (context);
     limiter.process (context);
@@ -196,6 +197,9 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         multitrack.process (buffer, numOut, numSamples);
         applyPeakGuard (buffer, numOut, numSamples);
     }
+
+    if (outputMuted.load())
+        buffer.clear();
 
     updatePeak (outputPeak, buffer.getMagnitude (0, numSamples));
 }
