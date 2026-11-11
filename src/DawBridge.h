@@ -54,6 +54,7 @@ private:
     juce::var describeStatus();
     juce::var describeInserts (const juce::ValueTree& trackOrMaster) const;
     juce::var getPeaks (const juce::File&);
+    juce::var getDetailPeaks (const juce::File&, double start, double end, double seconds);
 
     void setMode (bool daw);
     void rememberProject();
