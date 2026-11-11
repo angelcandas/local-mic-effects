@@ -33,6 +33,16 @@ public:
         reset();
     }
 
+    // The delay to report for a typical singing voice (around 200 Hz), in samples. The
+    // real delay follows the voice: 4 samples plus half a pitch period, wandering by up to
+    // half a period either way while the pitch is being changed.
+    static int getNominalLatency (double sampleRate) noexcept
+    {
+        return 4 + juce::roundToInt (0.5 * sampleRate / nominalVoiceHz);
+    }
+
+    static constexpr double nominalVoiceHz = 200.0;
+
     void reset()
     {
         std::fill (buffer.begin(), buffer.end(), 0.0f);

@@ -81,8 +81,19 @@ public:
     // For the UI tuner.
     const PitchEngine& getEngine() const noexcept { return engine; }
 
+    // Autotune and pitch shift delay the voice (see PsolaShifter). The harmonizer alone
+    // doesn't: the lead stays dry and only the harmony voices lag a little behind it.
+    int getLatencySamples() const noexcept override
+    {
+        return flag (tuneOn) || flag (shiftOn) ? PsolaShifter::getNominalLatency (sampleRate) : 0;
+    }
+
 private:
-    void prepareModule (const juce::dsp::ProcessSpec& spec) override { engine.prepare (spec); }
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override
+    {
+        sampleRate = spec.sampleRate;
+        engine.prepare (spec);
+    }
     void resetModule() override                                      { engine.reset(); }
 
     void update() noexcept override
@@ -105,6 +116,7 @@ private:
 
     PitchEngine engine;
     PitchEngine::Settings settings;
+    double sampleRate = 48000.0;
 };
 
 class Eq final : public Module

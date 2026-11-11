@@ -116,6 +116,11 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
             if (const auto module = modules.find ((int) tree[ids::id]); module != modules.end())
                 if (auto* value = module->second->findValue (property.toString()))
                     value->store ((float) tree[property]);
+
+            // Switching autotune or pitch shift on or off changes the track's delay, so
+            // the latency compensation is worked out again.
+            if (it->second->chain.getLatencySamples() != it->second->latencyAtBuild)
+                triggerAsyncUpdate();
         }
 
         return;
@@ -283,6 +288,7 @@ void DawEngine::rebuild()
     // Delay every track to line up with the slowest chain.
     for (auto& track : graph->tracks)
     {
+        track.strip->latencyAtBuild = track.strip->chain.getLatencySamples();
         track.delaySamples = maxLatency - track.strip->chain.getLatencySamples();
 
         if (track.delaySamples > 0)
@@ -293,7 +299,8 @@ void DawEngine::rebuild()
     }
 
     length = end;
-    latency = maxLatency + graph->master->chain.getLatencySamples();
+    graph->master->latencyAtBuild = graph->master->chain.getLatencySamples();
+    latency = maxLatency + graph->master->latencyAtBuild;
 
     updateMix();
     publish (std::move (graph));
