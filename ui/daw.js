@@ -834,7 +834,7 @@ class DawScreen {
       if (path) daw("openRecent", { path });
     });
 
-    this.projectName = html("div", "daw-project");
+    this.projectName = document.querySelector(".app-project");
 
     const transport = html("div", "daw-group daw-transport-buttons");
     transport.append(
@@ -953,15 +953,13 @@ class DawScreen {
     }
     right.append(this.viewTabs, iconButton("tool", "help", "Keyboard shortcuts (?)", () => this.toggleShortcuts()));
 
-    bar.append(files, sep(), this.projectName, transport, clock, sep(), timing, sep(), right);
+    bar.append(files, sep(), transport, clock, sep(), timing, sep(), right);
   }
 
   renderTransport() {
     const s = this.session;
     if (!s) return;
 
-    this.projectName.replaceChildren(html("strong", "", s.project.name), html("span", "dirty", s.project.dirty ? "•" : ""));
-    this.projectName.title = s.project.open ? s.project.path : "Not saved yet. Save to keep your work in a project folder.";
     this.saveButton.classList.toggle("is-dirty", s.project.dirty || !s.project.open);
     const recent = (s.recent ?? []).filter((r) => r.path !== s.project.path);
     const recentKey = JSON.stringify(recent);
@@ -3060,8 +3058,71 @@ class DawScreen {
 export function initDaw() {
   const root = document.querySelector(".daw");
   const modeSwitch = document.querySelector(".mode-switch");
-  const subtitle = document.querySelector(".brand p");
-  const liveSubtitle = subtitle.textContent;
+  const title = document.querySelector(".app-title");
+  const projectLine = document.querySelector(".app-project");
+  const liveTracks = document.querySelector(".live-tracks");
+  const liveTracksButton = liveTracks.querySelector(".live-tracks-button");
+  const liveTracksMenu = liveTracks.querySelector(".live-tracks-menu");
+  const backdrop = document.querySelector(".confirm-backdrop");
+  let sessionState = null;
+
+  // Asks before leaving one mode for the other; resolves true on "Switch".
+  const confirmSwitch = (toDaw) => new Promise((resolve) => {
+    const recording = screen.status?.recording;
+    backdrop.querySelector("h2").textContent = toDaw ? "Switch to MicFX DAW?" : "Switch to MicFX Live?";
+    backdrop.querySelector(".confirm-text").textContent = (toDaw
+      ? "The multitrack recorder takes over the window. Your live effects keep their settings."
+      : "Back to the live effects chain. The DAW project stays open and its tracks stay listed in Live.")
+      + (recording ? " A recording is in progress; switching stops it." : "");
+    const ok = backdrop.querySelector(".confirm-ok"), stay = backdrop.querySelector(".confirm-stay");
+    ok.textContent = toDaw ? "Switch to DAW" : "Switch to Live";
+    const done = (value) => {
+      backdrop.hidden = true;
+      ok.removeEventListener("click", yes); stay.removeEventListener("click", no);
+      backdrop.removeEventListener("click", away); document.removeEventListener("keydown", key, true);
+      resolve(value);
+    };
+    const yes = () => done(true), no = () => done(false);
+    const away = (event) => { if (event.target === backdrop) done(false); };
+    const key = (event) => {
+      if (event.key === "Escape") { event.stopPropagation(); done(false); }
+      else if (event.key === "Enter") { event.stopPropagation(); event.preventDefault(); done(true); }
+    };
+    ok.addEventListener("click", yes); stay.addEventListener("click", no);
+    backdrop.addEventListener("click", away); document.addEventListener("keydown", key, true);
+    backdrop.hidden = false;
+    ok.focus();
+  });
+  const requestMode = async (toDaw) => {
+    if (toDaw === screen.active) return;
+    if (await confirmSwitch(toDaw)) daw("mode", { daw: toDaw });
+  };
+
+  const renderLiveTracks = () => {
+    const tracks = sessionState?.tracks ?? [];
+    liveTracks.hidden = !sessionState?.available || screen.active || tracks.length === 0;
+    liveTracks.querySelector(".live-tracks-count").textContent = String(tracks.length);
+    if (liveTracks.hidden) { liveTracksMenu.hidden = true; liveTracksButton.setAttribute("aria-expanded", "false"); }
+    const anySolo = tracks.some((t) => t.solo);
+    liveTracksMenu.replaceChildren(
+      html("div", "live-tracks-head", sessionState?.project?.name ?? ""),
+      ...tracks.map((t) => {
+        const row = html("div", "live-track" + (t.mute || (anySolo && !t.solo) ? " is-off" : ""));
+        const dot = html("span", "live-track-dot"); dot.style.background = t.colour || "var(--accent)";
+        const flags = [t.kind === "midi" ? "MIDI" : "", t.arm ? "armed" : "", t.solo ? "solo" : "", t.mute ? "muted" : "",
+                       `${t.clips.length} clip${t.clips.length === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
+        row.append(dot, html("span", "live-track-name", t.name), html("span", "live-track-flags", flags));
+        return row;
+      }),
+      html("div", "live-tracks-foot", "Read only. Switch to DAW to edit."));
+  };
+  liveTracksButton.addEventListener("click", () => {
+    liveTracksMenu.hidden = !liveTracksMenu.hidden;
+    liveTracksButton.setAttribute("aria-expanded", String(!liveTracksMenu.hidden));
+  });
+  document.addEventListener("click", (event) => {
+    if (!liveTracks.contains(event.target)) { liveTracksMenu.hidden = true; liveTracksButton.setAttribute("aria-expanded", "false"); }
+  });
   const screen = new DawScreen(root);
 
   Juce.getNativeFunction("getParameterInfo")().then((info) => {
@@ -3080,20 +3141,29 @@ export function initDaw() {
     const isDaw = session.available && session.mode === "daw";
     const changed = document.body.classList.contains("is-daw") !== isDaw;
     document.body.classList.toggle("is-daw", isDaw);
-    subtitle.textContent = isDaw ? "Multitrack recorder" : liveSubtitle;
+    title.textContent = isDaw ? "MicFX DAW" : "MicFX Live";
+    document.title = title.textContent;
+    // The active project's name sits in the top bar in both modes.
+    const project = session.project;
+    projectLine.hidden = !session.available;
+    projectLine.querySelector(".app-project-label").textContent = session.available ? project.name : "Live voice processor";
+    projectLine.querySelector(".dirty").textContent = session.available && project.dirty ? "•" : "";
+    projectLine.title = project?.open ? project.path : "Not saved yet. Save to keep your work in a project folder.";
+    sessionState = session;
+    renderLiveTracks();
     root.hidden = !isDaw;
     [...modeSwitch.children].forEach((b) => b.classList.toggle("is-selected", (b.dataset.mode === "daw") === isDaw));
     if (changed && isDaw) screen.render();
   };
 
   for (const b of modeSwitch.children)
-    b.addEventListener("click", () => daw("mode", { daw: b.dataset.mode === "daw" }));
+    b.addEventListener("click", () => requestMode(b.dataset.mode === "daw"));
 
   document.addEventListener("daw-session", (event) => applyMode(event.detail));
 
   // The app's menu bar (standalone only) sends the same commands as the buttons and keys.
   window.__JUCE__.backend.addEventListener("appMenu", (action) => {
-    if (action === "mode:live" || action === "mode:daw") daw("mode", { daw: action === "mode:daw" });
+    if (action === "mode:live" || action === "mode:daw") requestMode(action === "mode:daw");
     else screen.run(action);
   });
 
