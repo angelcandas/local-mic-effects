@@ -112,6 +112,12 @@ tracks instead of one live chain:
 - The **effects panel** sits under the tracks (and the mixer): the selected clip, then the selected
   track's effects left to right, in chain order. Drag the bar above it to resize, or press **E** (or
   its **Hide** button) to fold it away.
+- The **library** on the left lists audio files (this project, Recordings, Music, Downloads,
+  Desktop and any folder you add with **+ Add folder…**), the effects, instruments (with MIDI
+  tracks) and presets. Drag a file onto a track to put a clip where you drop it, or below the
+  tracks for a new track; drag an effect or preset onto a track, the master, a mixer strip or the
+  effects panel. Double-click (or Enter) adds to the selected track. **Shift+B** folds it to a thin
+  strip, **Ctrl+F** searches it, and its right edge drags to resize.
 - **Menus**: the standalone app has File (new, open, save, import, export, audio settings), Edit,
   View and Transport menus, in the macOS menu bar at the top of the screen or under the title bar
   on Windows and Linux. They do the same as the buttons and shortcuts.
@@ -252,6 +258,7 @@ src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune
 ui/modules.js           the effect catalog the UI is built from
 ui/app.js, styles.css   the interface (Live mode)
 ui/daw.js, daw.css      the DAW screen: tracks, clips, inserts, mixer, transport
+ui/browser.js           the DAW screen's library sidebar (files, effects, instruments, presets)
 ui/widgets.js           helpers shared by both screens
 ui/fxviews.js           effect pictures (EQ/filter curves, dynamics, echo taps…) for both screens,
                         animated from each effect's live readings
