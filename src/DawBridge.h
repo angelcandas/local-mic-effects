@@ -39,7 +39,13 @@ public:
     juce::var openProject (const juce::File& picked);       // a project folder, or any file in one
     juce::var newProject (const juce::File& folder);
     juce::var saveProjectAs (const juce::File& folder);
-    juce::var importAudio (const juce::File& file, int trackId); // -> { ok, error, track, clip }
+    // start < 0: at the playhead. trackId not a track: on a new track.
+    juce::var importAudio (const juce::File& file, int trackId, double start = -1.0); // -> { ok, error, track, clip, start }
+
+    // The library sidebar (ui/browser.js): the places it shows, and one folder's
+    // subfolders and audio files.
+    juce::var describePlaces() const;                  // -> { ok, places: [{ name, path, kind, removable }] }
+    juce::var browseFolder (const juce::File&) const;  // -> { ok, error, path, name, folders, files }
 
     // The tests run outside the standalone app; this lets them switch DAW mode on.
     static inline bool availableForTesting = false;
@@ -48,6 +54,7 @@ private:
     juce::var describeStatus();
     juce::var describeInserts (const juce::ValueTree& trackOrMaster) const;
     juce::var getPeaks (const juce::File&);
+    juce::var getDetailPeaks (const juce::File&, double start, double end, double seconds);
 
     void setMode (bool daw);
     void rememberProject();

@@ -280,6 +280,7 @@ namespace
                 { "", "", "", false },
                 { "toggleView", "Tracks / mixer",        "Tab",          true },
                 { "toggleDock", "Effects panel",         "E",            true },
+                { "toggleLibrary", "Library",            "Shift+B",      true },
                 { "follow",    "Follow the playhead",    "F",            true },
                 { "", "", "", false },
                 { "zoomIn",    "Zoom in",                "+",            true },

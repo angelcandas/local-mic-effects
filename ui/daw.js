@@ -5,13 +5,14 @@
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES } from "./modules.js";
 import { createFxView } from "./fxviews.js";
+import { LibraryBrowser } from "./browser.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
 
 const HEAD_WIDTH = 210;           // track header column, px (matches daw.css)
 const MIN_ROW = 44, MAX_ROW = 200; // track height range, px (vertical zoom)
-const MIN_ZOOM = 4, MAX_ZOOM = 400; // pixels per second
+const MIN_ZOOM = 4, MAX_ZOOM = 2000; // pixels per second
 const METER_FLOOR_DB = -60;
 const FADER_MIN_DB = -60, FADER_MAX_DB = 6;
 const GRIDS = [["bar", "Bar"], [1, "Beat"], [0.5, "1/2 beat"], [0.25, "1/4 beat"]];
@@ -529,11 +530,15 @@ class DawScreen {
     this.view = "arrange";     // or "mixer"
     this.selectedTrack = null; // track id, 0 = master
     this.selectedClip = null;
-    this.peaks = new Map();    // file -> { seconds, peaks } | "loading"
+    this.peaks = new Map();    // file -> { seconds, peaks } | "loading" (whole-file overview)
+    this.detail = new Map();   // file -> [{ id, start, end, seconds, min, max }] (zoomed-in stretches)
+    this.detailPending = new Set();
+    this.detailCount = 0;
     this.meters = new Map();   // track id -> [Level]
     this.dragging = false;
     this.pendingSession = null;
     this.reveal = null;        // { track, clip?, start? } to scroll into view once drawn
+    this.trackWaiters = new Map(); // track id -> resolve, see waitForTrack
 
     this.buildTransport();
     this.buildArrange();
@@ -541,6 +546,7 @@ class DawScreen {
     this.buildInspector();
     this.buildBanners();
     this.buildAutoMix();
+    this.buildLibrary();
 
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
@@ -934,6 +940,10 @@ class DawScreen {
     // Scrolling by hand while playing switches Follow off, so you can look around
     // (and edit) elsewhere while the song keeps playing.
     this.arrange.addEventListener("scroll", () => {
+      if (!this.wavesQueued) {
+        this.wavesQueued = true;
+        requestAnimationFrame(() => { this.wavesQueued = false; this.redrawWaves(); });
+      }
       if (performance.now() - this.autoScrollTime < 150) return;
       if (this.status.playing && this.follow) this.setFollow(false);
     });
@@ -1230,6 +1240,7 @@ class DawScreen {
 
     const canvas = html("canvas", "clip-wave");
     canvas.dataset.color = trackColour(track, this.session.tracks.indexOf(track));
+    canvas.clip = clip;
     const label = html("span", "clip-name", clip.missing ? `⚠ ${clip.name}` : clip.mute ? `🔇 ${clip.name}` : clip.name);
     if (clip.gain && Math.abs(clip.gain) > 0.05) label.textContent += `  ${dbText(clip.gain)} dB`;
     const fades = svg("svg", { class: "clip-fades", preserveAspectRatio: "none" });
@@ -1247,7 +1258,7 @@ class DawScreen {
       html("div", "handle trim-start"), html("div", "handle trim-end"),
       html("div", "handle fade-in"), html("div", "handle fade-out"));
 
-    this.drawWaveform(canvas, clip);
+    this.drawWaveform(canvas);
 
     element.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
@@ -1268,7 +1279,8 @@ class DawScreen {
         drag(event, (dx, dy, e) => {
           gain = clamp(Math.round(((clip.gain || 0) - dy * (e.shiftKey ? 0.02 : 0.1)) * 10) / 10, -60, 24);
           label.textContent = `${clip.name}  ${dbText(gain)} dB`;
-          this.drawWaveform(canvas, { ...clip, gain });
+          canvas.clip = { ...clip, gain };
+          this.drawWaveform(canvas);
         }, (moved) => {
           this.dragging = false;
           element.classList.remove("is-dragging");
@@ -1308,10 +1320,14 @@ class DawScreen {
           const start = clamp(this.snapTime(clip.start + dt, e), Math.max(0, clip.start - clip.offset), end - 0.01);
           edit = { command: "trimStart", args: { id: clip.id, start } };
           place(start, end - start);
+          canvas.clip = { ...clip, start, offset: clip.offset + (start - clip.start), length: end - start };
+          this.drawWaveform(canvas);
         } else if (mode === "trim-end") {
           const newEnd = clamp(this.snapTime(end + dt, e), clip.start + 0.01, maxEnd);
           edit = { command: "trimEnd", args: { id: clip.id, end: newEnd } };
           place(clip.start, newEnd - clip.start);
+          canvas.clip = { ...clip, length: newEnd - clip.start };
+          this.drawWaveform(canvas);
         } else {
           const fadeInS = mode === "fade-in" ? clamp(clip.fadeIn + dt, 0, clip.length - clip.fadeOut) : clip.fadeIn;
           const fadeOutS = mode === "fade-out" ? clamp(clip.fadeOut - dt, 0, clip.length - clip.fadeIn) : clip.fadeOut;
@@ -1330,49 +1346,120 @@ class DawScreen {
     return element;
   }
 
-  async drawWaveform(canvas, clip) {
-    let peaks = this.peaks.get(clip.file);
-
-    if (!peaks && !clip.missing) {
-      this.peaks.set(clip.file, "loading");
-      const result = await nativeDaw("peaks", { file: clip.file });
-      if (result?.peaks) this.peaks.set(clip.file, result);
-      else {
-        this.peaks.delete(clip.file); // still decoding: try again shortly
-        setTimeout(() => canvas.isConnected && this.drawWaveform(canvas, clip), 400);
-        return;
-      }
-      peaks = result;
-      if (!canvas.isConnected) return;
-    }
-
-    if (!peaks || peaks === "loading") {
-      if (peaks === "loading") setTimeout(() => canvas.isConnected && this.drawWaveform(canvas, clip), 200);
+  // Draws the part of a clip's waveform that is on screen (plus half a screen either
+  // side), at the screen's own resolution. The canvas is placed at that part of the clip
+  // in pixels rather than stretched over the whole clip, so trimming an edge shows or
+  // hides audio where it is, and zooming in draws finer detail (asked for, for just the
+  // visible stretch) instead of scaling up a picture.
+  drawWaveform(canvas, clip = canvas.clip) {
+    const overview = this.peaks.get(clip.file);
+    if (!overview) {
+      if (!clip.missing) this.loadPeaks(clip.file);
       return;
     }
+    if (overview === "loading") return;
+
+    const zoom = this.zoom;
+    const view = Math.max(1, this.arrange.clientWidth - HEAD_WIDTH) / zoom;
+    const left = this.arrange.scrollLeft / zoom;
+    const s0 = Math.max(clip.start, left - view / 2);
+    const s1 = Math.min(clip.start + clip.length, left + view * 1.5);
+    canvas.hidden = s1 <= s0;
+    if (canvas.hidden) return;
 
     const ratio = window.devicePixelRatio || 1;
-    const cssWidth = Math.min(clip.length * this.zoom, 16000 / ratio);
+    const cssLeft = (s0 - clip.start) * zoom;
+    const cssWidth = Math.min((s1 - s0) * zoom, 16000 / ratio);
     const width = Math.max(1, Math.round(cssWidth * ratio));
     const height = Math.max(1, Math.round((this.rowHeight - 8) * ratio));
+    const f0 = clip.offset + (s0 - clip.start);       // file time at the canvas's left edge
+    const perPixel = cssWidth / zoom / width;         // file seconds per canvas pixel
+    const f1 = f0 + width * perPixel;
+
+    // Below the overview's resolution, draw from detail peaks for this stretch.
+    let detail = null;
+    if (perPixel < overview.seconds) {
+      const fileEnd = clip.fileLength > 0 ? clip.fileLength : Infinity;
+      detail = (this.detail.get(clip.file) ?? []).find((d) =>
+        d.seconds <= perPixel * 1.05 && d.start <= f0 + 1e-6 && d.end >= Math.min(f1, fileEnd) - 1e-6) ?? null;
+      if (!detail) this.loadDetail(clip.file, f0 - (f1 - f0) / 2, f1 + (f1 - f0) / 2, perPixel);
+    }
+
+    const key = [cssLeft, cssWidth, width, height, f0, perPixel, clip.gain || 0, canvas.dataset.color, detail?.id ?? 0].join();
+    if (canvas.drawn === key) return;
+    canvas.drawn = key;
+
+    canvas.style.left = `${cssLeft}px`;
+    canvas.style.width = `${cssWidth}px`;
     canvas.width = width;
     canvas.height = height;
-
     const context = canvas.getContext("2d");
     context.fillStyle = canvas.dataset.color || "#8c7bff";
     const gain = Math.pow(10, (clip.gain || 0) / 20);
-    const perPixel = clip.length / width / peaks.seconds;
-    const first = clip.offset / peaks.seconds;
-    const middle = height / 2;
+    const middle = height / 2, reach = middle - ratio;
 
+    if (detail) {
+      const scale = (v) => clamp(v * gain, -1, 1) * reach;
+      for (let x = 0; x < width; ++x) {
+        const t = f0 + x * perPixel - detail.start;
+        const a = Math.floor(t / detail.seconds);
+        const b = Math.max(a + 1, Math.floor((t + perPixel) / detail.seconds));
+        let lo = Infinity, hi = -Infinity;
+        for (let i = Math.max(0, a); i < Math.min(b, detail.max.length); ++i) {
+          lo = Math.min(lo, detail.min[i]);
+          hi = Math.max(hi, detail.max[i]);
+        }
+        if (lo > hi) continue;
+        const top = middle - scale(hi), bottom = middle - scale(lo);
+        context.fillRect(x, Math.min(top, middle - 0.5 * ratio), 1, Math.max(ratio, bottom - top));
+      }
+      return;
+    }
+
+    const peaks = overview.peaks, step = overview.seconds;
     for (let x = 0; x < width; ++x) {
-      const a = Math.floor(first + x * perPixel);
-      const b = Math.max(a + 1, Math.floor(first + (x + 1) * perPixel));
+      const a = Math.floor((f0 + x * perPixel) / step);
+      const b = Math.max(a + 1, Math.floor((f0 + (x + 1) * perPixel) / step));
       let peak = 0;
-      for (let i = a; i < Math.min(b, peaks.peaks.length); ++i) peak = Math.max(peak, peaks.peaks[i]);
-      const half = Math.max(0.5 * ratio, Math.min(1, peak * gain) * (middle - ratio));
+      for (let i = Math.max(0, a); i < Math.min(b, peaks.length); ++i) peak = Math.max(peak, peaks[i]);
+      const half = Math.max(0.5 * ratio, Math.min(1, peak * gain) * reach);
       context.fillRect(x, middle - half, 1, half * 2);
     }
+  }
+
+  // Redraws the waveforms on screen (all, or one file's), e.g. after scrolling.
+  redrawWaves(file = null) {
+    for (const canvas of this.rows.querySelectorAll("canvas.clip-wave"))
+      if (canvas.clip && (!file || canvas.clip.file === file)) this.drawWaveform(canvas);
+  }
+
+  async loadPeaks(file) {
+    if (this.peaks.has(file)) return;
+    this.peaks.set(file, "loading");
+    const result = await nativeDaw("peaks", { file });
+    if (result?.peaks) {
+      this.peaks.set(file, result);
+      this.redrawWaves(file);
+    } else {
+      setTimeout(() => { this.peaks.delete(file); this.redrawWaves(file); }, 400); // still decoding
+    }
+  }
+
+  // Fetches detail peaks for one stretch of a file; keeps the last few per file.
+  async loadDetail(file, start, end, seconds) {
+    if (this.detailPending.has(file)) return;
+    this.detailPending.add(file);
+    let result = null;
+    try {
+      result = await nativeDaw("peaks", { file, start: Math.max(0, start), end, seconds });
+    } finally {
+      this.detailPending.delete(file);
+    }
+    if (!result?.max) return;
+    result.id = ++this.detailCount;
+    const list = [result, ...(this.detail.get(file) ?? [])].slice(0, 6);
+    this.detail.set(file, list);
+    this.redrawWaves(file);
   }
 
   movePlayhead(force = false) {
@@ -1431,6 +1518,7 @@ class DawScreen {
 
   layoutArrange() {
     if (this.session && this.inner.offsetWidth < this.arrange.clientWidth) this.renderArrange();
+    else this.redrawWaves();
   }
 
   //============================================================================ mixer
@@ -1471,6 +1559,7 @@ class DawScreen {
   createStrip(track, index) {
     const isMaster = track.id === 0;
     const element = html("div", isMaster ? "strip is-master" : "strip");
+    if (!isMaster) element.dataset.track = track.id;
     element.style.setProperty("--track-color", isMaster ? "var(--accent-2)" : trackColour(track, index));
     element.addEventListener("pointerdown", (event) => {
       if (!event.target.closest(".fader, .knob, button")) this.select(track.id, null);
@@ -1626,7 +1715,7 @@ class DawScreen {
 
   createClipPanel(clip) {
     const element = html("section", "panel clip-panel");
-    const head = html("div", "panel-head");
+    const head = html("div", "clip-head");
     const id = clip.id;
     const nameInput = html("input", "clip-name-input");
     Object.assign(nameInput, { value: clip.name, spellcheck: false, title: "Rename the clip" });
@@ -1652,20 +1741,19 @@ class DawScreen {
     threshold.value = String(this.stripThreshold ?? -45);
     threshold.addEventListener("change", () => { this.stripThreshold = Number(threshold.value); });
 
-    const tools = html("div", "panel-actions clip-tools");
-    tools.append(muteButton,
-      button("tool", "Normalise", "Set the clip gain so its loudest peak is −1 dB", () => this.run("normaliseClip")),
-      button("tool", "Strip silence", "Split the clip into phrases and remove the silent gaps between them", () => this.run("stripSilence")),
-      threshold,
-      button("tool", "Loop clip", "Loop the clip's range (Shift+L)", () => this.run("loopClip")),
-      button("tool", "Zoom to clip", "Fit the clip in the view (Shift+Z)", () => this.run("zoomClip")));
-
-    const actions = html("div", "panel-actions");
-    actions.append(
-      button("tool", "Split", "Split at the playhead (S)", () => this.splitSelected()),
-      button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
-      button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected()));
-    head.append(actions);
+    // All clip controls sit in one compact column: name, knobs, then three rows of buttons.
+    const toolRow = (...items) => { const r = html("div", "clip-tool-row"); r.append(...items); return r; };
+    const tools = html("div", "clip-tools");
+    tools.append(
+      toolRow(button("tool", "Split", "Split at the playhead (S)", () => this.splitSelected()),
+              button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
+              button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected())),
+      toolRow(muteButton,
+              button("tool", "Normalise", "Set the clip gain so its loudest peak is −1 dB", () => this.run("normaliseClip")),
+              button("tool", "Loop clip", "Loop the clip's range (Shift+L)", () => this.run("loopClip")),
+              button("tool", "Zoom to clip", "Fit the clip in the view (Shift+Z)", () => this.run("zoomClip"))),
+      toolRow(button("tool", "Strip silence", "Split the clip into phrases and remove the silent gaps between them", () => this.run("stripSilence")),
+              threshold));
     element.append(head, row, tools);
 
     return { element, update: (c) => {
@@ -1704,16 +1792,10 @@ class DawScreen {
       for (const module of MODULES.filter((m) => m.category === categoryId)) group.append(new Option(module.name, module.id));
       add.append(group);
     }
-    add.addEventListener("change", async () => {
-      const module = MODULES.find((m) => m.id === add.value);
+    add.addEventListener("change", () => {
+      const moduleId = add.value;
       add.value = "";
-      if (!module) return;
-      const id = await daw("addInsert", { track: owner.id, type: MODULE_KEYS[module.id] });
-      // The pitch insert switches on autotune by default; switch to the part that was picked.
-      if (id >= 0 && MODULE_KEYS[module.id] === "pitch" && module.id !== "tune") {
-        await daw("setInsert", { id, param: "tuneOn", value: 0, continue: true });
-        await daw("setInsert", { id, param: module.power, value: 1, continue: true });
-      }
+      this.addEffect(owner.id, moduleId);
     });
 
     const preset = html("select", "dropdown load-preset");
@@ -1990,10 +2072,52 @@ class DawScreen {
     }
     // Another project: start at its top-left, not where the last one was scrolled to.
     const path = session.project?.path ?? "";
+    const pathChanged = this.projectPath !== undefined && path !== this.projectPath;
     if (this.projectPath !== undefined && path !== this.projectPath) this.arrange.scrollTop = this.arrange.scrollLeft = 0;
     this.projectPath = path;
+    if (pathChanged) this.library?.refresh();
     document.dispatchEvent(new CustomEvent("daw-session", { detail: session }));
     if (this.active) this.render();
+    for (const [id, resolve] of this.trackWaiters) if (tracks.some((t) => t.id === id)) { this.trackWaiters.delete(id); resolve(); }
+  }
+
+  // Resolves once a session holding the track has arrived (a command's reply comes
+  // before the session that shows its result).
+  waitForTrack(id) {
+    if (this.session?.tracks.some((t) => t.id === id)) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.trackWaiters.set(id, resolve);
+      setTimeout(() => { if (this.trackWaiters.get(id) === resolve) { this.trackWaiters.delete(id); resolve(); } }, 2000);
+    });
+  }
+
+  //============================================================================ library
+  // The sidebar on the left (ui/browser.js): it sits beside the tracks, mixer and
+  // effects panel.
+  buildLibrary() {
+    const main = this.root.querySelector(".daw-main");
+    const body = html("div", "daw-body");
+    main.replaceWith(body);
+    this.library = new LibraryBrowser(this, {
+      call: (command, args = {}) => nativeDaw(command, args),
+      run: daw,
+      toast: (message, kind) => toast(message, kind),
+      onEvent: (name, handler) => window.__JUCE__.backend.addEventListener(name, handler),
+    });
+    body.append(this.library.element, main);
+  }
+
+  // Adds an effect (a modules.js id) at the end of a track's (or the master's) chain.
+  async addEffect(trackId, moduleId) {
+    const module = MODULES.find((m) => m.id === moduleId);
+    if (!module) return -1;
+    const id = await daw("addInsert", { track: trackId, type: MODULE_KEYS[module.id] });
+    // The pitch insert switches on autotune by default; switch to the part that was picked.
+    if (id >= 0 && MODULE_KEYS[module.id] === "pitch" && module.id !== "tune") {
+      await daw("setInsert", { id, param: "tuneOn", value: 0, continue: true });
+      await daw("setInsert", { id, param: module.power, value: 1, continue: true });
+    }
+    return id;
   }
 
   flushSession() {
@@ -2066,7 +2190,7 @@ class DawScreen {
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
                ["V / B / G", "Select, cut and gain tools"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Shift+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
-    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Z / Shift+Z", "Zoom to fit the song / the selected clip"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
+    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["Shift+B", "Show / hide the library"], ["Ctrl+F", "Search the library"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Z / Shift+Z", "Zoom to fit the song / the selected clip"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
               ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Ctrl+S", "Save (Shift: save as)"], ["?", "This list"], ["F11 / Ctrl+Cmd+F", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
   ];
 
@@ -2224,6 +2348,8 @@ class DawScreen {
       addTrack: () => this.addTrack(),
       toggleView: () => this.setView(this.view === "arrange" ? "mixer" : "arrange"),
       toggleDock: () => this.setDock(this.root.classList.contains("dock-hidden")),
+      toggleLibrary: () => this.library.toggle(),
+      searchLibrary: () => this.library.focusSearch(),
       follow: () => this.setFollow(!this.follow),
       zoomIn: () => this.setZoom(this.zoom * 1.5),
       zoomOut: () => this.setZoom(this.zoom / 1.5),
@@ -2285,6 +2411,7 @@ class DawScreen {
     else if (mod && key === "x") { handled(); this.run("cut"); }
     else if (mod && key === "c") { handled(); this.run("copy"); }
     else if (mod && key === "v") { handled(); this.run("paste"); }
+    else if (mod && key === "f") { handled(); this.run("searchLibrary"); }
     else if (mod) return;
     else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { handled(); this.nudgeSelected(event.key === "ArrowLeft" ? -step : step); }
     else if (event.altKey) return;
@@ -2315,6 +2442,7 @@ class DawScreen {
     else if (event.shiftKey && key === "m") { handled(); this.run("muteClip"); }
     else if (event.shiftKey && key === "l") { handled(); this.run("loopClip"); }
     else if (event.shiftKey && key === "z") { handled(); this.run("zoomClip"); }
+    else if (event.shiftKey && key === "b") { handled(); this.run("toggleLibrary"); }
     else if (event.shiftKey) return;
     else if (key === "r") { handled(); this.run("record"); }
     else if (key === "k") { handled(); this.run("addMarker"); }
