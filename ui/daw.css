@@ -696,6 +696,8 @@ body.is-daw .chip--live { display: none; }
 }
 
 .insert-controls .knob { min-width: 56px; }
+.insert-footer { margin-top: 8px; }
+.insert-gains .knob { min-width: 44px; }
 .insert-choice { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .insert-choice .name { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; }
 
@@ -737,6 +739,8 @@ body.is-daw .chip--live { display: none; }
 .export-options label { display: grid; grid-template-columns: 70px 1fr; align-items: center; color: var(--muted); }
 .export-options label.check { display: flex; gap: 8px; color: var(--text); }
 .export-options input[type=checkbox] { accent-color: var(--accent); }
+.automix-effects { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
+.automix-effects > span { width: 62px; color: var(--muted); }
 .export-bar { height: 4px; margin: 14px 0 10px; overflow: hidden; border-radius: 2px; background: #080a0e; visibility: hidden; }
 .export-bar div { height: 100%; width: calc(var(--progress, 0) * 100%); background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
 .export-panel.is-running .export-bar,
@@ -1252,3 +1256,28 @@ body.library-dragging * { cursor: grabbing !important; }
 @media (max-width: 900px) {
   .daw-library:not(.is-collapsed) { --library-width: 220px !important; }
 }
+
+/* ---------- Pitch & time (ui/rhythm.js) ---------- */
+
+.inspector .rhythm-panel .panel-head { width: 170px; }
+.rhythm-panel .knob { --cat: var(--accent-2); }
+.rhythm-knobs { align-self: flex-start; width: 150px; }
+.rhythm-body { display: flex; flex: none; flex-direction: column; gap: 6px; width: 230px; min-height: 0; overflow-y: auto; }
+.rhythm-body .insert-sub { margin-top: 2px; }
+.rhythm-body .panel-actions { margin-top: 2px; }
+.rhythm-check { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11.5px; cursor: pointer; }
+.rhythm-warp-info { margin: 4px 0 0; }
+
+.warp-marker {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 0;
+  border-left: 1.5px solid var(--accent-2);
+  pointer-events: none;
+}
+.warp-marker::before { content: ""; position: absolute; top: 0; left: -4px; border: 4px solid transparent; border-top-color: var(--accent-2); }
+.warp-marker.is-dragging { border-left-style: dashed; }
+.clip.is-warped .clip-name::after { content: "  \21C4"; opacity: 0.7; }
+.daw-arrange[data-tool="warp"] .clip, [data-tool="warp"] .clip { cursor: ew-resize; }

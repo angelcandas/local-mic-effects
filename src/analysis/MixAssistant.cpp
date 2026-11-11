@@ -131,18 +131,127 @@ namespace
         return p > 0.0 ? powerToDb (p) : -200.0;
     }
 
+    // A compressor from how much a track's level swings: the momentary loudness for an
+    // instrument (so single plucks and hits don't count as swings), the level of each
+    // hop for a voice (phrase to phrase). Leaves `move` empty when it's steady enough.
+    // Returns the change to its loudness; adds the change to its peak to `peakChange`.
+    double planCompressor (MixMove& move, const Profile& profile, double eqChange, bool instrument, double& peakChange)
+    {
+        std::vector<float> levels;
+        const auto& source = instrument ? profile.momentaryLufs : profile.rmsDb;
+        for (size_t i = 0; i < source.size() && i < profile.active.size(); ++i)
+            if (profile.active[i] && source[i] > -150.0f)
+                levels.push_back (source[i] + (float) eqChange);
+
+        const auto spread = percentile (levels, 0.9) - percentile (levels, 0.1);
+        if (levels.empty() || spread < (instrument ? 8.0f : 6.0f))
+            return 0.0;
+
+        const auto ratio = instrument ? (spread > 12.0f ? 3.0f : 2.0f) : (spread > 14.0f ? 4.0f : spread > 10.0f ? 3.0f : 2.0f);
+
+        // The compressor follows peaks, which sit about 3 dB over the RMS of a voice's
+        // steady parts: the threshold is set there, so it acts on the louder half. An
+        // instrument is only caught on its loudest third.
+        std::vector<float> rms;
+        for (size_t i = 0; i < profile.rmsDb.size(); ++i)
+            if (profile.active[i])
+                rms.push_back (profile.rmsDb[i] + (float) eqChange);
+
+        constexpr float crest = 3.0f;
+        const auto threshold = juce::jlimit (-60.0f, 0.0f, roundTo (percentile (rms, instrument ? 0.67 : 0.5) + crest, 1.0));
+        move.insert = fx::ModuleType::compressor;
+        move.values = { { "compOn", 1.0f }, { "compThreshold", threshold }, { "compRatio", ratio } };
+        move.reasons.add ("Compressor " + juce::String (ratio, 0) + ":1 from " + juce::String (threshold, 0) + " dB: "
+                          + (instrument ? "its level swings " : "your level swings ") + formatDb (spread)
+                          + (instrument ? "" : " between phrases"));
+
+        // Its effect on loudness: each frame above the threshold comes down.
+        double before = 0.0, after = 0.0;
+        for (size_t i = 0; i < profile.momentaryLufs.size(); ++i)
+            if (profile.active[i])
+            {
+                const auto level = profile.rmsDb[i] + eqChange + crest;
+                const auto reduction = juce::jmax (0.0, level - threshold) * (1.0 - 1.0 / ratio);
+                before += dbToPower (profile.momentaryLufs[i]);
+                after += dbToPower (profile.momentaryLufs[i] - reduction);
+            }
+
+        peakChange -= juce::jmax (0.0, (double) profile.peakDb + eqChange - threshold) * (1.0 - 1.0 / ratio);
+        return powerToDb (after) - powerToDb (before);
+    }
+
+    // How long a voice takes to die away by 20 dB after its notes stop (median, seconds),
+    // or nothing when there are too few clear note ends to tell. A close, dry recording
+    // stops within a hop; one made in a room, or with reverb already on it, rings on.
+    std::optional<double> measureRingSeconds (const Profile& profile)
+    {
+        const auto& rms = profile.rmsDb;
+        const auto n = (int) rms.size();
+
+        std::vector<float> active;
+        for (int i = 0; i < n; ++i)
+            if (profile.active[(size_t) i])
+                active.push_back (rms[(size_t) i]);
+        const auto loud = percentile (active, 0.95);
+
+        const auto level = [&] (int i) { return juce::jmax (-100.0f, rms[(size_t) i]); };
+        std::vector<float> rings;
+
+        for (int i = 0; i + 2 < n; ++i)
+        {
+            // A note end: a loud hop followed by a clear drop over the next two.
+            if (level (i) < loud - 12.0f || level (i + 1) > level (i) || level (i + 2) > level (i) - 4.0f)
+                continue;
+
+            // Follow the fall until it's 20 dB down, the next note starts, or 1.5 s.
+            const auto start = level (i);
+            auto last = i + 1;
+            auto reached = level (last) <= start - 20.0f;
+            for (int k = i + 2; ! reached && k < juce::jmin (n, i + 16); ++k)
+            {
+                if (level (k) > level (k - 1) + 2.0f)
+                    break;
+                last = k;
+                reached = level (k) <= start - 20.0f;
+            }
+
+            if (reached)
+                rings.push_back ((float) ((last - i) * Profile::hopSeconds));
+            else if (last >= i + 3) // fell slowly and got interrupted: from its rate
+                rings.push_back ((float) juce::jmin (2.0, 20.0 / juce::jmax (1.0, (double) (start - level (last)) / ((last - i) * Profile::hopSeconds))));
+
+            i = last;
+        }
+
+        if (rings.size() < 2)
+            return {};
+        return (double) percentile (rings, 0.5);
+    }
+
+    bool hasAny (const MixOptions& options, int trackId, std::initializer_list<fx::ModuleType> types)
+    {
+        const auto it = options.existingInserts.find (trackId);
+        if (it == options.existingInserts.end())
+            return false;
+        for (auto type : types)
+            if (std::find (it->second.begin(), it->second.end(), type) != it->second.end())
+                return true;
+        return false;
+    }
+
     //==========================================================================
     struct VoicePlan
     {
-        MixMove eq, compressor, deEsser;
+        MixMove eq, compressor, deEsser, reverb;
         double loudnessChange = 0.0; // what the EQ and compressor do to its loudness
         double peakChange = 0.0;     // roughly, to the peak
     };
 
-    VoicePlan planVoice (int trackId, const Profile& voice, const MixTargets& targets)
+    VoicePlan planVoice (int trackId, const Profile& voice, const MixTargets& targets, const MixOptions& options, juce::StringArray& notes,
+                         const juce::String& name)
     {
         VoicePlan plan;
-        plan.eq.trackId = plan.compressor.trackId = plan.deEsser.trackId = trackId;
+        plan.eq.trackId = plan.compressor.trackId = plan.deEsser.trackId = plan.reverb.trackId = trackId;
         plan.eq.insert = fx::ModuleType::paraEq;
         plan.compressor.insert = fx::ModuleType::compressor;
         plan.deEsser.insert = fx::ModuleType::deEsser;
@@ -260,10 +369,17 @@ namespace
             plan.eq.values[prefix + "Q"] = roundTo (eq.bells[(size_t) b].q, 0.01);
         }
 
+        if (! options.eq)
+        {
+            eq = {};
+            plan.eq = {};
+        }
+
         const auto eqDb = fx::ParametricEq::getMagnitudeDb (eq, bandCentres(), analysisRate);
         const auto eqChange = loudnessChangeDb (spectrum, eqDb);
 
         // De-esser when 5-10 kHz stands out.
+        if (options.deEsser)
         {
             double sum = 0.0;
             int count = 0;
@@ -295,38 +411,33 @@ namespace
         }
 
         // Compressor from how much the level swings between phrases.
-        std::vector<float> levels;
-        for (size_t i = 0; i < voice.rmsDb.size(); ++i)
-            if (voice.active[i])
-                levels.push_back (voice.rmsDb[i] + (float) eqChange);
-
-        const auto low = percentile (levels, 0.1), middle = percentile (levels, 0.5), high = percentile (levels, 0.9);
-        const auto spread = high - low;
         double compChange = 0.0;
-
-        if (! levels.empty() && spread >= 6.0f)
+        if (options.compressor)
         {
-            const auto ratio = spread > 14.0f ? 4.0f : spread > 10.0f ? 3.0f : 2.0f;
-            // The compressor follows peaks, which sit about 3 dB over the RMS of a voice's
-            // steady parts: the threshold is set there, so it acts on the louder half.
-            constexpr float crest = 3.0f;
-            const auto threshold = juce::jlimit (-60.0f, 0.0f, roundTo (middle + crest, 1.0));
-            plan.compressor.values = { { "compOn", 1.0f }, { "compThreshold", threshold }, { "compRatio", ratio } };
-            plan.compressor.reasons.add ("Compressor " + juce::String (ratio, 0) + ":1 from " + juce::String (threshold, 0)
-                                         + " dB: your level swings " + formatDb (spread) + " between phrases");
+            plan.compressor.trackId = trackId;
+            compChange = planCompressor (plan.compressor, voice, eqChange, false, plan.peakChange);
+        }
 
-            // Its effect on loudness: each frame above the threshold comes down.
-            double before = 0.0, after = 0.0;
-            for (size_t i = 0; i < voice.momentaryLufs.size(); ++i)
-                if (voice.active[i])
-                {
-                    const auto level = voice.rmsDb[i] + eqChange + crest;
-                    const auto reduction = juce::jmax (0.0, level - threshold) * (1.0 - 1.0 / ratio);
-                    before += dbToPower (voice.momentaryLufs[i]);
-                    after += dbToPower (voice.momentaryLufs[i] - reduction);
-                }
-            compChange = powerToDb (after) - powerToDb (before);
-            plan.peakChange = -juce::jmax (0.0, (double) voice.peakDb + eqChange - threshold) * (1.0 - 1.0 / ratio);
+        // Reverb at the end of the chain: some space, as much as the style asks for, but
+        // only on a dry recording that doesn't have a reverb or echo of its own.
+        if (options.reverb && targets.reverbMix > 0.0f)
+        {
+            const auto ring = measureRingSeconds (voice);
+
+            if (hasAny (options, trackId, { fx::ModuleType::reverb, fx::ModuleType::echo }))
+                notes.add (name + " already has its own reverb or echo: no reverb added.");
+            else if (ring.has_value() && *ring > 0.4)
+                notes.add (name + " already sounds roomy (it rings on " + juce::String (*ring, 1) + " s after each note): no reverb added.");
+            else
+            {
+                plan.reverb.insert = fx::ModuleType::reverb;
+                plan.reverb.atEnd = true;
+                plan.reverb.values = { { "reverbOn", 1.0f }, { "reverbMix", targets.reverbMix }, { "reverbSize", targets.reverbSize },
+                                       { "reverbDamping", 55.0f }, { "reverbWidth", 100.0f } };
+                plan.reverb.reasons.add ("Reverb " + juce::String (targets.reverbMix, 0) + "%, "
+                                         + (targets.reverbSize >= 60.0f ? "large" : targets.reverbSize >= 45.0f ? "medium" : "small")
+                                         + " room: the recording is dry and gives the voice some space");
+            }
         }
 
         plan.loudnessChange = eqChange + compChange;
@@ -340,12 +451,13 @@ MixTargets getTargets (MixStyle style)
 {
     switch (style)
     {
-        case MixStyle::pop:      return { 1.5f, 2.0f, 0.0f };
-        case MixStyle::ballad:   return { 2.5f, 0.0f, 1.5f };
-        case MixStyle::rock:     return { 0.0f, 1.0f, -1.0f };
-        case MixStyle::coaching: return { 4.0f, 1.5f, 0.0f };
+        // Coaching keeps the voice dry, so every detail of it can be heard.
+        case MixStyle::pop:      return { 1.5f, 2.0f, 0.0f, -14.0f, 12.0f, 45.0f };
+        case MixStyle::ballad:   return { 2.5f, 0.0f, 1.5f, -14.0f, 20.0f, 65.0f };
+        case MixStyle::rock:     return { 0.0f, 1.0f, -1.0f, -14.0f, 9.0f, 35.0f };
+        case MixStyle::coaching: return { 4.0f, 1.5f, 0.0f, -14.0f, 0.0f, 50.0f };
     }
-    return { 1.5f, 0.0f, 0.0f };
+    return { 1.5f, 0.0f, 0.0f, -14.0f, 12.0f, 45.0f };
 }
 
 juce::String getStyleName (MixStyle style)
@@ -373,14 +485,21 @@ Role guessRole (const juce::String& trackName, const Profile& profile, double so
     const auto active = profile.getActiveSeconds();
     if (active <= 0.0)
         return Role::other;
+
+    for (auto word : { "guitar", "gtr", "guitarra", "piano", "keys", "synth", "bass", "bajo", "drum", "bateria", "kick", "snare",
+                       "perc", "string", "pad", "organ", "uke", "violin", "cello", "sax", "trumpet", "brass", "horn" })
+        if (name.contains (word))
+            return Role::instrument;
+
     if (profile.getPitchedFraction() > 0.6)
         return Role::voice;
-    return active > 0.5 * songSeconds ? Role::backing : Role::other;
+    return active > 0.5 * songSeconds ? Role::backing : Role::instrument;
 }
 
 //==============================================================================
 MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Role>& roles,
-                 const std::map<int, float>& currentVolumes, float currentMasterVolume, MixStyle style)
+                 const std::map<int, float>& currentVolumes, float currentMasterVolume, MixStyle style,
+                 const MixOptions& options)
 {
     MixPlan plan;
     const auto targets = getTargets (style);
@@ -388,13 +507,14 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
     const auto volumeOf = [&] (int id) { auto it = currentVolumes.find (id); return it != currentVolumes.end() ? it->second : 0.0f; };
     const auto roleOf = [&] (int id) { auto it = roles.find (id); return it != roles.end() ? it->second : Role::other; };
 
-    std::vector<int> voices, backings;
+    std::vector<int> voices, backings, instruments;
     for (const auto& [id, profile] : analysis.tracks)
     {
         if (profile.getActiveSeconds() <= 0.0)
             continue;
-        if (roleOf (id) == Role::voice)   voices.push_back (id);
-        if (roleOf (id) == Role::backing) backings.push_back (id);
+        if (roleOf (id) == Role::voice)      voices.push_back (id);
+        if (roleOf (id) == Role::backing)    backings.push_back (id);
+        if (roleOf (id) == Role::instrument) instruments.push_back (id);
     }
 
     if (voices.empty())
@@ -414,66 +534,125 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
     // Voices: EQ, compressor, de-esser.
     std::map<int, VoicePlan> voicePlans;
     for (auto id : voices)
-        voicePlans[id] = planVoice (id, *findProfile (analysis, id), targets);
+        voicePlans[id] = planVoice (id, *findProfile (analysis, id), targets, options, plan.notes,
+                                    options.trackNames.count (id) > 0 ? options.trackNames.at (id) : "The voice");
 
     // The lead is the voice that sings the most; the others are balanced like it.
     const auto lead = *std::max_element (voices.begin(), voices.end(), [&] (int a, int b)
                                          { return findProfile (analysis, a)->getActiveSeconds() < findProfile (analysis, b)->getActiveSeconds(); });
     const auto& leadProfile = *findProfile (analysis, lead);
 
-    // Backing: a dip where each one covers the lead's words most.
-    std::map<int, double> backingChange; // loudness change of each backing while the lead sings
+    // Backing and instruments: a dip where each one covers the lead's words most.
+    // Instruments also get a low cut under their lowest notes and, when their level
+    // swings a lot, a compressor. All of it in one EQ per track.
+    std::map<int, double> backingChange; // loudness change of each one while the lead sings
     for (auto id : backings)
-    {
-        const auto& profile = *findProfile (analysis, id);
-        const auto masking = measureMasking (leadProfile, profile);
+        backingChange[id] = 0.0;
+    for (auto id : instruments)
         backingChange[id] = 0.0;
 
-        if (masking.worstBand < 0)
-            continue;
+    for (auto& [id, change] : backingChange)
+    {
+        const auto& profile = *findProfile (analysis, id);
+        const auto instrument = roleOf (id) == Role::instrument;
 
-        const auto difference = masking.backingOverVoiceDb[(size_t) masking.worstBand];
-        const auto cut = juce::jlimit (0.0, 4.0, 0.5 * (difference + 6.0));
-
-        if (cut < 1.0)
-            continue;
-
-        const auto hz = getBandCentre (masking.worstBand);
-        MixMove move;
-        move.trackId = id;
-        move.insert = fx::ModuleType::paraEq;
+        MixMove eqMove;
+        eqMove.trackId = id;
+        eqMove.insert = fx::ModuleType::paraEq;
         fx::ParametricEq::Settings eq;
-        eq.bells[1] = { (float) roundTo (hz, 1.0), -roundTo (cut, 0.5), 1.2f };
-        move.values = { { "peqOn", 1.0f }, { "peqLowCutOn", 0.0f }, { "peqLowGain", 0.0f }, { "peqHighGain", 0.0f },
-                        { "peqHighCutOn", 0.0f }, { "peqBell1Gain", 0.0f }, { "peqBell3Gain", 0.0f },
-                        { "peqBell2Freq", eq.bells[1].hz }, { "peqBell2Gain", eq.bells[1].db }, { "peqBell2Q", eq.bells[1].q } };
-        move.reasons.add ("Dip " + formatDb (eq.bells[1].db) + " at " + formatHz (hz) + " so the words come through");
-        plan.moves.push_back (move);
+        eq.lowShelfDb = 0.0f;
 
-        backingChange[id] = loudnessChangeDb (profile.getAverageSpectrum (&leadProfile.active),
-                                              fx::ParametricEq::getMagnitudeDb (eq, bandCentres(), analysisRate));
-        finalLoudness[id] += backingChange[id];
+        if (options.eq && instrument)
+        {
+            // The lowest band with much in it (within 24 dB of its loudest), and a low
+            // cut an octave under that, so it doesn't add rumble under the song. A bass
+            // or a kick reaches so low it gets none.
+            const auto spectrum = profile.getAverageSpectrum();
+            const auto loudest = *std::max_element (spectrum.begin(), spectrum.end());
+            int lowest = -1;
+            for (int b = 0; b < numBands && lowest < 0; ++b)
+                if (spectrum[(size_t) b] > loudest - 24.0f)
+                    lowest = b;
+
+            const auto cutHz = lowest >= 0 ? juce::jmin (120.0, 0.5 * getBandCentre (lowest)) : 0.0;
+            if (cutHz >= 40.0)
+            {
+                eq.lowCutOn = true;
+                eq.lowCutHz = roundTo (cutHz, 1.0);
+                eqMove.reasons.add ("Low cut at " + formatHz (eq.lowCutHz) + ", under its lowest notes: less rumble under the song");
+            }
+        }
+
+        if (options.eq)
+        {
+            const auto masking = measureMasking (leadProfile, profile);
+            if (masking.worstBand >= 0)
+            {
+                const auto difference = masking.backingOverVoiceDb[(size_t) masking.worstBand];
+                const auto cut = juce::jlimit (0.0, instrument ? 3.0 : 4.0, 0.5 * (difference + 6.0));
+
+                if (cut >= 1.0)
+                {
+                    const auto hz = getBandCentre (masking.worstBand);
+                    eq.bells[1] = { (float) roundTo (hz, 1.0), -roundTo (cut, 0.5), 1.2f };
+                    eqMove.reasons.add ("Dip " + formatDb (eq.bells[1].db) + " at " + formatHz (hz) + " so the words come through");
+                }
+            }
+        }
+
+        double eqChange = 0.0;
+        if (! eqMove.reasons.isEmpty())
+        {
+            eqMove.values = { { "peqOn", 1.0f }, { "peqLowCutOn", eq.lowCutOn ? 1.0f : 0.0f }, { "peqLowGain", 0.0f }, { "peqHighGain", 0.0f },
+                              { "peqHighCutOn", 0.0f }, { "peqBell1Gain", 0.0f }, { "peqBell3Gain", 0.0f },
+                              { "peqBell2Freq", eq.bells[1].hz }, { "peqBell2Gain", eq.bells[1].db }, { "peqBell2Q", eq.bells[1].q } };
+            if (eq.lowCutOn)
+                eqMove.values["peqLowCutFreq"] = eq.lowCutHz;
+            plan.moves.push_back (eqMove);
+
+            const auto eqDb = fx::ParametricEq::getMagnitudeDb (eq, bandCentres(), analysisRate);
+            change = loudnessChangeDb (profile.getAverageSpectrum (&leadProfile.active), eqDb);
+            eqChange = loudnessChangeDb (profile.getAverageSpectrum(), eqDb);
+        }
+
+        if (options.compressor && instrument)
+        {
+            MixMove compressor;
+            compressor.trackId = id;
+            double peakChange = 0.0;
+            const auto compChange = planCompressor (compressor, profile, eqChange, true, peakChange);
+            if (! compressor.values.empty())
+            {
+                plan.moves.push_back (compressor);
+                change += compChange;
+                finalPeak[id] += peakChange;
+                finalLoudness[id] += compChange;
+            }
+        }
+
+        finalLoudness[id] += eqChange;
     }
 
     for (auto id : voices)
     {
         auto& vp = voicePlans[id];
-        for (auto* move : { &vp.eq, &vp.compressor, &vp.deEsser })
+        for (auto* move : { &vp.eq, &vp.compressor, &vp.deEsser, &vp.reverb })
             if (! move->values.empty())
                 plan.moves.push_back (*move);
     }
 
-    // Balance: each voice's volume so it sits the style's LU over the backing.
+    // Balance: each voice's volume so it sits the style's LU over the backing and the
+    // instruments together.
     double backingLoudness = -200.0;
     {
         std::vector<double> parts;
-        for (auto id : backings)
-            parts.push_back (findProfile (analysis, id)->getLoudnessOver (&leadProfile.active) + volumeOf (id) + backingChange[id]);
+        for (const auto& [id, change] : backingChange)
+            parts.push_back (findProfile (analysis, id)->getLoudnessOver (&leadProfile.active) + volumeOf (id) + change);
         backingLoudness = sumLoudness (parts);
     }
 
     if (backingLoudness <= -150.0)
-        plan.notes.add ("No backing track playing while you sing: the voice's level is left as it is.");
+        plan.notes.add ("No backing or instrument playing while you sing: the voice's level is left as it is.");
 
     for (auto id : voices)
     {
@@ -684,14 +863,15 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
             }
 
         if (! insert.isValid())
-            insert = edit.addInsert (move.trackId, *move.insert, added[move.trackId]++);
+            insert = move.atEnd ? edit.addInsert (move.trackId, *move.insert)
+                                : edit.addInsert (move.trackId, *move.insert, added[move.trackId]++);
 
         const auto id = (int) insert[daw::ids::id];
         for (const auto& [valueId, value] : move.values)
         {
             auto scaled = value;
-            if (valueId.endsWith ("Gain") || valueId.endsWith ("Threshold"))
-                scaled = value * amount; // from 0 dB: no boost or cut, no compression
+            if (valueId.endsWith ("Gain") || valueId.endsWith ("Threshold") || valueId.endsWith ("Mix"))
+                scaled = value * amount; // from 0 dB: no boost or cut, no compression; from a dry mix
             else if (valueId == "compRatio")
                 scaled = 1.0f + (value - 1.0f) * amount;
 

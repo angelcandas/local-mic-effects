@@ -143,9 +143,16 @@
         <strong>Auto Mix</strong>
         <button class="mini automix-close" title="Close" aria-label="Close">×</button>
       </div>
-      <p class="automix-intro">Listens to your voice and the backing track, then sets EQ, compression and levels with the effects you already have. One undo takes it all back.</p>
+      <p class="automix-intro">Listens to your voice, the backing and any instruments, then adds the effects each track needs (EQ, compressor, de-esser, reverb) and sets the levels. One undo takes it all back.</p>
       <div class="export-options">
         <label>Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="coaching">Coaching (voice up front)</option></select></label>
+        <div class="automix-effects" role="group" aria-label="Effects Auto Mix may add">
+          <span>May add</span>
+          <label class="check"><input type="checkbox" name="eq" checked> EQ</label>
+          <label class="check"><input type="checkbox" name="compressor" checked> Compressor</label>
+          <label class="check"><input type="checkbox" name="deEsser" checked> De-esser</label>
+          <label class="check"><input type="checkbox" name="reverb" checked> Reverb</label>
+        </div>
       </div>
       <div class="automix-roles"></div>
       <div class="automix-plan"></div>
