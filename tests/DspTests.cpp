@@ -375,7 +375,15 @@ namespace
             switchAll (partial, true);
 
             for (auto type : inserts)
-                full.find (type)->getValue (0).store (1.0f);
+            {
+                auto& module = *full.find (type);
+                for (int v = 0; v < module.getNumValues(); ++v)
+                    if (module.isSwitch (v))
+                    {
+                        module.getValue (v).store (1.0f);
+                        break;
+                    }
+            }
 
             check (runChain (full, voice) == runChain (partial, voice), "an insert chain matches the full chain with the same modules on");
         }
@@ -2558,6 +2566,41 @@ namespace
 
             chain[0].findValue ("peqOn")->store (0.0f);
             check (fx::describeMeter (chain[0], analyser).isVoid(), "a module that's off has no readings");
+        }
+
+        // Every effect's own input and output gain: in before it, out after it, and
+        // nothing while it's off.
+        {
+            fx::FxChain chain { { fx::ModuleType::saturation } };
+            auto& module = chain[0];
+            module.findValue ("satOn")->store (1.0f);
+            module.findValue ("satMix")->store (0.0f); // a clean pass, so the gains are all that change
+            module.getInputGain().store (6.0f);
+            module.getOutputGain().store (-12.0f);
+            check (module.findValue ("saturationInGain") == &module.getInputGain()
+                   && module.findValue ("saturationOutGain") == &module.getOutputGain(), "each effect has <key>InGain and <key>OutGain values");
+            chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            int phase = 0;
+            const auto run = [&]
+            {
+                for (int b = 0; b < 40; ++b)
+                {
+                    sineBlock (buffer, 440.0, 0.25f, phase);
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    chain.process (fx::Module::Context (block));
+                }
+                return juce::Decibels::gainToDecibels (buffer.getMagnitude (0, blockSize) / 0.25f);
+            };
+
+            const auto onDb = run();
+            const auto in = module.takeInputPeak();
+            check (std::abs (juce::Decibels::gainToDecibels (in / 0.25f) - 6.0f) < 0.2f, "an effect's input gain sets what it hears");
+            check (std::abs (onDb + 6.0f) < 0.2f, "and its output gain what it passes on (" + juce::String (onDb, 1) + " dB)");
+
+            module.findValue ("satOn")->store (0.0f);
+            check (std::abs (run()) < 0.05f, "switched off, its gains are bypassed too");
         }
 
         // The chain's input and output gain.

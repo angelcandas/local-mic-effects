@@ -696,6 +696,8 @@ body.is-daw .chip--live { display: none; }
 }
 
 .insert-controls .knob { min-width: 56px; }
+.insert-footer { margin-top: 8px; }
+.insert-gains .knob { min-width: 44px; }
 .insert-choice { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .insert-choice .name { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; }
 

@@ -5,6 +5,7 @@
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
+import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 
@@ -445,7 +446,43 @@ class InsertCard {
       this.body.append(row);
     }
 
+    this.body.append(this.createFooter(parts));
     this.update(insert);
+  }
+
+  // Presets for this effect, and its own input and output gain.
+  createFooter(parts) {
+    const footer = html("div", "insert-footer");
+    const ids = parts.map((part) => part.id);
+    const isPitch = this.insert.type === "pitch";
+    // The pitch insert's presets also remember which of its parts are on.
+    const params = () => [...ids.flatMap((id) => presetParams(id)), ...(isPitch ? parts.map((part) => part.power) : [])];
+
+    const picker = createPresetPicker({
+      getNativeFunction: Juce.getNativeFunction,
+      ids,
+      read: () => Object.fromEntries(params().map((param) => [param, this.insert.values[param] ?? parameterInfo[param]?.default ?? 0])),
+      apply: (values, fromId) => {
+        // A factory preset for one part of the pitch insert switches that part on.
+        if (isPitch && fromId) values[parts.find((part) => part.id === fromId).power] = 1;
+        Object.entries(values).forEach(([param, value], i) => {
+          this.insert.values[param] = value;
+          this.send(param, value, i === 0);
+        });
+        this.update(this.insert);
+      },
+      defaultOf: (param) => parameterInfo[param]?.default,
+    });
+
+    const gains = html("div", "insert-gains");
+    for (const [suffix, label, title] of [["InGain", "In", "Input gain: the level going into this effect"],
+                                          ["OutGain", "Out", "Output gain: the level coming out of this effect"]]) {
+      const widget = this.createControl({ type: "knob", param: `${this.insert.type}${suffix}`, label, bipolar: true });
+      widget.title = `${title}. Drag or scroll · Double-click to reset`;
+      gains.append(widget);
+    }
+    footer.append(picker.element, gains);
+    return footer;
   }
 
   // Animates the picture and the level bars from the signal (see fxviews.js).

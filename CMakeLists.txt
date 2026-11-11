@@ -41,6 +41,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/modules.js
         ui/widgets.js
         ui/fxviews.js
+        ui/fxpresets.js
         ui/daw.js
         ui/browser.js
         ui/daw.css
