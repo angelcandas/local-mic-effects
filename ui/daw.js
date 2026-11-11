@@ -655,6 +655,9 @@ class DawScreen {
     window.__JUCE__.backend.addEventListener("dawExport", (progress) => this.onExport(progress));
     window.__JUCE__.backend.addEventListener("dawStems", (event) => this.onStems(event));
     document.addEventListener("keydown", (event) => this.onKey(event));
+    document.addEventListener("keydown", (event) => this.onPianoKey(event, true), true); // before the shortcuts
+    document.addEventListener("keyup", (event) => this.onPianoKey(event, false), true);
+    window.addEventListener("blur", () => this.releasePianoKeys());
     new ResizeObserver(() => this.layoutArrange()).observe(this.arrange);
 
     let last = performance.now();
@@ -951,7 +954,9 @@ class DawScreen {
       tab.dataset.view = view;
       this.viewTabs.append(tab);
     }
-    right.append(this.viewTabs, iconButton("tool", "help", "Keyboard shortcuts (?)", () => this.toggleShortcuts()));
+    this.pianoButton = button("tool icon piano-toggle", "", "Play MIDI from the computer keyboard (M)", () => this.togglePiano());
+    this.pianoButton.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1.5" y="3.5" width="13" height="9" rx="1"/><path d="M5.8 3.5v9M10.2 3.5v9"/><path d="M4.4 3.5v5M8 3.5v5M11.6 3.5v5" stroke-width="2.2"/></svg>`;
+    right.append(this.viewTabs, this.pianoButton, iconButton("tool", "help", "Keyboard shortcuts (?)", () => this.toggleShortcuts()));
 
     bar.append(files, sep(), transport, clock, sep(), timing, sep(), right);
   }
@@ -2692,9 +2697,13 @@ class DawScreen {
                    ["Click the clock", "Type a bar or time to go to"]]],
     ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["Ctrl+Shift+T", "New MIDI track"], ["Ctrl+Shift+D", "Duplicate the selected track"],
                 ["Ctrl+R", "Rename the selected track"], ["Ctrl+Delete", "Delete the selected track"],
-                ["M", "Mute the selected track"], ["S", "Solo the selected track"], ["Alt+click S", "Solo only that track"],
+                ["0", "Mute the selected track"], ["S", "Solo the selected track"], ["Alt+click S", "Solo only that track"],
                 ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track"],
                 ["Q / Ctrl+U", "Quantize the selected clip (or track), with the Pitch & time settings"]]],
+    ["Computer keyboard piano", [["M", "Turn the computer keyboard into a MIDI keyboard on / off (toolbar piano button)"],
+                                 ["A S D F G H J K", "White keys, C to C (; adds one more)"], ["W E T Y U O P", "Black keys"],
+                                 ["Z / X", "Octave down / up"], ["C / V", "Velocity down / up"],
+                                 ["While on", "Plays the armed (or selected) MIDI track and records on it. The keys above stop doing their usual shortcuts."]]],
     ["Clips", [[", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
@@ -2769,6 +2778,77 @@ class DawScreen {
     this.select(track.id, next.id);
     const x = next.start * this.zoom, left = this.arrange.scrollLeft;
     if (x < left || x > left + this.arrange.clientWidth - HEAD_WIDTH - 40) this.scrollTo(x - 40);
+  }
+
+  //============================================================================ computer keyboard as MIDI
+  // Ableton's layout: A S D F G H J K are the white keys from C, W E T Y U (and O P) the
+  // black ones, Z / X change the octave, C / V the velocity. M turns it on and off.
+  static PIANO = { KeyA: 0, KeyW: 1, KeyS: 2, KeyE: 3, KeyD: 4, KeyF: 5, KeyT: 6, KeyG: 7, KeyY: 8, KeyH: 9, KeyU: 10, KeyJ: 11,
+                   KeyK: 12, KeyO: 13, KeyL: 14, KeyP: 15, Semicolon: 16 };
+  static PIANO_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+  togglePiano(on) {
+    this.piano ??= { on: false, octave: 0, velocity: 100, held: new Map() };
+    this.piano.on = on ?? !this.piano.on;
+    if (!this.piano.on) this.releasePianoKeys();
+    this.pianoButton?.classList.toggle("is-accent", this.piano.on);
+    this.pianoButton?.setAttribute("aria-pressed", String(this.piano.on));
+    if (this.piano.on) this.pianoToast();
+    else toast("Computer keyboard piano off.");
+  }
+
+  pianoToast() {
+    const { octave, velocity } = this.piano;
+    toast(`Computer keyboard piano on: A–K play from C${3 + octave} (Z / X octave, C / V velocity ${velocity}). M turns it off.`);
+  }
+
+  releasePianoKeys() {
+    if (!this.piano) return;
+    for (const note of this.piano.held.values()) daw("liveNote", { note, velocity: 0 });
+    this.piano.held.clear();
+  }
+
+  // The armed or monitored MIDI tracks play it. If none is, the selected MIDI track starts monitoring.
+  playPianoNote(note, velocity) {
+    const tracks = this.session?.tracks ?? [];
+    const listening = tracks.some((t) => t.kind === "midi" && (t.arm || t.monitor));
+    const selected = this.selectedTrackObject();
+    if (!listening && selected?.kind === "midi") daw("setTrack", { id: selected.id, monitor: true });
+    daw("liveNote", { note, velocity });
+  }
+
+  onPianoKey(event, down) {
+    if (!this.active || !this.piano) return;
+    const code = event.code;
+    const held = this.piano.held;
+    if (!down) {
+      if (held.has(code)) { daw("liveNote", { note: held.get(code), velocity: 0 }); held.delete(code); event.preventDefault(); }
+      return;
+    }
+    if (!this.piano.on) {
+      if (code === "KeyM" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !isTyping(event)) {
+        event.preventDefault(); event.stopPropagation(); if (!event.repeat) this.togglePiano(true);
+      }
+      return;
+    }
+    if (isTyping(event) || event.ctrlKey || event.metaKey || event.altKey) return;
+    const piano = this.piano;
+    const note = code in DawScreen.PIANO ? DawScreen.PIANO[code] : null;
+    if (note !== null && !event.shiftKey) {
+      event.preventDefault(); event.stopPropagation();
+      if (event.repeat || held.has(code)) return;
+      const pitch = Math.min(127, Math.max(0, 60 + piano.octave * 12 + note));
+      held.set(code, pitch);
+      this.playPianoNote(pitch, piano.velocity);
+    } else if (!event.shiftKey && ["KeyZ", "KeyX", "KeyC", "KeyV", "KeyM"].includes(code)) {
+      event.preventDefault(); event.stopPropagation();
+      if (event.repeat) return;
+      if (code === "KeyM") return this.togglePiano(false);
+      if (code === "KeyZ") piano.octave = Math.max(-4, piano.octave - 1);
+      else if (code === "KeyX") piano.octave = Math.min(4, piano.octave + 1);
+      else piano.velocity = Math.min(127, Math.max(1, piano.velocity + (code === "KeyC" ? -20 : 20)));
+      this.pianoToast();
+    }
   }
 
   toggleTrack(key) {
@@ -3036,7 +3116,7 @@ class DawScreen {
     else if (event.key === "]") command("nextMarker");
     else if (key === "t") command("tapTempo");
     else if (key === "s") command("soloTrack");
-    else if (key === "m") command("muteTrack");
+    else if (key === "0") command("muteTrack");
     else if (key === "q") command("quantize");
     else if (key === "l") command("loop");
     else if (key === "c") command("metronome");
