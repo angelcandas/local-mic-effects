@@ -1711,7 +1711,7 @@ class DawScreen {
 
   createClipPanel(clip) {
     const element = html("section", "panel clip-panel");
-    const head = html("div", "panel-head");
+    const head = html("div", "clip-head");
     const id = clip.id;
     const nameInput = html("input", "clip-name-input");
     Object.assign(nameInput, { value: clip.name, spellcheck: false, title: "Rename the clip" });
@@ -1737,20 +1737,19 @@ class DawScreen {
     threshold.value = String(this.stripThreshold ?? -45);
     threshold.addEventListener("change", () => { this.stripThreshold = Number(threshold.value); });
 
-    const tools = html("div", "panel-actions clip-tools");
-    tools.append(muteButton,
-      button("tool", "Normalise", "Set the clip gain so its loudest peak is −1 dB", () => this.run("normaliseClip")),
-      button("tool", "Strip silence", "Split the clip into phrases and remove the silent gaps between them", () => this.run("stripSilence")),
-      threshold,
-      button("tool", "Loop clip", "Loop the clip's range (Shift+L)", () => this.run("loopClip")),
-      button("tool", "Zoom to clip", "Fit the clip in the view (Shift+Z)", () => this.run("zoomClip")));
-
-    const actions = html("div", "panel-actions");
-    actions.append(
-      button("tool", "Split", "Split at the playhead (S)", () => this.splitSelected()),
-      button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
-      button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected()));
-    head.append(actions);
+    // All clip controls sit in one compact column: name, knobs, then three rows of buttons.
+    const toolRow = (...items) => { const r = html("div", "clip-tool-row"); r.append(...items); return r; };
+    const tools = html("div", "clip-tools");
+    tools.append(
+      toolRow(button("tool", "Split", "Split at the playhead (S)", () => this.splitSelected()),
+              button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
+              button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected())),
+      toolRow(muteButton,
+              button("tool", "Normalise", "Set the clip gain so its loudest peak is −1 dB", () => this.run("normaliseClip")),
+              button("tool", "Loop clip", "Loop the clip's range (Shift+L)", () => this.run("loopClip")),
+              button("tool", "Zoom to clip", "Fit the clip in the view (Shift+Z)", () => this.run("zoomClip"))),
+      toolRow(button("tool", "Strip silence", "Split the clip into phrases and remove the silent gaps between them", () => this.run("stripSilence")),
+              threshold));
     element.append(head, row, tools);
 
     return { element, update: (c) => {
