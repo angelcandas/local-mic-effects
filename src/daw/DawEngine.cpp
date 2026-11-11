@@ -123,7 +123,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
 
     if (tree.hasType (ids::PROJECT))
     {
-        if (property == ids::tempo)
+        if (property == ids::tempo || property == ids::beatsPerBar)
             updateTempo();
         else if (property == ids::loopOn || property == ids::loopStart || property == ids::loopEnd)
             updateLoop();
@@ -322,6 +322,7 @@ void DawEngine::updateTempo()
 {
     const auto bpm = juce::jlimit (20.0, 400.0, (double) edit.getState().getProperty (ids::tempo, 120.0));
     samplesPerBeat = sampleRate * 60.0 / bpm;
+    beatsPerBar = edit.getBeatsPerBar();
     updateLoop();
 }
 
@@ -353,7 +354,7 @@ juce::String DawEngine::startRecording (const juce::File& folder)
     if (const auto bars = countInBars.load(); bars > 0)
     {
         countingIn = true;
-        position = start - (juce::int64) std::llround (bars * 4 * samplesPerBeat.load());
+        position = start - (juce::int64) std::llround (bars * beatsPerBar.load() * samplesPerBeat.load());
     }
 
     playing = true;
@@ -398,6 +399,8 @@ void DawEngine::renderClick (juce::AudioBuffer<float>& output, int offset, int n
     const auto counting = countingIn.load();
     const auto start = recordStart.load();
     const auto clickOn = metronome.load();
+    const auto barLength = (juce::int64) beatsPerBar.load();
+    const auto volume = metronomeVolume.load();
 
     for (int i = 0; i < numSamples; ++i)
     {
@@ -409,10 +412,10 @@ void DawEngine::renderClick (juce::AudioBuffer<float>& output, int offset, int n
 
             if ((double) t - (double) beat * spb < 1.0) // a beat starts on this sample
             {
-                const auto downbeat = ((beat % 4) + 4) % 4 == 0;
+                const auto downbeat = ((beat % barLength) + barLength) % barLength == 0;
                 clickPhase = 0.0f;
                 clickIncrement = (downbeat ? 1500.0f : 1000.0f) / (float) sampleRate;
-                clickLevel = downbeat ? 0.35f : 0.22f;
+                clickLevel = (downbeat ? 0.35f : 0.22f) * volume;
                 clickDecay = (float) std::exp (-1.0 / (0.012 * sampleRate));
             }
         }

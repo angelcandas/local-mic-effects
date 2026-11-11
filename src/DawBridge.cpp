@@ -111,6 +111,8 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
         if (settings.getBoolValue ("dawMode", false))
             setMode (true);
     }
+
+    engine.setMetronomeVolume ((float) settings.getDoubleValue ("dawClickVolume", 1.0));
 }
 
 DawBridge::~DawBridge()
@@ -223,6 +225,15 @@ juce::var DawBridge::describeSession()
                                { "recoverable", project.getRecoverableBackup().getFileName() },
                                { "missing", project.getMissingFiles().size() } }) },
         { "tempo", edit.getTempo() },
+        { "beatsPerBar", edit.getBeatsPerBar() },
+        { "markers", [this]
+          {
+              juce::Array<juce::var> markers;
+              for (const auto& m : edit.getMarkers())
+                  markers.add (object ({ { "id", m[ids::id] }, { "name", m[ids::name] }, { "time", m[ids::time] } }));
+              return juce::var (markers);
+          }() },
+        { "metronomeVolume", engine.getMetronomeVolume() },
         { "loop", object ({ { "on", state.getProperty (ids::loopOn, false) }, { "start", state.getProperty (ids::loopStart, 0.0) },
                             { "end", state.getProperty (ids::loopEnd, 0.0) } }) },
         { "metronome", engine.getMetronome() },
@@ -749,6 +760,25 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "loop")      { edit.setLoop (args["on"], args["start"], args["end"]); ok(); return; }
     if (command == "metronome") { engine.setMetronome (args["on"]); sessionChanged = true; ok(); return; }
     if (command == "countIn")   { engine.setCountInBars (args["bars"]); sessionChanged = true; ok(); return; }
+    if (command == "beatsPerBar") { edit.setBeatsPerBar (args["beats"]); ok(); return; }
+    if (command == "metronomeVolume")
+    {
+        engine.setMetronomeVolume (args["volume"]);
+        settings.setValue ("dawClickVolume", engine.getMetronomeVolume());
+        sessionChanged = true;
+        ok();
+        return;
+    }
+
+    if (command == "addMarker")    { complete (edit.addMarker (args["time"], args["name"].toString())[ids::id]); return; }
+    if (command == "removeMarker") { edit.removeMarker (id); ok(); return; }
+    if (command == "setMarker")
+    {
+        if (args.hasProperty ("time")) edit.setMarkerTime (id, args["time"]);
+        if (args.hasProperty ("name")) edit.setMarkerName (id, args["name"].toString());
+        ok();
+        return;
+    }
 
     if (command == "transport")
     {

@@ -9,7 +9,8 @@
 // The DAW session as a ValueTree, so every change can be undone and the whole thing
 // saves to a file as it is:
 //
-//   PROJECT  version, tempo, loopOn, loopStart, loopEnd
+//   PROJECT  version, tempo, beatsPerBar, loopOn, loopStart, loopEnd
+//     MARKER  id, name, time
 //     MASTER  volume (dB)
 //       INSERTS
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value
@@ -33,6 +34,7 @@ namespace ids
     MICFX_DAW_ID (monitor) MICFX_DAW_ID (type) MICFX_DAW_ID (file) MICFX_DAW_ID (start) MICFX_DAW_ID (offset)
     MICFX_DAW_ID (length) MICFX_DAW_ID (gain) MICFX_DAW_ID (fadeIn) MICFX_DAW_ID (fadeOut)
     MICFX_DAW_ID (loopOn) MICFX_DAW_ID (loopStart) MICFX_DAW_ID (loopEnd)
+    MICFX_DAW_ID (beatsPerBar) MICFX_DAW_ID (MARKER) MICFX_DAW_ID (time)
 #undef MICFX_DAW_ID
 }
 
@@ -73,6 +75,19 @@ public:
 
     void setTempo (double bpm);
     double getTempo() const { return state.getProperty (ids::tempo, 120.0); }
+
+    // Time signature: beats in a bar (2..12), for the click's accent, bar numbers and
+    // the count-in. The tempo counts these beats.
+    void setBeatsPerBar (int beats);
+    int getBeatsPerBar() const { return juce::jlimit (2, 12, (int) state.getProperty (ids::beatsPerBar, 4)); }
+
+    //==============================================================================
+    // Markers: named points on the timeline (verse, chorus...). Times in seconds.
+    juce::ValueTree addMarker (double timeSeconds, const juce::String& name = {});
+    void removeMarker (int markerId);
+    void setMarkerTime (int markerId, double timeSeconds);
+    void setMarkerName (int markerId, const juce::String& name);
+    juce::Array<juce::ValueTree> getMarkers() const; // in time order
 
     //==============================================================================
     juce::ValueTree addClip (int trackId, const juce::File&, double startSeconds, double lengthSeconds,
