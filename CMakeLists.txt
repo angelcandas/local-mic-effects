@@ -52,6 +52,8 @@ juce_add_binary_data(MicFX_WebUI
 set(MICFX_DSP_SOURCES
     src/analysis/Analysis.cpp
     src/analysis/Analysis.h
+    src/analysis/Key.cpp
+    src/analysis/Key.h
     src/analysis/MixAssistant.cpp
     src/analysis/MixAssistant.h
     src/analysis/Beats.cpp

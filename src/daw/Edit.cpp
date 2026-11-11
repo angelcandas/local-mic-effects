@@ -564,6 +564,27 @@ void Edit::setBeatsPerBar (int beats)
     state.setProperty (ids::beatsPerBar, juce::jlimit (2, 12, beats), &undoManager);
 }
 
+void Edit::setKey (int tonic, bool minor)
+{
+    if (tonic < 0 || tonic > 11)
+    {
+        state.removeProperty (ids::key, &undoManager);
+        state.removeProperty (ids::keyMinor, &undoManager);
+        return;
+    }
+
+    state.setProperty (ids::key, tonic, &undoManager);
+    state.setProperty (ids::keyMinor, minor, &undoManager);
+}
+
+int Edit::getKey() const
+{
+    if (! state.hasProperty (ids::key))
+        return -1;
+    const auto tonic = (int) state.getProperty (ids::key);
+    return tonic >= 0 && tonic < 12 ? tonic : -1;
+}
+
 //==============================================================================
 juce::ValueTree Edit::addMarker (double timeSeconds, const juce::String& name)
 {

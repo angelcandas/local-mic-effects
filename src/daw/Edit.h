@@ -57,6 +57,7 @@ namespace ids
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
+    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor)
 #undef MICFX_DAW_ID
 }
 
@@ -118,6 +119,11 @@ public:
     // the count-in. The tempo counts these beats.
     void setBeatsPerBar (int beats);
     int getBeatsPerBar() const { return juce::jlimit (2, 12, (int) state.getProperty (ids::beatsPerBar, 4)); }
+
+    // The song's key (detected or picked): tonic 0 = C ... 11 = B, or -1 when unknown.
+    void setKey (int tonic, bool minor);
+    int getKey() const;
+    bool isKeyMinor() const { return (bool) state.getProperty (ids::keyMinor, false); }
 
     //==============================================================================
     // Markers: named points on the timeline (verse, chorus...). Times in seconds.
