@@ -57,6 +57,52 @@ function button(className, text, title, onClick) {
   return element;
 }
 
+
+// Inline 24x24 stroke icons for the toolbar (no icon library).
+const ICONS = {
+  new: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M12 12v6M9 15h6"/>',
+  open: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  recent: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  save: '<path d="M5 3h11l4 4v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M8 3v5h7V3M8 21v-7h8v7"/>',
+  saveas: '<path d="M5 3h11l4 4v6M5 3a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h7"/><path d="M8 3v5h7V3M17 15v6M14 18h6"/>',
+  import: '<path d="M12 3v12M7 10l5 5 5-5M4 20h16"/>',
+  automix: '<path d="M5 4v16M12 4v16M19 4v16"/><circle cx="5" cy="14" r="2" fill="currentColor"/><circle cx="12" cy="8" r="2" fill="currentColor"/><circle cx="19" cy="15" r="2" fill="currentColor"/>',
+  export: '<path d="M12 15V3M7 8l5-5 5 5M4 20h16"/>',
+  tap: '<path d="M9 11V5a2 2 0 0 1 4 0v6M9 11l-1-1.5a1.8 1.8 0 0 0-3 2L8 18a5 5 0 0 0 4 2h2a5 5 0 0 0 5-5v-3a2 2 0 0 0-4 0M13 11a2 2 0 0 1 4 0"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>',
+  click: '<path d="M8 21h8l-2-16h-4zM12 17l4-9"/>',
+  countin: '<path d="M4 8h3v8M12 8h4v3h-4v5h4M3 3h2M19 3h2"/><path d="M19 8v8"/>',
+  loop: '<path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/>',
+  snap: '<path d="M6 3v8a6 6 0 0 0 12 0V3h-4v8a2 2 0 0 1-4 0V3zM6 7h4M14 7h4"/>',
+  returnstop: '<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-4"/>',
+  follow: '<path d="M4 12h12M12 7l5 5-5 5M20 4v16"/>',
+  select: '<path d="M5 3l14 8-6 2-3 6z"/>',
+  cut: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.6 7.6L20 18M8.6 16.4L20 6"/>',
+  gain: '<path d="M4 9v6h4l5 4V5L8 9zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>',
+  warp: '<path d="M3 12c3-8 6-8 9 0s6 8 9 0"/><path d="M3 20h18" stroke-dasharray="2 3"/>',
+  fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+  undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
+  redo: '<path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/>',
+  tracks: '<path d="M3 6h18M3 12h18M3 18h18"/><rect x="6" y="4.5" width="6" height="3" rx="1" fill="currentColor"/><rect x="12" y="10.5" width="7" height="3" rx="1" fill="currentColor"/><rect x="5" y="16.5" width="5" height="3" rx="1" fill="currentColor"/>',
+  mixer: '<path d="M6 3v18M12 3v18M18 3v18"/><rect x="4" y="13" width="4" height="3" rx="1" fill="currentColor"/><rect x="10" y="7" width="4" height="3" rx="1" fill="currentColor"/><rect x="16" y="11" width="4" height="3" rx="1" fill="currentColor"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01"/>',
+};
+
+function icon(name) {
+  return `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+}
+
+// An icon-only button. The tooltip carries the name and the shortcut.
+function iconButton(className, name, title, onClick) {
+  const element = button(`${className} ib`, "", title, onClick);
+  element.innerHTML = icon(name);
+  element.setAttribute("aria-label", title.replace(/\s*\(.*\)\s*$/, "").replace(/[.:].*$/, ""));
+  return element;
+}
+
+// Thin divider between toolbar groups.
+const sep = () => html("span", "tb-sep");
+
 // Vertical drag helper: calls move(dx, dy, event) and end(moved, event).
 function drag(event, move, end = () => {}) {
   event.preventDefault();
@@ -768,15 +814,19 @@ class DawScreen {
 
     const files = html("div", "daw-group");
     files.append(
-      button("tool", "New", "Start a new project", () => daw("new")),
-      button("tool", "Open…", "Open a project", () => daw("open")),
-      (this.recentSelect = html("select", "dropdown recent-projects")),
-      (this.saveButton = button("tool", "Save", "Save the project (Ctrl+S)", () => daw("save"))),
-      button("tool", "Save as…", "Save a copy under a new name", () => daw("saveAs")),
-      button("tool", "Import…", "Add an audio file at the playhead", () => this.importAudio()),
-      button("tool", "Auto Mix…", "Listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix()),
-      (this.exportButton = button("tool is-accent", "Export…", "Render the mix or stems to WAV", () => this.toggleExportPanel())));
+      iconButton("tool", "new", "New project (Ctrl+N)", () => daw("new")),
+      iconButton("tool", "open", "Open a project (Ctrl+O)", () => daw("open")),
+      (this.recentWrap = html("span", "ib-select")),
+      (this.saveButton = iconButton("tool", "save", "Save the project (Ctrl+S)", () => daw("save"))),
+      iconButton("tool", "saveas", "Save as: a copy under a new name (Ctrl+Shift+S)", () => daw("saveAs")),
+      iconButton("tool", "import", "Import audio at the playhead (Ctrl+I)", () => this.importAudio()),
+      iconButton("tool", "automix", "Auto Mix: listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix()),
+      (this.exportButton = iconButton("tool is-accent", "export", "Export the mix or stems to WAV (Ctrl+Shift+R)", () => this.toggleExportPanel())));
 
+    this.recentSelect = html("select", "recent-projects");
+    this.recentWrap.innerHTML = icon("recent");
+    this.recentWrap.append(this.recentSelect);
+    this.recentWrap.title = "Open a recent project";
     this.recentSelect.title = "Open a recent project";
     this.recentSelect.addEventListener("change", () => {
       const path = this.recentSelect.value;
@@ -814,7 +864,7 @@ class DawScreen {
     this.tempoInput.addEventListener("change", () => daw("tempo", { bpm: Number(this.tempoInput.value) || 120 }));
     const tempo = html("label", "tempo");
     tempo.append(this.tempoInput, html("span", "", "BPM"));
-    const tap = button("tool tap-tempo", "Tap", "Tap tempo: click (or press T) on the beat a few times", () => this.tapTempo());
+    const tap = iconButton("tool tap-tempo", "tap", "Tap tempo: click on the beat a few times (T)", () => this.tapTempo());
 
     this.signature = html("select", "dropdown signature");
     this.signature.title = "Time signature (beats in a bar). In x/8 the tempo counts eighth notes.";
@@ -844,30 +894,30 @@ class DawScreen {
     this.countIn.addEventListener("change", () => daw("countIn", { bars: Number(this.countIn.value) }));
 
     const click = html("div", "click-group");
-    click.append((this.metronomeButton = button("toggle", "Click", "Metronome (C)", () => daw("metronome", { on: !this.session?.metronome }))),
+    click.append((this.metronomeButton = iconButton("toggle", "click", "Click: metronome on / off (C)", () => daw("metronome", { on: !this.session?.metronome }))),
                  this.clickVolume);
-    this.keyButton = button("tool key-button", "Key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
+    this.keyButton = iconButton("tool key-button", "key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
     timing.append(tempo, tap, this.signature, this.keyButton, click,
       this.countIn,
-      (this.loopButton = button("toggle", "Loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop())),
-      (this.snapButton = button("toggle", "Snap", "Snap edits to the beat (hold Alt to drag freely)", () => {
+      (this.loopButton = iconButton("toggle", "loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop())),
+      (this.snapButton = iconButton("toggle", "snap", "Snap edits to the grid (hold Alt to drag freely)", () => {
         this.snap = !this.snap;
         this.renderTransport();
       })),
       this.gridSelect,
-      (this.returnButton = button("toggle", "Return", "Return on stop: pausing goes back to where you pressed play", () => {
+      (this.returnButton = iconButton("toggle", "returnstop", "Return on stop: pausing goes back to where you pressed play", () => {
         this.returnOnStop = !this.returnOnStop;
         prefs.set("returnOnStop", this.returnOnStop);
         this.renderTransport();
       })),
-      (this.followButton = button("toggle", "Follow", "Scroll with the playhead while playing (F). Scrolling yourself switches it off.", () => this.setFollow(!this.follow))));
+      (this.followButton = iconButton("toggle", "follow", "Follow: scroll with the playhead while playing (F). Scrolling yourself switches it off.", () => this.setFollow(!this.follow))));
 
     this.tools = html("div", "segmented tools");
-    for (const [tool, text, title] of [["select", "Select", "Select, move, trim and fade clips (V)"],
-                                       ["cut", "Cut", "Click a clip to split it there (B)"],
-                                       ["gain", "Gain", "Drag a clip up or down to change its gain (G)"],
-                                       ["warp", "Warp", "Drag inside a clip to stretch its timing; double-click a marker to remove it (W)"]]) {
-      const b = button("", text, title, () => this.setTool(tool));
+    for (const [tool, text, title] of [["select", "Select", "Select tool: move, trim and fade clips (V)"],
+                                       ["cut", "Cut", "Cut tool: click a clip to split it there (B)"],
+                                       ["gain", "Gain", "Gain tool: drag a clip up or down to change its gain (G)"],
+                                       ["warp", "Warp", "Warp tool: drag inside a clip to stretch its timing; double-click a marker to remove it (W)"]]) {
+      const b = iconButton("", tool, title, () => this.setTool(tool));
       b.dataset.tool = tool;
       this.tools.append(b);
     }
@@ -884,7 +934,7 @@ class DawScreen {
       return input;
     };
     // Logarithmic, so each step of the slider zooms by the same factor.
-    zoom.append(button("tool fit-button", "Fit", "Zoom to fit the whole song (Shift+Z)", () => this.run("zoomFit")));
+    zoom.append(iconButton("tool fit-button", "fit", "Zoom to fit the whole song (Shift+Z)", () => this.run("zoomFit")));
     this.zoomSlider = slider("↔", "Horizontal zoom (+ / − or Ctrl+scroll)", (p) => this.setZoom(MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, p), true));
     this.heightSlider = slider("↕", "Track height (Shift+↑ / Shift+↓)", (p) => this.setRowHeight(MIN_ROW + (MAX_ROW - MIN_ROW) * p));
 
@@ -892,18 +942,18 @@ class DawScreen {
     right.append(
       this.tools,
       zoom,
-      (this.undoButton = button("tool", "Undo", "Undo (Ctrl+Z)", () => daw("undo"))),
-      (this.redoButton = button("tool", "Redo", "Redo (Ctrl+Shift+Z)", () => daw("redo"))));
+      (this.undoButton = iconButton("tool", "undo", "Undo (Ctrl+Z)", () => daw("undo"))),
+      (this.redoButton = iconButton("tool", "redo", "Redo (Ctrl+Shift+Z)", () => daw("redo"))));
 
     this.viewTabs = html("div", "segmented view-tabs");
     for (const view of ["arrange", "mixer"]) {
-      const tab = button("", view === "arrange" ? "Tracks" : "Mixer", view === "arrange" ? "Tracks and clips (Tab)" : "Mixer (Tab)", () => this.setView(view));
+      const tab = iconButton("", view === "arrange" ? "tracks" : "mixer", view === "arrange" ? "Tracks and clips (Tab)" : "Mixer (Tab / X)", () => this.setView(view));
       tab.dataset.view = view;
       this.viewTabs.append(tab);
     }
-    right.append(this.viewTabs, button("tool icon", "?", "Keyboard shortcuts (?)", () => this.toggleShortcuts()));
+    right.append(this.viewTabs, iconButton("tool", "help", "Keyboard shortcuts (?)", () => this.toggleShortcuts()));
 
-    bar.append(files, this.projectName, transport, clock, timing, right);
+    bar.append(files, sep(), this.projectName, transport, clock, sep(), timing, sep(), right);
   }
 
   renderTransport() {
@@ -918,13 +968,13 @@ class DawScreen {
     if (recentKey !== this.recentKey) {
       this.recentKey = recentKey;
       this.recentSelect.replaceChildren(new Option("Recent…", ""), ...recent.map((r) => new Option(r.name, r.path)));
-      this.recentSelect.hidden = recent.length === 0;
+      this.recentWrap.hidden = recent.length === 0;
     }
     if (document.activeElement !== this.tempoInput) this.tempoInput.value = Math.round(s.tempo * 100) / 100;
     this.countIn.value = String(s.countIn);
     this.signature.value = String(s.beatsPerBar ?? 4);
     const songKey = s.key?.key ?? -1;
-    this.keyButton.textContent = songKey >= 0 ? `Key ${NOTE_NAMES[songKey]}${s.key.minor ? "m" : ""}` : "Key";
+    this.keyButton.innerHTML = icon("key") + (songKey >= 0 ? `<span class="ib-label">${NOTE_NAMES[songKey]}${s.key.minor ? "m" : ""}</span>` : "");
     this.keyButton.classList.toggle("is-set", songKey >= 0);
     this.renderKeyPanel();
     if (document.activeElement !== this.clickVolume) this.clickVolume.value = String(Math.round((s.metronomeVolume ?? 1) * 100));

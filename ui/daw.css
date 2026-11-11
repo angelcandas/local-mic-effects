@@ -1419,3 +1419,25 @@ body.library-dragging * { cursor: grabbing !important; }
 .warp-marker.is-dragging { border-left-style: dashed; }
 .clip.is-warped .clip-name::after { content: "  \21C4"; opacity: 0.7; }
 .daw-arrange[data-tool="warp"] .clip, [data-tool="warp"] .clip { cursor: ew-resize; }
+
+/* ---------- Icon toolbar ---------- */
+
+.daw-transport { gap: 8px 10px; }
+.daw-group { gap: 4px; }
+.tb-sep { align-self: stretch; width: 1px; margin: 3px 2px; background: var(--line); }
+.ib { display: inline-flex; align-items: center; justify-content: center; gap: 3px; width: 30px; padding: 0; }
+.ib .ico { width: 17px; height: 17px; flex: none; }
+.ib .ib-label { font: 600 11px var(--mono); }
+.ib.key-button.is-set { width: auto; padding: 0 8px; }
+.segmented .ib { width: auto; padding: 5px 10px; }
+.view-tabs .ib { padding: 5px 10px; }
+.ib-select { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--muted); }
+.ib-select:hover { color: var(--text); border-color: var(--line-strong); }
+.ib-select[hidden] { display: none; }
+.ib-select .ico { width: 17px; height: 17px; pointer-events: none; }
+.ib-select select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.daw .tempo span { display: none; }
+.daw .tempo-input { width: 50px; }
+.daw .click-volume { width: 56px; }
+.daw .zoom-slider input { width: 64px; }
+.daw select.count-in, .daw select.grid-size, .daw select.signature { padding-left: 8px; padding-right: 22px; }
