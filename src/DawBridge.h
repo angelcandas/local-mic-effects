@@ -41,6 +41,7 @@ private:
 
     void setMode (bool daw);
     void rememberProject();
+    juce::var describeRecentProjects() const;
     juce::File getRecordingFolder() const;
     void loadPresetInto (int trackId, int presetIndex);
     void startExport (const juce::var& args, const juce::File& destination);

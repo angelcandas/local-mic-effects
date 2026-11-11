@@ -74,6 +74,11 @@ function drag(event, move, end = () => {}) {
   target.addEventListener("pointercancel", onUp);
 }
 
+// True when `id` is the only soloed track.
+function session_onlySolo(session, id) {
+  return (session?.tracks ?? []).every((t) => (t.id === id) === Boolean(t.solo));
+}
+
 //==============================================================================
 // A rotary control for a value that isn't a host parameter (insert values, pan,
 // clip gain). Same look as the Live screen's knobs. onChange (value, first) is
@@ -220,12 +225,28 @@ class Fader {
 
 //==============================================================================
 // A peak meter with a falling display, horizontal or vertical.
+// With a key, a peak at or over 0 dB lights a clip light that stays on (across
+// re-renders) until the meter is clicked.
 class Level {
-  constructor(vertical = false) {
+  static clipped = new Set();
+
+  constructor(vertical = false, key = null) {
+    this.key = key;
     this.element = html("div", vertical ? "level-meter is-vertical" : "level-meter");
     this.fill = html("div", "level-fill");
     this.element.append(this.fill);
     this.shown = METER_FLOOR_DB;
+    if (key != null) {
+      this.light = html("span", "clip-light");
+      this.element.append(this.light);
+      this.element.title = "Level. Red light: it went over 0 dB. Click to reset.";
+      this.element.addEventListener("pointerdown", (event) => {
+        event.stopPropagation();
+        Level.clipped.delete(this.key);
+        this.element.classList.remove("is-clipped");
+      });
+      this.element.classList.toggle("is-clipped", Level.clipped.has(key));
+    }
   }
 
   push(db, elapsed) {
@@ -233,6 +254,10 @@ class Level {
     const amount = clamp((this.shown - METER_FLOOR_DB) / -METER_FLOOR_DB);
     this.fill.style.setProperty("--level", amount);
     this.element.classList.toggle("is-hot", this.shown > -1);
+    if (this.key != null && (db ?? -100) >= -0.01 && !Level.clipped.has(this.key)) {
+      Level.clipped.add(this.key);
+      this.element.classList.add("is-clipped");
+    }
   }
 }
 
@@ -678,11 +703,19 @@ class DawScreen {
     files.append(
       button("tool", "New", "Start a new project", () => daw("new")),
       button("tool", "Open…", "Open a project", () => daw("open")),
+      (this.recentSelect = html("select", "dropdown recent-projects")),
       (this.saveButton = button("tool", "Save", "Save the project (Ctrl+S)", () => daw("save"))),
       button("tool", "Save as…", "Save a copy under a new name", () => daw("saveAs")),
       button("tool", "Import…", "Add an audio file at the playhead", () => daw("import", { track: this.selectedTrack ?? -1 })),
       button("tool", "Auto Mix…", "Listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix()),
       (this.exportButton = button("tool is-accent", "Export…", "Render the mix or stems to WAV", () => this.toggleExportPanel())));
+
+    this.recentSelect.title = "Open a recent project";
+    this.recentSelect.addEventListener("change", () => {
+      const path = this.recentSelect.value;
+      this.recentSelect.value = "";
+      if (path) daw("openRecent", { path });
+    });
 
     this.projectName = html("div", "daw-project");
 
@@ -691,6 +724,12 @@ class DawScreen {
       button("transport-button", "", "Back to the start (Enter)", () => daw("transport", { action: "stop" })),
       (this.playButton = button("transport-button play-button", "", "Play / pause (Space)", () => this.togglePlay())),
       (this.recordButton = button("record-button", "", "Record on the armed tracks (R)", () => this.toggleRecord())));
+    this.inputMeter = new Level(false, "input");
+    this.inputReadout = html("span", "mic-readout", "−∞");
+    const mic = html("div", "mic-meter");
+    mic.title = "Mic input level. Aim for peaks around −12 dB; red means it went over 0 dB (click to reset).";
+    mic.append(html("span", "mic-label", "Mic"), this.inputMeter.element, this.inputReadout);
+    transport.append(mic);
     transport.children[0].innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="2" height="10" rx="0.5"/><path d="M13 3.5v9a.5.5 0 0 1-.8.4L6.3 8.4a.5.5 0 0 1 0-.8l5.9-4.5a.5.5 0 0 1 .8.4z"/></svg>`;
     this.playButton.innerHTML = `<svg class="icon-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.8v10.4a.6.6 0 0 0 .9.5l8.2-5.2a.6.6 0 0 0 0-1L4.9 2.3a.6.6 0 0 0-.9.5z"/></svg><svg class="icon-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="0.8"/><rect x="9.5" y="2.5" width="3" height="11" rx="0.8"/></svg>`;
     this.recordButton.innerHTML = `<span class="record-dot"></span><span class="record-label">Rec</span>`;
@@ -805,6 +844,13 @@ class DawScreen {
     this.projectName.replaceChildren(html("strong", "", s.project.name), html("span", "dirty", s.project.dirty ? "•" : ""));
     this.projectName.title = s.project.open ? s.project.path : "Not saved yet. Save to keep your work in a project folder.";
     this.saveButton.classList.toggle("is-dirty", s.project.dirty || !s.project.open);
+    const recent = (s.recent ?? []).filter((r) => r.path !== s.project.path);
+    const recentKey = JSON.stringify(recent);
+    if (recentKey !== this.recentKey) {
+      this.recentKey = recentKey;
+      this.recentSelect.replaceChildren(new Option("Recent…", ""), ...recent.map((r) => new Option(r.name, r.path)));
+      this.recentSelect.hidden = recent.length === 0;
+    }
     if (document.activeElement !== this.tempoInput) this.tempoInput.value = Math.round(s.tempo * 100) / 100;
     this.countIn.value = String(s.countIn);
     this.signature.value = String(s.beatsPerBar ?? 4);
@@ -862,7 +908,8 @@ class DawScreen {
 
     const rulerRow = html("div", "ruler-row");
     const corner = html("div", "corner");
-    corner.append(button("tool", "+ Track", "Add a track (Ctrl+T)", () => this.addTrack()));
+    this.clearButton = button("tool clear-mute-solo", "Clear M/S", "Turn every mute and solo off", () => this.run("clearMuteSolo"));
+    corner.append(button("tool", "+ Track", "Add a track (Ctrl+T)", () => this.addTrack()), this.clearButton);
     this.ruler = html("div", "ruler");
     this.ruler.title = "Click to move the playhead · Drag to mark a loop";
     this.loopBand = html("div", "loop-band");
@@ -1016,6 +1063,7 @@ class DawScreen {
     this.rows.replaceChildren(...session.tracks.map((track, index) => this.createTrackRow(track, index)));
     this.renderMasterRow();
     this.emptyHint.hidden = session.tracks.some((track) => track.clips.length > 0);
+    this.clearButton.hidden = !session.tracks.some((track) => track.mute || track.solo);
     this.scrollTo(scroll);
     this.updateRecording();
     this.movePlayhead();
@@ -1065,14 +1113,14 @@ class DawScreen {
 
     const toggles = html("div", "track-toggles");
     const toggle = (key, text, title) => {
-      const b = button(`tt tt-${key}`, text, title, () => daw("setTrack", { id: track.id, [key]: !track[key] }));
+      const b = button(`tt tt-${key}`, text, title, (event) => this.toggleTrackKey(track, key, !track[key], event));
       b.setAttribute("aria-pressed", String(Boolean(track[key])));
       return b;
     };
-    toggles.append(toggle("mute", "M", "Mute"), toggle("solo", "S", "Solo"),
+    toggles.append(toggle("mute", "M", "Mute"), toggle("solo", "S", "Solo (Alt+click: solo only this track)"),
                    toggle("arm", "●", "Arm for recording"), toggle("monitor", "In", "Hear the mic through this track's effects"));
 
-    const meter = new Level();
+    const meter = new Level(false, track.id);
     this.meters.set(track.id, meter);
 
     const fx = button("fx-count", track.inserts.length ? `${track.inserts.length} fx` : "+ fx", "Effects on this track", () => this.select(track.id, null));
@@ -1090,7 +1138,8 @@ class DawScreen {
     pan.element.classList.add("is-pan");
 
     const top = html("div", "track-head-top");
-    top.append(html("span", "track-swatch"), name, remove);
+    const duplicate = button("mini track-duplicate", "⧉", "Duplicate the track with its clips and effects (Ctrl+Shift+D)", () => this.duplicateTrack(track.id));
+    top.append(html("span", "track-swatch"), name, duplicate, remove);
     const bottom = html("div", "track-head-bottom");
     bottom.append(toggles, fx);
     const mix = html("div", "track-head-mix");
@@ -1118,7 +1167,7 @@ class DawScreen {
     const master = this.session.master;
     const head = html("div", "track-head");
     head.addEventListener("pointerdown", () => this.select(0, null));
-    const meter = new Level();
+    const meter = new Level(false, 0);
     this.meters.set(0, meter);
     const top = html("div", "track-head-top");
     top.append(html("span", "track-swatch"), html("span", "track-name is-static", "Master"),
@@ -1408,7 +1457,7 @@ class DawScreen {
                                            format: (v) => (Math.abs(v) < 0.01 ? "C" : `${Math.round(Math.abs(v) * 100)}${v < 0 ? "L" : "R"}`),
                                            onChange: send("pan") });
     const fader = new Fader({ value: track.volume, onChange: send("volume") });
-    const meter = new Level(true);
+    const meter = new Level(true, track.id);
 
     const faderRow = html("div", "strip-fader");
     faderRow.append(fader.element, meter.element);
@@ -1418,7 +1467,8 @@ class DawScreen {
     const buttons = html("div", "strip-toggles");
     if (!isMaster)
       for (const [key, text, title] of [["mute", "M", "Mute"], ["solo", "S", "Solo"], ["arm", "●", "Arm"], ["monitor", "In", "Monitor"]]) {
-        toggles[key] = button(`tt tt-${key}`, text, title, () => daw("setTrack", { id: track.id, [key]: toggles[key].getAttribute("aria-pressed") !== "true" }));
+        toggles[key] = button(`tt tt-${key}`, text, key === "solo" ? "Solo (Alt+click: solo only this track)" : title,
+                              (event) => this.toggleTrackKey(track, key, toggles[key].getAttribute("aria-pressed") !== "true", event));
         buttons.append(toggles[key]);
       }
 
@@ -1643,6 +1693,14 @@ class DawScreen {
 
     const footer = html("div", "panel-actions");
     footer.append(add, preset);
+    const clipboard = this.effectsClipboard;
+    const effectsRow = html("div", "panel-actions");
+    effectsRow.append(button("tool", "Copy effects", "Copy this chain to paste on another track", () => this.copyEffects(owner.id)));
+    if (clipboard && clipboard.id !== owner.id) {
+      effectsRow.append(button("tool", `Paste from ${clipboard.name}`, `Replace this chain with the ${clipboard.count} effects copied from ${clipboard.name}`, () => this.pasteEffects(owner.id)));
+    }
+    if (!isMaster) effectsRow.append(button("tool", "Duplicate track", "A copy of this track with its clips and effects (Ctrl+Shift+D)", () => this.duplicateTrack(owner.id)));
+    head.append(effectsRow);
     head.append(footer);
     element.append(list);
     this.rack.update(owner);
@@ -1934,6 +1992,12 @@ class DawScreen {
   tickMeters(elapsed) {
     const level = (id) => (id === 0 ? this.status.master : this.status.tracks?.[id]);
     for (const [id, meter] of this.meters) meter.push(level(id), elapsed);
+    this.inputMeter.push(this.status.input, elapsed);
+    if (this.status.input !== undefined) {
+      this.inputPeak = Math.max(this.status.input, (this.inputPeak ?? -100) - elapsed * 0.01);
+      this.inputReadout.textContent = this.inputPeak <= METER_FLOOR_DB ? "−∞" : this.inputPeak.toFixed(0);
+    }
+    this.status.input = undefined;
     if (this.view === "mixer") for (const [id, strip] of this.strips) strip.meter.push(level(id), elapsed);
     this.status.master = undefined;
     if (this.status.tracks) this.status.tracks = {};
@@ -1948,7 +2012,7 @@ class DawScreen {
                    ["K", "Add a marker at the playhead"], ["[ / ]", "Previous / next marker"], ["T", "Tap tempo"],
                    ["Click the clock", "Type a bar or time to go to"]]],
     ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["M", "Mute the selected track"],
-                ["Shift+S", "Solo the selected track"], ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track"]]],
+                ["Shift+S", "Solo the selected track"], ["Alt+click S", "Solo only that track"], ["Ctrl+Shift+D", "Duplicate the selected track"], ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track"]]],
     ["Clips", [[", / .", "Select the previous / next clip on the track"], ["S", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
@@ -2042,6 +2106,33 @@ class DawScreen {
     if (id >= 0) this.select(track.id, id);
   }
 
+  toggleTrackKey(track, key, on, event) {
+    if (key === "solo" && event?.altKey) return daw("soloExclusive", { id: track.solo && session_onlySolo(this.session, track.id) ? -1 : track.id });
+    return daw("setTrack", { id: track.id, [key]: on });
+  }
+
+  async duplicateTrack(id = this.selectedTrack) {
+    if (!id) return toast("Select a track first.");
+    const copy = await daw("duplicateTrack", { id });
+    if (typeof copy === "number" && copy > 0) this.select(copy, null);
+  }
+
+  copyEffects(owner = this.selectedTrack) {
+    if (owner == null) return toast("Select a track first.");
+    const from = owner === 0 ? this.session.master : this.session.tracks.find((t) => t.id === owner);
+    if (!from?.inserts.length) return toast("This track has no effects to copy.");
+    this.effectsClipboard = { id: owner, name: owner === 0 ? "Master" : from.name, count: from.inserts.length };
+    toast(`Copied ${from.inserts.length} effect${from.inserts.length === 1 ? "" : "s"} from "${this.effectsClipboard.name}".`);
+    this.inspectorKey = "";
+    this.renderInspector();
+  }
+
+  pasteEffects(owner = this.selectedTrack) {
+    if (!this.effectsClipboard) return toast("Copy a track's effects first.");
+    if (owner == null || owner === this.effectsClipboard.id) return;
+    daw("pasteInserts", { from: this.effectsClipboard.id, to: owner });
+  }
+
   withClip(action) {
     const found = this.findClip(this.selectedClip);
     if (!found) return toast("Select a clip first.");
@@ -2099,6 +2190,10 @@ class DawScreen {
       loop: () => this.toggleLoop(),
       metronome: () => daw("metronome", { on: !this.session?.metronome }),
       addMarker: () => this.addMarker(),
+      duplicateTrack: () => this.duplicateTrack(),
+      copyEffects: () => this.copyEffects(),
+      pasteEffects: () => this.pasteEffects(),
+      clearMuteSolo: () => daw("clearMuteSolo"),
       muteClip: () => this.withClip((clip) => daw("setClip", { id: clip.id, mute: !clip.mute })),
       normaliseClip: () => this.withClip(async (clip) => {
         const result = await daw("normaliseClip", { id: clip.id });
@@ -2136,6 +2231,7 @@ class DawScreen {
     if (mod && key === "z") { handled(); this.run(event.shiftKey ? "redo" : "undo"); }
     else if (mod && key === "y") { handled(); this.run("redo"); }
     else if (mod && key === "s") { handled(); this.run(event.shiftKey ? "saveAs" : "save"); }
+    else if (mod && event.shiftKey && key === "d") { handled(); this.run("duplicateTrack"); }
     else if (mod && key === "d") { handled(); this.run("duplicate"); }
     else if (mod && key === "t") { handled(); this.run("addTrack"); }
     else if (mod && key === "x") { handled(); this.run("cut"); }

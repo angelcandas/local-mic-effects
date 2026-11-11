@@ -60,6 +60,17 @@ public:
     void removeTrack (int trackId);
     void moveTrack (int trackId, int newIndex);
     juce::ValueTree getTrack (int trackId) const;
+
+    // A copy of the track right below it, with its clips, inserts and mixer settings
+    // (not armed). Returns the new track's id, or -1.
+    int duplicateTrack (int trackId);
+
+    // Replaces a track's (or the master's) inserts with copies of another's.
+    void copyInserts (int fromTrackId, int toTrackId);
+
+    // Solo just this track (or nothing, with -1), and clear every mute and solo.
+    void soloExclusive (int trackId);
+    void clearMuteAndSolo();
     juce::Array<juce::ValueTree> getTracks() const;
 
     // Mixer controls. Volume in dB (-inf is muted), pan -1 (left) .. 1 (right).

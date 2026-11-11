@@ -328,8 +328,8 @@ body.is-daw .chip--live { display: none; }
 .mini:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); }
 .mini:disabled { opacity: 0.3; cursor: default; }
 .mini.is-danger:hover { color: var(--hot); border-color: var(--hot); }
-.daw .track-remove { visibility: hidden; border-color: transparent; }
-.track-row:hover .track-remove { visibility: visible; }
+.daw .track-remove, .daw .track-duplicate { visibility: hidden; border-color: transparent; }
+.track-row:hover .track-remove, .track-row:hover .track-duplicate { visibility: visible; }
 
 .track-toggles, .strip-toggles { display: flex; gap: 3px; }
 
@@ -926,3 +926,28 @@ body.is-daw .chip--live { display: none; }
 .clip-tools { flex-wrap: wrap; margin-top: 8px; }
 .daw select.strip-threshold { width: 150px; }
 .fit-button { height: 24px; padding: 0 8px; font-size: 11px; }
+
+/* ---------- Tracks and mixer extras ---------- */
+
+.level-meter { position: relative; cursor: default; }
+.clip-light {
+  position: absolute;
+  right: 0;
+  top: 0;
+  width: 6px;
+  height: 100%;
+  pointer-events: none;
+}
+.level-meter.is-vertical .clip-light { width: 100%; height: 6px; }
+.level-meter.is-clipped { cursor: pointer; box-shadow: 0 0 0 1px color-mix(in srgb, var(--hot) 60%, transparent); }
+.level-meter.is-clipped .clip-light { background: var(--hot); }
+
+.mic-meter { display: flex; align-items: center; gap: 6px; margin-left: 6px; color: var(--faint); font-size: 11px; }
+.mic-meter .level-meter { width: 70px; margin: 0; }
+.mic-readout { width: 26px; color: var(--muted); font: 600 10.5px var(--mono); text-align: right; }
+
+.track-duplicate { margin-left: auto; }
+.corner .clear-mute-solo { margin-left: 6px; color: var(--warn); }
+.corner .clear-mute-solo[hidden] { display: none; }
+.daw select.recent-projects { width: 92px; }
+.daw select.recent-projects[hidden] { display: none; }

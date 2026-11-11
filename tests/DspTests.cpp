@@ -1752,6 +1752,52 @@ namespace
         check (rms (liveLeft, skip, liveLeft.size()) > 0.01f, "back in Live mode the mic goes through the Live chain again");
     }
 
+    void testTrackTools()
+    {
+        std::cout << "\nDAW track tools (duplicate, copy effects, solo, clear)\n";
+
+        daw::Edit edit;
+        const auto a = (int) edit.addTrack ("Lead")[daw::ids::id];
+        const auto b = (int) edit.addTrack ("Backing")[daw::ids::id];
+        edit.setTrackVolume (a, -4.0f);
+        edit.setTrackArm (a, true);
+        edit.addClip (a, juce::File ("/tmp/x.wav"), 1.0, 2.0);
+        const auto echo = (int) edit.addInsert (a, fx::ModuleType::echo)[daw::ids::id];
+        edit.setInsertValue (echo, "delayTime", 300.0f);
+        edit.addInsert (a, fx::ModuleType::reverb);
+
+        edit.getUndoManager().beginNewTransaction();
+        const auto copy = edit.duplicateTrack (a);
+        const auto copyTree = edit.getTrack (copy);
+        const auto copyInserts = daw::Edit::getInserts (copyTree);
+        check (copy > 0 && edit.getTracks().size() == 3 && edit.getTracks()[1] == copyTree
+                   && copyTree[daw::ids::name].toString() == "Lead copy" && (float) copyTree[daw::ids::volume] == -4.0f
+                   && ! (bool) copyTree[daw::ids::arm] && copyInserts.getNumChildren() == 2
+                   && (float) copyInserts.getChild (0)[juce::Identifier ("delayTime")] == 300.0f
+                   && copyTree.getChildWithName (daw::ids::CLIP).isValid(),
+               "duplicating a track copies its clips, effects and mix settings, right below it");
+        check ((int) copyInserts.getChild (0)[daw::ids::id] != echo
+                   && (int) copyTree.getChildWithName (daw::ids::CLIP)[daw::ids::id] != (int) edit.getTrack (a).getChildWithName (daw::ids::CLIP)[daw::ids::id],
+               "the copy gets its own ids");
+        edit.getUndoManager().undo();
+        check (edit.getTracks().size() == 2, "duplicate is one undo step");
+
+        edit.addInsert (b, fx::ModuleType::compressor);
+        edit.copyInserts (a, b);
+        const auto bInserts = daw::Edit::getInserts (edit.getTrack (b));
+        check (bInserts.getNumChildren() == 2 && bInserts.getChild (0)[daw::ids::type].toString() == daw::Edit::getInserts (edit.getTrack (a)).getChild (0)[daw::ids::type].toString()
+                   && (float) bInserts.getChild (0)[juce::Identifier ("delayTime")] == 300.0f,
+               "pasting effects replaces the other track's chain with a copy");
+        edit.copyInserts (a, daw::Edit::masterId);
+        check (daw::Edit::getInserts (edit.getMaster()).getNumChildren() == 2, "effects can be pasted on the master");
+
+        edit.setTrackMute (b, true);
+        edit.soloExclusive (b);
+        check ((bool) edit.getTrack (b)[daw::ids::solo] && ! (bool) edit.getTrack (a)[daw::ids::solo], "exclusive solo");
+        edit.clearMuteAndSolo();
+        check (! (bool) edit.getTrack (b)[daw::ids::solo] && ! (bool) edit.getTrack (b)[daw::ids::mute], "clear every mute and solo");
+    }
+
     void testClipTools()
     {
         std::cout << "\nDAW clip tools (mute, normalise, strip silence, anti-click edges)\n";
@@ -2073,6 +2119,7 @@ int main()
     testClipEditing();
     testDawMode();
     testClipTools();
+    testTrackTools();
     testAnalysis();
     testMixAssistant();
     testLatency();
