@@ -1040,6 +1040,7 @@ class DawScreen {
       const box = this.arrange.getBoundingClientRect();
       const anchor = event.clientX - box.left - HEAD_WIDTH;
       const seconds = (this.arrange.scrollLeft + anchor) / this.zoom;
+      this.beginZoom();
       this.zoom = clamp(this.zoom * Math.exp(-event.deltaY * 0.002), MIN_ZOOM, MAX_ZOOM);
       this.renderArrange(true);
       this.scrollTo(seconds * this.zoom - anchor);
@@ -1064,6 +1065,7 @@ class DawScreen {
   // Keeps the playhead (or the left edge, if it's off screen) in place while zooming.
   setZoom(zoom, fromSlider = false) {
     const before = this.zoom;
+    this.beginZoom();
     this.zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
     const visible = this.arrange.clientWidth - HEAD_WIDTH;
     const playheadX = this.status.position * before - this.arrange.scrollLeft;
@@ -1072,6 +1074,15 @@ class DawScreen {
     this.renderArrange(true);
     this.scrollTo(seconds * this.zoom - anchor);
     if (!fromSlider) this.renderTransport();
+  }
+
+  // While zooming, waveforms are not redrawn on every step (that is slow at high zoom,
+  // where each is a fine-detail picture): the previous picture is kept and stretched
+  // to the new scale, and one sharp redraw follows when the zooming stops.
+  beginZoom() {
+    this.zooming = true;
+    clearTimeout(this.zoomTimer);
+    this.zoomTimer = setTimeout(() => { this.zooming = false; this.redrawWaves(); }, 160);
   }
 
   setRowHeight(height) {
@@ -1183,6 +1194,10 @@ class DawScreen {
 
     this.meters.clear();
     const scroll = this.arrange.scrollLeft;
+    this.oldWaves = new Map();
+    if (this.zooming)
+      for (const canvas of this.rows.querySelectorAll("canvas.clip-wave"))
+        if (canvas.clip && canvas.drawn) this.oldWaves.set(canvas.clip.id, canvas);
     this.rows.replaceChildren(...session.tracks.map((track, index) => this.createTrackRow(track, index)));
     this.renderMasterRow();
     this.emptyHint.hidden = session.tracks.some((track) => track.clips.length > 0);
@@ -1191,6 +1206,7 @@ class DawScreen {
     this.updateRecording();
     this.movePlayhead();
     this.revealPending();
+    this.oldWaves = null;
   }
 
   renderRuler(width) {
@@ -1348,9 +1364,16 @@ class DawScreen {
     };
     place(clip.start, clip.length);
 
-    const canvas = html("canvas", "clip-wave");
+    // Mid-zoom, reuse the old picture (stretched) instead of drawing a new one.
+    const kept = this.zooming ? this.oldWaves?.get(clip.id) : null;
+    const canvas = kept ?? html("canvas", "clip-wave");
     canvas.dataset.color = trackColour(track, this.session.tracks.indexOf(track));
     canvas.clip = clip;
+    if (kept) {
+      const scale = this.zoom / (kept.zoomAt || this.zoom);
+      kept.style.left = `${kept.cssLeft * scale}px`;
+      kept.style.width = `${kept.cssWidth * scale}px`;
+    }
     const label = html("span", "clip-name", clip.missing ? `⚠ ${clip.name}` : clip.mute ? `🔇 ${clip.name}` : clip.name);
     if (clip.gain && Math.abs(clip.gain) > 0.05) label.textContent += `  ${dbText(clip.gain)} dB`;
     const fades = svg("svg", { class: "clip-fades", preserveAspectRatio: "none" });
@@ -1368,7 +1391,7 @@ class DawScreen {
       html("div", "handle trim-start"), html("div", "handle trim-end"),
       html("div", "handle fade-in"), html("div", "handle fade-out"));
 
-    this.drawWaveform(canvas);
+    if (!kept) this.drawWaveform(canvas);
     if (!clip.midi) drawWarpMarkers(element, clip, this.zoom);
     element.classList.toggle("is-warped", Boolean(clip.warp?.length) || Math.abs(clip.transpose || 0) > 1e-4);
 
@@ -1477,6 +1500,7 @@ class DawScreen {
       return;
     }
     if (overview === "loading") return;
+    if (this.zooming && canvas.drawn) return; // keep the stretched picture until zooming stops
 
     const zoom = this.zoom;
     const view = Math.max(1, this.arrange.clientWidth - HEAD_WIDTH) / zoom;
@@ -1510,6 +1534,7 @@ class DawScreen {
 
     canvas.style.left = `${cssLeft}px`;
     canvas.style.width = `${cssWidth}px`;
+    canvas.zoomAt = zoom; canvas.cssLeft = cssLeft; canvas.cssWidth = cssWidth;
     canvas.width = width;
     canvas.height = height;
     const context = canvas.getContext("2d");
