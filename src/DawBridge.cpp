@@ -343,7 +343,7 @@ juce::var DawBridge::getDetailPeaks (const juce::File& file, double start, doubl
     const auto total = audio->getNumSamples();
     const auto first = juce::jlimit (0, total, (int) std::floor (start * rate));
     const auto last = juce::jlimit (first, total, (int) std::ceil (end * rate));
-    const auto step = juce::jmax ({ 1, (int) std::round (seconds * rate), (last - first) / maxBins + 1 });
+    const auto step = juce::jmax (1, (int) std::round (seconds * rate), (last - first) / maxBins + 1);
 
     juce::Array<juce::var> lows, highs;
     lows.ensureStorageAllocated ((last - first) / step + 1);
