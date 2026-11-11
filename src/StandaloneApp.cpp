@@ -244,13 +244,13 @@ namespace
         static const std::vector<std::pair<const char*, std::vector<MenuItem>>> menus
         {
             { "File", {
-                { "new",       "New project",            "",             true },
-                { "open",      "Open project...",        "",             true },
+                { "new",       "New project",            "Ctrl+N",       true },
+                { "open",      "Open project...",        "Ctrl+O",       true },
                 { "save",      "Save",                   "Ctrl+S",       true },
                 { "saveAs",    "Save as...",             "Ctrl+Shift+S", true },
                 { "", "", "", false },
-                { "import",    "Import audio...",        "",             true },
-                { "export",    "Export...",              "",             true },
+                { "import",    "Import audio...",        "Ctrl+I",       true },
+                { "export",    "Export...",              "Ctrl+Shift+R", true },
                 { "", "", "", false },
                 { "app:audio", "Audio settings...",      "",             false },
                #if ! JUCE_MAC
@@ -267,10 +267,14 @@ namespace
                 { "copy",      "Copy clip",              "Ctrl+C",       true },
                 { "paste",     "Paste at the playhead",  "Ctrl+V",       true },
                 { "duplicate", "Duplicate clip",         "Ctrl+D",       true },
-                { "split",     "Split at the playhead",  "S",            true },
+                { "split",     "Split at the playhead",  "Ctrl+E",       true },
                 { "delete",    "Delete clip",            "Delete",       true },
                 { "", "", "", false },
                 { "addTrack",  "New track",              "Ctrl+T",       true },
+                { "duplicateTrack", "Duplicate track",   "Ctrl+Shift+D", true },
+                { "renameTrack", "Rename track",         "Ctrl+R",       true },
+                { "deleteTrack", "Delete track",         "Ctrl+Delete",  true },
+                { "quantize",  "Quantize",               "Q",            true },
                 { "", "", "", false },
                 { "autoMix",   "Auto Mix...",            "",             true },
                 { "songKey",   "Song key...",            "",             true },

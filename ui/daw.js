@@ -8,8 +8,8 @@ import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
-import { createRhythmPanel, drawWarpMarkers, startWarpDrag } from "./rhythm.js";
-import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
+import { createRhythmPanel, drawWarpMarkers, savedQuantizeArgs, startWarpDrag } from "./rhythm.js";
+import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
 
@@ -52,7 +52,7 @@ const dbText = (value) => {
 
 function button(className, text, title, onClick) {
   const element = html("button", className, text);
-  if (title) element.title = title;
+  if (title) element.title = keyText(title);
   if (onClick) element.addEventListener("click", onClick);
   return element;
 }
@@ -882,7 +882,7 @@ class DawScreen {
       return input;
     };
     // Logarithmic, so each step of the slider zooms by the same factor.
-    zoom.append(button("tool fit-button", "Fit", "Zoom to fit the whole song (Z)", () => this.run("zoomFit")));
+    zoom.append(button("tool fit-button", "Fit", "Zoom to fit the whole song (Shift+Z)", () => this.run("zoomFit")));
     this.zoomSlider = slider("↔", "Horizontal zoom (+ / − or Ctrl+scroll)", (p) => this.setZoom(MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, p), true));
     this.heightSlider = slider("↕", "Track height (Shift+↑ / Shift+↓)", (p) => this.setRowHeight(MIN_ROW + (MAX_ROW - MIN_ROW) * p));
 
@@ -1981,13 +1981,13 @@ class DawScreen {
     const toolRow = (...items) => { const r = html("div", "clip-tool-row"); r.append(...items); return r; };
     const tools = html("div", "clip-tools");
     tools.append(
-      toolRow(button("tool", "Split", "Split at the playhead (S)", () => this.splitSelected()),
+      toolRow(button("tool", "Split", "Split at the playhead (Ctrl+E)", () => this.splitSelected()),
               button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
               button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected())),
       toolRow(muteButton,
               button("tool", "Normalise", "Set the clip gain so its loudest peak is −1 dB", () => this.run("normaliseClip")),
-              button("tool", "Loop clip", "Loop the clip's range (Shift+L)", () => this.run("loopClip")),
-              button("tool", "Zoom to clip", "Fit the clip in the view (Shift+Z)", () => this.run("zoomClip"))),
+              button("tool", "Loop clip", "Loop the clip's range (Ctrl+L)", () => this.run("loopClip")),
+              button("tool", "Zoom to clip", "Fit the clip in the view (Z)", () => this.run("zoomClip"))),
       toolRow(button("tool", "Strip silence", "Split the clip into phrases and remove the silent gaps between them", () => this.run("stripSilence")),
               threshold));
     element.append(head, row, tools);
@@ -2106,7 +2106,7 @@ class DawScreen {
     this.toastArea = this.root.querySelector(".daw-toast");
     this.exportPanel = this.root.querySelector(".export-panel");
     toast = (message, kind = "") => {
-      this.toastArea.textContent = message;
+      this.toastArea.textContent = keyText(message);
       this.toastArea.className = `daw-toast is-visible ${kind}`;
       clearTimeout(this.toastTimer);
       this.toastTimer = setTimeout(() => this.toastArea.classList.remove("is-visible"), 5000);
@@ -2569,22 +2569,31 @@ class DawScreen {
   }
 
   //============================================================================ keyboard
-  // Every shortcut, for the "?" overlay. Keep in step with onKey.
+  // Every shortcut, for the "?" overlay. Keep in step with onKey. The bindings follow
+  // what Ableton Live, Cubase and Logic Pro share (Space, M, S, R, Ctrl+Z/S/D/N/O, Q...);
+  // where they differ, the most obvious one wins. Ctrl is Cmd on a Mac (keyText).
   static SHORTCUTS = [
-    ["Transport", [["Space", "Play / pause"], ["Enter", "Stop and go back to the start"], ["R", "Record on the armed tracks"],
+    ["Transport", [["Space", "Play / pause"], ["Enter / Num 0", "Stop and go back to the start"], ["R / Num *", "Record on the armed tracks"],
                    ["← / →", "Move the playhead a beat (Shift: a bar)"], ["Home / End", "Go to the start / end of the song"],
-                   ["L", "Loop on / off"], ["C", "Click (metronome) on / off"], ["F", "Follow the playhead on / off"],
-                   ["K", "Add a marker at the playhead"], ["[ / ]", "Previous / next marker"], ["T", "Tap tempo"],
+                   ["L / Num /", "Loop on / off"], ["C", "Click (metronome) on / off"], ["F", "Follow the playhead on / off"],
+                   ["K / Insert", "Add a marker at the playhead"], ["[ / ]", "Previous / next marker"], ["T", "Tap tempo"],
                    ["Click the clock", "Type a bar or time to go to"]]],
-    ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["M", "Mute the selected track"],
-                ["Shift+S", "Solo the selected track"], ["Alt+click S", "Solo only that track"], ["Ctrl+Shift+D", "Duplicate the selected track"], ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track"]]],
-    ["Clips", [[", / .", "Select the previous / next clip on the track"], ["S", "Split the selected clip at the playhead"],
+    ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["Ctrl+Shift+T", "New MIDI track"], ["Ctrl+Shift+D", "Duplicate the selected track"],
+                ["Ctrl+R", "Rename the selected track"], ["Ctrl+Delete", "Delete the selected track"],
+                ["M", "Mute the selected track"], ["S", "Solo the selected track"], ["Alt+click S", "Solo only that track"],
+                ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track"],
+                ["Q / Ctrl+U", "Quantize the selected clip (or track), with the Pitch & time settings"]]],
+    ["Clips", [[", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
                ["V / B / G / W", "Select, cut, gain and warp tools"], ["Shift+M", "Mute / unmute the selected clip"],
-               ["Shift+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
-    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["Shift+B", "Show / hide the library"], ["Ctrl+F", "Search the library"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Z / Shift+Z", "Zoom to fit the song / the selected clip"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
-              ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Ctrl+S", "Save (Shift: save as)"], ["?", "This list"], ["F11 / Ctrl+Cmd+F", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
+               ["Ctrl+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
+    ["File", [["Ctrl+N", "New project"], ["Ctrl+O", "Open a project"], ["Ctrl+S", "Save (Shift: save as)"],
+              ["Ctrl+I", "Import audio"], ["Ctrl+Shift+R / Ctrl+B", "Export (bounce)"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"]]],
+    ["View", [["Tab / X", "Tracks / mixer"], ["E / Shift+Tab", "Show / hide the effects panel"], ["Shift+B / Ctrl+Alt+B", "Show / hide the library"],
+              ["Ctrl+F", "Search the library"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"],
+              ["Z / Shift+Z", "Zoom to the selected clip / the whole song"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
+              ["?", "This list"], [IS_MAC ? "Ctrl+Cmd+F" : "F11", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
   ];
 
   toggleShortcuts(show) {
@@ -2601,7 +2610,7 @@ class DawScreen {
         section.append(html("h4", "", group));
         for (const [keys, action] of rows) {
           const row = html("div", "shortcut");
-          row.append(html("kbd", "", keys), html("span", "", action));
+          row.append(html("kbd", "", keyText(keys)), html("span", "", action));
           section.append(row);
         }
         grid.append(section);
@@ -2788,6 +2797,12 @@ class DawScreen {
       nextMarker: () => this.jumpMarker(1),
       tapTempo: () => this.tapTempo(),
       goTo: () => this.editClock(),
+      soloTrack: () => this.toggleTrack("solo"),
+      muteTrack: () => this.toggleTrack("mute"),
+      renameTrack: () => this.renameTrack(),
+      deleteTrack: () => this.deleteTrack(),
+      quantize: () => this.quantizeSelected(),
+      zoomSelection: () => this.run(this.findClip(this.selectedClip) ? "zoomClip" : "zoomFit"),
     };
   }
 
@@ -2795,42 +2810,98 @@ class DawScreen {
     if (this.active) this.commands[command]?.();
   }
 
+  renameTrack() {
+    const input = this.rows.querySelector(`.track-row[data-track="${this.selectedTrack}"] .track-name`);
+    if (!input) return toast("Select a track first.");
+    if (this.view !== "arrange") this.setView("arrange");
+    input.scrollIntoView({ block: "nearest" });
+    input.focus();
+    input.select();
+  }
+
+  async deleteTrack() {
+    const track = this.selectedTrackObject();
+    if (!track) return toast("Select a track first.");
+    const tracks = this.session.tracks, index = tracks.indexOf(track);
+    const next = tracks[index + 1] ?? tracks[index - 1];
+    await daw("removeTrack", { id: track.id });
+    if (next) this.select(next.id, null);
+    toast(`Deleted "${track.name}". Ctrl+Z brings it back.`);
+  }
+
+  // Q: quantize the selected clip, or the whole selected track, with the settings last
+  // used in the Pitch & time panel.
+  async quantizeSelected() {
+    const track = this.selectedTrackObject();
+    if (!track) return toast("Select a track or clip first.");
+    const clip = this.findClip(this.selectedClip)?.clip;
+    const args = savedQuantizeArgs(this.session, track.id);
+    const result = await daw("quantize", clip ? { clips: [clip.id], ...args } : { track: track.id, ...args });
+    if (!result?.ok) return;
+    const what = clip ? "Quantize" : `Quantize ${track.name}`;
+    toast(result.onsets ? `${what}: ${result.moved} of ${result.onsets} notes moved onto the grid.` : `${what}: no clear note starts found.`);
+  }
+
   onKey(event) {
     if (!this.active || isTyping(event)) return;
+    if (event.ctrlKey && event.metaKey) return; // Ctrl+Cmd+F is full screen on a Mac
     const mod = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
+    const code = event.code; // for Alt (Option on a Mac) combinations, which change event.key
     const handled = () => event.preventDefault();
     const onSlider = event.target.closest?.("[role=slider]");
     const step = event.shiftKey ? this.bar : this.beat;
+    const command = (name) => { handled(); this.run(name); };
 
-    if (mod && key === "z") { handled(); this.run(event.shiftKey ? "redo" : "undo"); }
-    else if (mod && key === "y") { handled(); this.run("redo"); }
-    else if (mod && key === "s") { handled(); this.run(event.shiftKey ? "saveAs" : "save"); }
-    else if (mod && event.shiftKey && key === "d") { handled(); this.run("duplicateTrack"); }
-    else if (mod && key === "d") { handled(); this.run("duplicate"); }
-    else if (mod && event.shiftKey && key === "t") { handled(); this.addMidiTrack(); }
-    else if (mod && key === "t") { handled(); this.run("addTrack"); }
-    else if (mod && key === "x") { handled(); this.run("cut"); }
-    else if (mod && key === "c") { handled(); this.run("copy"); }
-    else if (mod && key === "v") { handled(); this.run("paste"); }
-    else if (mod && key === "f") { handled(); this.run("searchLibrary"); }
-    else if (mod) return;
+    if (mod && event.altKey) { if (code === "KeyB") command("toggleLibrary"); }
+    else if (mod && event.shiftKey) {
+      if (key === "z") command("redo");
+      else if (key === "s") command("saveAs");
+      else if (key === "d") command("duplicateTrack");
+      else if (key === "t") { handled(); this.addMidiTrack(); }
+      else if (key === "r") command("export");
+      else if (key === "i") command("import");
+    }
+    else if (mod) {
+      if (key === "z") command("undo");
+      else if (key === "y") command("redo");
+      else if (key === "s") command("save");
+      else if (key === "n") command("new");
+      else if (key === "o") command("open");
+      else if (key === "i") command("import");
+      else if (key === "b") command("export");
+      else if (key === "d") command("duplicate");
+      else if (key === "e") command("split");
+      else if (key === "t") command("addTrack");
+      else if (key === "r") command("renameTrack");
+      else if (key === "l") command("loopClip");
+      else if (key === "u") command("quantize");
+      else if (key === "x") command("cut");
+      else if (key === "c") command("copy");
+      else if (key === "v") command("paste");
+      else if (key === "f") command("searchLibrary");
+      else if (event.key === "Delete" || event.key === "Backspace") command("deleteTrack");
+    }
     else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { handled(); this.nudgeSelected(event.key === "ArrowLeft" ? -step : step); }
     else if (event.altKey) return;
+    else if (code === "Numpad0") command("stop");
+    else if (code === "NumpadMultiply") command("record");
+    else if (code === "NumpadDivide") command("loop");
     else if (onSlider && event.key.startsWith("Arrow")) return;
-    else if (event.key === " ") { if (event.target.closest?.("button, [role=slider]")) return; handled(); this.run("play"); }
-    else if (event.key === "Enter") { if (event.target.closest?.("button")) return; handled(); this.run("stop"); }
+    else if (event.key === " ") { if (event.target.closest?.("button, [role=slider]")) return; command("play"); }
+    else if (event.key === "Enter") { if (event.target.closest?.("button")) return; command("stop"); }
     else if (event.key === "ArrowLeft") { handled(); this.seek(Math.ceil(this.status.position / step - 1e-6) * step - step); }
     else if (event.key === "ArrowRight") { handled(); this.seek(Math.floor(this.status.position / step + 1e-6) * step + step); }
     else if (event.key === "ArrowUp") { handled(); event.shiftKey ? this.setRowHeight(this.rowHeight + 12) : this.selectTrackBy(-1); }
     else if (event.key === "ArrowDown") { handled(); event.shiftKey ? this.setRowHeight(this.rowHeight - 12) : this.selectTrackBy(1); }
-    else if (event.key === "Home") { handled(); this.run("start"); }
-    else if (event.key === "End") { handled(); this.run("end"); }
-    else if (event.key === "?" || event.key === "/") { handled(); this.run("shortcuts"); }
-    else if (event.key === "Tab") { handled(); this.run("toggleView"); }
-    else if (event.key === "Delete" || event.key === "Backspace") { if (onSlider) return; handled(); this.run("delete"); }
-    else if (event.key === "+" || event.key === "=") { handled(); this.run("zoomIn"); }
-    else if (event.key === "-" || event.key === "_") { handled(); this.run("zoomOut"); }
+    else if (event.key === "Home") command("start");
+    else if (event.key === "End") command("end");
+    else if (event.key === "Insert") command("addMarker");
+    else if (event.key === "?" || event.key === "/") command("shortcuts");
+    else if (event.key === "Tab") command(event.shiftKey ? "toggleDock" : "toggleView");
+    else if (event.key === "Delete" || event.key === "Backspace") { if (onSlider) return; command("delete"); }
+    else if (event.key === "+" || event.key === "=") command("zoomIn");
+    else if (event.key === "-" || event.key === "_") command("zoomOut");
     else if (event.key === ",") { handled(); this.selectClipBy(-1); }
     else if (event.key === ".") { handled(); this.selectClipBy(1); }
     else if (event.key === "Escape") {
@@ -2840,30 +2911,31 @@ class DawScreen {
       this.setTool("select");
       this.select(this.selectedTrack, null);
     }
-    else if (event.shiftKey && key === "s") { handled(); this.toggleTrack("solo"); }
-    else if (event.shiftKey && key === "m") { handled(); this.run("muteClip"); }
-    else if (event.shiftKey && key === "l") { handled(); this.run("loopClip"); }
-    else if (event.shiftKey && key === "z") { handled(); this.run("zoomClip"); }
-    else if (event.shiftKey && key === "b") { handled(); this.run("toggleLibrary"); }
-    else if (event.shiftKey) return;
-    else if (key === "r") { handled(); this.run("record"); }
-    else if (key === "k") { handled(); this.run("addMarker"); }
-    else if (key === "z") { handled(); this.run("zoomFit"); }
-    else if (event.key === "[") { handled(); this.run("previousMarker"); }
-    else if (event.key === "]") { handled(); this.run("nextMarker"); }
-    else if (key === "t") { handled(); this.run("tapTempo"); }
-    else if (key === "s") { handled(); this.run("split"); }
-    else if (key === "l") { handled(); this.run("loop"); }
-    else if (key === "c") { handled(); this.run("metronome"); }
-    else if (key === "f") { handled(); this.run("follow"); }
-    else if (key === "m") { handled(); this.toggleTrack("mute"); }
+    else if (event.shiftKey) {
+      if (key === "m") command("muteClip");
+      else if (key === "z") command("zoomFit");
+      else if (key === "b") command("toggleLibrary");
+    }
+    else if (key === "r") command("record");
+    else if (key === "k") command("addMarker");
+    else if (key === "z") command("zoomSelection");
+    else if (event.key === "[") command("previousMarker");
+    else if (event.key === "]") command("nextMarker");
+    else if (key === "t") command("tapTempo");
+    else if (key === "s") command("soloTrack");
+    else if (key === "m") command("muteTrack");
+    else if (key === "q") command("quantize");
+    else if (key === "l") command("loop");
+    else if (key === "c") command("metronome");
+    else if (key === "f") command("follow");
+    else if (key === "x") command("toggleView");
     else if (key === "a") { handled(); this.toggleTrack("arm"); }
     else if (key === "i") { handled(); this.toggleTrack("monitor"); }
     else if (key === "v") { handled(); this.setTool("select"); }
     else if (key === "b") { handled(); this.setTool("cut"); }
     else if (key === "g") { handled(); this.setTool("gain"); }
     else if (key === "w") { handled(); this.setTool("warp"); }
-    else if (key === "e") { handled(); this.run("toggleDock"); }
+    else if (key === "e") command("toggleDock");
   }
 }
 
