@@ -7,6 +7,7 @@ import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
+import { PianoRoll } from "./pianoroll.js";
 import { createRhythmPanel, drawWarpMarkers, startWarpDrag } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 
@@ -981,7 +982,9 @@ class DawScreen {
     const rulerRow = html("div", "ruler-row");
     const corner = html("div", "corner");
     this.clearButton = button("tool clear-mute-solo", "Clear M/S", "Turn every mute and solo off", () => this.run("clearMuteSolo"));
-    corner.append(button("tool", "+ Track", "Add a track (Ctrl+T)", () => this.addTrack()), this.clearButton);
+    corner.append(button("tool", "+ Track", "Add an audio track (Ctrl+T)", () => this.addTrack()),
+                  button("tool", "+ MIDI", "Add a MIDI track with a built-in synth (Ctrl+Shift+T). Pick another instrument in the library.", () => this.addMidiTrack()),
+                  this.clearButton);
     this.ruler = html("div", "ruler");
     this.ruler.title = "Click to move the playhead · Drag to mark a loop";
     this.loopBand = html("div", "loop-band");
@@ -1109,6 +1112,20 @@ class DawScreen {
     if (typeof id === "number") this.showWhenDrawn({ track: id });
   }
 
+  async addMidiTrack() {
+    const id = await daw("addMidiTrack");
+    if (typeof id === "number") this.showWhenDrawn({ track: id });
+  }
+
+  // An empty MIDI clip (one bar) on a MIDI track at a time, opened in the piano roll.
+  async addMidiClip(track, start) {
+    const id = await daw("addMidiClip", { track: track.id, start: Math.max(0, start), length: this.bar });
+    if (typeof id === "number" && id > 0) {
+      this.showWhenDrawn({ track: track.id, clip: id });
+      this.setDock(true);
+    }
+  }
+
   // Import an audio file at the playhead, on the selected track (or a new one).
   async importAudio() {
     const result = await daw("import", { track: this.selectedTrack ?? -1 });
@@ -1223,8 +1240,11 @@ class DawScreen {
       b.setAttribute("aria-pressed", String(Boolean(track[key])));
       return b;
     };
+    const isMidi = track.kind === "midi";
+    row.classList.toggle("is-midi", isMidi);
     toggles.append(toggle("mute", "M", "Mute"), toggle("solo", "S", "Solo (Alt+click: solo only this track)"),
-                   toggle("arm", "●", "Arm for recording"), toggle("monitor", "In", "Hear the mic through this track's effects"));
+                   toggle("arm", "●", isMidi ? "Arm to record from your MIDI keyboard (you hear it while armed)" : "Arm for recording"),
+                   toggle("monitor", "In", isMidi ? "Play this track's instrument from your MIDI keyboard" : "Hear the mic through this track's effects"));
 
     const meter = new Level(false, track.id);
     this.meters.set(track.id, meter);
@@ -1248,9 +1268,23 @@ class DawScreen {
     top.append(html("span", "track-swatch"), name, duplicate, remove);
     const bottom = html("div", "track-head-bottom");
     bottom.append(toggles, fx);
+    let chip = null;
+    if (isMidi) {
+      const instrument = track.instrument ?? {};
+      chip = button("instrument-chip", `${instrument.error ? "⚠ " : "♫ "}${instrument.name || "Instrument"}`,
+        instrument.error ? instrument.error
+          : instrument.hasWindow ? `${instrument.name}: open its window` : `${instrument.name} (built-in). Drag another instrument here from the library to swap it.`,
+        () => {
+          this.select(track.id, null);
+          if (instrument.hasWindow && !instrument.error) daw("showInstrument", { track: track.id });
+          else if (instrument.error) toast(instrument.error, "is-error");
+          else toast("Double-click the lane to add a MIDI clip; pick another instrument in the library or the piano roll.");
+        });
+      chip.classList.toggle("has-error", Boolean(instrument.error));
+    }
     const mix = html("div", "track-head-mix");
     mix.append(volume.element, pan.element);
-    head.append(top, bottom, mix, meter.element);
+    head.append(top, ...(chip ? [chip] : []), bottom, mix, meter.element);
 
     // Clicking a lane selects the track; it only moves the playhead while stopped, so
     // you can click around while a take plays back. (The ruler always moves it.)
@@ -1262,6 +1296,17 @@ class DawScreen {
       const box = lane.getBoundingClientRect();
       daw("transport", { action: "seek", time: Math.max(0, (event.clientX - box.left) / this.zoom) });
     });
+
+    if (isMidi) {
+      lane.title = "Double-click to add a MIDI clip";
+      lane.addEventListener("dblclick", (event) => {
+        if (event.target !== lane) return;
+        const box = lane.getBoundingClientRect();
+        const time = (event.clientX - box.left) / this.zoom;
+        const bar = this.bar;
+        this.addMidiClip(track, Math.floor(time / bar + 1e-6) * bar);
+      });
+    }
 
     for (const clip of track.clips) lane.append(this.createClip(clip, track));
 
@@ -1292,7 +1337,9 @@ class DawScreen {
     element.classList.toggle("is-selected", this.selectedClip === clip.id);
     element.classList.toggle("is-missing", clip.missing);
     element.classList.toggle("is-muted", Boolean(clip.mute));
-    element.title = clip.missing ? `Missing file: ${clip.file}` : `${clip.name}\nDrag to move · Edges to trim · Corners to fade · S splits at the playhead`;
+    element.classList.toggle("is-midi", Boolean(clip.midi));
+    if (clip.midi) element.addEventListener("dblclick", () => { this.select(track.id, clip.id); this.setDock(true); this.pianoRoll?.element.focus(); });
+    element.title = clip.midi ? `${clip.name} (${clip.notes.length} notes)\nDouble-click to edit the notes · Drag to move · Edges to trim` : clip.missing ? `Missing file: ${clip.file}` : `${clip.name}\nDrag to move · Edges to trim · Corners to fade · S splits at the playhead`;
 
     const place = (start, length) => {
       element.style.left = `${start * this.zoom}px`;
@@ -1321,7 +1368,7 @@ class DawScreen {
       html("div", "handle fade-in"), html("div", "handle fade-out"));
 
     this.drawWaveform(canvas);
-    drawWarpMarkers(element, clip, this.zoom);
+    if (!clip.midi) drawWarpMarkers(element, clip, this.zoom);
     element.classList.toggle("is-warped", Boolean(clip.warp?.length) || Math.abs(clip.transpose || 0) > 1e-4);
 
     element.addEventListener("pointerdown", (event) => {
@@ -1329,7 +1376,7 @@ class DawScreen {
       event.stopPropagation();
       this.select(track.id, clip.id, false);
 
-      if (this.tool === "warp") {
+      if (this.tool === "warp" && !clip.midi) {
         startWarpDrag(this, event, clip, element, daw);
         return;
       }
@@ -1421,6 +1468,7 @@ class DawScreen {
   // hides audio where it is, and zooming in draws finer detail (asked for, for just the
   // visible stretch) instead of scaling up a picture.
   drawWaveform(canvas, clip = canvas.clip) {
+    if (clip.midi) return this.drawNotes(canvas, clip);
     const audio = clip.audioKey || clip.file; // a warped or transposed clip shows its rendered copy
     const overview = this.peaks.get(audio);
     if (!overview) {
@@ -1495,6 +1543,39 @@ class DawScreen {
       const half = Math.max(0.5 * ratio, Math.min(1, peak * gain) * reach);
       context.fillRect(x, middle - half, 1, half * 2);
     }
+  }
+
+  // A MIDI clip's notes, as small bars spanning the clip's pitch range.
+  drawNotes(canvas, clip) {
+    const zoom = this.zoom;
+    const ratio = window.devicePixelRatio || 1;
+    const cssWidth = Math.min(Math.max(2, clip.length * zoom), 16000 / ratio);
+    const width = Math.max(1, Math.round(cssWidth * ratio));
+    const height = Math.max(1, Math.round((this.rowHeight - 8) * ratio));
+    const visible = clip.notes.filter((n) => n.time < clip.offset + clip.length && n.time + n.length > clip.offset);
+    const key = ["midi", cssWidth, width, height, clip.offset, canvas.dataset.color, visible.map((n) => `${n.pitch}:${n.time}:${n.length}`).join(",")].join();
+    if (canvas.drawn === key) return;
+    canvas.drawn = key;
+    canvas.hidden = false;
+    canvas.style.left = "0px";
+    canvas.style.width = `${cssWidth}px`;
+    canvas.width = width;
+    canvas.height = height;
+    const context = canvas.getContext("2d");
+    if (!visible.length) return;
+    let lo = Math.min(...visible.map((n) => n.pitch)), hi = Math.max(...visible.map((n) => n.pitch));
+    if (hi - lo < 12) { const mid = (hi + lo) / 2; lo = Math.floor(mid - 6); hi = Math.ceil(mid + 6); }
+    const top = 14 * ratio, usable = Math.max(ratio * 4, height - top - 3 * ratio);
+    const rowH = Math.max(ratio, Math.min(6 * ratio, usable / (hi - lo + 1)));
+    context.fillStyle = canvas.dataset.color || "#8c7bff";
+    for (const n of visible) {
+      const x0 = (Math.max(n.time, clip.offset) - clip.offset) * zoom * ratio;
+      const x1 = (Math.min(n.time + n.length, clip.offset + clip.length) - clip.offset) * zoom * ratio;
+      const y = top + (hi - n.pitch) / Math.max(1, hi - lo) * (usable - rowH);
+      context.globalAlpha = 0.5 + 0.5 * (n.velocity / 127);
+      context.fillRect(x0, y, Math.max(ratio, x1 - x0 - ratio), rowH);
+    }
+    context.globalAlpha = 1;
   }
 
   // Redraws the waveforms on screen (all, or one file's), e.g. after scrolling.
@@ -1776,9 +1857,10 @@ class DawScreen {
     if (key !== this.inspectorKey) {
       this.inspectorKey = key;
       this.inspector.replaceChildren();
-      this.clipPanel = found ? this.createClipPanel(found.clip) : null;
+      this.clipPanel?.dispose?.();
+      this.clipPanel = !found ? null : found.clip.midi ? this.createPianoRoll(found.clip, found.track) : this.createClipPanel(found.clip);
       if (this.clipPanel) this.inspector.append(this.clipPanel.element);
-      this.rhythmPanel = owner && owner.id !== 0
+      this.rhythmPanel = owner && owner.id !== 0 && owner.kind !== "midi" // audio quantize/warp only
         ? createRhythmPanel(this, owner, found?.clip ?? null, { daw, ValueKnob, button, toast: (...a) => toast(...a) }) : null;
       if (this.rhythmPanel) this.inspector.append(this.rhythmPanel.element);
       if (owner) this.inspector.append(this.createTrackPanel(owner));
@@ -1786,7 +1868,7 @@ class DawScreen {
 
     if (this.rhythmPanel && owner) this.rhythmPanel.update(owner, found?.clip ?? null);
 
-    if (found && this.clipPanel) this.clipPanel.update(found.clip);
+    if (found && this.clipPanel) this.clipPanel.update(found.clip, found.track);
     if (owner) this.rack?.update(owner);
     if (owner && this.chainGains?.id === owner.id) {
       this.chainGains.input.knob.update(owner.inGain ?? 0);
@@ -1801,6 +1883,18 @@ class DawScreen {
     this.watchedInserts = id;
     daw("watchInserts", { track: id });
     if (id < 0) this.rack?.live(null);
+  }
+
+  // A MIDI clip's notes, in the dock (pianoroll.js).
+  createPianoRoll(clip, track) {
+    const roll = new PianoRoll({ clip, track, session: this.session, daw, toast: (text) => toast(text),
+                                 colour: trackColour(track, this.session.tracks.indexOf(track)) });
+    this.pianoRoll = roll;
+    return {
+      element: roll.element,
+      update: (c, t) => roll.update(c, t, this.session),
+      dispose: () => { roll.dispose(); if (this.pianoRoll === roll) this.pianoRoll = null; },
+    };
   }
 
   createClipPanel(clip) {
@@ -1860,7 +1954,8 @@ class DawScreen {
     const head = html("div", "panel-head");
     element.append(head);
     head.append(html("h3", "", isMaster ? "Master effects" : `${owner.name} effects`),
-                   html("p", "panel-caption", isMaster ? "Applied to the whole mix, after the tracks." : "The take is recorded dry. These play on top, and you can change them any time."));
+                   html("p", "panel-caption", isMaster ? "Applied to the whole mix, after the tracks."
+                     : owner.kind === "midi" ? `After the instrument (${owner.instrument?.name ?? "none"}). Change them any time.` : "The take is recorded dry. These play on top, and you can change them any time."));
 
     if (!isMaster) {
       const colours = html("div", "colour-row");
@@ -2460,6 +2555,7 @@ class DawScreen {
     if ((lengthChanged || neededWidth > this.inner.offsetWidth + 1) && !this.dragging) this.renderArrange();
     else this.movePlayhead();
     if (status.recording || this.rows.querySelector(".rec-region")) this.updateRecording();
+    this.pianoRoll?.setStatus(status);
   }
 
   tickMeters(elapsed) {
@@ -2573,6 +2669,12 @@ class DawScreen {
     const found = this.findClip(this.selectedClip);
     if (!found) return toast("Select a clip first.");
     const { clip } = found;
+    if (clip.midi) {
+      this.clipboard = { midi: true, offset: clip.offset, length: clip.length, name: clip.name,
+                         notes: clip.notes.map(({ pitch, time, length, velocity }) => ({ pitch, time, length, velocity })) };
+      if (cut) this.deleteSelected();
+      return;
+    }
     this.clipboard = { file: clip.file, offset: clip.offset, length: clip.length, gain: clip.gain, fadeIn: clip.fadeIn, fadeOut: clip.fadeOut, name: clip.name };
     if (cut) this.deleteSelected();
   }
@@ -2581,6 +2683,7 @@ class DawScreen {
     if (!this.clipboard) return toast("Copy a clip first (Ctrl+C).");
     const track = this.selectedTrackObject() ?? this.session?.tracks[0];
     if (!track) return;
+    if (this.clipboard.midi && track.kind !== "midi") return toast("Select a MIDI track to paste a MIDI clip on.");
     const id = await daw("pasteClip", { ...this.clipboard, track: track.id, start: Math.max(0, this.status.position) });
     if (id >= 0) this.select(track.id, id);
   }
@@ -2716,6 +2819,7 @@ class DawScreen {
     else if (mod && key === "s") { handled(); this.run(event.shiftKey ? "saveAs" : "save"); }
     else if (mod && event.shiftKey && key === "d") { handled(); this.run("duplicateTrack"); }
     else if (mod && key === "d") { handled(); this.run("duplicate"); }
+    else if (mod && event.shiftKey && key === "t") { handled(); this.addMidiTrack(); }
     else if (mod && key === "t") { handled(); this.run("addTrack"); }
     else if (mod && key === "x") { handled(); this.run("cut"); }
     else if (mod && key === "c") { handled(); this.run("copy"); }

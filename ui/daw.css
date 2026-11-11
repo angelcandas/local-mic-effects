@@ -1259,6 +1259,61 @@ body.library-dragging * { cursor: grabbing !important; }
   .daw-library:not(.is-collapsed) { --library-width: 220px !important; }
 }
 
+/* ---------- MIDI tracks and the piano roll (pianoroll.js) ---------- */
+.instrument-chip {
+  display: block;
+  flex: none;
+  min-width: 0;
+  text-align: left;
+  max-width: 100%;
+  overflow: hidden;
+  padding: 1px 7px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.instrument-chip:hover { color: var(--text); border-color: var(--track-color); }
+.instrument-chip.has-error { color: #ffb547; border-color: #ffb54766; }
+.track-row.is-midi .track-swatch { border-radius: 2px; }
+.clip.is-midi .handle.fade-in,
+.clip.is-midi .handle.fade-out,
+.clip.is-midi .clip-fades { display: none; }
+
+.inspector .piano-panel {
+  flex: 1 0 680px;
+  gap: 10px;
+  min-width: 680px;
+  outline: none;
+}
+.piano-panel:focus-visible .roll-view { box-shadow: 0 0 0 1px var(--accent); }
+.roll-head { display: flex; flex: none; flex-direction: column; gap: 6px; width: 190px; min-height: 0; overflow-y: auto; }
+.roll-title { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
+.roll-clip-name { overflow: hidden; color: var(--muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.roll-row { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+.roll-row .dropdown { flex: 1 1 0; min-width: 0; }
+.roll-row.has-error .dropdown { border-color: #ffb547; }
+.roll-velocity-row { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.roll-velocity { flex: 1; min-width: 0; accent-color: var(--accent); }
+.roll-velocity-value { width: 24px; text-align: right; font-variant-numeric: tabular-nums; }
+.roll-hint { margin: 0; font-size: 10.5px; }
+.roll-view {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 200px;
+  min-height: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #15161d;
+}
+.roll-canvas { position: absolute; inset: 0; display: block; touch-action: none; }
+
 /* ---------- Song key ---------- */
 
 .key-panel { left: auto; right: 10px; width: min(420px, calc(100% - 20px)); max-height: calc(100% - 64px); overflow-y: auto; }

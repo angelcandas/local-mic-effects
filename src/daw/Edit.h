@@ -15,10 +15,22 @@
 //     MASTER  volume (dB)
 //       INSERTS
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value
-//     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor, transpose
+//     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor, transpose,
+//            kind ("midi" for MIDI tracks; audio when missing)
 //       INSERTS ...
+//       INSTRUMENT  id, plugin, name, format, vendor, description, state   (MIDI tracks)
 //       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute,
 //             transpose (semitones), warp (warp::Map as text)
+//       CLIP  kind "midi", id, name, start, offset, length, mute          (MIDI clips)
+//         NOTE  id, pitch (0..127), time, length, velocity (1..127)
+//
+// A MIDI track plays its MIDI clips through its instrument (a built-in synth or a
+// VST3/AU plugin, see Instruments.h), then through its inserts like any track. An
+// INSTRUMENT's `plugin` is its id ("builtin:keys", or the plugin's identifier string),
+// `description` the plugin's PluginDescription as XML (to find it again), and `state`
+// the plugin's own settings, base64. A MIDI clip is a window onto its notes, like an
+// audio clip onto its file: note times are seconds from the start of the clip's
+// content, and `offset` says where the clip starts within it.
 //
 // A clip with a warp map or a transpose (its own plus its track's) plays a rendered copy
 // of its file (see Warp.h); its offset and length are then measured in that copy. The
@@ -42,6 +54,8 @@ namespace ids
     MICFX_DAW_ID (loopOn) MICFX_DAW_ID (loopStart) MICFX_DAW_ID (loopEnd)
     MICFX_DAW_ID (beatsPerBar) MICFX_DAW_ID (MARKER) MICFX_DAW_ID (time)
     MICFX_DAW_ID (transpose) MICFX_DAW_ID (warp)
+    MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
+    MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
     MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor)
 #undef MICFX_DAW_ID
@@ -120,6 +134,33 @@ public:
     juce::Array<juce::ValueTree> getMarkers() const; // in time order
 
     //==============================================================================
+    // MIDI tracks, instruments and notes.
+    struct InstrumentInfo
+    {
+        juce::String id, name, format, vendor; // format: "builtin", "VST3", "AU"...
+        juce::String description;               // the plugin's PluginDescription as XML (plugins)
+        juce::String state;                     // base64 settings to start from (optional)
+    };
+
+    static constexpr const char* midiKind = "midi";
+    static bool isMidiTrack (const juce::ValueTree& track) { return track[ids::kind].toString() == midiKind; }
+    static bool isMidiClip (const juce::ValueTree& clip)   { return clip[ids::kind].toString() == midiKind; }
+
+    juce::ValueTree addMidiTrack (const juce::String& name, const InstrumentInfo&, int index = -1);
+    void setInstrument (int trackId, const InstrumentInfo&); // replaces the track's instrument (a MIDI track)
+    juce::ValueTree getInstrument (int trackId) const;
+
+    // An empty MIDI clip on a MIDI track. Returns it, or an invalid tree.
+    juce::ValueTree addMidiClip (int trackId, double startSeconds, double lengthSeconds, const juce::String& name = {});
+
+    // Notes in a MIDI clip; `time` is seconds from the start of the clip's content (so a
+    // note at the clip's left edge has time == the clip's offset).
+    juce::ValueTree addNote (int clipId, int pitch, double time, double length, int velocity = 100);
+    void setNote (int noteId, int pitch, double time, double length, int velocity);
+    void removeNote (int noteId);
+    juce::ValueTree getNote (int noteId) const;
+
+    //==============================================================================
     juce::ValueTree addClip (int trackId, const juce::File&, double startSeconds, double lengthSeconds,
                              double offsetSeconds = 0.0);
     void removeClip (int clipId);
@@ -177,6 +218,7 @@ public:
 
 private:
     int takeNextId();
+    void renumber (juce::ValueTree&); // fresh ids for a copied tree and everything in it
     juce::ValueTree findById (const juce::Identifier& type, int id) const;
     juce::ValueTree getTrackOrMaster (int trackId) const;
 

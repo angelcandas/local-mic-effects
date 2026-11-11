@@ -7,6 +7,7 @@
 #include "Multitrack.h"
 #include "Recorder.h"
 #include "daw/DawEngine.h"
+#include "daw/PluginHost.h"
 #include "daw/Project.h"
 #include "dsp/FxChain.h"
 
@@ -72,6 +73,8 @@ public:
     daw::Edit& getDawEdit() noexcept                         { return dawEdit; }
     daw::DawEngine& getDawEngine() noexcept                  { return dawEngine; }
     daw::Project& getDawProject() noexcept                   { return dawProject; }
+    // Instrument plugins for MIDI tracks (one host shared by every MicFX in the process).
+    daw::PluginHost& getPluginHost() noexcept                { return *pluginHost; }
     void setDawMode (bool on) noexcept                       { dawMode = on; updateLatency(); }
     bool isDawMode() const noexcept                          { return dawMode.load(); }
 
@@ -111,6 +114,7 @@ private:
     Recorder recorder;
     Multitrack multitrack;
 
+    juce::SharedResourcePointer<daw::PluginHost> pluginHost; // before the engine, which loads instruments through it
     daw::Edit dawEdit;
     daw::DawEngine dawEngine { dawEdit };
     daw::Project dawProject { dawEdit };
