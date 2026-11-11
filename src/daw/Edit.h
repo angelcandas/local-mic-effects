@@ -3,6 +3,7 @@
 #include <juce_data_structures/juce_data_structures.h>
 
 #include "dsp/FxModule.h"
+#include "Warp.h"
 
 #include <optional>
 
@@ -14,9 +15,14 @@
 //     MASTER  volume (dB)
 //       INSERTS
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value
-//     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor
+//     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor, transpose
 //       INSERTS ...
-//       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute
+//       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute,
+//             transpose (semitones), warp (warp::Map as text)
+//
+// A clip with a warp map or a transpose (its own plus its track's) plays a rendered copy
+// of its file (see Warp.h); its offset and length are then measured in that copy. The
+// file itself is never changed.
 //
 // Times are in seconds, so a project survives a sample-rate change. Insert values use
 // the plugin parameter IDs (see Parameters.cpp) in real units, as presets do.
@@ -35,6 +41,7 @@ namespace ids
     MICFX_DAW_ID (length) MICFX_DAW_ID (gain) MICFX_DAW_ID (fadeIn) MICFX_DAW_ID (fadeOut)
     MICFX_DAW_ID (loopOn) MICFX_DAW_ID (loopStart) MICFX_DAW_ID (loopEnd)
     MICFX_DAW_ID (beatsPerBar) MICFX_DAW_ID (MARKER) MICFX_DAW_ID (time)
+    MICFX_DAW_ID (transpose) MICFX_DAW_ID (warp)
 #undef MICFX_DAW_ID
 }
 
@@ -117,6 +124,17 @@ public:
     void setClipFades (int clipId, double fadeInSeconds, double fadeOutSeconds);
     void setClipName (int clipId, const juce::String&);
     void setClipMute (int clipId, bool);
+
+    // Pitch and time warp, non-destructive. Transpose in semitones (fractions are cents),
+    // -24..24. A clip's warp map says where each moment of its file plays (see Warp.h);
+    // setting one keeps the clip's window where it is, so the audio moves under it.
+    void setClipTranspose (int clipId, double semitones);
+    void setTrackTranspose (int trackId, double semitones);
+    void setClipWarp (int clipId, const warp::Map&);
+    static warp::Map getClipWarp (const juce::ValueTree& clip);
+
+    // What the clip's rendered copy needs: its warp map and its transpose plus its track's.
+    static warp::Settings getWarpSettings (const juce::ValueTree& clip);
 
     // Replaces a clip with copies that play only the given parts of it (seconds from the
     // clip's start), each with short fades. For strip silence. Returns the new clip ids.

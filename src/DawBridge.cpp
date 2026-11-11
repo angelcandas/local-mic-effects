@@ -234,7 +234,12 @@ juce::var DawBridge::describeSession()
                 continue;
 
             const juce::File file (clip[ids::file].toString());
-            const auto audio = engine.getAudioPool().get (file);
+            const auto warpSettings = daw::Edit::getWarpSettings (clip);
+            const auto audio = engine.getAudioPool().get (file, warpSettings);
+
+            juce::Array<juce::var> markers;
+            for (const auto& m : daw::Edit::getClipWarp (clip).getMarkers())
+                markers.add (juce::Array<juce::var> { m.source, m.target });
 
             // Typed explicitly: the page does arithmetic on these, and text ("0.0") breaks it.
             clips.add (object ({ { "id", (int) clip[ids::id] }, { "name", clip[ids::name].toString() }, { "file", file.getFullPathName() },
@@ -242,6 +247,9 @@ juce::var DawBridge::describeSession()
                                  { "length", number (clip, ids::length) }, { "gain", number (clip, ids::gain) },
                                  { "fadeIn", number (clip, ids::fadeIn) }, { "fadeOut", number (clip, ids::fadeOut) },
                                  { "mute", (bool) clip.getProperty (ids::mute, false) },
+                                 { "transpose", number (clip, ids::transpose) }, { "warp", markers },
+                                 // The audio the clip plays (its file, or a rendered copy): the page keys waveforms on it.
+                                 { "audioKey", warpSettings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, warpSettings) },
                                  { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
                                  { "missing", ! file.existsAsFile() } }));
         }
@@ -250,6 +258,7 @@ juce::var DawBridge::describeSession()
                               { "volume", number (track, ids::volume) }, { "pan", number (track, ids::pan) },
                               { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
+                              { "transpose", number (track, ids::transpose) },
                               { "inserts", describeInserts (track) }, { "clips", clips } }));
     }
 
@@ -306,14 +315,15 @@ juce::var DawBridge::describeStatus()
     });
 }
 
-juce::var DawBridge::getPeaks (const juce::File& file)
+juce::var DawBridge::getPeaks (const juce::File& file, const daw::warp::Settings& settings)
 {
-    const auto key = file.getFullPathName();
+    // A warped or transposed clip shows its rendered copy.
+    const auto key = settings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, settings);
 
     if (const auto it = peakCache.find (key); it != peakCache.end())
         return it->second;
 
-    const auto audio = engine.getAudioPool().get (file);
+    const auto audio = engine.getAudioPool().get (file, settings);
     if (audio == nullptr)
         return {}; // still decoding: the UI asks again
 
@@ -819,7 +829,14 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "mode")                  { setMode (arg (args, "daw", false)); ok(); return; }
     if (command == "undo")                  { undo.undo(); ok(); return; }
     if (command == "redo")                  { undo.redo(); ok(); return; }
-    if (command == "peaks")                 { complete (getPeaks (juce::File (args["file"].toString()))); return; }
+    if (command == "peaks")
+    {
+        // With a clip id, the audio that clip plays (warped and transposed); else the plain file.
+        const auto clip = edit.getClip (arg (args, "clip", -1));
+        complete (clip.isValid() ? getPeaks (juce::File (clip[ids::file].toString()), daw::Edit::getWarpSettings (clip))
+                                 : getPeaks (juce::File (args["file"].toString())));
+        return;
+    }
 
     //================================================================ tracks
     if (command == "addTrack")
@@ -850,6 +867,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("solo"))    edit.setTrackSolo (id, args["solo"]);
             if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
             if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
+            if (args.hasProperty ("transpose")) edit.setTrackTranspose (id, args["transpose"]);
         }
 
         ok();
@@ -904,6 +922,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         if (args.hasProperty ("name")) edit.setClipName (id, args["name"].toString());
         if (args.hasProperty ("mute")) edit.setClipMute (id, args["mute"]);
+        if (args.hasProperty ("transpose")) edit.setClipTranspose (id, args["transpose"]);
         ok();
         return;
     }
@@ -913,7 +932,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "normaliseClip" || command == "stripSilence")
     {
         const auto clip = edit.getClip (id);
-        const auto audio = clip.isValid() ? engine.getAudioPool().get (juce::File (clip[ids::file].toString())) : nullptr;
+        // The audio the clip plays: offset and length are measured in the rendered copy when it's warped.
+        const auto audio = clip.isValid() ? engine.getAudioPool().get (juce::File (clip[ids::file].toString()), daw::Edit::getWarpSettings (clip))
+                                          : nullptr;
         if (audio == nullptr)
         {
             complete (error (clip.isValid() ? "The clip's audio is still loading. Try again in a moment." : "Select a clip first."));
@@ -951,6 +972,20 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
         const auto created = edit.keepClipParts (id, parts);
         complete (object ({ { "ok", true }, { "clips", created.size() } }));
+        return;
+    }
+    // Warp markers: [[source, target], ...] in seconds (file time, rendered time). An
+    // empty list clears the warp.
+    if (command == "setWarp")
+    {
+        std::vector<daw::warp::Marker> markers;
+        if (const auto* list = args["markers"].getArray())
+            for (const auto& pair : *list)
+                if (pair.isArray() && pair.size() == 2)
+                    markers.push_back ({ (double) pair[0], (double) pair[1] });
+
+        edit.setClipWarp (id, daw::warp::Map (std::move (markers)));
+        ok();
         return;
     }
     if (command == "clipFades")  { edit.setClipFades (id, args["fadeIn"], args["fadeOut"]); ok(); return; }
