@@ -36,13 +36,38 @@ jobs:
         with:
           submodules: true
 
+      # Downloaded packages are cached between runs, so most runs fetch only the package
+      # lists. apt gets short network timeouts and retries, and a try that hangs is
+      # stopped and retried, on the main Ubuntu mirror after the first (the runners'
+      # own mirror sometimes stalls for half an hour).
+      - name: Restore apt package cache
+        uses: actions/cache@v4
+        with:
+          path: ~/apt-cache
+          key: apt-linux-${{ hashFiles('.github/workflows/ci.yml') }}
+          restore-keys: apt-linux-
+
       - name: Install build dependencies
+        timeout-minutes: 15
         run: |
-          sudo apt-get update
-          sudo apt-get install -y ninja-build ccache \
+          mkdir -p ~/apt-cache/partial
+          opts="-o Acquire::Retries=3 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 -o Dir::Cache::Archives=$HOME/apt-cache"
+          packages="ninja-build ccache \
             libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libxi-dev libxcomposite-dev \
             libxrender-dev libfreetype-dev libfontconfig1-dev libasound2-dev libx11-dev libgl-dev \
-            libgtk-3-dev libwebkit2gtk-4.1-dev
+            libgtk-3-dev libwebkit2gtk-4.1-dev"
+          for attempt in 1 2 3; do
+            if [ "$attempt" -gt 1 ]; then
+              echo "::warning::apt try $((attempt - 1)) failed or hung; retrying on archive.ubuntu.com"
+              sudo sed -i 's#http://azure.archive.ubuntu.com#http://archive.ubuntu.com#g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
+            fi
+            if sudo timeout 180 apt-get $opts update && sudo timeout 300 apt-get $opts install -y $packages; then
+              sudo chown -R "$USER" ~/apt-cache
+              exit 0
+            fi
+            sleep 5
+          done
+          exit 1
 
       - name: Restore compiler cache
         uses: actions/cache@v4
