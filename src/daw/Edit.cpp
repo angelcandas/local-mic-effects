@@ -61,6 +61,26 @@ void Edit::replaceState (const juce::ValueTree& newState)
         state.addChild (makeMaster(), 0, nullptr);
 
     nextId = maxId (state) + 1;
+
+    // Older or hand-edited projects can miss parts the editing code relies on: give every
+    // track and the master an effects list, and anything without an id a fresh one.
+    for (auto child : state)
+    {
+        if (! child.hasType (ids::TRACK) && ! child.hasType (ids::MASTER))
+            continue;
+
+        if (! child.getChildWithName (ids::INSERTS).isValid())
+            child.appendChild (juce::ValueTree (ids::INSERTS), nullptr);
+
+        if (child.hasType (ids::TRACK))
+            for (auto item : child)
+                if (item.hasType (ids::CLIP) && ! item.hasProperty (ids::id))
+                    item.setProperty (ids::id, takeNextId(), nullptr);
+
+        if (child.hasType (ids::TRACK) && ! child.hasProperty (ids::id))
+            child.setProperty (ids::id, takeNextId(), nullptr);
+    }
+
     undoManager.clearUndoHistory();
 }
 

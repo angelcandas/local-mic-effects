@@ -34,6 +34,11 @@ public:
     // Loads a project folder into the Edit. Returns an error message, or empty.
     juce::String open (const juce::File& folder);
 
+    // The project folder that holds `picked`: the folder itself, its project.xml, or any
+    // file or folder inside it (what a file chooser hands back varies by platform).
+    // Returns an empty File if `picked` isn't part of a project.
+    static juce::File findProjectFolder (const juce::File& picked);
+
     // Writes project.xml. Returns an error message, or empty.
     juce::String save();
 
@@ -54,6 +59,9 @@ public:
     // Copies an audio file into Audio/ (keeping its name, made unique) and returns the
     // copy, or an empty File on failure. Files already inside Audio/ are returned as is.
     juce::File importAudio (const juce::File&);
+
+    // True while autosave is running (it keeps running across open, new and close).
+    bool isAutosaving() const                    { return isTimerRunning(); }
 
     // Clip files that don't exist (moved or deleted outside the app).
     juce::StringArray getMissingFiles() const;

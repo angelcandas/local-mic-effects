@@ -11,6 +11,7 @@
 #include <set>
 #include <thread>
 
+#include "DawBridge.h"
 #include "PluginProcessor.h"
 #include "analysis/Analysis.h"
 #include "analysis/MixAssistant.h"
@@ -1653,6 +1654,203 @@ namespace
 
         folder.deleteRecursively();
     }
+    // The DAW screen's commands, through DawBridge as the page sends them: tracks, import,
+    // new / save as / open (the file chooser's part is skipped: the tests call what runs
+    // after a file is picked), and the session events the page redraws from.
+    void testDawBridge()
+    {
+        std::cout << "\nDAW screen commands (DawBridge)\n";
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-bridge", {});
+        folder.createDirectory();
+
+        juce::PropertiesFile::Options options;
+        options.applicationName = "MicFXTests";
+        options.filenameSuffix = ".settings";
+        juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+        auto& project = processor.getDawProject();
+
+        std::vector<std::pair<juce::String, juce::var>> events;
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, settings,
+                          [&] (const juce::Identifier& event, const juce::var& payload) { events.emplace_back (event.toString(), payload); },
+                          [] { return (juce::int64) 0; });
+
+        // Runs a command and returns what it completed with (every command completes).
+        const auto run = [&] (const juce::String& command, juce::var args = juce::var (new juce::DynamicObject()))
+        {
+            juce::var result;
+            auto completed = false;
+            bridge.handle (command, args, [&] (juce::var r) { result = r; completed = true; });
+            return completed ? result : juce::var ("never completed");
+        };
+        const auto args = [] (std::initializer_list<std::pair<const char*, juce::var>> properties)
+        {
+            auto* object = new juce::DynamicObject();
+            for (const auto& [name, value] : properties)
+                object->setProperty (name, value);
+            return juce::var (object);
+        };
+        // The last "dawSession" the page got, after a tick (the editor's 30 Hz timer), parsed
+        // back from JSON the way the WebView receives it.
+        const auto lastSession = [&]
+        {
+            events.clear();
+            bridge.tick();
+            for (const auto& [name, payload] : events)
+                if (name == "dawSession")
+                    return juce::JSON::parse (juce::JSON::toString (payload, true));
+            return juce::var();
+        };
+        const auto trackCount = [] (const juce::var& session) { return session["tracks"].size(); };
+        const auto ok = [] (const juce::var& result) { return result.isObject() && (bool) result["ok"]; };
+
+        run ("mode", args ({ { "daw", true } }));
+        auto session = lastSession();
+        check (processor.isDawMode() && session["mode"].toString() == "daw" && trackCount (session) == 1,
+               "DAW mode starts with one track");
+
+        // Add track: completes with the new id, and the page gets a session with it.
+        const auto added = run ("addTrack");
+        session = lastSession();
+        check (added.isInt() && edit.getTrack ((int) added).isValid() && trackCount (session) == 2
+                   && (int) session["tracks"][1]["id"] == (int) added && session["tracks"][1]["name"].toString() == "Track 2",
+               "Add track adds a track and sends it to the page");
+        check (session.isObject() && juce::JSON::toString (session).isNotEmpty() && ! juce::JSON::toString (session).contains ("undefined"),
+               "the session is valid JSON");
+        run ("undo");
+        check (trackCount (lastSession()) == 1, "Add track undoes in one step");
+        run ("redo");
+
+        // Import (no project open): the file is used where it is, on the chosen track.
+        const auto song = folder.getChildFile ("Song.wav");
+        const auto songAudio = makeTones ({ { 2.5, 330.0, 0.2f, 0.2f } });
+        writeWav (song, songAudio, 44100.0); // not the device rate
+        const auto songSeconds = songAudio.getNumSamples() / 44100.0;
+        const auto vocal = (int) edit.getTracks()[0][daw::ids::id];
+        auto imported = bridge.importAudio (song, vocal);
+        session = lastSession();
+        check (ok (imported) && (int) imported["track"] == vocal && session["tracks"][0]["clips"].size() == 1
+                   && std::abs ((double) session["tracks"][0]["clips"][0]["length"] - songSeconds) < 1.0e-6
+                   && session["tracks"][0]["clips"][0]["file"].toString() == song.getFullPathName(),
+               "Import puts the file on the selected track, at its full length");
+
+        // ...and with no track picked, on a new track named after the file.
+        imported = bridge.importAudio (song, -1);
+        session = lastSession();
+        check (ok (imported) && trackCount (session) == 3 && session["tracks"][2]["name"].toString() == "Song"
+                   && session["tracks"][2]["clips"].size() == 1,
+               "Import with no track selected adds a track for the file");
+        run ("undo");
+        check (trackCount (lastSession()) == 2, "Import undoes in one step (clip and its new track)");
+
+        const auto notAudio = folder.getChildFile ("notes.wav");
+        notAudio.replaceWithText ("not audio");
+        imported = bridge.importAudio (notAudio, vocal);
+        check (! ok (imported) && imported["error"].toString().contains ("notes.wav") && edit.getTrack (vocal).getNumChildren() == 2,
+               "Import reports a file it can't read, and adds nothing");
+
+        // New project: an empty session with one track, saved, autosaving.
+        const auto projects = folder.getChildFile ("Projects");
+        projects.createDirectory();
+        auto result = bridge.newProject (projects.getChildFile ("First"));
+        session = lastSession();
+        const auto first = projects.getChildFile ("First.micfx");
+        check (ok (result) && project.getFolder() == first && first.getChildFile ("project.xml").existsAsFile()
+                   && trackCount (session) == 1 && session["project"]["name"].toString() == "First"
+                   && settings.getValue ("dawProject") == first.getFullPathName(),
+               "New project creates First.micfx with one track and remembers it");
+        check (project.isAutosaving(), "autosave runs after New project");
+
+        // Import into a project copies the file into its Audio folder.
+        bridge.handle ("addTrack", juce::var (new juce::DynamicObject()), [] (juce::var) {});
+        imported = bridge.importAudio (song, -1);
+        const auto copied = first.getChildFile ("Audio").getChildFile ("Song.wav");
+        check (ok (imported) && copied.existsAsFile() && edit.getClip ((int) imported["clip"])[daw::ids::file].toString() == copied.getFullPathName(),
+               "Import into a project copies the file into Audio/");
+        check (ok (run ("save")) && ! project.hasUnsavedChanges(), "Save writes the project");
+
+        // Save as: a copy with its own audio, now the open project.
+        result = bridge.saveProjectAs (projects.getChildFile ("Second"));
+        const auto second = projects.getChildFile ("Second.micfx");
+        check (ok (result) && project.getFolder() == second && second.getChildFile ("Audio").getChildFile ("Song.wav").existsAsFile(),
+               "Save as copies the project and its audio");
+
+        // Open: whatever the file chooser hands back (the folder, project.xml, a file inside).
+        for (const auto& picked : { first, first.getChildFile ("project.xml"), copied })
+        {
+            bridge.newProject (projects.getChildFile ("Scratch"));
+            result = bridge.openProject (picked);
+            session = lastSession();
+            check (ok (result) && project.getFolder() == first && trackCount (session) == 3
+                       && session["tracks"][2]["clips"].size() == 1 && ! (bool) session["tracks"][2]["clips"][0]["missing"]
+                       && session["project"]["name"].toString() == "First" && settings.getValue ("dawProject") == first.getFullPathName(),
+                   "Open works when the chooser returns " + picked.getRelativePathFrom (projects));
+        }
+
+        // A project read back from XML must reach the page typed like one built in memory:
+        // volumes as text ("0.0") broke the page's drawing, so nothing showed after Open.
+        const auto typed = [] (const juce::var& track)
+        {
+            return ! track["volume"].isString() && ! track["pan"].isString() && track["mute"].isBool() && track["arm"].isBool()
+                && track["id"].isInt() && ! track["clips"][0]["start"].isString() && ! track["clips"][0]["length"].isString();
+        };
+        check (typed (session["tracks"][2]) && ! session["master"]["volume"].isString() && ! session["loop"]["end"].isString()
+                   && edit.getTracks()[0][daw::ids::volume].isDouble() && edit.getTracks()[0][daw::ids::mute].isBool(),
+               "an opened project has numbers and switches, not text");
+        check (project.isAutosaving(), "autosave keeps running after Open");
+
+        // Picking something that isn't a project: an error, and the open project stays.
+        result = bridge.openProject (projects);
+        check (! ok (result) && result["error"].toString().contains ("isn't a MicFX project") && project.getFolder() == first,
+               "Open explains when the pick isn't a project, and keeps the current one");
+
+        // An older project: no version, no effects lists, a folder without .micfx, an
+        // absolute clip path, a clip without an id.
+        const auto legacy = projects.getChildFile ("Old Song");
+        legacy.createDirectory();
+        legacy.getChildFile ("project.xml").replaceWithText (
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n"
+            "<PROJECT tempo=\"100.0\">\n"
+            "  <MASTER id=\"0\" volume=\"0.0\"/>\n"
+            "  <TRACK id=\"3\" name=\"Lead\" volume=\"-3.0\" pan=\"0.0\" mute=\"1\">\n"
+            "    <CLIP name=\"Song\" file=\"" + song.getFullPathName() + "\" start=\"1.0\" offset=\"0.0\" length=\"2.0\"/>\n"
+            "  </TRACK>\n"
+            "</PROJECT>\n");
+        result = bridge.openProject (legacy.getChildFile ("project.xml"));
+        session = lastSession();
+        check (ok (result) && trackCount (session) == 1 && session["tracks"][0]["name"].toString() == "Lead"
+                   && session["tracks"][0]["clips"].size() == 1 && (int) session["tracks"][0]["clips"][0]["id"] > 3
+                   && typed (session["tracks"][0]) && session["tracks"][0]["mute"] == juce::var (true)
+                   && juce::approximatelyEqual ((double) session["tracks"][0]["volume"], -3.0),
+               "Opens an older project (no version, no effects lists, clip without an id)");
+
+        const auto legacyTrack = (int) session["tracks"][0]["id"];
+        const auto insert = run ("addInsert", args ({ { "track", legacyTrack }, { "type", "compressor" } }));
+        check (insert.isInt() && (int) insert > 0 && lastSession()["tracks"][0]["inserts"].size() == 1,
+               "an older project's tracks take effects");
+        check (trackCount (session) == 1 && run ("addTrack").isInt() && trackCount (lastSession()) == 2,
+               "Add track works in an older project");
+
+        // Starting the app again reopens the last project.
+        {
+            PluginProcessor again;
+            again.prepareToPlay (sampleRate, blockSize);
+            DawBridge reopened (again, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+            check (again.getDawProject().getFolder() == legacy && again.isDawMode() && again.getDawProject().isAutosaving(),
+                   "the app reopens the last project in DAW mode, autosaving");
+            again.getDawProject().close();
+        }
+
+        project.close();
+        DawBridge::availableForTesting = false;
+        folder.deleteRecursively();
+    }
+
     void testDawMode()
     {
         std::cout << "\nDAW mode in the processor\n";
@@ -1840,6 +2038,7 @@ int main()
     testExport();
     testClipEditing();
     testDawMode();
+    testDawBridge();
     testAnalysis();
     testMixAssistant();
 

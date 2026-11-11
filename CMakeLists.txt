@@ -110,7 +110,7 @@ option(MICFX_BUILD_TESTS "Build the DSP test runner" ON)
 if(MICFX_BUILD_TESTS)
     juce_add_console_app(MicFXTests PRODUCT_NAME "MicFXTests")
 
-    target_sources(MicFXTests PRIVATE tests/DspTests.cpp ${MICFX_DSP_SOURCES})
+    target_sources(MicFXTests PRIVATE tests/DspTests.cpp src/DawBridge.cpp ${MICFX_DSP_SOURCES})
     target_include_directories(MicFXTests PRIVATE src)
 
     target_compile_definitions(MicFXTests
