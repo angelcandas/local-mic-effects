@@ -5,6 +5,7 @@
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES } from "./modules.js";
 import { createFxView } from "./fxviews.js";
+import { LibraryBrowser } from "./browser.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
@@ -534,6 +535,7 @@ class DawScreen {
     this.dragging = false;
     this.pendingSession = null;
     this.reveal = null;        // { track, clip?, start? } to scroll into view once drawn
+    this.trackWaiters = new Map(); // track id -> resolve, see waitForTrack
 
     this.buildTransport();
     this.buildArrange();
@@ -541,6 +543,7 @@ class DawScreen {
     this.buildInspector();
     this.buildBanners();
     this.buildAutoMix();
+    this.buildLibrary();
 
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
@@ -1471,6 +1474,7 @@ class DawScreen {
   createStrip(track, index) {
     const isMaster = track.id === 0;
     const element = html("div", isMaster ? "strip is-master" : "strip");
+    if (!isMaster) element.dataset.track = track.id;
     element.style.setProperty("--track-color", isMaster ? "var(--accent-2)" : trackColour(track, index));
     element.addEventListener("pointerdown", (event) => {
       if (!event.target.closest(".fader, .knob, button")) this.select(track.id, null);
@@ -1704,16 +1708,10 @@ class DawScreen {
       for (const module of MODULES.filter((m) => m.category === categoryId)) group.append(new Option(module.name, module.id));
       add.append(group);
     }
-    add.addEventListener("change", async () => {
-      const module = MODULES.find((m) => m.id === add.value);
+    add.addEventListener("change", () => {
+      const moduleId = add.value;
       add.value = "";
-      if (!module) return;
-      const id = await daw("addInsert", { track: owner.id, type: MODULE_KEYS[module.id] });
-      // The pitch insert switches on autotune by default; switch to the part that was picked.
-      if (id >= 0 && MODULE_KEYS[module.id] === "pitch" && module.id !== "tune") {
-        await daw("setInsert", { id, param: "tuneOn", value: 0, continue: true });
-        await daw("setInsert", { id, param: module.power, value: 1, continue: true });
-      }
+      this.addEffect(owner.id, moduleId);
     });
 
     const preset = html("select", "dropdown load-preset");
@@ -1990,10 +1988,52 @@ class DawScreen {
     }
     // Another project: start at its top-left, not where the last one was scrolled to.
     const path = session.project?.path ?? "";
+    const pathChanged = this.projectPath !== undefined && path !== this.projectPath;
     if (this.projectPath !== undefined && path !== this.projectPath) this.arrange.scrollTop = this.arrange.scrollLeft = 0;
     this.projectPath = path;
+    if (pathChanged) this.library?.refresh();
     document.dispatchEvent(new CustomEvent("daw-session", { detail: session }));
     if (this.active) this.render();
+    for (const [id, resolve] of this.trackWaiters) if (tracks.some((t) => t.id === id)) { this.trackWaiters.delete(id); resolve(); }
+  }
+
+  // Resolves once a session holding the track has arrived (a command's reply comes
+  // before the session that shows its result).
+  waitForTrack(id) {
+    if (this.session?.tracks.some((t) => t.id === id)) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.trackWaiters.set(id, resolve);
+      setTimeout(() => { if (this.trackWaiters.get(id) === resolve) { this.trackWaiters.delete(id); resolve(); } }, 2000);
+    });
+  }
+
+  //============================================================================ library
+  // The sidebar on the left (ui/browser.js): it sits beside the tracks, mixer and
+  // effects panel.
+  buildLibrary() {
+    const main = this.root.querySelector(".daw-main");
+    const body = html("div", "daw-body");
+    main.replaceWith(body);
+    this.library = new LibraryBrowser(this, {
+      call: (command, args = {}) => nativeDaw(command, args),
+      run: daw,
+      toast: (message, kind) => toast(message, kind),
+      onEvent: (name, handler) => window.__JUCE__.backend.addEventListener(name, handler),
+    });
+    body.append(this.library.element, main);
+  }
+
+  // Adds an effect (a modules.js id) at the end of a track's (or the master's) chain.
+  async addEffect(trackId, moduleId) {
+    const module = MODULES.find((m) => m.id === moduleId);
+    if (!module) return -1;
+    const id = await daw("addInsert", { track: trackId, type: MODULE_KEYS[module.id] });
+    // The pitch insert switches on autotune by default; switch to the part that was picked.
+    if (id >= 0 && MODULE_KEYS[module.id] === "pitch" && module.id !== "tune") {
+      await daw("setInsert", { id, param: "tuneOn", value: 0, continue: true });
+      await daw("setInsert", { id, param: module.power, value: 1, continue: true });
+    }
+    return id;
   }
 
   flushSession() {
@@ -2066,7 +2106,7 @@ class DawScreen {
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
                ["V / B / G", "Select, cut and gain tools"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Shift+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
-    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Z / Shift+Z", "Zoom to fit the song / the selected clip"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
+    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["Shift+B", "Show / hide the library"], ["Ctrl+F", "Search the library"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Z / Shift+Z", "Zoom to fit the song / the selected clip"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
               ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Ctrl+S", "Save (Shift: save as)"], ["?", "This list"], ["F11 / Ctrl+Cmd+F", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
   ];
 
@@ -2224,6 +2264,8 @@ class DawScreen {
       addTrack: () => this.addTrack(),
       toggleView: () => this.setView(this.view === "arrange" ? "mixer" : "arrange"),
       toggleDock: () => this.setDock(this.root.classList.contains("dock-hidden")),
+      toggleLibrary: () => this.library.toggle(),
+      searchLibrary: () => this.library.focusSearch(),
       follow: () => this.setFollow(!this.follow),
       zoomIn: () => this.setZoom(this.zoom * 1.5),
       zoomOut: () => this.setZoom(this.zoom / 1.5),
@@ -2285,6 +2327,7 @@ class DawScreen {
     else if (mod && key === "x") { handled(); this.run("cut"); }
     else if (mod && key === "c") { handled(); this.run("copy"); }
     else if (mod && key === "v") { handled(); this.run("paste"); }
+    else if (mod && key === "f") { handled(); this.run("searchLibrary"); }
     else if (mod) return;
     else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { handled(); this.nudgeSelected(event.key === "ArrowLeft" ? -step : step); }
     else if (event.altKey) return;
@@ -2315,6 +2358,7 @@ class DawScreen {
     else if (event.shiftKey && key === "m") { handled(); this.run("muteClip"); }
     else if (event.shiftKey && key === "l") { handled(); this.run("loopClip"); }
     else if (event.shiftKey && key === "z") { handled(); this.run("zoomClip"); }
+    else if (event.shiftKey && key === "b") { handled(); this.run("toggleLibrary"); }
     else if (event.shiftKey) return;
     else if (key === "r") { handled(); this.run("record"); }
     else if (key === "k") { handled(); this.run("addMarker"); }
