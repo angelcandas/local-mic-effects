@@ -38,8 +38,8 @@ jobs:
 
       # Downloaded packages are cached between runs, so most runs fetch only the package
       # lists. apt gets short network timeouts and retries, and a try that hangs is
-      # stopped and retried, on the main Ubuntu mirror after the first (the runners'
-      # own mirror sometimes stalls for half an hour).
+      # stopped and retried, on the main Ubuntu archive after the first (the runners'
+      # own Azure mirror sometimes stops answering, as on 2026-11-11).
       - name: Restore apt package cache
         uses: actions/cache@v4
         with:
@@ -58,10 +58,18 @@ jobs:
             libgtk-3-dev libwebkit2gtk-4.1-dev"
           for attempt in 1 2 3; do
             if [ "$attempt" -gt 1 ]; then
+              # The runners read Ubuntu's mirrors from a mirror list (/etc/apt/apt-mirrors.txt)
+              # that points at their own Azure mirror; replace it with the main archive.
               echo "::warning::apt try $((attempt - 1)) failed or hung; retrying on archive.ubuntu.com"
-              sudo sed -i 's#http://azure.archive.ubuntu.com#http://archive.ubuntu.com#g' /etc/apt/sources.list.d/*.sources /etc/apt/sources.list 2>/dev/null || true
+              printf '%s\n' \
+                'Types: deb' 'URIs: http://archive.ubuntu.com/ubuntu' 'Suites: noble noble-updates noble-backports' \
+                'Components: main restricted universe multiverse' 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' '' \
+                'Types: deb' 'URIs: http://security.ubuntu.com/ubuntu' 'Suites: noble-security' \
+                'Components: main restricted universe multiverse' 'Signed-By: /usr/share/keyrings/ubuntu-archive-keyring.gpg' \
+                | sudo tee /etc/apt/sources.list.d/ubuntu.sources > /dev/null
+              sudo rm -f /etc/apt/sources.list
             fi
-            if sudo timeout 180 apt-get $opts update && sudo timeout 300 apt-get $opts install -y $packages; then
+            if sudo timeout 120 apt-get $opts update && sudo timeout 300 apt-get $opts install -y $packages; then
               sudo chown -R "$USER" ~/apt-cache
               exit 0
             fi
