@@ -2,7 +2,7 @@
 // parameter through the relays created in src/PluginEditor.cpp (relay name = parameter ID).
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, SCALES } from "./modules.js";
-import { createFxView } from "./fxviews.js";
+import { createActivity, createFxView } from "./fxviews.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 import { initDaw } from "./daw.js";
 
@@ -339,7 +339,15 @@ class ReverbGraphic {
   constructor(card) {
     this.element = svg("svg", { class: "reverb-graphic", viewBox: "0 0 400 60", preserveAspectRatio: "none" });
     card.addEventListener("knob-change", () => this.render());
+    this.energy = 1;
     this.render();
+  }
+
+  // Live: the tail swells with what comes out of the reverb and dies away with it.
+  live(reading) {
+    const level = reading ? Math.min(1, Math.max(0, (reading.out + 60) / 60)) : 1;
+    this.energy = reading ? Math.max(0.08 + level * 0.92, this.energy * 0.93) : 1;
+    this.element.style.setProperty("--energy", this.energy.toFixed(3));
   }
 
   render() {
@@ -647,7 +655,10 @@ class Rack {
     reset.setAttribute("aria-label", reset.title);
     reset.addEventListener("click", () => this.resetModule(module));
 
-    header.append(html("span", "step"), html("h2", "", module.name));
+    // Live: in/out level bars, and the picture (below) animates from the signal.
+    const activity = createActivity();
+    card.live = { activity, view: null };
+    header.append(html("span", "step"), html("h2", "", module.name), activity.element);
     if (module.id === "echo") {
       const tap = html("button", "card-tap", "Tap");
       tap.title = "Tap the beat a few times to set the echo time";
@@ -667,10 +678,24 @@ class Rack {
     if (key !== "pitch" && key !== "reverb") {
       const view = createFxView(key, this.liveAccess(() => view?.update()));
       if (view) card.append(view.element);
+      card.live.view = view;
     }
 
     card.append(controls);
     return card;
+  }
+
+  // From the "meters" event: each effect's live reading by module key ({ in, out,
+  // spectrum? }), for the cards that are showing.
+  live(readings) {
+    for (const { module, card } of this.entries) {
+      if (card.hidden) continue;
+      const reading = readings?.[MODULE_KEYS[module.id]] ?? null;
+      card.live.view?.live(reading);
+      const level = card.live.activity.push(reading);
+      card.classList.toggle("is-live", Boolean(reading));
+      card.style.setProperty("--act", level.toFixed(2));
+    }
   }
 
   // Every control of the module back to its default (the power stays on).
@@ -763,7 +788,11 @@ class Rack {
       case "toggle": return new Pill(control.param, control.label, this.onUserChange).element;
       case "tuner": return (this.tuner = new Tuner()).element;
       case "keys": return (this.keyPicker = new KeyPicker(control.param, control.scaleParam, this.onUserChange)).element;
-      case "reverb-graphic": return new ReverbGraphic(card).element;
+      case "reverb-graphic": {
+        const graphic = new ReverbGraphic(card);
+        card.live.view = graphic;
+        return graphic.element;
+      }
       default: throw new Error(`Unknown control type ${control.type}`);
     }
   }
@@ -1158,6 +1187,7 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   if (micCheck) micCheck.peak = Math.max(micCheck.peak, status.input);
   meters.output.push(status.output);
   rack.tuner?.update(status.note, status.target);
+  if (!document.hidden) rack.live(status.fx);
   rack.keyPicker?.setTarget(status.target);
   presetBar.syncFromHost(status.preset);
   recorderBar.update(status.recording);

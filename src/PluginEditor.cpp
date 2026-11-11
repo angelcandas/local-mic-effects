@@ -469,6 +469,19 @@ void PluginEditor::timerCallback()
     status->setProperty ("target", pitch.tunedNote.load());
     status->setProperty ("preset", processorRef.currentPreset.load());
 
+    // Live readings for the effect cards that are on, by module key (Live mode only).
+    if (! processorRef.isDawMode())
+    {
+        auto* effects = new juce::DynamicObject();
+        auto& chain = processorRef.getLiveChain();
+
+        for (int i = 0; i < chain.size(); ++i)
+            if (auto meter = fx::describeMeter (chain[i], spectrumAnalyser); ! meter.isVoid())
+                effects->setProperty (fx::getModuleKey (chain[i].getType()), meter);
+
+        status->setProperty ("fx", juce::var (effects));
+    }
+
     const auto& recorder = processorRef.getRecorder();
     status->setProperty ("recording", recorder.isRecording() ? recorder.getSeconds() : -1.0);
 

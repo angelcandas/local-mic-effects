@@ -42,6 +42,7 @@ namespace ids
     MICFX_DAW_ID (loopOn) MICFX_DAW_ID (loopStart) MICFX_DAW_ID (loopEnd)
     MICFX_DAW_ID (beatsPerBar) MICFX_DAW_ID (MARKER) MICFX_DAW_ID (time)
     MICFX_DAW_ID (transpose) MICFX_DAW_ID (warp)
+    MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
 #undef MICFX_DAW_ID
 }
 
@@ -86,6 +87,11 @@ public:
     void setTrackMute (int trackId, bool);
     void setTrackSolo (int trackId, bool);
     void setMasterVolume (float decibels);
+
+    // The insert chain's input and output gain (before and after its effects), in dB,
+    // -24..24. On a track, or the master with masterId.
+    static constexpr float maxChainGain = 24.0f;
+    void setChainGain (int trackId, bool output, float decibels);
 
     // Recording: armed tracks get the take; monitored tracks hear the mic live.
     void setTrackArm (int trackId, bool);
