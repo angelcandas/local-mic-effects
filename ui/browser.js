@@ -450,6 +450,7 @@ export class LibraryBrowser {
     if (payload.kind === "effect") await screen.addEffect(track, payload.id);
     if (payload.kind === "preset") await this.run("loadPreset", { track, preset: payload.index });
     screen.select(track, null);
+    screen.setDockTab("effects"); // where the new effect shows
     screen.setDock(true);
   }
 

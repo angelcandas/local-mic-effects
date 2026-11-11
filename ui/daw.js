@@ -1120,6 +1120,7 @@ class DawScreen {
     const id = await daw("addMidiClip", { track: track.id, start: Math.max(0, start), length: this.bar });
     if (typeof id === "number" && id > 0) {
       this.showWhenDrawn({ track: track.id, clip: id });
+      this.setDockTab("track");
       this.setDock(true);
     }
   }
@@ -1336,7 +1337,7 @@ class DawScreen {
     element.classList.toggle("is-missing", clip.missing);
     element.classList.toggle("is-muted", Boolean(clip.mute));
     element.classList.toggle("is-midi", Boolean(clip.midi));
-    if (clip.midi) element.addEventListener("dblclick", () => { this.select(track.id, clip.id); this.setDock(true); this.pianoRoll?.element.focus(); });
+    if (clip.midi) element.addEventListener("dblclick", () => { this.select(track.id, clip.id); this.setDockTab("track"); this.setDock(true); this.pianoRoll?.element.focus(); });
     element.title = clip.midi ? `${clip.name} (${clip.notes.length} notes)\nDouble-click to edit the notes · Drag to move · Edges to trim` : clip.missing ? `Missing file: ${clip.file}` : `${clip.name}\nDrag to move · Edges to trim · Corners to fade · S splits at the playhead`;
 
     const place = (start, length) => {
@@ -1767,12 +1768,21 @@ class DawScreen {
     this.dockToggle = splitter.querySelector(".dock-toggle");
     const saved = (() => { try { return JSON.parse(localStorage.getItem("micfx.dock") ?? "null"); } catch { return null; } })();
     this.dockHeight = saved?.height ?? 290;
+    this.dockTabs = [...splitter.querySelectorAll(".dock-tab")];
+    this.setDockTab(saved?.tab === "track" ? "track" : "effects", false);
     this.setDock(saved?.hidden ? false : true, this.dockHeight);
 
+    // Two tabs: Effects (the track's inserts) and Track (the clip, pitch & time, quantize, tempo).
+    // Clicking the open tab while the panel is folded away shows it again.
+    this.dockTabs.forEach((tab) => tab.addEventListener("click", () => {
+      this.setDockTab(tab.dataset.tab);
+      if (this.root.classList.contains("dock-hidden")) this.setDock(true);
+    }));
+    const onControl = (event) => event.target === this.dockToggle || event.target.closest(".dock-tab");
     this.dockToggle.addEventListener("click", () => this.setDock(this.root.classList.contains("dock-hidden")));
-    splitter.addEventListener("dblclick", (event) => { if (event.target !== this.dockToggle) this.setDock(this.root.classList.contains("dock-hidden")); });
+    splitter.addEventListener("dblclick", (event) => { if (!onControl(event)) this.setDock(this.root.classList.contains("dock-hidden")); });
     splitter.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || event.target === this.dockToggle) return;
+      if (event.button !== 0 || onControl(event)) return;
       event.preventDefault();
       splitter.setPointerCapture(event.pointerId);
       splitter.classList.add("is-dragging");
@@ -1810,9 +1820,32 @@ class DawScreen {
     this.root.classList.toggle("dock-hidden", !show);
     this.dockToggle.textContent = show ? "Hide" : "Show";
     this.dockToggle.setAttribute("aria-expanded", String(show));
-    if (save) try { localStorage.setItem("micfx.dock", JSON.stringify({ height, hidden: !show })); } catch { /* not kept */ }
+    if (save) this.saveDock();
     if (this.session) this.watchInserts(show && this.chainGains ? this.chainGains.id : -1);
   }
+  saveDock() {
+    try {
+      localStorage.setItem("micfx.dock", JSON.stringify({ height: this.dockHeight, hidden: this.root.classList.contains("dock-hidden"), tab: this.dockTab }));
+    } catch { /* not kept */ }
+  }
+
+  // Picks the bottom panel's tab: "effects" or "track".
+  setDockTab(tab, save = true) {
+    if (tab === this.dockTab) return;
+    this.dockTab = tab;
+    this.dockTabs.forEach((t) => {
+      const on = t.dataset.tab === tab;
+      t.classList.toggle("is-active", on);
+      t.setAttribute("aria-selected", String(on));
+    });
+    this.inspector.dataset.tab = tab;
+    if (save) this.saveDock();
+    if (this.session) {
+      this.inspectorKey = "";
+      this.renderInspector();
+    }
+  }
+
 
   select(trackId, clipId, render = true, openAdd = false) {
     const changed = this.selectedTrack !== trackId || this.selectedClip !== clipId;
@@ -1826,6 +1859,7 @@ class DawScreen {
       this.renderInspector();
     }
     if (openAdd) {
+      this.setDockTab("effects");
       this.setDock(true);
       this.inspector.querySelector(".add-effect")?.focus();
     }
@@ -1851,17 +1885,25 @@ class DawScreen {
     if (!found) this.selectedClip = null;
 
     // Rebuild only when what's shown changes, so knobs keep working mid-drag.
-    const key = `${owner?.id}|${found?.clip.id}|${owner?.name}`;
+    // Effects tab: the track's insert chain. Track tab: the clip, then pitch & time.
+    const onTrackTab = this.dockTab === "track";
+    const key = `${this.dockTab}|${owner?.id}|${found?.clip.id}|${owner?.name}`;
     if (key !== this.inspectorKey) {
       this.inspectorKey = key;
       this.inspector.replaceChildren();
       this.clipPanel?.dispose?.();
-      this.clipPanel = !found ? null : found.clip.midi ? this.createPianoRoll(found.clip, found.track) : this.createClipPanel(found.clip);
-      if (this.clipPanel) this.inspector.append(this.clipPanel.element);
-      this.rhythmPanel = owner && owner.id !== 0 && owner.kind !== "midi" // audio quantize/warp only
-        ? createRhythmPanel(this, owner, found?.clip ?? null, { daw, ValueKnob, button, toast: (...a) => toast(...a) }) : null;
-      if (this.rhythmPanel) this.inspector.append(this.rhythmPanel.element);
-      if (owner) this.inspector.append(this.createTrackPanel(owner));
+      this.clipPanel = this.rhythmPanel = null;
+      this.rack = null;
+      this.chainGains = null;
+      if (onTrackTab) {
+        this.clipPanel = !found ? null : found.clip.midi ? this.createPianoRoll(found.clip, found.track) : this.createClipPanel(found.clip);
+        this.inspector.append(this.clipPanel?.element ?? this.createNoClipPanel(owner));
+        this.rhythmPanel = owner && owner.id !== 0 && owner.kind !== "midi" // audio quantize/warp only
+          ? createRhythmPanel(this, owner, found?.clip ?? null, { daw, ValueKnob, button, toast: (...a) => toast(...a) }) : null;
+        if (this.rhythmPanel) this.inspector.append(this.rhythmPanel.element);
+      } else if (owner) {
+        this.inspector.append(this.createTrackPanel(owner));
+      }
     }
 
     if (this.rhythmPanel && owner) this.rhythmPanel.update(owner, found?.clip ?? null);
@@ -1872,7 +1914,18 @@ class DawScreen {
       this.chainGains.input.knob.update(owner.inGain ?? 0);
       this.chainGains.output.knob.update(owner.outGain ?? 0);
     }
-    this.watchInserts(owner && !this.root.classList.contains("dock-hidden") ? owner.id : -1);
+    this.watchInserts(owner && !onTrackTab && !this.root.classList.contains("dock-hidden") ? owner.id : -1);
+  }
+
+  // The Track tab's clip card when no clip is selected.
+  createNoClipPanel(owner) {
+    const element = html("section", "panel clip-panel is-empty");
+    const head = html("div", "clip-head");
+    head.append(html("h3", "", "Clip"));
+    element.append(head, html("p", "panel-caption",
+      owner?.id === 0 ? "The master has no clips. Select a clip on a track to edit it here."
+                      : "Select a clip to change its gain and fades, split, loop or strip silence."));
+    return element;
   }
 
   // Asks for live readings of the effects on screen (or none, -1, while the panel is hidden).
