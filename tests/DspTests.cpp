@@ -14,6 +14,7 @@
 #include "DawBridge.h"
 #include "PluginProcessor.h"
 #include "analysis/Analysis.h"
+#include "analysis/Key.h"
 #include "analysis/MixAssistant.h"
 #include "Presets.h"
 #include "daw/DawEngine.h"
@@ -723,6 +724,138 @@ namespace
         }
 
         return buffer;
+    }
+
+    // Chords (MIDI notes) played one after another, each note a soft harmonic tone,
+    // `cents` away from A = 440 Hz tuning. Optional noise bursts on every beat stand in
+    // for drums.
+    juce::AudioBuffer<float> makeChords (const std::vector<std::vector<int>>& chords, double rate,
+                                         double secondsEach = 1.5, double cents = 0.0, bool drums = false)
+    {
+        const auto chordSamples = (int) (secondsEach * rate);
+        juce::AudioBuffer<float> buffer (2, chordSamples * (int) chords.size());
+        buffer.clear();
+        juce::Random random (7);
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+
+        for (size_t c = 0; c < chords.size(); ++c)
+        {
+            for (auto note : chords[c])
+            {
+                const auto frequency = 440.0 * std::pow (2.0, (note - 69 + cents / 100.0) / 12.0);
+                for (int h = 1; h <= 6 && frequency * h < rate / 2; ++h)
+                {
+                    const auto step = twoPi * frequency * h / rate;
+                    double phase = random.nextDouble() * twoPi;
+                    for (int i = 0; i < chordSamples; ++i, phase += step)
+                    {
+                        const auto envelope = juce::jmin (1.0, i / (0.01 * rate)) * std::exp (-1.2 * i / rate);
+                        const auto value = (float) (0.06 / h * envelope * std::sin (phase));
+                        buffer.addSample (0, (int) c * chordSamples + i, value);
+                        buffer.addSample (1, (int) c * chordSamples + i, value);
+                    }
+                }
+            }
+        }
+
+        if (drums)
+        {
+            const auto beat = (int) (0.375 * rate);
+            for (int start = 0; start < buffer.getNumSamples(); start += beat)
+                for (int i = 0; i < (int) (0.08 * rate) && start + i < buffer.getNumSamples(); ++i)
+                {
+                    const auto value = 0.3f * (random.nextFloat() * 2.0f - 1.0f) * std::exp (-(float) i / (float) (0.02 * rate));
+                    buffer.addSample (0, start + i, value);
+                    buffer.addSample (1, start + i, value);
+                }
+        }
+
+        return buffer;
+    }
+
+    // A chord as MIDI notes: a bass note an octave below plus the triad (or seventh).
+    std::vector<int> chord (int root, std::initializer_list<int> intervals)
+    {
+        std::vector<int> notes { root - 12 };
+        for (auto interval : intervals)
+            notes.push_back (root + interval);
+        return notes;
+    }
+
+    void testKeyDetection()
+    {
+        std::cout << "\nKey detection\n";
+        constexpr double rate = 24000.0;
+        const std::initializer_list<int> maj { 0, 4, 7 }, min { 0, 3, 7 }, dom7 { 0, 4, 7, 10 };
+
+        // Pop I-V-vi-IV in all 12 major keys, and i-iv-V7-i in all 12 minor keys.
+        int majorRight = 0, minorRight = 0;
+        juce::String misses;
+        for (int tonic = 0; tonic < 12; ++tonic)
+        {
+            const auto root = 57 + tonic; // A3 .. G#4
+            const auto majorKey = analysis::detectKey (makeChords ({ chord (root, maj), chord (root + 7 - 12, maj),
+                                                                     chord (root + 9 - 12, min), chord (root + 5 - 12, maj),
+                                                                     chord (root, maj) }, rate), rate);
+            const auto minorKey = analysis::detectKey (makeChords ({ chord (root, min), chord (root + 5 - 12, min),
+                                                                     chord (root + 7 - 12, dom7), chord (root, min) }, rate), rate);
+            const auto expected = (root % 12);
+
+            if (majorKey.key == expected && ! majorKey.minor) ++majorRight;
+            else misses << " " << analysis::KeyEstimate::getName (expected, false) << " read as " << majorKey.getName() << ";";
+            if (minorKey.key == expected && minorKey.minor) ++minorRight;
+            else misses << " " << analysis::KeyEstimate::getName (expected, true) << " read as " << minorKey.getName() << ";";
+        }
+        check (majorRight == 12, "I-V-vi-IV: " + juce::String (majorRight) + " of 12 major keys right" + misses);
+        check (minorRight == 12, "i-iv-V7-i: " + juce::String (minorRight) + " of 12 minor keys right");
+
+        // A clear key is confident, and its runner-up is a neighbour.
+        {
+            const auto key = analysis::detectKey (makeChords ({ chord (60, maj), chord (65 - 12, maj), chord (67 - 12, dom7), chord (60, maj) }, rate), rate);
+            check (key.getName() == "C major" && key.confidence > 0.3f && std::abs (key.tuningCents) < 5.0f,
+                   "C-F-G7-C: " + key.getName() + ", confidence " + juce::String (key.confidence, 2) + ", tuning "
+                       + juce::String (key.tuningCents, 1) + " cents, or " + analysis::KeyEstimate::getName (key.runnerUpKey, key.runnerUpMinor));
+            check (key.getAutotuneScale() == fx::PitchEngine::getScaleNames().indexOf ("Major"), "major maps to the autotune's Major scale");
+        }
+
+        // Off A = 440: a 432 Hz recording (-32 cents) and one 40 cents sharp keep their key.
+        for (auto cents : { -31.8, 40.0 })
+        {
+            const auto key = analysis::detectKey (makeChords ({ chord (64, min), chord (69 - 12, min), chord (71 - 12, dom7), chord (64, min) },
+                                                              rate, 1.5, cents), rate);
+            check (key.getName() == "E minor" && std::abs (key.tuningCents - (float) cents) < 12.0f,
+                   "E minor at " + juce::String (cents, 1) + " cents: " + key.getName() + ", tuning read as "
+                       + juce::String (key.tuningCents, 1) + " cents");
+        }
+
+        // Drums on every beat don't throw it.
+        {
+            const auto key = analysis::detectKey (makeChords ({ chord (62, maj), chord (69 - 12, maj), chord (71 - 12, min), chord (67 - 12, maj) },
+                                                              rate, 1.5, 0.0, true), rate);
+            check (key.getName() == "D major", "D-A-Bm-G with drums: " + key.getName());
+        }
+
+        // No harmony, no key: silence and white noise.
+        {
+            juce::AudioBuffer<float> silence (2, (int) (3 * rate));
+            silence.clear();
+            juce::AudioBuffer<float> noise (1, (int) (3 * rate));
+            juce::Random random (3);
+            for (int i = 0; i < noise.getNumSamples(); ++i)
+                noise.setSample (0, i, 0.2f * (random.nextFloat() * 2.0f - 1.0f));
+            const auto quiet = analysis::detectKey (silence, rate), hiss = analysis::detectKey (noise, rate);
+            check (! quiet.isValid() && (! hiss.isValid() || hiss.confidence < 0.3f),
+                   "silence has no key, noise has none or an unsure one (" + hiss.getName() + " " + juce::String (hiss.confidence, 2) + ")");
+        }
+
+        // The Auto Mix analyser keeps the chroma too, so a session's profiles give the key.
+        {
+            const auto audio = makeChords ({ chord (67, maj), chord (62 - 12, dom7), chord (64 - 12, min), chord (60 - 12, maj), chord (67, maj) }, sampleRate);
+            const auto profile = analysis::analyse (audio, sampleRate);
+            const auto key = profile.getKey();
+            check (key.getName() == "G major" && profile.chroma.size() == profile.rmsDb.size(),
+                   "Profile::getKey on G-D7-Em-C-G: " + key.getName());
+        }
     }
 
     void testMixAssistant()
@@ -1980,6 +2113,116 @@ namespace
         check (rms (liveLeft, skip, liveLeft.size()) > 0.01f, "back in Live mode the mic goes through the Live chain again");
     }
 
+    // The DAW screen's key panel: detect the key from the tracks, keep it in the session,
+    // and point the autotunes at it.
+    void testDawKey()
+    {
+        std::cout << "\nSong key in DAW mode\n";
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-key", {});
+        folder.createDirectory();
+
+        juce::PropertiesFile::Options options;
+        options.applicationName = "MicFXTests";
+        options.filenameSuffix = ".settings";
+        juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+
+        std::vector<std::pair<juce::String, juce::var>> events;
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, settings,
+                          [&] (const juce::Identifier& event, const juce::var& payload) { events.emplace_back (event.toString(), payload); },
+                          [] { return (juce::int64) 0; });
+
+        const auto run = [&] (const juce::String& command, std::initializer_list<std::pair<const char*, juce::var>> properties = {})
+        {
+            auto* object = new juce::DynamicObject();
+            for (const auto& [name, value] : properties)
+                object->setProperty (name, value);
+            juce::var result;
+            bridge.handle (command, juce::var (object), [&] (juce::var r) { result = r; });
+            return result;
+        };
+
+        run ("mode", { { "daw", true } });
+
+        // A backing in F minor and a "Vocal" singing a melody that hangs on F#: the
+        // voice is left out, so the key comes from the backing.
+        const auto backing = folder.getChildFile ("backing.wav"), vocal = folder.getChildFile ("vocal.wav");
+        writeWav (backing, makeChords ({ chord (65, { 0, 3, 7 }), chord (70 - 12, { 0, 3, 7 }), chord (72 - 12, { 0, 4, 7, 10 }),
+                                         chord (65, { 0, 3, 7 }) }, sampleRate), sampleRate);
+        writeWav (vocal, makeChords ({ { 66 }, { 66 }, { 73 }, { 66 } }, sampleRate), sampleRate);
+
+        const auto vocalTrack = (int) edit.getTracks()[0][daw::ids::id];
+        edit.getTrack (vocalTrack).setProperty (daw::ids::name, "Vocal", nullptr);
+        bridge.importAudio (vocal, vocalTrack);
+        bridge.importAudio (backing, -1);
+        const auto autotune = (int) run ("addInsert", { { "track", vocalTrack }, { "type", "pitch" } });
+        edit.setInsertValue (autotune, "tuneScale", 6.0f); // Blues
+
+        // Detect: runs in the background, then "dawKey" brings the result.
+        check ((bool) run ("key", { { "action", "detect" } })["ok"], "detect starts");
+        juce::var result;
+        for (int i = 0; i < 1000 && ! result.isObject(); ++i)
+        {
+            events.clear();
+            bridge.tick();
+            for (const auto& [name, payload] : events)
+                if (name == "dawKey" && payload["state"].toString() == "ready")
+                    result = payload;
+            if (! result.isObject())
+                juce::Thread::sleep (10);
+        }
+
+        const auto session = juce::JSON::parse (juce::JSON::toString (bridge.describeSession()));
+        check (result["name"].toString() == "F minor" && edit.getKey() == 5 && edit.isKeyMinor()
+                   && session["key"]["name"].toString() == "F minor",
+               "detected " + result["name"].toString() + " from the backing (the session now says "
+                   + session["key"]["name"].toString() + ")");
+
+        bool vocalLeftOut = false;
+        for (const auto& track : *result["tracks"].getArray())
+            if ((int) track["id"] == vocalTrack)
+                vocalLeftOut = (bool) track["voice"] && ! (bool) track["used"];
+        check (vocalLeftOut && result["chroma"].size() == 12, "the vocal track is listed but left out of the key");
+
+        edit.getUndoManager().undo();
+        check (edit.getKey() == -1, "undo forgets the detected key");
+        edit.getUndoManager().redo();
+
+        // Autotune to the key: the key changes; Blues fits a minor song, so it stays.
+        const auto applied = run ("key", { { "action", "autotune" } });
+        const auto insert = edit.getInsert (autotune);
+        check ((int) applied["count"] == 1 && (int) (float) insert["tuneKey"] == 5 && (int) (float) insert["tuneScale"] == 6,
+               "autotune set to F, keeping its Blues scale (" + juce::String ((int) applied["count"]) + " autotune)");
+
+        // A major key replaces a minor-only scale with Major; new autotunes start in key.
+        run ("key", { { "action", "set" }, { "key", 7 }, { "minor", false } });
+        run ("key", { { "action", "autotune" } });
+        const auto fresh = (int) run ("addInsert", { { "track", vocalTrack }, { "type", "pitch" } });
+        check ((int) (float) edit.getInsert (autotune)["tuneScale"] == 1 && (int) (float) edit.getInsert (fresh)["tuneKey"] == 7
+                   && (int) (float) edit.getInsert (fresh)["tuneScale"] == 1,
+               "G major by hand: Blues becomes Major, and a new autotune starts in G major");
+
+        // The key survives saving and opening the project.
+        {
+            const auto projectFolder = folder.getChildFile ("Song");
+            check ((bool) bridge.saveProjectAs (projectFolder)["ok"], "saved");
+            edit.setKey (-1, false);
+            const auto saved = processor.getDawProject().getFolder();
+            processor.getDawProject().close();
+            bridge.openProject (saved);
+            check (edit.getKey() == 7 && ! edit.isKeyMinor() && edit.getState()[daw::ids::key].isInt(), "the key is saved in the project");
+            processor.getDawProject().close();
+        }
+
+        DawBridge::availableForTesting = false;
+        folder.deleteRecursively();
+    }
+
     void testLiveControls()
     {
         std::cout << "\nLive controls (panic mute, dry compare)\n";
@@ -2641,6 +2884,8 @@ int main()
     testLiveControls();
     testAnalysis();
     testMixAssistant();
+    testKeyDetection();
+    testDawKey();
     testLatency();
     testSmoothing();
     testLiveMeters();

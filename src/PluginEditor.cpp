@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include "Presets.h"
+#include "analysis/Key.h"
 #include "WebUIData.h"
 
 #if JucePlugin_Build_Standalone
@@ -351,6 +352,48 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            }
 
                            complete ({});
+                       })
+
+                       // () -> { ok, error, key, minor, name, confidence }: the key of the backing
+                       // track (the first one that isn't a take), found on a background thread.
+                       .withNativeFunction ("detectBackingKey", [this] (const auto&, auto complete)
+                       {
+                           std::shared_ptr<const Multitrack::Track> backing;
+                           for (const auto& track : processorRef.getMultitrack().getTracks())
+                               if (! track->isTake) { backing = track; break; }
+
+                           if (backing == nullptr)
+                           {
+                               auto* result = new juce::DynamicObject();
+                               result->setProperty ("ok", false);
+                               result->setProperty ("error", "Load a backing track first.");
+                               complete (juce::var (result));
+                               return;
+                           }
+
+                           const auto rate = processorRef.getMultitrack().getSampleRate();
+                           juce::Component::SafePointer<PluginEditor> editor (this);
+
+                           juce::Thread::launch ([backing, rate, editor, complete]
+                           {
+                               auto* result = new juce::DynamicObject();
+                               const auto key = analysis::detectKey (backing->audio, rate,
+                                                                     [editor] { return editor != nullptr; });
+                               result->setProperty ("ok", key.isValid());
+                               result->setProperty ("error", key.isValid() ? juce::String() : juce::String ("No clear key in the backing track."));
+                               result->setProperty ("key", key.key);
+                               result->setProperty ("minor", key.minor);
+                               result->setProperty ("name", key.getName());
+                               result->setProperty ("confidence", key.confidence);
+                               result->setProperty ("track", backing->name);
+                               juce::var payload (result);
+
+                               juce::MessageManager::callAsync ([editor, complete, payload]
+                               {
+                                   if (editor != nullptr)
+                                       complete (payload);
+                               });
+                           });
                        })
 
                        // (id) -> undefined

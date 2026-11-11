@@ -5,6 +5,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "dsp/PitchDetector.h"
+#include "Key.h"
 
 #include <array>
 #include <functional>
@@ -50,6 +51,7 @@ struct Profile
     std::vector<Bands> bandsDb;       // power per 1/3-octave band over the last ~170 ms, dB re full-scale mean square
     std::vector<bool> active;         // something is playing (see analyse())
     std::vector<float> pitchHz;       // YIN pitch at the end of the hop, 0 when unpitched
+    std::vector<Chroma> chroma;       // notes sounding over the last ~170 ms (see Key.h), all zero when nothing tonal
 
     float integratedLufs = -200.0f;   // gated, over the whole signal (-200 = silence)
     float shortTermMaxLufs = -200.0f; // loudest 3 s
@@ -72,6 +74,11 @@ struct Profile
     // Loudness (power mean of the momentary values, LUFS) over the frames where
     // `mask` is true, or over the active frames.
     float getLoudnessOver (const std::vector<bool>* mask = nullptr) const;
+
+    // The chroma summed over the active frames (or those where `mask` is true), and
+    // the musical key it points to.
+    Chroma getChromaSum (const std::vector<bool>* mask = nullptr) const;
+    KeyEstimate getKey (const std::vector<bool>* mask = nullptr) const { return estimateKey (getChromaSum (mask)); }
 };
 
 //==============================================================================

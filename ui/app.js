@@ -248,7 +248,10 @@ class KeyPicker {
 
     this.element = html("div", "keys-picker");
     const row = html("div", "row");
-    row.append(html("span", "name", "Key"), (this.keyLabel = html("span", "name")));
+    this.matchButton = html("button", "key-match", "Match song");
+    this.matchButton.title = "Listen to the backing track and set the key and scale to the song's";
+    this.matchButton.addEventListener("click", () => this.matchBackingTrack());
+    row.append(html("span", "name", "Key"), this.matchButton, (this.keyLabel = html("span", "name")));
     this.piano = html("div", "piano");
     this.element.append(row, this.piano);
 
@@ -280,6 +283,37 @@ class KeyPicker {
     });
     this.piano.append(key);
     return key;
+  }
+
+  // The backing track's key: the key changes, and the scale becomes Major or Minor
+  // unless it already fits (a minor pentatonic stays for a minor song).
+  async matchBackingTrack() {
+    const button = this.matchButton;
+    button.disabled = true;
+    button.textContent = "Listening…";
+    try {
+      const result = await Juce.getNativeFunction("detectBackingKey")();
+      if (!result?.ok) {
+        button.textContent = result?.error ? "No key found" : "Match song";
+        button.title = result?.error ?? button.title;
+        return;
+      }
+      const fitting = result.minor ? ["Minor", "Harmonic Minor", "Minor Pentatonic", "Blues"] : ["Major", "Major Pentatonic"];
+      const choices = this.scale.properties.choices;
+      if (!fitting.includes(choices[this.scale.getChoiceIndex()])) {
+        const index = choices.indexOf(result.minor ? "Minor" : "Major");
+        if (index >= 0) this.scale.setChoiceIndex(index);
+      }
+      this.key.setChoiceIndex(result.key);
+      this.onUserChange();
+      this.render();
+      button.textContent = "Match song";
+      button.title = `${result.track}: ${result.name}${result.confidence < 0.25 ? " (unsure)" : ""}`;
+    } catch (error) {
+      button.textContent = "Match song";
+    } finally {
+      button.disabled = false;
+    }
   }
 
   setTarget(note) {

@@ -156,6 +156,11 @@ float Profile::getLoudnessOver (const std::vector<bool>* mask) const
     return count > 0 ? toLufs (sum / count) : silenceDb;
 }
 
+Chroma Profile::getChromaSum (const std::vector<bool>* mask) const
+{
+    return sumChroma (chroma, &maskOrActive (*this, mask));
+}
+
 //==============================================================================
 // K-weighting as in BS.1770 (a high shelf and a high-pass), designed for any sample
 // rate the way libebur128 does it, which reproduces the standard's 48 kHz coefficients.
@@ -297,6 +302,10 @@ void Analyser::endHop()
     }
 
     profile.bandsDb.push_back (bands);
+
+    Chroma chroma {};
+    computeChroma (fftData.data(), fftSize, profile.sampleRate, chroma);
+    profile.chroma.push_back (chroma);
 }
 
 Profile Analyser::finish()

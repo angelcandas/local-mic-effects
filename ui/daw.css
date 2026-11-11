@@ -717,7 +717,8 @@ body.is-daw .chip--live { display: none; }
 /* ---------- Export ---------- */
 
 .export-panel,
-.automix-panel {
+.automix-panel,
+.key-panel {
   position: absolute;
   top: 52px;
   left: 10px;
@@ -730,7 +731,7 @@ body.is-daw .chip--live { display: none; }
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
 }
 
-.export-panel[hidden], .automix-panel[hidden] { display: none; }
+.export-panel[hidden], .automix-panel[hidden], .key-panel[hidden] { display: none; }
 .export-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .export-options { display: grid; gap: 8px; }
 .export-options label { display: grid; grid-template-columns: 70px 1fr; align-items: center; color: var(--muted); }
@@ -739,7 +740,8 @@ body.is-daw .chip--live { display: none; }
 .export-bar { height: 4px; margin: 14px 0 10px; overflow: hidden; border-radius: 2px; background: #080a0e; visibility: hidden; }
 .export-bar div { height: 100%; width: calc(var(--progress, 0) * 100%); background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
 .export-panel.is-running .export-bar,
-.automix-panel.is-running .export-bar { visibility: visible; }
+.automix-panel.is-running .export-bar,
+.key-panel.is-running .export-bar { visibility: visible; }
 .export-footer { display: flex; align-items: center; gap: 8px; }
 .export-result { flex: 1; color: var(--muted); font-size: 11.5px; }
 .export-result .is-error { color: var(--hot); }
@@ -1247,3 +1249,32 @@ body.library-dragging * { cursor: grabbing !important; }
 @media (max-width: 900px) {
   .daw-library:not(.is-collapsed) { --library-width: 220px !important; }
 }
+
+/* ---------- Song key ---------- */
+
+.key-panel { left: auto; right: 10px; width: min(420px, calc(100% - 20px)); max-height: calc(100% - 64px); overflow-y: auto; }
+.key-button.is-set { color: var(--text); border-color: var(--accent); }
+.key-summary { display: grid; gap: 4px; margin-bottom: 10px; }
+.key-name { font-size: 22px; font-weight: 700; letter-spacing: -0.01em; }
+.key-detail { color: var(--muted); font-size: 12px; line-height: 1.45; }
+.key-chroma { display: grid; grid-template-columns: repeat(12, 1fr); gap: 4px; height: 84px; margin: 4px 0 12px; }
+.key-chroma[hidden] { display: none; }
+.key-note { display: grid; grid-template-rows: 1fr auto; gap: 4px; min-width: 0; text-align: center; }
+.key-note span { color: var(--faint); font-family: var(--mono); font-size: 10.5px; }
+.key-bar { align-self: end; height: calc(var(--level, 0) * 100%); border-radius: 3px 3px 1px 1px; background: #2a2f3b; }
+.key-note.in-scale .key-bar { background: var(--accent); opacity: 0.75; }
+.key-note.in-scale span { color: var(--text); }
+.key-note.is-tonic .key-bar { opacity: 1; background: var(--accent-2); }
+.key-note.is-tonic span { font-weight: 700; }
+.key-tracks { display: grid; gap: 4px; margin-bottom: 10px; }
+.key-tracks:empty { display: none; }
+.key-track { display: flex; justify-content: space-between; gap: 8px; font-size: 12px; }
+.key-track span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.key-track small { color: var(--muted); font-family: var(--mono); font-size: 11px; white-space: nowrap; }
+.key-track.is-unused { opacity: 0.55; }
+.key-pick { display: flex; gap: 6px; }
+.key-pick select { flex: 1; }
+.key-cancel { display: none; }
+.key-panel.is-running .key-cancel { display: inline-block; }
+.key-panel.is-running .key-detect,
+.key-panel.is-running .key-autotune { display: none; }

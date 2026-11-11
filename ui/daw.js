@@ -3,7 +3,7 @@
 // "dawSession" it receives and sends edits back through one native function,
 // daw (command, args). Every edit is one undo step: drags only send on release.
 import * as Juce from "./juce/index.js";
-import { CATEGORIES, MODULE_KEYS, MODULES } from "./modules.js";
+import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
 import { LibraryBrowser } from "./browser.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
@@ -16,6 +16,7 @@ const MIN_ZOOM = 4, MAX_ZOOM = 2000; // pixels per second
 const METER_FLOOR_DB = -60;
 const FADER_MIN_DB = -60, FADER_MAX_DB = 6;
 const GRIDS = [["bar", "Bar"], [1, "Beat"], [0.5, "1/2 beat"], [0.25, "1/4 beat"]];
+const SCALE_STEPS = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10] };
 const SIGNATURES = [[2, "2/4"], [3, "3/4"], [4, "4/4"], [5, "5/4"], [6, "6/8"], [7, "7/8"], [9, "9/8"], [12, "12/8"]];
 
 // Per-viewer UI preferences (grid, return on stop). The page may have no storage.
@@ -561,6 +562,7 @@ class DawScreen {
     this.buildBanners();
     this.buildAutoMix();
     this.buildLibrary();
+    this.buildKeyPanel();
 
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
@@ -803,7 +805,8 @@ class DawScreen {
     const click = html("div", "click-group");
     click.append((this.metronomeButton = button("toggle", "Click", "Metronome (C)", () => daw("metronome", { on: !this.session?.metronome }))),
                  this.clickVolume);
-    timing.append(tempo, tap, this.signature, click,
+    this.keyButton = button("tool key-button", "Key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
+    timing.append(tempo, tap, this.signature, this.keyButton, click,
       this.countIn,
       (this.loopButton = button("toggle", "Loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop())),
       (this.snapButton = button("toggle", "Snap", "Snap edits to the beat (hold Alt to drag freely)", () => {
@@ -878,6 +881,10 @@ class DawScreen {
     if (document.activeElement !== this.tempoInput) this.tempoInput.value = Math.round(s.tempo * 100) / 100;
     this.countIn.value = String(s.countIn);
     this.signature.value = String(s.beatsPerBar ?? 4);
+    const songKey = s.key?.key ?? -1;
+    this.keyButton.textContent = songKey >= 0 ? `Key ${NOTE_NAMES[songKey]}${s.key.minor ? "m" : ""}` : "Key";
+    this.keyButton.classList.toggle("is-set", songKey >= 0);
+    this.renderKeyPanel();
     if (document.activeElement !== this.clickVolume) this.clickVolume.value = String(Math.round((s.metronomeVolume ?? 1) * 100));
     this.gridSelect.value = String(this.grid);
     this.gridSelect.disabled = !this.snap;
@@ -1921,6 +1928,7 @@ class DawScreen {
   toggleExportPanel(show = this.exportPanel.hidden) {
     this.exportPanel.hidden = !show;
     if (show && this.autoMixPanel) this.autoMixPanel.hidden = true;
+    if (show && this.keyPanel) this.keyPanel.hidden = true;
     if (show) {
       this.exportPanel.querySelector("[name=loopOnly]").disabled = !this.session?.loop.on;
       this.exportPanel.querySelector(".export-result").replaceChildren();
@@ -2000,6 +2008,123 @@ class DawScreen {
   toggleAutoMix(show = this.autoMixPanel.hidden) {
     this.autoMixPanel.hidden = !show;
     if (show) this.toggleExportPanel(false);
+  }
+
+  //============================================================================ Song key
+  buildKeyPanel() {
+    const panel = (this.keyPanel = this.root.querySelector(".key-panel"));
+    const $ = (selector) => panel.querySelector(selector);
+    this.keyResult = null;
+
+    const tonic = $("[name=tonic]"), mode = $("[name=mode]");
+    tonic.append(new Option("Not set", "-1"), ...NOTE_NAMES.map((name, i) => new Option(name, String(i))));
+    const pick = () => daw("key", { action: "set", key: Number(tonic.value), minor: mode.value === "minor" });
+    tonic.addEventListener("change", pick);
+    mode.addEventListener("change", pick);
+
+    $(".key-close").addEventListener("click", () => this.toggleKeyPanel(false));
+    $(".key-detect").addEventListener("click", () => {
+      this.setKeyMessage("");
+      daw("key", { action: "detect" });
+    });
+    $(".key-cancel").addEventListener("click", () => daw("key", { action: "cancel" }));
+    $(".key-autotune").addEventListener("click", async () => {
+      const result = await daw("key", { action: "autotune" });
+      if (!result?.ok) return;
+      const name = this.session?.key?.name ?? "the key";
+      this.setKeyMessage(result.count === 0
+        ? `No autotune yet. Add Autotune to your vocal track's effects: it starts in ${name}.`
+        : `${result.count === 1 ? "The autotune is" : `${result.count} autotunes are`} now in ${name}. Ctrl+Z undoes it.`);
+    });
+
+    window.__JUCE__.backend.addEventListener("dawKey", (event) => this.onSongKey(event));
+  }
+
+  toggleKeyPanel(show = this.keyPanel.hidden) {
+    this.keyPanel.hidden = !show;
+    if (show) {
+      this.toggleExportPanel(false);
+      this.autoMixPanel.hidden = true;
+      this.renderKeyPanel();
+    }
+  }
+
+  setKeyMessage(text, isError = false) {
+    this.keyPanel.querySelector(".key-message").replaceChildren(text ? html("span", isError ? "is-error" : "", text) : "");
+  }
+
+  onSongKey(event) {
+    const panel = this.keyPanel;
+    panel.hidden = false;
+    panel.classList.toggle("is-running", event.state === "analysing");
+    panel.querySelector(".export-bar").style.setProperty("--progress", event.progress ?? 1);
+
+    if (event.state === "analysing") return this.setKeyMessage("Listening…");
+    if (event.state === "cancelled") return this.setKeyMessage("Cancelled.");
+    if (event.state !== "ready") return;
+
+    this.keyResult = event;
+    this.setKeyMessage(event.key < 0 ? "No clear key: the tracks have little harmony (drums or speech only?). Pick it by hand." : "");
+    this.renderKeyPanel();
+  }
+
+  // The session's key (detected or picked), with the last detection's details.
+  renderKeyPanel() {
+    const panel = this.keyPanel;
+    if (!panel || panel.hidden || !this.session) return;
+    const key = this.session.key ?? { key: -1, minor: false, name: "" };
+    const $ = (selector) => panel.querySelector(selector);
+
+    if (document.activeElement !== $("[name=tonic]")) $("[name=tonic]").value = String(key.key);
+    $("[name=mode]").value = key.minor ? "minor" : "major";
+    $("[name=mode]").disabled = key.key < 0;
+    $(".key-autotune").disabled = key.key < 0;
+    $(".key-detect").textContent = this.keyResult ? "Detect again" : "Detect";
+
+    const detected = this.keyResult?.state === "ready" && this.keyResult.key >= 0 ? this.keyResult : null;
+    const summary = $(".key-summary");
+    summary.replaceChildren();
+    summary.append(html("div", "key-name", key.key >= 0 ? key.name : "Key not set"));
+
+    if (detected) {
+      const sure = detected.confidence >= 0.6 ? "Clear" : detected.confidence >= 0.25 ? "Likely" : "Unsure";
+      const same = detected.key === key.key && detected.minor === key.minor;
+      let detail = same ? `${sure} match from the music` : `Detected ${detected.name} (${sure.toLowerCase()}); you picked another key`;
+      if (detected.confidence < 0.6 && detected.runnerUp) detail += `. Could also be ${detected.runnerUp}`;
+      summary.append(html("div", "key-detail", detail + "."));
+      if (Math.abs(detected.tuningCents) >= 8) {
+        const a = 440 * Math.pow(2, detected.tuningCents / 1200);
+        summary.append(html("div", "key-detail",
+          `Tuned ${detected.tuningCents > 0 ? "+" : "−"}${Math.abs(detected.tuningCents).toFixed(0)} cents from standard (A ≈ ${a.toFixed(1)} Hz). The autotune uses A = 440 Hz.`));
+      }
+    } else if (key.key < 0) {
+      summary.append(html("div", "key-detail", "Press Detect to listen to the tracks, or pick it below."));
+    }
+
+    // Which notes the music uses, with the key's scale lit up.
+    const chroma = $(".key-chroma");
+    chroma.replaceChildren();
+    chroma.hidden = !detected;
+    if (detected) {
+      const steps = key.key >= 0 ? SCALE_STEPS[key.minor ? "minor" : "major"].map((step) => (step + key.key) % 12) : [];
+      NOTE_NAMES.forEach((name, note) => {
+        const column = html("div", `key-note${steps.includes(note) ? " in-scale" : ""}${note === key.key ? " is-tonic" : ""}`);
+        const bar = html("div", "key-bar");
+        bar.style.setProperty("--level", Math.max(0.02, Number(detected.chroma[note]) || 0));
+        column.title = `${name}: ${Math.round((Number(detected.chroma[note]) || 0) * 100)}%`;
+        column.append(bar, html("span", "", name));
+        chroma.append(column);
+      });
+    }
+
+    const tracks = $(".key-tracks");
+    tracks.replaceChildren();
+    for (const track of detected?.tracks ?? []) {
+      const row = html("div", `key-track${track.used ? "" : " is-unused"}`);
+      row.append(html("span", "", track.name),
+                 html("small", "", !track.key ? "no harmony" : track.used ? track.key : `${track.key} · voice, left out`));
+      tracks.append(row);
+    }
   }
 
   async replanAutoMix(args) {
@@ -2391,6 +2516,7 @@ class DawScreen {
       import: () => this.importAudio(),
       export: () => this.toggleExportPanel(true),
       autoMix: () => this.toggleAutoMix(true),
+      songKey: () => this.toggleKeyPanel(true),
       undo: () => daw("undo"),
       redo: () => daw("redo"),
       cut: () => this.copySelected(true),
