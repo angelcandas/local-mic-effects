@@ -210,3 +210,17 @@ export function startWarpDrag(screen, event, clip, element, daw) {
   window.addEventListener("pointermove", move);
   window.addEventListener("pointerup", up);
 }
+
+// The quantize settings last chosen in the "Pitch & time" panel, for the Q shortcut.
+export function savedQuantizeArgs(session, trackId) {
+  const steps = prefs.get("steps", 0.5);
+  let groove = Number(prefs.get("groove", -1));
+  const leader = session.tracks.find((t) => t.id === groove);
+  if (groove === trackId || !leader?.clips.length) groove = -1;
+  return {
+    steps: steps === "bar" ? session.beatsPerBar ?? 4 : Number(steps) || 0.5,
+    strength: prefs.get("strength", 100) / 100,
+    swing: prefs.get("swing", 0) / 100,
+    groove,
+  };
+}

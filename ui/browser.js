@@ -9,7 +9,7 @@
 // The folders come from the native side (DawBridge: places, browse, addPlace,
 // removePlace, importFile); instruments from "instruments" / "addInstrument".
 import { CATEGORIES, MODULES } from "./modules.js";
-import { html } from "./widgets.js";
+import { html, keyText } from "./widgets.js";
 
 const MIN_WIDTH = 200, MAX_WIDTH = 460;
 const DRAG_THRESHOLD = 4; // px before a press becomes a drag
@@ -71,7 +71,7 @@ export class LibraryBrowser {
       return b;
     });
     const expand = html("button", "library-rail-button library-expand", "»");
-    Object.assign(expand, { type: "button", title: "Show the library (Shift+B)" });
+    Object.assign(expand, { type: "button", title: keyText("Show the library (Shift+B)") });
     expand.addEventListener("click", () => this.setCollapsed(false));
     this.rail.append(expand, ...this.railButtons);
 
@@ -79,7 +79,7 @@ export class LibraryBrowser {
     this.panel = html("div", "library-panel");
     const head = html("div", "library-head");
     this.search = html("input", "library-search");
-    Object.assign(this.search, { type: "search", placeholder: "Search", spellcheck: false, title: "Search this section (Ctrl+F)" });
+    Object.assign(this.search, { type: "search", placeholder: "Search", spellcheck: false, title: keyText("Search this section (Ctrl+F)") });
     this.search.addEventListener("input", () => { this.query = this.search.value.trim().toLowerCase(); this.renderItems(); });
     this.search.addEventListener("keydown", (event) => {
       if (event.key === "Escape") { this.search.value = ""; this.query = ""; this.renderItems(); this.search.blur(); }
@@ -87,7 +87,7 @@ export class LibraryBrowser {
       event.stopPropagation();
     });
     const collapse = html("button", "mini library-collapse", "«");
-    Object.assign(collapse, { type: "button", title: "Hide the library (Shift+B)" });
+    Object.assign(collapse, { type: "button", title: keyText("Hide the library (Shift+B)") });
     collapse.addEventListener("click", () => this.setCollapsed(true));
     head.append(this.search, collapse);
 

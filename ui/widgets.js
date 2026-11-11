@@ -50,3 +50,9 @@ export function arcPath(fromDeg, toDeg, radius) {
   const [x2, y2] = polar(b, radius);
   return `M ${x1} ${y1} A ${radius} ${radius} 0 ${b - a > 180 ? 1 : 0} 1 ${x2} ${y2}`;
 }
+
+// Shortcut text as the user's keyboard shows it: Ctrl and Alt are Cmd and Option on a Mac
+// (the screens' shortcuts accept either Ctrl or Cmd). "Ctrl+Cmd+F" stays as it is.
+export const IS_MAC = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform || globalThis.navigator?.userAgent || "");
+export const keyText = (text) => (IS_MAC && typeof text === "string"
+  ? text.replace(/\bCtrl\+(?!Cmd)/g, "Cmd+").replace(/\bAlt\+/g, "Option+") : text);

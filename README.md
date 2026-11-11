@@ -96,7 +96,7 @@ tracks instead of one live chain:
   unprocessed mic; the track's inserts play on top, so you can change the effects afterwards.
   Optional click and count-in; the take is shifted by the audio round-trip latency.
 - **Editing**: drag clips to move them (also to another track), drag the edges to trim, the top
-  corners to fade, **S** splits at the playhead, **Ctrl+D** duplicates, **Delete** removes. Edits
+  corners to fade, **Ctrl+E** splits at the playhead, **Ctrl+D** duplicates, **Delete** removes. Edits
   snap to the beat at the project tempo (hold **Alt** to drag freely). Drag on the ruler to mark a
   loop, **L** toggles it. **Ctrl+Z / Ctrl+Shift+Z** undo and redo every edit.
 - **Projects** are folders (`My Song.micfx/`) with `project.xml`, the audio, autosave backups and
@@ -123,6 +123,10 @@ tracks instead of one live chain:
 - **Menus**: the standalone app has File (new, open, save, import, export, audio settings), Edit,
   View and Transport menus, in the macOS menu bar at the top of the screen or under the title bar
   on Windows and Linux. They do the same as the buttons and shortcuts.
+- **Keyboard shortcuts** follow what Ableton Live, Cubase and Logic Pro have in common (Space,
+  M mute, S solo, R record, Q quantize, Ctrl+N/O/S, Ctrl+Z, Ctrl+D, Ctrl+E split, Ctrl+T new
+  track, Tab or X for the mixer, numeric keypad 0 / * for stop / record). Ctrl is Cmd on a Mac.
+  Press **?** (or the ? button) for the full list.
 - **Full screen**: the title bar's maximise button, the ⛶ button at the top, **View → Full screen**,
   **F11**, or **Ctrl+Cmd+F** on a Mac.
 
