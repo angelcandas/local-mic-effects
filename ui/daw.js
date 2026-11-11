@@ -5,8 +5,10 @@
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
+import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
+import { createRhythmPanel, drawWarpMarkers, startWarpDrag } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
@@ -446,7 +448,43 @@ class InsertCard {
       this.body.append(row);
     }
 
+    this.body.append(this.createFooter(parts));
     this.update(insert);
+  }
+
+  // Presets for this effect, and its own input and output gain.
+  createFooter(parts) {
+    const footer = html("div", "insert-footer");
+    const ids = parts.map((part) => part.id);
+    const isPitch = this.insert.type === "pitch";
+    // The pitch insert's presets also remember which of its parts are on.
+    const params = () => [...ids.flatMap((id) => presetParams(id)), ...(isPitch ? parts.map((part) => part.power) : [])];
+
+    const picker = createPresetPicker({
+      getNativeFunction: Juce.getNativeFunction,
+      ids,
+      read: () => Object.fromEntries(params().map((param) => [param, this.insert.values[param] ?? parameterInfo[param]?.default ?? 0])),
+      apply: (values, fromId) => {
+        // A factory preset for one part of the pitch insert switches that part on.
+        if (isPitch && fromId) values[parts.find((part) => part.id === fromId).power] = 1;
+        Object.entries(values).forEach(([param, value], i) => {
+          this.insert.values[param] = value;
+          this.send(param, value, i === 0);
+        });
+        this.update(this.insert);
+      },
+      defaultOf: (param) => parameterInfo[param]?.default,
+    });
+
+    const gains = html("div", "insert-gains");
+    for (const [suffix, label, title] of [["InGain", "In", "Input gain: the level going into this effect"],
+                                          ["OutGain", "Out", "Output gain: the level coming out of this effect"]]) {
+      const widget = this.createControl({ type: "knob", param: `${this.insert.type}${suffix}`, label, bipolar: true });
+      widget.title = `${title}. Drag or scroll · Double-click to reset`;
+      gains.append(widget);
+    }
+    footer.append(picker.element, gains);
+    return footer;
   }
 
   // Animates the picture and the level bars from the signal (see fxviews.js).
@@ -822,7 +860,8 @@ class DawScreen {
     this.tools = html("div", "segmented tools");
     for (const [tool, text, title] of [["select", "Select", "Select, move, trim and fade clips (V)"],
                                        ["cut", "Cut", "Click a clip to split it there (B)"],
-                                       ["gain", "Gain", "Drag a clip up or down to change its gain (G)"]]) {
+                                       ["gain", "Gain", "Drag a clip up or down to change its gain (G)"],
+                                       ["warp", "Warp", "Drag inside a clip to stretch its timing; double-click a marker to remove it (W)"]]) {
       const b = button("", text, title, () => this.setTool(tool));
       b.dataset.tool = tool;
       this.tools.append(b);
@@ -1320,11 +1359,18 @@ class DawScreen {
       html("div", "handle fade-in"), html("div", "handle fade-out"));
 
     this.drawWaveform(canvas);
+    if (!clip.midi) drawWarpMarkers(element, clip, this.zoom);
+    element.classList.toggle("is-warped", Boolean(clip.warp?.length) || Math.abs(clip.transpose || 0) > 1e-4);
 
     element.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       event.stopPropagation();
       this.select(track.id, clip.id, false);
+
+      if (this.tool === "warp" && !clip.midi) {
+        startWarpDrag(this, event, clip, element, daw);
+        return;
+      }
 
       if (this.tool === "cut") {
         const box = this.inner.getBoundingClientRect();
@@ -1414,9 +1460,10 @@ class DawScreen {
   // visible stretch) instead of scaling up a picture.
   drawWaveform(canvas, clip = canvas.clip) {
     if (clip.midi) return this.drawNotes(canvas, clip);
-    const overview = this.peaks.get(clip.file);
+    const audio = clip.audioKey || clip.file; // a warped or transposed clip shows its rendered copy
+    const overview = this.peaks.get(audio);
     if (!overview) {
-      if (!clip.missing) this.loadPeaks(clip.file);
+      if (!clip.missing) this.loadPeaks(audio, clip.id);
       return;
     }
     if (overview === "loading") return;
@@ -1442,12 +1489,12 @@ class DawScreen {
     let detail = null;
     if (perPixel < overview.seconds) {
       const fileEnd = clip.fileLength > 0 ? clip.fileLength : Infinity;
-      detail = (this.detail.get(clip.file) ?? []).find((d) =>
+      detail = (this.detail.get(audio) ?? []).find((d) =>
         d.seconds <= perPixel * 1.05 && d.start <= f0 + 1e-6 && d.end >= Math.min(f1, fileEnd) - 1e-6) ?? null;
-      if (!detail) this.loadDetail(clip.file, f0 - (f1 - f0) / 2, f1 + (f1 - f0) / 2, perPixel);
+      if (!detail) this.loadDetail(audio, f0 - (f1 - f0) / 2, f1 + (f1 - f0) / 2, perPixel, clip.id);
     }
 
-    const key = [cssLeft, cssWidth, width, height, f0, perPixel, clip.gain || 0, canvas.dataset.color, detail?.id ?? 0].join();
+    const key = [audio, cssLeft, cssWidth, width, height, f0, perPixel, clip.gain || 0, canvas.dataset.color, detail?.id ?? 0].join();
     if (canvas.drawn === key) return;
     canvas.drawn = key;
 
@@ -1525,13 +1572,14 @@ class DawScreen {
   // Redraws the waveforms on screen (all, or one file's), e.g. after scrolling.
   redrawWaves(file = null) {
     for (const canvas of this.rows.querySelectorAll("canvas.clip-wave"))
-      if (canvas.clip && (!file || canvas.clip.file === file)) this.drawWaveform(canvas);
+      if (canvas.clip && (!file || (canvas.clip.audioKey || canvas.clip.file) === file)) this.drawWaveform(canvas);
   }
 
-  async loadPeaks(file) {
+  // `file` is the cache key (the clip's audioKey); `clip` asks for that clip's rendered audio.
+  async loadPeaks(file, clip = -1) {
     if (this.peaks.has(file)) return;
     this.peaks.set(file, "loading");
-    const result = await nativeDaw("peaks", { file });
+    const result = await nativeDaw("peaks", { file, clip });
     if (result?.peaks) {
       this.peaks.set(file, result);
       this.redrawWaves(file);
@@ -1541,12 +1589,12 @@ class DawScreen {
   }
 
   // Fetches detail peaks for one stretch of a file; keeps the last few per file.
-  async loadDetail(file, start, end, seconds) {
+  async loadDetail(file, start, end, seconds, clip = -1) {
     if (this.detailPending.has(file)) return;
     this.detailPending.add(file);
     let result = null;
     try {
-      result = await nativeDaw("peaks", { file, start: Math.max(0, start), end, seconds });
+      result = await nativeDaw("peaks", { file, clip, start: Math.max(0, start), end, seconds });
     } finally {
       this.detailPending.delete(file);
     }
@@ -1803,8 +1851,13 @@ class DawScreen {
       this.clipPanel?.dispose?.();
       this.clipPanel = !found ? null : found.clip.midi ? this.createPianoRoll(found.clip, found.track) : this.createClipPanel(found.clip);
       if (this.clipPanel) this.inspector.append(this.clipPanel.element);
+      this.rhythmPanel = owner && owner.id !== 0 && owner.kind !== "midi" // audio quantize/warp only
+        ? createRhythmPanel(this, owner, found?.clip ?? null, { daw, ValueKnob, button, toast: (...a) => toast(...a) }) : null;
+      if (this.rhythmPanel) this.inspector.append(this.rhythmPanel.element);
       if (owner) this.inspector.append(this.createTrackPanel(owner));
     }
+
+    if (this.rhythmPanel && owner) this.rhythmPanel.update(owner, found?.clip ?? null);
 
     if (found && this.clipPanel) this.clipPanel.update(found.clip, found.track);
     if (owner) this.rack?.update(owner);
@@ -2349,7 +2402,7 @@ class DawScreen {
     ["Clips", [[", / .", "Select the previous / next clip on the track"], ["S", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
-               ["V / B / G", "Select, cut and gain tools"], ["Shift+M", "Mute / unmute the selected clip"],
+               ["V / B / G / W", "Select, cut, gain and warp tools"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Shift+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
     ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["Shift+B", "Show / hide the library"], ["Ctrl+F", "Search the library"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Z / Shift+Z", "Zoom to fit the song / the selected clip"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
               ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Ctrl+S", "Save (Shift: save as)"], ["?", "This list"], ["F11 / Ctrl+Cmd+F", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
@@ -2629,6 +2682,7 @@ class DawScreen {
     else if (key === "v") { handled(); this.setTool("select"); }
     else if (key === "b") { handled(); this.setTool("cut"); }
     else if (key === "g") { handled(); this.setTool("gain"); }
+    else if (key === "w") { handled(); this.setTool("warp"); }
     else if (key === "e") { handled(); this.run("toggleDock"); }
   }
 }
