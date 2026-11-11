@@ -1419,3 +1419,32 @@ body.library-dragging * { cursor: grabbing !important; }
 .warp-marker.is-dragging { border-left-style: dashed; }
 .clip.is-warped .clip-name::after { content: "  \21C4"; opacity: 0.7; }
 .daw-arrange[data-tool="warp"] .clip, [data-tool="warp"] .clip { cursor: ew-resize; }
+
+/* ---------- Floating keyboard piano ---------- */
+
+.piano-window {
+  position: absolute;
+  right: 24px;
+  bottom: 24px;
+  z-index: 30;
+  width: 460px;
+  max-width: calc(100% - 16px);
+  padding: 8px 10px 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  background: rgba(21, 24, 33, 0.97);
+  box-shadow: 0 18px 48px rgba(0, 0, 0, 0.55);
+}
+.piano-window[hidden] { display: none; }
+.piano-head { display: flex; align-items: center; gap: 10px; cursor: grab; user-select: none; margin-bottom: 8px; font-size: 12px; }
+.piano-head strong { margin-right: auto; }
+.piano-controls { display: flex; align-items: center; gap: 4px; }
+.piano-readout { min-width: 40px; text-align: center; color: var(--muted); font-family: var(--mono); font-size: 11px; }
+.piano-keys { position: relative; height: 110px; user-select: none; touch-action: none; }
+.piano-key { position: absolute; top: 0; display: flex; align-items: flex-end; justify-content: center; box-sizing: border-box; cursor: pointer; }
+.piano-key span { margin-bottom: 6px; font: 600 11px var(--mono); }
+.piano-key.white { height: 100%; background: #e9ecf4; color: #3a4153; border: 1px solid #9aa3b8; border-radius: 0 0 5px 5px; }
+.piano-key.black { height: 62%; z-index: 1; background: #1a1d27; color: #aab2c6; border: 1px solid #000; border-radius: 0 0 4px 4px; }
+.piano-key.white.is-down { background: var(--accent); color: #fff; }
+.piano-key.black.is-down { background: var(--accent-2); color: #08110f; }
+.piano-hint { margin-top: 8px; color: var(--faint); font-size: 11px; }

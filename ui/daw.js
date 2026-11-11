@@ -2655,7 +2655,7 @@ class DawScreen {
     ["Computer keyboard piano", [["M", "Turn the computer keyboard into a MIDI keyboard on / off (toolbar piano button)"],
                                  ["A S D F G H J K", "White keys, C to C (; adds one more)"], ["W E T Y U O P", "Black keys"],
                                  ["Z / X", "Octave down / up"], ["C / V", "Velocity down / up"],
-                                 ["While on", "Plays the armed (or selected) MIDI track and records on it. The keys above stop doing their usual shortcuts."]]],
+                                 ["While on", "Opens a floating piano and plays the armed (or selected) MIDI track. Single-key shortcuts (R, Space, S...) are off; Ctrl / Cmd ones still work. Esc closes it."]]],
     ["Clips", [[", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
@@ -2745,19 +2745,98 @@ class DawScreen {
     if (!this.piano.on) this.releasePianoKeys();
     this.pianoButton?.classList.toggle("is-accent", this.piano.on);
     this.pianoButton?.setAttribute("aria-pressed", String(this.piano.on));
-    if (this.piano.on) this.pianoToast();
-    else toast("Computer keyboard piano off.");
+    this.pianoWindow(this.piano.on);
+    toast(this.piano.on ? "Computer keyboard piano on. Single-key shortcuts are off until you turn it off (M or Esc)." : "Computer keyboard piano off.");
   }
 
-  pianoToast() {
-    const { octave, velocity } = this.piano;
-    toast(`Computer keyboard piano on: A–K play from C${3 + octave} (Z / X octave, C / V velocity ${velocity}). M turns it off.`);
+  // The floating piano: the keys, labelled with the computer keys that play them, lighting up
+  // while held. Drag it by its title; the keys also play with the mouse.
+  pianoWindow(show) {
+    let win = this.pianoWin;
+    if (!win) {
+      win = this.pianoWin = html("div", "piano-window");
+      win.hidden = true;
+      const head = html("div", "piano-head");
+      head.append(html("strong", "", "Keyboard piano"));
+      const controls = html("span", "piano-controls");
+      const step = (label, title, fn) => controls.append(button("mini", label, title, fn));
+      step("−", "Octave down (Z)", () => this.pianoSet("octave", -1));
+      this.pianoOctave = html("span", "piano-readout");
+      controls.append(this.pianoOctave);
+      step("+", "Octave up (X)", () => this.pianoSet("octave", 1));
+      step("−", "Velocity down (C)", () => this.pianoSet("velocity", -20));
+      this.pianoVelocity = html("span", "piano-readout");
+      controls.append(this.pianoVelocity);
+      step("+", "Velocity up (V)", () => this.pianoSet("velocity", 20));
+      head.append(controls, button("mini", "×", "Turn the keyboard piano off (M)", () => this.togglePiano(false)));
+      const keys = html("div", "piano-keys");
+      const names = Object.fromEntries(Object.entries(DawScreen.PIANO).map(([code, n]) => [n, code]));
+      const label = (code) => (code === "Semicolon" ? ";" : code.slice(3));
+      this.pianoKeyElements = new Map();
+      const whites = [0, 2, 4, 5, 7, 9, 11, 12, 14, 16];
+      const blackAfter = { 1: 0, 3: 1, 6: 3, 8: 4, 10: 5, 13: 7, 15: 8 }; // black offset -> index of the white key to its left
+      const add = (offset, cls, left) => {
+        const code = names[offset];
+        const key = html("div", `piano-key ${cls}`);
+        key.style.left = `${left}%`;
+        key.append(html("span", "", label(code)));
+        key.dataset.offset = String(offset);
+        key.addEventListener("pointerdown", (event) => {
+          event.preventDefault();
+          key.setPointerCapture(event.pointerId);
+          this.pianoPress(code);
+          key.addEventListener("pointerup", () => this.pianoRelease(code), { once: true });
+          key.addEventListener("pointercancel", () => this.pianoRelease(code), { once: true });
+        });
+        this.pianoKeyElements.set(code, key);
+        keys.append(key);
+      };
+      const w = 100 / whites.length;
+      whites.forEach((offset, i) => add(offset, "white", i * w));
+      for (const [offset, i] of Object.entries(blackAfter)) add(Number(offset), "black", (i + 1) * w - w * 0.3);
+      for (const key of keys.querySelectorAll(".white")) key.style.width = `${w}%`;
+      for (const key of keys.querySelectorAll(".black")) key.style.width = `${w * 0.6}%`;
+      win.append(head, keys, html("div", "piano-hint", "A–K and W E T Y U O P play. Z / X octave, C / V velocity, M or Esc to close."));
+
+      head.addEventListener("pointerdown", (event) => {
+        if (event.target.closest("button")) return;
+        const rect = win.getBoundingClientRect(), host = this.root.getBoundingClientRect();
+        const dx = event.clientX - rect.left, dy = event.clientY - rect.top;
+        head.setPointerCapture(event.pointerId);
+        const move = (e) => {
+          win.style.left = `${clamp(e.clientX - dx - host.left, 0, host.width - rect.width)}px`;
+          win.style.top = `${clamp(e.clientY - dy - host.top, 0, host.height - rect.height)}px`;
+          win.style.right = win.style.bottom = "auto";
+        };
+        head.addEventListener("pointermove", move);
+        head.addEventListener("pointerup", () => head.removeEventListener("pointermove", move), { once: true });
+      });
+      this.root.append(win);
+    }
+    win.hidden = !show;
+    this.updatePianoWindow();
+  }
+
+  updatePianoWindow() {
+    if (!this.pianoWin || !this.piano) return;
+    const { octave, velocity, held } = this.piano;
+    this.pianoOctave.textContent = `C${3 + octave}`;
+    this.pianoVelocity.textContent = `vel ${velocity}`;
+    for (const [code, key] of this.pianoKeyElements) key.classList.toggle("is-down", held.has(code));
+  }
+
+  pianoSet(what, delta) {
+    const piano = this.piano;
+    if (what === "octave") piano.octave = clamp(piano.octave + delta, -4, 4);
+    else piano.velocity = clamp(piano.velocity + delta, 1, 127);
+    this.updatePianoWindow();
   }
 
   releasePianoKeys() {
     if (!this.piano) return;
     for (const note of this.piano.held.values()) daw("liveNote", { note, velocity: 0 });
     this.piano.held.clear();
+    this.updatePianoWindow();
   }
 
   // The armed or monitored MIDI tracks play it. If none is, the selected MIDI track starts monitoring.
@@ -2769,12 +2848,29 @@ class DawScreen {
     daw("liveNote", { note, velocity });
   }
 
+  pianoPress(code) {
+    const piano = this.piano;
+    if (piano.held.has(code)) return;
+    const pitch = clamp(60 + piano.octave * 12 + DawScreen.PIANO[code], 0, 127);
+    piano.held.set(code, pitch);
+    this.playPianoNote(pitch, piano.velocity);
+    this.updatePianoWindow();
+  }
+
+  pianoRelease(code) {
+    const held = this.piano.held;
+    if (!held.has(code)) return false;
+    daw("liveNote", { note: held.get(code), velocity: 0 });
+    held.delete(code);
+    this.updatePianoWindow();
+    return true;
+  }
+
   onPianoKey(event, down) {
     if (!this.active || !this.piano) return;
     const code = event.code;
-    const held = this.piano.held;
     if (!down) {
-      if (held.has(code)) { daw("liveNote", { note: held.get(code), velocity: 0 }); held.delete(code); event.preventDefault(); }
+      if (this.pianoRelease(code)) event.preventDefault();
       return;
     }
     if (!this.piano.on) {
@@ -2783,23 +2879,19 @@ class DawScreen {
       }
       return;
     }
-    if (isTyping(event) || event.ctrlKey || event.metaKey || event.altKey) return;
-    const piano = this.piano;
-    const note = code in DawScreen.PIANO ? DawScreen.PIANO[code] : null;
-    if (note !== null && !event.shiftKey) {
-      event.preventDefault(); event.stopPropagation();
-      if (event.repeat || held.has(code)) return;
-      const pitch = Math.min(127, Math.max(0, 60 + piano.octave * 12 + note));
-      held.set(code, pitch);
-      this.playPianoNote(pitch, piano.velocity);
-    } else if (!event.shiftKey && ["KeyZ", "KeyX", "KeyC", "KeyV", "KeyM"].includes(code)) {
-      event.preventDefault(); event.stopPropagation();
+    if (isTyping(event) || event.ctrlKey || event.metaKey) return; // Ctrl / Cmd shortcuts still work
+    event.stopPropagation(); // every other single key is the piano's while it's on
+    if (event.altKey || event.shiftKey) return;
+    if (code in DawScreen.PIANO) {
+      event.preventDefault();
+      if (!event.repeat) this.pianoPress(code);
+    } else if (["KeyZ", "KeyX", "KeyC", "KeyV", "KeyM", "Escape"].includes(code)) {
+      event.preventDefault();
       if (event.repeat) return;
-      if (code === "KeyM") return this.togglePiano(false);
-      if (code === "KeyZ") piano.octave = Math.max(-4, piano.octave - 1);
-      else if (code === "KeyX") piano.octave = Math.min(4, piano.octave + 1);
-      else piano.velocity = Math.min(127, Math.max(1, piano.velocity + (code === "KeyC" ? -20 : 20)));
-      this.pianoToast();
+      if (code === "KeyM" || code === "Escape") return this.togglePiano(false);
+      if (code === "KeyZ") this.pianoSet("octave", -1);
+      else if (code === "KeyX") this.pianoSet("octave", 1);
+      else this.pianoSet("velocity", code === "KeyC" ? -20 : 20);
     }
   }
 
