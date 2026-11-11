@@ -433,6 +433,45 @@ int Edit::splitClip (int clipId, double time)
     return id;
 }
 
+void Edit::setClipTranspose (int clipId, double semitones)
+{
+    if (auto clip = getClip (clipId); clip.isValid())
+        clip.setProperty (ids::transpose, juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, semitones), &undoManager);
+}
+
+void Edit::setTrackTranspose (int trackId, double semitones)
+{
+    if (auto track = getTrack (trackId); track.isValid())
+        track.setProperty (ids::transpose, juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, semitones), &undoManager);
+}
+
+void Edit::setClipWarp (int clipId, const warp::Map& map)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid())
+        return;
+
+    const auto text = map.toString();
+    if (text.isEmpty())
+        clip.removeProperty (ids::warp, &undoManager);
+    else
+        clip.setProperty (ids::warp, text, &undoManager);
+}
+
+warp::Map Edit::getClipWarp (const juce::ValueTree& clip)
+{
+    return warp::Map::fromString (clip[ids::warp].toString());
+}
+
+warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
+{
+    warp::Settings settings;
+    settings.map = getClipWarp (clip);
+    settings.semitones = (double) clip.getProperty (ids::transpose, 0.0) + (double) clip.getParent().getProperty (ids::transpose, 0.0);
+    settings.semitones = juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, settings.semitones);
+    return settings;
+}
+
 int Edit::duplicateClip (int clipId)
 {
     auto clip = getClip (clipId);

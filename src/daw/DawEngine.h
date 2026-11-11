@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <bitset>
 #include <map>
+#include <set>
 
 namespace daw
 {
@@ -248,6 +249,7 @@ private:
     int blockSize = 512;
 
     std::map<int, std::shared_ptr<Strip>> strips; // message thread: the current strip per id
+    std::map<int, AudioPool::Audio> lastClipAudio; // message thread: what each clip played in the last graph
 
     std::atomic<Graph*> incoming { nullptr }; // built, not yet picked up by the audio thread
     Graph* active = nullptr;                  // audio thread

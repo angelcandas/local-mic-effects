@@ -22,6 +22,7 @@
 #include "daw/Instruments.h"
 #include "daw/PluginHost.h"
 #include "daw/Project.h"
+#include "daw/Warp.h"
 #include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
@@ -681,7 +682,7 @@ namespace
 
     // A sung line: phrases of a 160 Hz voice-like tone (harmonics at 1/h) with a muddy
     // second harmonic (+9.5 dB at 320 Hz), alternating loud and soft, with gaps.
-    juce::AudioBuffer<float> makeSungLine (double seconds)
+    juce::AudioBuffer<float> makeSungLine (double seconds, double period = 1.25, double sung = 1.0)
     {
         juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
         buffer.clear();
@@ -690,8 +691,8 @@ namespace
         for (int i = 0; i < buffer.getNumSamples(); ++i)
         {
             const auto t = i / sampleRate;
-            const auto phrase = (int) std::floor (t / 1.25);
-            if (std::fmod (t, 1.25) > 1.0)
+            const auto phrase = (int) std::floor (t / period);
+            if (std::fmod (t, period) > sung)
                 continue; // a breath between phrases
 
             const auto level = phrase % 2 == 0 ? 0.3 : 0.07;
@@ -727,6 +728,156 @@ namespace
         return buffer;
     }
 
+    // A guitar-ish part: plucked 196 Hz notes (decaying harmonics) every half second,
+    // a loud bar then a quiet one, so its level swings; a little rumble at 30 Hz.
+    juce::AudioBuffer<float> makePlucks (double seconds)
+    {
+        juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto since = std::fmod (t, 0.5);
+            const auto level = (int) std::floor (t / 2.0) % 2 == 0 ? 0.25 : 0.04;
+            double value = 0.0;
+            for (int h = 1; h <= 12; ++h)
+                value += std::sin (twoPi * 196.0 * h * t) / h * std::exp (-since * (3.0 + h));
+            value = value * level + 0.002 * std::sin (twoPi * 30.0 * t);
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.setSample (ch, i, (float) value);
+        }
+
+        return buffer;
+    }
+
+    // Auto Mix adding effects: reverb on a dry voice (at the end of its chain), EQ and a
+    // compressor on an instrument, none on a voice that rings already, and only the
+    // effects it's allowed.
+    void testAutoMixEffects()
+    {
+        std::cout << "\nAuto Mix adds effects\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-automix-fx");
+        folder.createDirectory();
+        const auto voiceFile = folder.getChildFile ("voice.wav"), guitarFile = folder.getChildFile ("guitar.wav"),
+                   backingFile = folder.getChildFile ("backing.wav"), roomyFile = folder.getChildFile ("roomy.wav");
+        writeWav (voiceFile, makeSungLine (12.0, 2.5, 1.5), sampleRate);
+        writeWav (guitarFile, makePlucks (12.0), sampleRate);
+        writeWav (backingFile, makeBacking (12.0), sampleRate);
+        {
+            auto roomy = makeSungLine (12.0, 2.5, 1.5);
+            fx::FxChain room ({ fx::ModuleType::reverb });
+            room.setValue ("reverbMix", 45.0f);
+            room.setValue ("reverbSize", 90.0f);
+            room.setValue ("reverbDamping", 20.0f);
+            room.prepare ({ sampleRate, (juce::uint32) roomy.getNumSamples(), 2 });
+            juce::dsp::AudioBlock<float> block (roomy);
+            room.process (fx::Module::Context (block));
+            writeWav (roomyFile, roomy, sampleRate);
+        }
+
+        daw::Edit edit;
+        const auto voice = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto guitar = (int) edit.addTrack ("Guitar")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Backing")[daw::ids::id];
+        const auto roomy = (int) edit.addTrack ("Harmony vocal")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 12.0);
+        edit.addClip (guitar, guitarFile, 0.0, 12.0);
+        edit.addClip (backing, backingFile, 0.0, 12.0);
+        edit.addClip (roomy, roomyFile, 0.0, 12.0);
+        const auto own = (int) edit.addInsert (guitar, fx::ModuleType::chorus)[daw::ids::id];
+        juce::ignoreUnused (own);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        std::map<int, analysis::Role> roles;
+        std::map<int, float> volumes;
+        for (const auto& [id, profile] : source.tracks)
+        {
+            roles[id] = analysis::guessRole (edit.getTrack (id)[daw::ids::name].toString(), profile, 12.0);
+            volumes[id] = 0.0f;
+        }
+        check (roles[guitar] == analysis::Role::instrument && roles[voice] == analysis::Role::voice && roles[roomy] == analysis::Role::voice,
+               "guesses the guitar is an instrument");
+
+        analysis::MixOptions options;
+        options.existingInserts[guitar] = { fx::ModuleType::chorus };
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options);
+
+        for (const auto& move : plan.moves)
+            for (const auto& reason : move.reasons)
+                std::cout << "        " << edit.getTrack (move.trackId)[daw::ids::name].toString() << ": " << reason << "\n";
+        for (const auto& note : plan.notes)
+            std::cout << "        note: " << note << "\n";
+
+        const auto find = [] (const analysis::MixPlan& p, int track, fx::ModuleType type) -> const analysis::MixMove*
+        {
+            for (const auto& move : p.moves)
+                if (move.trackId == track && move.insert == type)
+                    return &move;
+            return nullptr;
+        };
+
+        const auto* reverb = find (plan, voice, fx::ModuleType::reverb);
+        check (reverb != nullptr && reverb->atEnd && juce::exactlyEqual (reverb->values.at ("reverbMix"), 20.0f),
+               "dry voice: a ballad-sized reverb");
+        check (find (plan, roomy, fx::ModuleType::reverb) == nullptr && find (plan, roomy, fx::ModuleType::paraEq) != nullptr,
+               "a voice that rings on already gets no reverb (but still its EQ)");
+
+        const auto* guitarEq = find (plan, guitar, fx::ModuleType::paraEq);
+        check (guitarEq != nullptr && juce::exactlyEqual (guitarEq->values.at ("peqLowCutOn"), 1.0f)
+                   && guitarEq->values.at ("peqLowCutFreq") >= 60.0f && guitarEq->values.at ("peqLowCutFreq") <= 120.0f,
+               "instrument: low cut under its lowest note (196 Hz)");
+        check (find (plan, guitar, fx::ModuleType::compressor) != nullptr, "instrument: compresses its loud and quiet bars");
+        check (find (plan, backing, fx::ModuleType::compressor) == nullptr && find (plan, backing, fx::ModuleType::reverb) == nullptr,
+               "a full backing gets no compressor or reverb");
+
+        // Applied: the reverb goes after the track's own effects, the rest before them.
+        edit.addInsert (voice, fx::ModuleType::chorus);
+        analysis::applyMix (edit, plan);
+        const auto voiceInserts = daw::Edit::getInserts (edit.getTrack (voice));
+        const auto guitarInserts = daw::Edit::getInserts (edit.getTrack (guitar));
+        check (voiceInserts.getChild (voiceInserts.getNumChildren() - 1)[daw::ids::type].toString() == "reverb"
+                   && voiceInserts.getChild (voiceInserts.getNumChildren() - 2)[daw::ids::type].toString() == "chorus"
+                   && voiceInserts.getChild (0)[daw::ids::type].toString() == "paraEq",
+               "reverb goes at the end of the voice's chain, EQ at the start");
+        check (guitarInserts.getNumChildren() == 3 && guitarInserts.getChild (0)[daw::ids::type].toString() == "paraEq"
+                   && guitarInserts.getChild (1)[daw::ids::type].toString() == "compressor"
+                   && guitarInserts.getChild (2)[daw::ids::type].toString() == "chorus",
+               "instrument: EQ and compressor before its own chorus");
+
+        // Half the amount: half the reverb.
+        edit.getUndoManager().undo();
+        analysis::applyMix (edit, plan, 0.5f);
+        {
+            const auto inserts = daw::Edit::getInserts (edit.getTrack (voice));
+            check (juce::exactlyEqual ((float) inserts.getChild (inserts.getNumChildren() - 1)["reverbMix"], 10.0f),
+                   "amount 50% halves the reverb");
+        }
+
+        // Only what it's allowed to add.
+        analysis::MixOptions eqOnly;
+        eqOnly.compressor = eqOnly.deEsser = eqOnly.reverb = false;
+        const auto limited = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, eqOnly);
+        bool onlyEq = true;
+        for (const auto& move : limited.moves)
+            onlyEq = onlyEq && (! move.insert.has_value() || *move.insert == fx::ModuleType::paraEq);
+        analysis::MixOptions none;
+        none.eq = none.compressor = none.deEsser = none.reverb = false;
+        const auto volumesOnly = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, none);
+        bool onlyVolumes = ! volumesOnly.moves.empty();
+        for (const auto& move : volumesOnly.moves)
+            onlyVolumes = onlyVolumes && ! move.insert.has_value();
+        check (onlyEq && find (limited, voice, fx::ModuleType::paraEq) != nullptr && onlyVolumes,
+               "adds only the effects you allow (volumes always)");
+
+        // Coaching keeps the voice dry.
+        const auto coaching = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::coaching, options);
+        check (find (coaching, voice, fx::ModuleType::reverb) == nullptr, "coaching: no reverb");
+
+        folder.deleteRecursively();
+    }
+
     void testMixAssistant()
     {
         std::cout << "\nAuto Mix (mix assistant)\n";
@@ -755,7 +906,9 @@ namespace
                "guesses voice and backing (pitched " + juce::String (voiceProfile.getPitchedFraction() * 100.0, 0) + "% of the voice)");
 
         const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { backing, analysis::Role::backing } };
-        const auto plan = analysis::planMix (source, roles, { { voice, 0.0f }, { backing, 0.0f } }, 0.0f, analysis::MixStyle::pop);
+        analysis::MixOptions existing; // as DawBridge passes them: the voice has its own reverb
+        existing.existingInserts[voice] = { fx::ModuleType::reverb };
+        const auto plan = analysis::planMix (source, roles, { { voice, 0.0f }, { backing, 0.0f } }, 0.0f, analysis::MixStyle::pop, existing);
 
         for (const auto& move : plan.moves)
             for (const auto& reason : move.reasons)
@@ -793,6 +946,8 @@ namespace
                    && inserts.getChild (0)[daw::ids::type].toString() == "paraEq"
                    && inserts.getChild (inserts.getNumChildren() - 1)[daw::ids::type].toString() == "reverb",
                "adds its inserts before the track's own effects");
+        check (juce::exactlyEqual ((float) inserts.getChild (inserts.getNumChildren() - 1)["reverbMix"], 0.0f),
+               "leaves the voice's own reverb as it was");
 
         const auto after = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, true).run();
         const auto masking = analysis::measureMasking (after.tracks[0].second, after.tracks[1].second);
@@ -1805,6 +1960,18 @@ namespace
         check (std::abs (f - 440.0) < 3.0, "the built-in synth plays the note's pitch (" + juce::String (f, 1) + " Hz)");
         check (rms (out[0], at (1.8), at (2.0)) < 1.0e-4f, "the note ends (with its release)");
 
+        edit.getTrack (keys).setProperty (daw::ids::transpose, 12.0, nullptr);
+        engine.rebuildNow();
+        engine.seek (0);
+        engine.play();
+        out = render (engine, 1.3);
+        engine.stop();
+        const auto up = estimateFrequency (out[0], at (0.8), at (1.2));
+        check (std::abs (up - 880.0) < 6.0, "the track's transpose moves its MIDI notes (" + juce::String (up, 1) + " Hz)");
+        edit.getTrack (keys).removeProperty (daw::ids::transpose, nullptr);
+        engine.rebuildNow();
+        render (engine, 1.0); // let the release ring out
+
         // Outside the clip's window: not played.
         edit.getUndoManager().beginNewTransaction();
         edit.trimClipStart (clip, 0.9); // the window now starts after the note's start
@@ -2120,6 +2287,29 @@ namespace
                    && std::abs ((double) session["tracks"][0]["clips"][0]["length"] - songSeconds) < 1.0e-6
                    && session["tracks"][0]["clips"][0]["file"].toString() == song.getFullPathName(),
                "Import puts the file on the selected track, at its full length");
+
+        // Warp and transpose through the page's commands: the session describes them, and
+        // the clip's waveform and length come from its rendered copy.
+        {
+            const auto clipId = (int) imported["clip"];
+            auto markers = juce::Array<juce::var> { juce::var (juce::Array<juce::var> { 0.0, 0.0 }), juce::var (juce::Array<juce::var> { 0.5, 1.0 }) };
+            check (ok (run ("setWarp", args ({ { "id", clipId }, { "markers", markers } })))
+                       && ok (run ("setClip", args ({ { "id", clipId }, { "transpose", 3.0 } })))
+                       && ok (run ("setTrack", args ({ { "id", vocal }, { "transpose", -1.5 } }))),
+                   "setWarp, clip transpose and track transpose complete");
+            processor.getDawEngine().loadAllNow();
+            const auto warped = lastSession();
+            const auto clip = warped["tracks"][0]["clips"][0];
+            const auto peaks = run ("peaks", args ({ { "clip", clipId } }));
+            check (clip["warp"].size() == 2 && std::abs ((double) clip["transpose"] - 3.0) < 1e-9
+                       && std::abs ((double) warped["tracks"][0]["transpose"] + 1.5) < 1e-9
+                       && clip["audioKey"].toString().contains ("#")
+                       && std::abs ((double) clip["fileLength"] - (songSeconds + 0.5)) < 0.01
+                       && peaks["peaks"].isArray(),
+                   "the session shows the warp, both transposes and the rendered length (" + clip["fileLength"].toString() + " s)");
+            run ("undo"); run ("undo"); run ("undo");
+            check (! edit.getClip (clipId).hasProperty (daw::ids::warp), "and each undoes");
+        }
 
         // ...and with no track picked, on a new track named after the file.
         imported = bridge.importAudio (song, -1);
@@ -2472,6 +2662,185 @@ namespace
         check ((bool) edit.getTrack (b)[daw::ids::solo] && ! (bool) edit.getTrack (a)[daw::ids::solo], "exclusive solo");
         edit.clearMuteAndSolo();
         check (! (bool) edit.getTrack (b)[daw::ids::solo] && ! (bool) edit.getTrack (b)[daw::ids::mute], "clear every mute and solo");
+    }
+
+    // Frequency of a steady tone from its zero crossings, between `from` and `to` seconds.
+    double measureFrequency (const juce::AudioBuffer<float>& audio, double from, double to)
+    {
+        const auto* x = audio.getReadPointer (0);
+        const auto a = (int) (from * sampleRate), b = juce::jmin (audio.getNumSamples(), (int) (to * sampleRate));
+        int first = -1, last = -1, crossings = 0;
+
+        for (int i = a + 1; i < b; ++i)
+        {
+            if (x[i - 1] < 0.0f && x[i] >= 0.0f)
+            {
+                if (first < 0) first = i; else ++crossings;
+                last = i;
+            }
+        }
+
+        return crossings > 0 ? crossings * sampleRate / (last - first) : 0.0;
+    }
+
+    // Where the loudest sample is, in seconds.
+    double findPeak (const juce::AudioBuffer<float>& audio, double from, double to)
+    {
+        const auto* x = audio.getReadPointer (0);
+        auto best = (int) (from * sampleRate);
+        for (auto i = best; i < juce::jmin (audio.getNumSamples(), (int) (to * sampleRate)); ++i)
+            if (std::abs (x[i]) > std::abs (x[best]))
+                best = i;
+        return best / sampleRate;
+    }
+
+    void testWarp()
+    {
+        std::cout << "\nTime warp and transpose (clips stay dry)\n";
+        using daw::warp::Map;
+        using daw::warp::Marker;
+
+        // The map.
+        const Map map ({ { 1.0, 1.5 }, { 0.5, 0.5 }, { 1.2, 1.4 }, { 2.0, 2.5 } }); // { 1.2, 1.4 } would run backwards
+        check (map.getMarkers().size() == 3, "markers are sorted and one that runs time backwards is dropped");
+        check (std::abs (map.toTarget (0.25) - 0.25) < 1e-9 && std::abs (map.toTarget (0.75) - 1.0) < 1e-9
+                   && std::abs (map.toTarget (3.0) - 3.5) < 1e-9,
+               "time runs at normal speed outside the markers and stretches between them");
+        auto roundTrip = true;
+        for (double s = 0.0; s < 3.0; s += 0.137)
+            roundTrip = roundTrip && std::abs (map.toSource (map.toTarget (s)) - s) < 1e-9;
+        check (roundTrip, "toSource undoes toTarget");
+        check (Map::fromString (map.toString()) == map && Map().toString().isEmpty() && Map::fromString ({}).isIdentity(),
+               "a map saves to text and back; no markers is the identity");
+        check (std::abs (map.getRateAt (0.75) - 0.5) < 1e-9, "the rate between markers (half speed when stretched 2x)");
+
+        // A voice-like tone, and the same through a map that only slides it later.
+        const auto voice = makeVoice (220.0f, 2.0);
+        juce::AudioBuffer<float> source (2, (int) voice.size());
+        for (int ch = 0; ch < 2; ++ch)
+            source.copyFrom (ch, 0, voice.data(), (int) voice.size());
+
+        daw::warp::Settings slide;
+        slide.map = Map ({ { 0.0, 0.25 } });
+        const auto slid = daw::warp::render (source, sampleRate, slide);
+        double worst = 0.0;
+        const auto offset = (int) (0.25 * sampleRate);
+        for (int i = (int) (0.3 * sampleRate); i < (int) (2.0 * sampleRate); ++i)
+            worst = std::max (worst, (double) std::abs (slid.getSample (1, i) - source.getSample (1, i - offset)));
+        check (slid.getNumSamples() == (int) (2.25 * sampleRate) && rms (std::vector<float> (slid.getReadPointer (0), slid.getReadPointer (0) + offset - 4096), 0, (size_t) offset - 4096) < 1e-4f,
+               "sliding the audio later adds silence in front");
+        check (worst < 0.01, "audio that only moves comes through unchanged (worst error " + juce::String (worst, 4) + ")");
+
+        // Stretch the first second to two: the pitch stays, the length grows.
+        juce::AudioBuffer<float> sine (1, (int) (2.0 * sampleRate));
+        for (int i = 0; i < sine.getNumSamples(); ++i)
+            sine.setSample (0, i, 0.5f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * i / sampleRate));
+
+        daw::warp::Settings stretch;
+        stretch.map = Map ({ { 0.0, 0.0 }, { 1.0, 2.0 } });
+        const auto stretched = daw::warp::render (sine, sampleRate, stretch);
+        const auto slowPitch = measureFrequency (stretched, 0.3, 1.7);
+        check (stretched.getNumSamples() == (int) (3.0 * sampleRate), "stretching the first second to two makes 3 s");
+        check (std::abs (slowPitch - 440.0) < 1.0, "time stretch keeps the pitch (" + juce::String (slowPitch, 1) + " Hz)");
+        check (rms (std::vector<float> (stretched.getReadPointer (0), stretched.getReadPointer (0) + stretched.getNumSamples()),
+                    (size_t) (0.3 * sampleRate), (size_t) (2.7 * sampleRate)) > 0.3f,
+               "and keeps the level steady");
+
+        // Transpose: an octave up, then a fifth down, same length.
+        for (const auto& [semitones, expected] : { std::pair { 12.0, 880.0 }, std::pair { -7.0, 440.0 * std::pow (2.0, -7.0 / 12.0) } })
+        {
+            daw::warp::Settings transpose;
+            transpose.semitones = semitones;
+            const auto shifted = daw::warp::render (sine, sampleRate, transpose);
+            const auto pitch = measureFrequency (shifted, 0.3, 1.7);
+            check (shifted.getNumSamples() == sine.getNumSamples() && std::abs (pitch - expected) < expected * 0.005,
+                   juce::String (semitones, 0) + " semitones: " + juce::String (pitch, 1) + " Hz (expected " + juce::String (expected, 1) + ")");
+        }
+
+        // A hit moved by a marker lands where the marker says, and the one before stays.
+        juce::AudioBuffer<float> hits (1, (int) (2.0 * sampleRate));
+        hits.clear();
+        for (const auto at : { 0.5, 1.0 })
+            for (int i = 0; i < (int) (0.08 * sampleRate); ++i)
+                hits.setSample (0, (int) (at * sampleRate) + i,
+                                0.8f * (float) std::exp (-i / (0.01 * sampleRate)) * (float) std::sin (0.2 * i));
+
+        daw::warp::Settings nudge;
+        nudge.map = Map ({ { 0.5, 0.5 }, { 1.0, 1.1 } });
+        const auto nudged = daw::warp::render (hits, sampleRate, nudge);
+        const auto firstHit = findPeak (nudged, 0.3, 0.8), secondHit = findPeak (nudged, 0.9, 1.4);
+        check (std::abs (firstHit - 0.5) < 0.01 && std::abs (secondHit - 1.1) < 0.01,
+               "a hit moved from 1.0 s to 1.1 s lands there (" + juce::String (firstHit, 3) + " s, " + juce::String (secondHit, 3) + " s)");
+
+        // Speed (for information: use the release build for real numbers).
+        {
+            juce::AudioBuffer<float> noise (2, (int) (20.0 * sampleRate));
+            juce::Random random (1);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < noise.getNumSamples(); ++i)
+                    noise.setSample (ch, i, random.nextFloat() - 0.5f);
+
+            daw::warp::Settings up;
+            up.semitones = 2.0;
+            const auto started = juce::Time::getMillisecondCounterHiRes();
+            daw::warp::render (noise, sampleRate, up);
+            std::cout << "  INFO  20 s of stereo transposed in "
+                      << juce::String ((juce::Time::getMillisecondCounterHiRes() - started) / 1000.0, 2) << " s\n";
+        }
+
+        // In the engine: a transposed clip plays its rendered copy; the file is untouched.
+        const auto folder = juce::File::createTempFile ("micfx-warp");
+        folder.createDirectory();
+        const auto file = folder.getChildFile ("sine.wav");
+        writeWav (file, sine, sampleRate);
+        const auto before = file.getSize();
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit, false);
+        engine.prepare (sampleRate, blockSize);
+        const auto track = (int) edit.addTrack ("Voice")[daw::ids::id];
+        const auto clip = (int) edit.addClip (track, file, 0.0, 2.0)[daw::ids::id];
+
+        const auto play = [&]
+        {
+            engine.loadAllNow();
+            engine.seek (0);
+            engine.play();
+            juce::AudioBuffer<float> out (2, (int) (2.0 * sampleRate));
+            for (int done = 0; done < out.getNumSamples(); done += blockSize)
+            {
+                juce::AudioBuffer<float> block (2, blockSize);
+                engine.process (block, 2, blockSize);
+                for (int ch = 0; ch < 2; ++ch)
+                    out.copyFrom (ch, done, block, ch, 0, juce::jmin (blockSize, out.getNumSamples() - done));
+            }
+            engine.stop();
+            return out;
+        };
+
+        edit.setClipTranspose (clip, 12.0);
+        auto out = play();
+        check (std::abs (measureFrequency (out, 0.3, 1.7) - 880.0) < 5.0, "a clip transposed +12 plays an octave up");
+
+        edit.setClipTranspose (clip, 0.0);
+        edit.setTrackTranspose (track, -12.0);
+        out = play();
+        check (std::abs (measureFrequency (out, 0.3, 1.7) - 220.0) < 2.0, "the track's transpose applies to its clips");
+
+        edit.setTrackTranspose (track, 5.0);
+        edit.setClipTranspose (clip, -5.0);
+        out = play();
+        check (std::abs (measureFrequency (out, 0.3, 1.7) - 440.0) < 2.0, "clip and track transposes add up");
+        check (file.getSize() == before, "the recording itself is never changed");
+
+        edit.setClipWarp (clip, Map ({ { 0.0, 0.0 }, { 0.5, 1.0 } }));
+        const auto right = edit.splitClip (clip, 1.5);
+        check (daw::Edit::getClipWarp (edit.getClip (right)) == daw::Edit::getClipWarp (edit.getClip (clip)) && ! daw::Edit::getClipWarp (edit.getClip (clip)).isIdentity(),
+               "a split keeps the warp on both halves");
+        edit.setClipWarp (clip, Map());
+        check (! edit.getClip (clip).hasProperty (daw::ids::warp), "clearing the warp removes it from the project");
+
+        folder.deleteRecursively();
     }
 
     void testClipTools()
@@ -3026,11 +3395,13 @@ int main()
     testClipEditing();
     testDawMode();
     testClipTools();
+    testWarp();
     testTrackTools();
     testDawBridge();
     testLiveControls();
     testAnalysis();
     testMixAssistant();
+    testAutoMixEffects();
     testLatency();
     testSmoothing();
     testLiveMeters();
