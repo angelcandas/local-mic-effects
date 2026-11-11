@@ -66,8 +66,8 @@ public:
     Pitch() : Module (ModuleType::pitch) {}
 
     Value& tuneOn        = addSwitch ("tuneOn");
-    Value& tuneKey       = addValue ("tuneKey", 0.0f);
-    Value& tuneScale     = addValue ("tuneScale", 0.0f);
+    Value& tuneKey       = addChoice ("tuneKey", 0.0f);
+    Value& tuneScale     = addChoice ("tuneScale", 0.0f);
     Value& tuneSpeed     = addValue ("tuneSpeed", 20.0f);
     Value& tuneAmount    = addValue ("tuneAmount", 100.0f);
     Value& shiftOn       = addSwitch ("pitchOn");
@@ -145,7 +145,7 @@ public:
     ParaEq() : Module (ModuleType::paraEq) {}
 
     Value& on          = addSwitch ("peqOn");
-    Value& lowCutOn    = addValue ("peqLowCutOn", 0.0f); // a value, not a switch: it doesn't switch the module on
+    Value& lowCutOn    = addChoice ("peqLowCutOn", 0.0f); // a value, not a switch: it doesn't switch the module on
     Value& lowCutFreq  = addValue ("peqLowCutFreq", 80.0f);
     Value& lowFreq     = addValue ("peqLowFreq", 120.0f);
     Value& lowGain     = addValue ("peqLowGain", 0.0f);
@@ -160,31 +160,38 @@ public:
     Value& bell3Q      = addValue ("peqBell3Q", 1.0f);
     Value& highFreq    = addValue ("peqHighFreq", 8000.0f);
     Value& highGain    = addValue ("peqHighGain", 0.0f);
-    Value& highCutOn   = addValue ("peqHighCutOn", 0.0f);
+    Value& highCutOn   = addChoice ("peqHighCutOn", 0.0f);
     Value& highCutFreq = addValue ("peqHighCutFreq", 18000.0f);
 
-    // The values as EQ settings (for the analysis, which plans moves on the same curve).
+    // The values as EQ settings (for the analysis, which plans moves on the same curve):
+    // what the knobs are set to, not where a glide towards them has got to.
     ParametricEq::Settings getSettings() const noexcept
     {
-        ParametricEq::Settings s;
-        s.lowCutOn    = flag (lowCutOn);
-        s.lowCutHz    = get (lowCutFreq);
-        s.lowShelfHz  = get (lowFreq);
-        s.lowShelfDb  = get (lowGain);
-        s.bells[0]    = { get (bell1Freq), get (bell1Gain), get (bell1Q) };
-        s.bells[1]    = { get (bell2Freq), get (bell2Gain), get (bell2Q) };
-        s.bells[2]    = { get (bell3Freq), get (bell3Gain), get (bell3Q) };
-        s.highShelfHz = get (highFreq);
-        s.highShelfDb = get (highGain);
-        s.highCutOn   = flag (highCutOn);
-        s.highCutHz   = get (highCutFreq);
-        return s;
+        return makeSettings ([] (const Value& v) { return v.load (std::memory_order_relaxed); });
     }
 
 private:
+    template <typename Read>
+    ParametricEq::Settings makeSettings (Read read) const noexcept
+    {
+        ParametricEq::Settings s;
+        s.lowCutOn    = read (lowCutOn) >= 0.5f;
+        s.lowCutHz    = read (lowCutFreq);
+        s.lowShelfHz  = read (lowFreq);
+        s.lowShelfDb  = read (lowGain);
+        s.bells[0]    = { read (bell1Freq), read (bell1Gain), read (bell1Q) };
+        s.bells[1]    = { read (bell2Freq), read (bell2Gain), read (bell2Q) };
+        s.bells[2]    = { read (bell3Freq), read (bell3Gain), read (bell3Q) };
+        s.highShelfHz = read (highFreq);
+        s.highShelfDb = read (highGain);
+        s.highCutOn   = read (highCutOn) >= 0.5f;
+        s.highCutHz   = read (highCutFreq);
+        return s;
+    }
+
     void prepareModule (const juce::dsp::ProcessSpec& spec) override { eq.prepare (spec); }
     void resetModule() override                                      { eq.reset(); }
-    void update() noexcept override                                  { eq.setSettings (getSettings()); }
+    void update() noexcept override                                  { eq.setSettings (makeSettings ([] (const Value& v) { return get (v); })); }
     void render (const Context& c) noexcept override                 { eq.process (c); }
 
     ParametricEq eq;
@@ -335,7 +342,7 @@ public:
     Filter() : Module (ModuleType::filter) {}
 
     Value& on        = addSwitch ("filterOn");
-    Value& type      = addValue ("filterType", 0.0f);
+    Value& type      = addChoice ("filterType", 0.0f);
     Value& cutoff    = addValue ("filterCutoff", 1200.0f);
     Value& resonance = addValue ("filterResonance", 30.0f);
 
@@ -530,7 +537,7 @@ public:
     Value& time     = addValue ("delayTime", 350.0f);
     Value& feedback = addValue ("delayFeedback", 35.0f);
     Value& mix      = addValue ("delayMix", 25.0f);
-    Value& pingPong = addValue ("delayPingPong", 0.0f);
+    Value& pingPong = addChoice ("delayPingPong", 0.0f);
 
 private:
     void prepareModule (const juce::dsp::ProcessSpec& spec) override { echo.prepare (spec); }
