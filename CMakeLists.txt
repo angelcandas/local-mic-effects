@@ -104,7 +104,16 @@ if(EXISTS "${MICFX_DEMUCS_DIR}/src/model.hpp" AND EXISTS "${MICFX_EIGEN_DIR}/Eig
     if(MSVC)
         target_compile_options(MicFXDemucs PRIVATE /O2 /W0)
     else()
-        target_compile_options(MicFXDemucs PRIVATE -O3 -w)
+        target_compile_options(MicFXDemucs PRIVATE -O3 -fno-math-errno -w)
+    endif()
+
+    # Nearly all of Demucs is matrix multiplication (the convolutions are im2col + GEMM).
+    # Eigen's own kernels are far slower than Apple's Accelerate, which runs on the M-series
+    # matrix units; EIGEN_USE_BLAS hands every large product to it. (PUBLIC so DemucsSeparator,
+    # which also includes Eigen, agrees with the library.) Elsewhere Eigen's kernels stay.
+    if(APPLE)
+        target_compile_definitions(MicFXDemucs PUBLIC EIGEN_USE_BLAS)
+        target_link_libraries(MicFXDemucs PUBLIC "-framework Accelerate")
     endif()
 
     list(APPEND MICFX_DSP_SOURCES src/stems/DemucsSeparator.cpp)
