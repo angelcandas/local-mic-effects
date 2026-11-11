@@ -339,6 +339,43 @@ juce::var DawBridge::getPeaks (const juce::File& file, const daw::warp::Settings
     return result;
 }
 
+// Finer peaks for one stretch of a file, for drawing it zoomed in: the signed lowest
+// and highest sample (over all channels) of each bin of about `seconds`. Not cached:
+// the UI asks only for what is on screen.
+juce::var DawBridge::getDetailPeaks (const juce::File& file, double start, double end, double seconds, const daw::warp::Settings& settings)
+{
+    const auto audio = engine.getAudioPool().get (file, settings);
+    if (audio == nullptr || ! (end > start) || ! (seconds > 0.0))
+        return {};
+
+    constexpr int maxBins = 60000;
+    const auto rate = engine.getSampleRate();
+    const auto total = audio->getNumSamples();
+    const auto first = juce::jlimit (0, total, (int) std::floor (start * rate));
+    const auto last = juce::jlimit (first, total, (int) std::ceil (end * rate));
+    const auto step = juce::jmax (1, (int) std::round (seconds * rate), (last - first) / maxBins + 1);
+
+    juce::Array<juce::var> lows, highs;
+    lows.ensureStorageAllocated ((last - first) / step + 1);
+    highs.ensureStorageAllocated ((last - first) / step + 1);
+
+    for (int i = first; i < last; i += step)
+    {
+        const auto count = juce::jmin (step, last - i);
+        auto range = juce::Range<float>::emptyRange (0.0f);
+        for (int channel = 0; channel < audio->getNumChannels(); ++channel)
+        {
+            const auto r = audio->findMinMax (channel, i, count);
+            range = channel == 0 ? r : range.getUnionWith (r);
+        }
+        lows.add (std::round (range.getStart() * 10000.0f) / 10000.0f);
+        highs.add (std::round (range.getEnd() * 10000.0f) / 10000.0f);
+    }
+
+    return object ({ { "start", first / rate }, { "end", last / rate }, { "seconds", step / rate },
+                     { "min", lows }, { "max", highs } });
+}
+
 //==============================================================================
 void DawBridge::tick()
 {
@@ -520,7 +557,7 @@ namespace
     }
 }
 
-juce::var DawBridge::importAudio (const juce::File& file, int trackId)
+juce::var DawBridge::importAudio (const juce::File& file, int trackId, double start)
 {
     // Check the file before copying it anywhere. Only the header is read: the audio
     // itself loads in the background (AudioPool), so a long song doesn't freeze the app.
@@ -538,7 +575,9 @@ juce::var DawBridge::importAudio (const juce::File& file, int trackId)
     if (! edit.getTrack (trackId).isValid())
         trackId = (int) edit.addTrack (file.getFileNameWithoutExtension())[ids::id];
 
-    const auto start = juce::jmax (0.0, (double) engine.getPosition() / engine.getSampleRate());
+    if (start < 0.0)
+        start = (double) engine.getPosition() / engine.getSampleRate();
+    start = juce::jmax (0.0, start);
     const auto clip = edit.addClip (trackId, source, start, std::get<double> (length));
     sessionChanged = true;
 
@@ -547,6 +586,91 @@ juce::var DawBridge::importAudio (const juce::File& file, int trackId)
 
     return object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId }, { "clip", clip[ids::id] },
                      { "start", start } });
+}
+
+//==============================================================================
+namespace
+{
+    constexpr int maxBrowseEntries = 2000;
+
+    bool isAudioFile (const juce::File& file)
+    {
+        static const auto extensions = []
+        {
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            juce::StringArray list;
+            for (auto* format : formats)
+                for (const auto& extension : format->getFileExtensions())
+                    list.addIfNotAlreadyThere (extension.toLowerCase());
+            return list;
+        }();
+
+        return extensions.contains (file.getFileExtension().toLowerCase());
+    }
+}
+
+juce::var DawBridge::describePlaces() const
+{
+    juce::Array<juce::var> list;
+    juce::StringArray seen;
+
+    const auto add = [&] (const juce::String& name, const juce::File& folder, const juce::String& kind, bool removable)
+    {
+        if (! folder.isDirectory() || seen.contains (folder.getFullPathName()))
+            return;
+        seen.add (folder.getFullPathName());
+        list.add (object ({ { "name", name }, { "path", folder.getFullPathName() }, { "kind", kind }, { "removable", removable } }));
+    };
+
+    if (project.isOpen())
+        add ("This project", project.getAudioFolder(), "project", false);
+
+    add ("Recordings", Recorder::getDefaultFolder(), "recordings", false);
+    add ("Music", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "music", false);
+    add ("Downloads", juce::File::getSpecialLocation (juce::File::userHomeDirectory).getChildFile ("Downloads"), "downloads", false);
+    add ("Desktop", juce::File::getSpecialLocation (juce::File::userDesktopDirectory), "desktop", false);
+
+    for (const auto& path : juce::StringArray::fromLines (settings.getValue ("dawBrowserPlaces")))
+        if (juce::File::isAbsolutePath (path))
+            add (juce::File (path).getFileName(), juce::File (path), "folder", true);
+
+    return object ({ { "ok", true }, { "error", juce::String() }, { "places", list } });
+}
+
+juce::var DawBridge::browseFolder (const juce::File& folder) const
+{
+    if (! folder.isDirectory())
+        return error ("That folder isn't there any more.");
+
+    juce::Array<juce::File> folders, files;
+    bool truncated = false;
+
+    for (const auto& entry : juce::RangedDirectoryIterator (folder, false, "*", juce::File::findFilesAndDirectories | juce::File::ignoreHiddenFiles))
+    {
+        if (folders.size() + files.size() >= maxBrowseEntries) { truncated = true; break; }
+
+        const auto file = entry.getFile();
+        if (file.getFileName().startsWithChar ('.'))
+            continue;
+        if (entry.isDirectory())
+            folders.add (file);
+        else if (isAudioFile (file))
+            files.add (file);
+    }
+
+    const auto byName = [] (const juce::File& a, const juce::File& b) { return a.getFileName().compareNatural (b.getFileName()) < 0; };
+    std::sort (folders.begin(), folders.end(), byName);
+    std::sort (files.begin(), files.end(), byName);
+
+    juce::Array<juce::var> folderList, fileList;
+    for (const auto& f : folders)
+        folderList.add (object ({ { "name", f.getFileName() }, { "path", f.getFullPathName() } }));
+    for (const auto& f : files)
+        fileList.add (object ({ { "name", f.getFileName() }, { "path", f.getFullPathName() }, { "size", (double) f.getSize() } }));
+
+    return object ({ { "ok", true }, { "error", juce::String() }, { "path", folder.getFullPathName() }, { "name", folder.getFileName() },
+                     { "folders", folderList }, { "files", fileList }, { "truncated", truncated } });
 }
 
 void DawBridge::loadPresetInto (int trackId, int presetIndex)
@@ -833,8 +957,10 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         // With a clip id, the audio that clip plays (warped and transposed); else the plain file.
         const auto clip = edit.getClip (arg (args, "clip", -1));
-        complete (clip.isValid() ? getPeaks (juce::File (clip[ids::file].toString()), daw::Edit::getWarpSettings (clip))
-                                 : getPeaks (juce::File (args["file"].toString())));
+        const auto file = clip.isValid() ? juce::File (clip[ids::file].toString()) : juce::File (args["file"].toString());
+        const auto settings = clip.isValid() ? daw::Edit::getWarpSettings (clip) : daw::warp::Settings();
+        complete (args.hasProperty ("seconds") ? getDetailPeaks (file, arg (args, "start", 0.0), arg (args, "end", 0.0), arg (args, "seconds", 0.0), settings)
+                                               : getPeaks (file, settings));
         return;
     }
 
@@ -1128,6 +1254,49 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                      Flags::openMode | Flags::canSelectFiles,
                      [this, trackId] (const juce::File& file) { return importAudio (file, trackId); },
                      complete);
+        return;
+    }
+
+    //================================================================ library sidebar
+    if (command == "places") { complete (describePlaces()); return; }
+    if (command == "browse") { complete (browseFolder (juce::File (args["path"].toString()))); return; }
+
+    if (command == "importFile")
+    {
+        const juce::File file (args["file"].toString());
+        complete (juce::File::isAbsolutePath (args["file"].toString()) && file.existsAsFile()
+                      ? importAudio (file, arg (args, "track", -1), arg (args, "start", -1.0))
+                      : error ("That file isn't there any more."));
+        return;
+    }
+
+    if (command == "addPlace")
+    {
+        withChooser ("Add a folder to the library", juce::File::getSpecialLocation (juce::File::userMusicDirectory), {},
+                     Flags::openMode | Flags::canSelectDirectories,
+                     [this] (const juce::File& folder)
+                     {
+                         if (! folder.isDirectory())
+                             return error (folder.getFileName() + " isn't a folder.");
+                         auto places = juce::StringArray::fromLines (settings.getValue ("dawBrowserPlaces"));
+                         places.removeEmptyStrings();
+                         places.addIfNotAlreadyThere (folder.getFullPathName());
+                         settings.setValue ("dawBrowserPlaces", places.joinIntoString ("\n"));
+                         auto result = describePlaces();
+                         result.getDynamicObject()->setProperty ("added", folder.getFullPathName());
+                         return result;
+                     },
+                     complete);
+        return;
+    }
+
+    if (command == "removePlace")
+    {
+        auto places = juce::StringArray::fromLines (settings.getValue ("dawBrowserPlaces"));
+        places.removeString (args["path"].toString());
+        places.removeEmptyStrings();
+        settings.setValue ("dawBrowserPlaces", places.joinIntoString ("\n"));
+        complete (describePlaces());
         return;
     }
 

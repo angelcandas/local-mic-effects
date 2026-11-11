@@ -1821,6 +1821,36 @@ namespace
         check (! ok (imported) && imported["error"].toString().contains ("notes.wav") && edit.getTrack (vocal).getNumChildren() == 2,
                "Import reports a file it can't read, and adds nothing");
 
+        // The library sidebar: browse a folder (audio files and subfolders only), then drop
+        // a file at a time on a track (importFile).
+        {
+            const auto library = folder.getChildFile ("Library");
+            library.getChildFile ("Loops").createDirectory();
+            writeWav (library.getChildFile ("Loops").getChildFile ("Beat.wav"), songAudio, 44100.0);
+            writeWav (library.getChildFile ("b.wav"), songAudio, 44100.0);
+            writeWav (library.getChildFile ("a.wav"), songAudio, 44100.0);
+            library.getChildFile ("readme.txt").replaceWithText ("not audio");
+
+            const auto listing = run ("browse", args ({ { "path", library.getFullPathName() } }));
+            check (ok (listing) && listing["folders"].size() == 1 && listing["folders"][0]["name"].toString() == "Loops"
+                       && listing["files"].size() == 2 && listing["files"][0]["name"].toString() == "a.wav"
+                       && listing["files"][1]["name"].toString() == "b.wav",
+                   "Browse lists a folder's subfolders and audio files, sorted, without other files");
+            check (! ok (run ("browse", args ({ { "path", library.getChildFile ("gone").getFullPathName() } }))),
+                   "Browse reports a folder that isn't there");
+            check (ok (run ("places")) && run ("places")["places"].isArray(), "Places answers with the library's places");
+
+            const auto clipsBefore = edit.getTrack (vocal).getNumChildren();
+            const auto dropped = run ("importFile", args ({ { "file", library.getChildFile ("a.wav").getFullPathName() },
+                                                            { "track", vocal }, { "start", 4.0 } }));
+            check (ok (dropped) && (int) dropped["track"] == vocal && std::abs ((double) dropped["start"] - 4.0) < 1.0e-9
+                       && edit.getTrack (vocal).getNumChildren() == clipsBefore + 1,
+                   "Dropping a file from the library puts a clip where it was dropped");
+            run ("undo");
+            check (! ok (run ("importFile", args ({ { "file", "relative.wav" }, { "track", vocal } }))),
+                   "importFile refuses a path that isn't a file");
+        }
+
         // New project: an empty session with one track, saved, autosaving.
         const auto projects = folder.getChildFile ("Projects");
         projects.createDirectory();
