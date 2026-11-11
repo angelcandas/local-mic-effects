@@ -49,6 +49,49 @@ namespace
     }
 }
 
+namespace
+{
+    // An instrument plugin's own editor in a window of its own (or a generic one with its
+    // parameters when it has none). Keeps the instrument alive while it's open.
+    class InstrumentWindow final : public juce::DocumentWindow
+    {
+    public:
+        InstrumentWindow (const juce::String& title, daw::InstrumentPtr instrumentToShow, std::function<void()> onClose)
+            : DocumentWindow (title, juce::Colour (0xff1b1d27), DocumentWindow::closeButton | DocumentWindow::minimiseButton),
+              instrument (std::move (instrumentToShow)),
+              closed (std::move (onClose))
+        {
+            auto* editor = instrument->hasEditor() ? instrument->createEditorAndMakeActive() : nullptr;
+            if (editor == nullptr)
+                editor = new juce::GenericAudioProcessorEditor (*instrument);
+
+            setUsingNativeTitleBar (true);
+            setContentOwned (editor, true);
+            setResizable (editor->isResizable(), false);
+            centreWithSize (juce::jmax (200, getWidth()), juce::jmax (100, getHeight()));
+            setVisible (true);
+            toFront (true);
+        }
+
+        ~InstrumentWindow() override { clearContentComponent(); } // the editor goes before the instrument
+
+        void closeButtonPressed() override
+        {
+            juce::MessageManager::callAsync ([callback = closed] { if (callback) callback(); });
+        }
+
+        const daw::InstrumentPtr instrument;
+
+    private:
+        std::function<void()> closed;
+    };
+
+    juce::String instrumentKind (const juce::String& format)
+    {
+        return format.toLowerCase().removeCharacters (" ");
+    }
+}
+
 struct DawBridge::ExportJob
 {
     std::atomic<double> progress { 0.0 };
@@ -125,11 +168,20 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
     }
 
     engine.setMetronomeVolume ((float) settings.getDoubleValue ("dawClickVolume", 1.0));
+
+    processor.getPluginHost().onScanFinished = [this]
+    {
+        auto& host = processor.getPluginHost();
+        emit ("dawPlugins", object ({ { "scanning", false }, { "progress", 1.0 }, { "count", host.getInstruments().size() },
+                                      { "failed", host.getFailedFiles().size() } }));
+    };
 }
 
 DawBridge::~DawBridge()
 {
     edit.getState().removeListener (this);
+    processor.getPluginHost().onScanFinished = nullptr;
+    instrumentWindows.clear();
 
     if (exportJob != nullptr)
         exportJob->cancel = true;
@@ -219,6 +271,35 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
     return list;
 }
 
+juce::var DawBridge::describeNotes (const juce::ValueTree& clip) const
+{
+    juce::Array<juce::var> notes;
+
+    for (const auto& note : clip)
+        if (note.hasType (ids::NOTE))
+            notes.add (object ({ { "id", (int) note[ids::id] }, { "pitch", (int) number (note, ids::pitch) },
+                                 { "time", number (note, ids::time) }, { "length", number (note, ids::length) },
+                                 { "velocity", (int) number (note, ids::velocity) } }));
+
+    return notes;
+}
+
+juce::var DawBridge::describeInstrument (const juce::ValueTree& track) const
+{
+    if (! daw::Edit::isMidiTrack (track))
+        return {};
+
+    const auto instrument = track.getChildWithName (ids::INSTRUMENT);
+    const auto trackId = (int) track[ids::id];
+    const auto format = instrument[ids::format].toString();
+
+    return object ({ { "id", instrument[ids::plugin].toString() }, { "name", instrument[ids::name].toString() },
+                     { "kind", instrumentKind (format) }, { "vendor", instrument[ids::vendor].toString() },
+                     { "loaded", engine.getInstrument (trackId) != nullptr }, { "error", engine.getInstrumentError (trackId) },
+                     { "hasWindow", format != daw::instruments::builtinFormat },
+                     { "windowOpen", instrumentWindows.count (trackId) > 0 } });
+}
+
 juce::var DawBridge::describeSession()
 {
     const auto& state = edit.getState();
@@ -232,6 +313,16 @@ juce::var DawBridge::describeSession()
         {
             if (! clip.hasType (ids::CLIP))
                 continue;
+
+            if (daw::Edit::isMidiClip (clip))
+            {
+                clips.add (object ({ { "id", (int) clip[ids::id] }, { "name", clip[ids::name].toString() }, { "midi", true },
+                                     { "start", number (clip, ids::start) }, { "offset", number (clip, ids::offset) },
+                                     { "length", number (clip, ids::length) }, { "gain", 0.0 }, { "fadeIn", 0.0 }, { "fadeOut", 0.0 },
+                                     { "mute", (bool) clip.getProperty (ids::mute, false) }, { "file", juce::String() },
+                                     { "fileLength", -1.0 }, { "missing", false }, { "notes", describeNotes (clip) } }));
+                continue;
+            }
 
             const juce::File file (clip[ids::file].toString());
             const auto audio = engine.getAudioPool().get (file);
@@ -251,7 +342,9 @@ juce::var DawBridge::describeSession()
                               { "inGain", number (track, ids::inGain) }, { "outGain", number (track, ids::outGain) },
                               { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
-                              { "inserts", describeInserts (track) }, { "clips", clips } }));
+                              { "inserts", describeInserts (track) }, { "clips", clips },
+                              { "kind", daw::Edit::isMidiTrack (track) ? "midi" : "audio" },
+                              { "instrument", describeInstrument (track) } }));
     }
 
     const auto master = edit.getMaster();
@@ -328,6 +421,15 @@ juce::var DawBridge::describeStatus()
         { "chains", juce::var (chains) },
         { "inserts", juce::var (inserts) },
         { "loading", engine.getAudioPool().isLoading() },
+        { "midiNotes", [this]
+          {
+              juce::Array<juce::var> held;
+              const auto notes = engine.getHeldNotes();
+              for (int n = 0; n < 128; ++n)
+                  if (notes[(size_t) n])
+                      held.add (n);
+              return juce::var (held);
+          }() },
     });
 }
 
@@ -392,8 +494,43 @@ juce::var DawBridge::getDetailPeaks (const juce::File& file, double start, doubl
 }
 
 //==============================================================================
+void DawBridge::updateInstrumentWindows()
+{
+    // What each MIDI track's instrument is now (a rebuild loads them after the edit).
+    juce::String seen;
+    for (const auto& track : edit.getTracks())
+        if (daw::Edit::isMidiTrack (track))
+        {
+            const auto id = (int) track[ids::id];
+            seen << id << ":" << juce::String::toHexString ((juce::pointer_sized_int) engine.getInstrument (id).get())
+                 << ":" << engine.getInstrumentError (id) << ";";
+        }
+
+    if (seen == instrumentsSeen)
+        return;
+
+    instrumentsSeen = seen;
+    sessionChanged = true;
+
+    // Windows of instruments that were replaced or removed close.
+    for (auto it = instrumentWindows.begin(); it != instrumentWindows.end();)
+    {
+        const auto* window = static_cast<InstrumentWindow*> (it->second.get());
+        if (window->instrument != engine.getInstrument (it->first))
+            it = instrumentWindows.erase (it);
+        else
+            ++it;
+    }
+}
+
 void DawBridge::tick()
 {
+    updateInstrumentWindows();
+
+    if (auto& host = processor.getPluginHost(); host.isScanning() && ++scanTicks % 10 == 0)
+        emit ("dawPlugins", object ({ { "scanning", true }, { "progress", host.getScanProgress() },
+                                      { "name", juce::File (host.getScanningName()).getFileNameWithoutExtension() } }));
+
     auto& undo = edit.getUndoManager();
     const auto dirty = project.hasUnsavedChanges();
 
@@ -725,6 +862,7 @@ void DawBridge::loadPresetInto (int trackId, int presetIndex)
 
 void DawBridge::startExport (const juce::var& args, const juce::File& destination)
 {
+    engine.captureInstrumentStates(); // the export loads its own instruments from these
     daw::Exporter::Settings exportSettings;
     exportSettings.sampleRate = engine.getSampleRate();
     exportSettings.bitDepth = arg (args, "bitDepth", 24);
@@ -754,6 +892,7 @@ void DawBridge::startExport (const juce::var& args, const juce::File& destinatio
 //==============================================================================
 void DawBridge::startAutoMix (const juce::File& reference)
 {
+    engine.captureInstrumentStates();
     auto job = std::make_shared<AutoMixJob>();
     job->reference = reference;
 
@@ -968,6 +1107,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     const auto id = arg (args, "id", -1);
     const auto ok = [&] { complete (error ({})); };
 
+    if (handleMidi (command, args, complete))
+        return;
+
     if (command == "session")               { complete (describeSession()); return; }
     if (command == "mode")                  { setMode (arg (args, "daw", false)); ok(); return; }
     if (command == "undo")                  { undo.undo(); ok(); return; }
@@ -1049,6 +1191,24 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
     // A copy of a clip (from copy/cut in the UI) at a new place: { track, start, file, offset,
     // length, gain, fadeIn, fadeOut, name } -> the new clip's id, or -1.
+    if (command == "pasteClip" && arg (args, "midi", false))
+    {
+        auto clip = edit.addMidiClip (arg (args, "track", -1), juce::jmax (0.0, (double) args["start"]), args["length"], args["name"].toString());
+        if (! clip.isValid())
+        {
+            complete (-1);
+            return;
+        }
+
+        const auto clipId = (int) clip[ids::id];
+        clip.setProperty (ids::offset, juce::jmax (0.0, (double) args["offset"]), &undo);
+        if (auto* notes = args["notes"].getArray())
+            for (const auto& n : *notes)
+                edit.addNote (clipId, n["pitch"], n["time"], n["length"], arg (n, "velocity", 100));
+        complete (clipId);
+        return;
+    }
+
     if (command == "pasteClip")
     {
         const juce::File file (args["file"].toString());
@@ -1081,6 +1241,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "normaliseClip" || command == "stripSilence")
     {
         const auto clip = edit.getClip (id);
+        if (daw::Edit::isMidiClip (clip))
+        {
+            complete (error ("That works on audio clips, not MIDI clips."));
+            return;
+        }
+
         const auto audio = clip.isValid() ? engine.getAudioPool().get (juce::File (clip[ids::file].toString())) : nullptr;
         if (audio == nullptr)
         {
@@ -1172,6 +1338,8 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         if (arg (args, "on", false))
         {
             engine.setRecordingLatency (roundTripLatency());
+            // MIDI: only the output side (keys are played to what's heard), about half.
+            engine.setMidiRecordingLatency (roundTripLatency() / 2);
             complete (error (engine.startRecording (getRecordingFolder())));
         }
         else
@@ -1358,4 +1526,218 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     }
 
     complete (error ("Unknown command: " + command));
+}
+
+//==============================================================================
+// MIDI tracks, notes and instruments.
+juce::var DawBridge::describeInstruments() const
+{
+    auto& host = processor.getPluginHost();
+    juce::Array<juce::var> list;
+
+    for (const auto& info : host.getInstruments())
+        list.add (object ({ { "id", info.id }, { "name", info.name }, { "kind", instrumentKind (info.format) },
+                            { "vendor", info.vendor }, { "format", info.format } }));
+
+    return object ({ { "ok", true }, { "instruments", list }, { "scanning", host.isScanning() },
+                     { "folders", host.getExtraFolders() } });
+}
+
+juce::var DawBridge::addInstrument (int trackId, const juce::String& instrumentId)
+{
+    const auto info = processor.getPluginHost().findInstrument (instrumentId);
+    if (! info.has_value())
+        return error ("That instrument isn't available. Rescan plug-ins and try again.");
+
+    auto track = edit.getTrack (trackId);
+    const auto hasAudioClips = [&]
+    {
+        for (const auto& child : track)
+            if (child.hasType (ids::CLIP) && ! daw::Edit::isMidiClip (child))
+                return true;
+        return false;
+    };
+
+    // On a MIDI track (or an empty audio track): swap its instrument. Otherwise a new MIDI
+    // track, right below the one it was dropped on.
+    if (track.isValid() && (daw::Edit::isMidiTrack (track) || ! hasAudioClips()))
+    {
+        edit.setInstrument (trackId, *info);
+        if (track[ids::arm])
+            edit.setTrackArm (trackId, true); // re-applies monitoring for the new kind
+    }
+    else
+    {
+        const auto index = track.isValid() ? edit.getTracks().indexOf (track) + 1 : -1;
+        trackId = (int) edit.addMidiTrack (info->name.substring (0, 60), *info, index)[ids::id];
+    }
+
+    return object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId } });
+}
+
+void DawBridge::showInstrumentWindow (int trackId)
+{
+    if (const auto it = instrumentWindows.find (trackId); it != instrumentWindows.end())
+    {
+        it->second->toFront (true);
+        return;
+    }
+
+    const auto instrument = engine.getInstrument (trackId);
+    if (instrument == nullptr)
+        return;
+
+    const auto title = edit.getTrack (trackId)[ids::name].toString() + " - " + instrument->getName();
+    instrumentWindows[trackId] = std::make_unique<InstrumentWindow> (title, instrument, [this, trackId]
+    {
+        instrumentWindows.erase (trackId);
+        sessionChanged = true;
+    });
+    sessionChanged = true;
+}
+
+// The MIDI commands:
+//   instruments                      -> { ok, instruments: [{ id, name, kind, vendor, format }], scanning, folders }
+//   addInstrument {track, instrument} on a MIDI track (or empty audio track) swaps its
+//                                    instrument; track -1 (or one with audio) adds a MIDI track
+//                                    -> { ok, track }
+//   addMidiTrack {name, instrument}  -> the new track's id
+//   scanPlugins {full}               look for instrument plugins ("dawPlugins" reports)
+//   addPluginFolder / removePluginFolder {path}   extra folders to scan
+//   showInstrument {track}           opens the plugin's own window
+//   addMidiClip {track, start, length} -> the new clip's id
+//   editNotes {clip, add: [{pitch, time, length, velocity}], change: [{id, ...}], remove: [ids]}
+//                                    one undo step -> { ok, added: [ids] }
+//   liveNote {note, velocity}        plays a note on the armed/monitored MIDI tracks (0 = off)
+bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, Complete& complete)
+{
+    auto& host = processor.getPluginHost();
+
+    if (command == "instruments")
+    {
+        complete (describeInstruments());
+        return true;
+    }
+
+    if (command == "addInstrument")
+    {
+        complete (addInstrument (arg (args, "track", -1), args["instrument"].toString()));
+        return true;
+    }
+
+    if (command == "addMidiTrack")
+    {
+        auto info = host.findInstrument (args["instrument"].toString()).value_or (daw::instruments::getDefault());
+        const auto name = args["name"].toString().isNotEmpty() ? args["name"].toString()
+                                                               : "MIDI " + juce::String (edit.getTracks().size() + 1);
+        complete (edit.addMidiTrack (name.substring (0, 60), info, arg (args, "index", -1))[ids::id]);
+        return true;
+    }
+
+    if (command == "scanPlugins")
+    {
+        host.startScan (arg (args, "full", false));
+        emit ("dawPlugins", object ({ { "scanning", true }, { "progress", 0.0 } }));
+        complete (error ({}));
+        return true;
+    }
+
+    if (command == "addPluginFolder")
+    {
+        using Flags = juce::FileBrowserComponent::FileChooserFlags;
+        withChooser ("Add a plug-in folder", juce::File::getSpecialLocation (juce::File::userHomeDirectory), {},
+                     Flags::openMode | Flags::canSelectDirectories,
+                     [this] (const juce::File& folder)
+                     {
+                         auto& h = processor.getPluginHost();
+                         auto folders = h.getExtraFolders();
+                         folders.addIfNotAlreadyThere (folder.getFullPathName());
+                         h.setExtraFolders (folders);
+                         h.startScan();
+                         emit ("dawPlugins", object ({ { "scanning", true }, { "progress", 0.0 } }));
+                         return error ({});
+                     },
+                     complete);
+        return true;
+    }
+
+    if (command == "removePluginFolder")
+    {
+        auto folders = host.getExtraFolders();
+        folders.removeString (args["path"].toString());
+        host.setExtraFolders (folders);
+        complete (error ({}));
+        return true;
+    }
+
+    if (command == "showInstrument")
+    {
+        const auto trackId = arg (args, "track", -1);
+        if (engine.getInstrument (trackId) == nullptr)
+        {
+            const auto reason = engine.getInstrumentError (trackId);
+            complete (error (reason.isNotEmpty() ? reason : juce::String ("The instrument is still loading.")));
+            return true;
+        }
+
+        showInstrumentWindow (trackId);
+        complete (error ({}));
+        return true;
+    }
+
+    if (command == "addMidiClip")
+    {
+        const auto trackId = arg (args, "track", -1);
+        const auto beat = 60.0 / edit.getTempo();
+        const auto clip = edit.addMidiClip (trackId, arg (args, "start", 0.0), arg (args, "length", beat * edit.getBeatsPerBar()));
+        complete (clip.isValid() ? clip[ids::id] : juce::var (-1));
+        return true;
+    }
+
+    if (command == "editNotes")
+    {
+        const auto clipId = arg (args, "clip", -1);
+        if (! daw::Edit::isMidiClip (edit.getClip (clipId)))
+        {
+            complete (error ("Pick a MIDI clip first."));
+            return true;
+        }
+
+        if (auto* removed = args["remove"].getArray())
+            for (const auto& id : *removed)
+                edit.removeNote (id);
+
+        if (auto* changed = args["change"].getArray())
+        {
+            for (const auto& n : *changed)
+            {
+                const auto note = edit.getNote (n["id"]);
+                if (! note.isValid())
+                    continue;
+
+                edit.setNote (n["id"], arg (n, "pitch", (int) number (note, ids::pitch)), arg (n, "time", number (note, ids::time)),
+                              arg (n, "length", number (note, ids::length)), arg (n, "velocity", (int) number (note, ids::velocity)));
+            }
+        }
+
+        juce::Array<juce::var> added;
+        if (auto* notes = args["add"].getArray())
+            for (const auto& n : *notes)
+                added.add (edit.addNote (clipId, n["pitch"], n["time"], n["length"], arg (n, "velocity", 100))[ids::id]);
+
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "added", added } }));
+        return true;
+    }
+
+    if (command == "liveNote")
+    {
+        const auto note = juce::jlimit (0, 127, arg (args, "note", 60));
+        const auto velocity = juce::jlimit (0, 127, arg (args, "velocity", 100));
+        engine.addLiveMidi (velocity > 0 ? juce::MidiMessage::noteOn (1, note, (juce::uint8) velocity)
+                                         : juce::MidiMessage::noteOff (1, note));
+        complete (error ({}));
+        return true;
+    }
+
+    return false;
 }

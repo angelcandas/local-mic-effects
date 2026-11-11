@@ -2248,6 +2248,55 @@ namespace
         check (trackCount (session) == 1 && run ("addTrack").isInt() && trackCount (lastSession()) == 2,
                "Add track works in an older project");
 
+        // MIDI tracks: instruments for the library, a MIDI track, a clip, notes.
+        {
+            const auto list = run ("instruments");
+            check ((bool) list["ok"] && list["instruments"].size() >= 7 && list["instruments"][0]["kind"].toString() == "builtin",
+                   "\"instruments\" lists the built-in synths (for the library)");
+
+            const auto added = run ("addInstrument", args ({ { "track", -1 }, { "instrument", "builtin:bass" } }));
+            const auto midiTrack = (int) added["track"];
+            auto session = lastSession();
+            juce::var described;
+            for (int i = 0; i < session["tracks"].size(); ++i)
+                if ((int) session["tracks"][i]["id"] == midiTrack)
+                    described = session["tracks"][i];
+            check ((bool) added["ok"] && described["kind"].toString() == "midi" && described["instrument"]["name"].toString() == "Synth Bass",
+                   "dropping an instrument below the tracks makes a MIDI track with it");
+
+            const auto clipId = (int) run ("addMidiClip", args ({ { "track", midiTrack }, { "start", 1.0 }, { "length", 2.0 } }));
+            auto notes = juce::Array<juce::var> { args ({ { "pitch", 60 }, { "time", 0.0 }, { "length", 0.5 }, { "velocity", 90 } }),
+                                                  args ({ { "pitch", 64 }, { "time", 0.5 }, { "length", 0.5 } }) };
+            const auto edited = run ("editNotes", args ({ { "clip", clipId }, { "add", notes } }));
+            check (clipId > 0 && (bool) edited["ok"] && edited["added"].size() == 2, "a MIDI clip takes notes");
+
+            const auto firstNote = (int) edited["added"][0];
+            run ("editNotes", args ({ { "clip", clipId }, { "change", juce::Array<juce::var> { args ({ { "id", firstNote }, { "pitch", 62 } }) } },
+                                      { "remove", juce::Array<juce::var> { edited["added"][1] } } }));
+            session = lastSession();
+            juce::var clip;
+            for (int i = 0; i < session["tracks"].size(); ++i)
+                if ((int) session["tracks"][i]["id"] == midiTrack)
+                    clip = session["tracks"][i]["clips"][0];
+            check ((bool) clip["midi"] && ! (bool) clip["missing"] && clip["notes"].size() == 1 && (int) clip["notes"][0]["pitch"] == 62
+                       && (int) clip["notes"][0]["velocity"] == 90,
+                   "notes can be changed and removed, and the session describes them");
+
+            check (! (bool) run ("normaliseClip", args ({ { "id", clipId } }))["ok"], "audio-only clip tools refuse MIDI clips");
+            const auto pasted = (int) run ("pasteClip", args ({ { "midi", true }, { "track", midiTrack }, { "start", 4.0 }, { "length", 1.0 },
+                                                                 { "offset", 0.0 }, { "notes", juce::Array<juce::var> { args ({ { "pitch", 70 }, { "time", 0.1 }, { "length", 0.2 } }) } } }));
+            check (pasted > 0 && daw::Edit::isMidiClip (edit.getClip (pasted)) && edit.getClip (pasted).getNumChildren() == 1,
+                   "a copied MIDI clip pastes with its notes");
+
+            const auto swapped = run ("addInstrument", args ({ { "track", midiTrack }, { "instrument", "builtin:organ" } }));
+            check ((int) swapped["track"] == midiTrack && edit.getInstrument (midiTrack)[daw::ids::name].toString() == "Organ",
+                   "dropping an instrument on a MIDI track swaps its instrument");
+            check (! (bool) run ("addInstrument", args ({ { "track", -1 }, { "instrument", "VST3-Nothing" } }))["ok"],
+                   "an unknown instrument is refused");
+            check ((bool) run ("liveNote", args ({ { "note", 60 }, { "velocity", 100 } }))["ok"]
+                       && (bool) run ("liveNote", args ({ { "note", 60 }, { "velocity", 0 } }))["ok"], "liveNote plays notes");
+        }
+
         // Starting the app again reopens the last project.
         {
             PluginProcessor again;
