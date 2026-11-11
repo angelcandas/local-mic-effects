@@ -91,6 +91,12 @@ function session_onlySolo(session, id) {
 // A rotary control for a value that isn't a host parameter (insert values, pan,
 // clip gain). Same look as the Live screen's knobs. onChange (value, first) is
 // called while dragging; first is true for the first change of a gesture.
+// "45 s", "2 min 10 s": a length of time as it's said, for progress messages.
+function spokenDuration(seconds) {
+  const total = Math.max(1, Math.round(seconds));
+  return total < 60 ? `${total} s` : `${Math.floor(total / 60)} min ${total % 60} s`;
+}
+
 class ValueKnob {
   constructor({ label, min, max, skew = 1, step = 0, unit = "", value, defaultValue, bipolar = false, format, onChange }) {
     Object.assign(this, { min, max, skew, step, unit, bipolar, onChange, format });
@@ -2203,16 +2209,27 @@ class DawScreen {
       const progress = event.progress ?? 0;
       panel.querySelector(".export-bar").style.setProperty("--progress", event.state === "loading" ? 0 : progress);
       const percent = `${Math.round(progress * 100)}%`;
+      let left = "";
+      if (event.state === "splitting") {
+        // Time left, from how long the first part took, once there's enough to go on.
+        this.stems.splitStart ??= performance.now();
+        const elapsed = (performance.now() - this.stems.splitStart) / 1000;
+        if (progress > 0.03 && elapsed > 5) left = `, about ${spokenDuration(elapsed * (1 - progress) / progress)} left`;
+      } else {
+        this.stems.splitStart = null;
+      }
       this.setStemsStatus(event.state === "downloading" ? `Downloading the separation model… ${percent}`
                         : event.state === "loading" ? "Loading the separation model…"
-                        : `Separating… ${percent}`);
+                        : `Separating… ${percent}${left}`);
       return;
     }
 
     panel.querySelector(".export-bar").style.setProperty("--progress", 0);
     if (event.state === "done") {
       panel.hidden = true;
-      toast(`Added ${event.tracks?.length ?? 0} stem tracks and muted the original clip. Ctrl+Z undoes it.`);
+      this.stems.splitStart = null;
+      const took = event.seconds ? ` (separating took ${spokenDuration(event.seconds)})` : "";
+      toast(`Added ${event.tracks?.length ?? 0} stem tracks and muted the original clip${took}. Ctrl+Z undoes it.`);
     } else if (event.state === "cancelled") {
       this.setStemsStatus("Cancelled.");
     } else if (event.state === "error") {

@@ -179,8 +179,9 @@ up with the clip (same start, trim, gain and fades), and mutes the song's clip. 
   Nothing is uploaded.
 - The first split downloads the model weights once (about 84 MB) to
   `~/Library/Application Support/MicFX/Models/`, and checks them against their SHA-256.
-- It takes a few minutes for a 4-minute song: the song is cut into 30-second chunks that up to four
-  CPU cores separate at once, crossfaded back together. Cancel any time.
+- The song is cut into 30-second chunks that up to four CPU cores separate at once, crossfaded back
+  together. On a Mac the matrix maths goes through Apple's Accelerate (the M-series matrix units). The
+  panel shows the time left, and the finished message says how long separating took. Cancel any time.
 - The stems are 24-bit 44.1 kHz WAVs (`Song - Vocals.wav`, ...) in the project's `Audio` folder, or
   next to your recordings when no project is open.
 

@@ -111,6 +111,7 @@ struct DawBridge::StemJob
     juce::ValueTree clip; // a copy, taken when the split started
     int trackId = -1;
     stems::Result result;
+    std::atomic<juce::int64> splitStartedMs { 0 }; // when separating began (after download and load)
 };
 
 struct DawBridge::AutoMixJob
@@ -657,7 +658,8 @@ void DawBridge::tick()
             else
             {
                 const auto added = addStemTracks (job->clip, job->trackId, job->result.files);
-                emit ("dawStems", (bool) added["ok"] ? object ({ { "state", "done" }, { "tracks", added["tracks"] } })
+                const auto seconds = (juce::Time::getMillisecondCounter() - job->splitStartedMs.load()) / 1000.0;
+                emit ("dawStems", (bool) added["ok"] ? object ({ { "state", "done" }, { "tracks", added["tracks"] }, { "seconds", seconds } })
                                                      : object ({ { "state", "error" }, { "error", added["error"] } }));
             }
         }
@@ -909,6 +911,7 @@ juce::var DawBridge::handleStems (const juce::var& args)
         if (separator != nullptr && ! job->cancel.load())
         {
             job->phase = StemJob::splitting;
+            job->splitStartedMs = (juce::int64) juce::Time::getMillisecondCounter();
             result = stems::split (source, folder, name, separator, progress);
         }
 
