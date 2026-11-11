@@ -57,6 +57,52 @@ function button(className, text, title, onClick) {
   return element;
 }
 
+
+// Inline 24x24 stroke icons for the toolbar (no icon library).
+const ICONS = {
+  new: '<path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5M12 12v6M9 15h6"/>',
+  open: '<path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>',
+  recent: '<circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>',
+  save: '<path d="M5 3h11l4 4v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M8 3v5h7V3M8 21v-7h8v7"/>',
+  saveas: '<path d="M5 3h11l4 4v6M5 3a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h7"/><path d="M8 3v5h7V3M17 15v6M14 18h6"/>',
+  import: '<path d="M12 3v12M7 10l5 5 5-5M4 20h16"/>',
+  automix: '<path d="M5 4v16M12 4v16M19 4v16"/><circle cx="5" cy="14" r="2" fill="currentColor"/><circle cx="12" cy="8" r="2" fill="currentColor"/><circle cx="19" cy="15" r="2" fill="currentColor"/>',
+  export: '<path d="M12 15V3M7 8l5-5 5 5M4 20h16"/>',
+  tap: '<path d="M9 11V5a2 2 0 0 1 4 0v6M9 11l-1-1.5a1.8 1.8 0 0 0-3 2L8 18a5 5 0 0 0 4 2h2a5 5 0 0 0 5-5v-3a2 2 0 0 0-4 0M13 11a2 2 0 0 1 4 0"/>',
+  key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>',
+  click: '<path d="M8 21h8l-2-16h-4zM12 17l4-9"/>',
+  countin: '<path d="M4 8h3v8M12 8h4v3h-4v5h4M3 3h2M19 3h2"/><path d="M19 8v8"/>',
+  loop: '<path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/>',
+  snap: '<path d="M6 3v8a6 6 0 0 0 12 0V3h-4v8a2 2 0 0 1-4 0V3zM6 7h4M14 7h4"/>',
+  returnstop: '<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-4"/>',
+  follow: '<path d="M4 12h12M12 7l5 5-5 5M20 4v16"/>',
+  select: '<path d="M5 3l14 8-6 2-3 6z"/>',
+  cut: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.6 7.6L20 18M8.6 16.4L20 6"/>',
+  gain: '<path d="M4 9v6h4l5 4V5L8 9zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>',
+  warp: '<path d="M3 12c3-8 6-8 9 0s6 8 9 0"/><path d="M3 20h18" stroke-dasharray="2 3"/>',
+  fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
+  undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
+  redo: '<path d="M15 14l5-5-5-5"/><path d="M20 9H10a6 6 0 0 0 0 12h3"/>',
+  tracks: '<path d="M3 6h18M3 12h18M3 18h18"/><rect x="6" y="4.5" width="6" height="3" rx="1" fill="currentColor"/><rect x="12" y="10.5" width="7" height="3" rx="1" fill="currentColor"/><rect x="5" y="16.5" width="5" height="3" rx="1" fill="currentColor"/>',
+  mixer: '<path d="M6 3v18M12 3v18M18 3v18"/><rect x="4" y="13" width="4" height="3" rx="1" fill="currentColor"/><rect x="10" y="7" width="4" height="3" rx="1" fill="currentColor"/><rect x="16" y="11" width="4" height="3" rx="1" fill="currentColor"/>',
+  help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01"/>',
+};
+
+function icon(name) {
+  return `<svg class="ico" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${ICONS[name]}</svg>`;
+}
+
+// An icon-only button. The tooltip carries the name and the shortcut.
+function iconButton(className, name, title, onClick) {
+  const element = button(`${className} ib`, "", title, onClick);
+  element.innerHTML = icon(name);
+  element.setAttribute("aria-label", title.replace(/\s*\(.*\)\s*$/, "").replace(/[.:].*$/, ""));
+  return element;
+}
+
+// Thin divider between toolbar groups.
+const sep = () => html("span", "tb-sep");
+
 // Vertical drag helper: calls move(dx, dy, event) and end(moved, event).
 function drag(event, move, end = () => {}) {
   event.preventDefault();
@@ -609,6 +655,9 @@ class DawScreen {
     window.__JUCE__.backend.addEventListener("dawExport", (progress) => this.onExport(progress));
     window.__JUCE__.backend.addEventListener("dawStems", (event) => this.onStems(event));
     document.addEventListener("keydown", (event) => this.onKey(event));
+    document.addEventListener("keydown", (event) => this.onPianoKey(event, true), true); // before the shortcuts
+    document.addEventListener("keyup", (event) => this.onPianoKey(event, false), true);
+    window.addEventListener("blur", () => this.releasePianoKeys());
     new ResizeObserver(() => this.layoutArrange()).observe(this.arrange);
 
     let last = performance.now();
@@ -768,15 +817,19 @@ class DawScreen {
 
     const files = html("div", "daw-group");
     files.append(
-      button("tool", "New", "Start a new project", () => daw("new")),
-      button("tool", "Open…", "Open a project", () => daw("open")),
-      (this.recentSelect = html("select", "dropdown recent-projects")),
-      (this.saveButton = button("tool", "Save", "Save the project (Ctrl+S)", () => daw("save"))),
-      button("tool", "Save as…", "Save a copy under a new name", () => daw("saveAs")),
-      button("tool", "Import…", "Add an audio file at the playhead", () => this.importAudio()),
-      button("tool", "Auto Mix…", "Listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix()),
-      (this.exportButton = button("tool is-accent", "Export…", "Render the mix or stems to WAV", () => this.toggleExportPanel())));
+      iconButton("tool", "new", "New project (Ctrl+N)", () => daw("new")),
+      iconButton("tool", "open", "Open a project (Ctrl+O)", () => daw("open")),
+      (this.recentWrap = html("span", "ib-select")),
+      (this.saveButton = iconButton("tool", "save", "Save the project (Ctrl+S)", () => daw("save"))),
+      iconButton("tool", "saveas", "Save as: a copy under a new name (Ctrl+Shift+S)", () => daw("saveAs")),
+      iconButton("tool", "import", "Import audio at the playhead (Ctrl+I)", () => this.importAudio()),
+      iconButton("tool", "automix", "Auto Mix: listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix()),
+      (this.exportButton = iconButton("tool is-accent", "export", "Export the mix or stems to WAV (Ctrl+Shift+R)", () => this.toggleExportPanel())));
 
+    this.recentSelect = html("select", "recent-projects");
+    this.recentWrap.innerHTML = icon("recent");
+    this.recentWrap.append(this.recentSelect);
+    this.recentWrap.title = "Open a recent project";
     this.recentSelect.title = "Open a recent project";
     this.recentSelect.addEventListener("change", () => {
       const path = this.recentSelect.value;
@@ -784,7 +837,7 @@ class DawScreen {
       if (path) daw("openRecent", { path });
     });
 
-    this.projectName = html("div", "daw-project");
+    this.projectName = document.querySelector(".app-project");
 
     const transport = html("div", "daw-group daw-transport-buttons");
     transport.append(
@@ -814,7 +867,7 @@ class DawScreen {
     this.tempoInput.addEventListener("change", () => daw("tempo", { bpm: Number(this.tempoInput.value) || 120 }));
     const tempo = html("label", "tempo");
     tempo.append(this.tempoInput, html("span", "", "BPM"));
-    const tap = button("tool tap-tempo", "Tap", "Tap tempo: click (or press T) on the beat a few times", () => this.tapTempo());
+    const tap = iconButton("tool tap-tempo", "tap", "Tap tempo: click on the beat a few times (T)", () => this.tapTempo());
 
     this.signature = html("select", "dropdown signature");
     this.signature.title = "Time signature (beats in a bar). In x/8 the tempo counts eighth notes.";
@@ -844,30 +897,30 @@ class DawScreen {
     this.countIn.addEventListener("change", () => daw("countIn", { bars: Number(this.countIn.value) }));
 
     const click = html("div", "click-group");
-    click.append((this.metronomeButton = button("toggle", "Click", "Metronome (C)", () => daw("metronome", { on: !this.session?.metronome }))),
+    click.append((this.metronomeButton = iconButton("toggle", "click", "Click: metronome on / off (C)", () => daw("metronome", { on: !this.session?.metronome }))),
                  this.clickVolume);
-    this.keyButton = button("tool key-button", "Key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
+    this.keyButton = iconButton("tool key-button", "key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
     timing.append(tempo, tap, this.signature, this.keyButton, click,
       this.countIn,
-      (this.loopButton = button("toggle", "Loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop())),
-      (this.snapButton = button("toggle", "Snap", "Snap edits to the beat (hold Alt to drag freely)", () => {
+      (this.loopButton = iconButton("toggle", "loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop())),
+      (this.snapButton = iconButton("toggle", "snap", "Snap edits to the grid (hold Alt to drag freely)", () => {
         this.snap = !this.snap;
         this.renderTransport();
       })),
       this.gridSelect,
-      (this.returnButton = button("toggle", "Return", "Return on stop: pausing goes back to where you pressed play", () => {
+      (this.returnButton = iconButton("toggle", "returnstop", "Return on stop: pausing goes back to where you pressed play", () => {
         this.returnOnStop = !this.returnOnStop;
         prefs.set("returnOnStop", this.returnOnStop);
         this.renderTransport();
       })),
-      (this.followButton = button("toggle", "Follow", "Scroll with the playhead while playing (F). Scrolling yourself switches it off.", () => this.setFollow(!this.follow))));
+      (this.followButton = iconButton("toggle", "follow", "Follow: scroll with the playhead while playing (F). Scrolling yourself switches it off.", () => this.setFollow(!this.follow))));
 
     this.tools = html("div", "segmented tools");
-    for (const [tool, text, title] of [["select", "Select", "Select, move, trim and fade clips (V)"],
-                                       ["cut", "Cut", "Click a clip to split it there (B)"],
-                                       ["gain", "Gain", "Drag a clip up or down to change its gain (G)"],
-                                       ["warp", "Warp", "Drag inside a clip to stretch its timing; double-click a marker to remove it (W)"]]) {
-      const b = button("", text, title, () => this.setTool(tool));
+    for (const [tool, text, title] of [["select", "Select", "Select tool: move, trim and fade clips (V)"],
+                                       ["cut", "Cut", "Cut tool: click a clip to split it there (B)"],
+                                       ["gain", "Gain", "Gain tool: drag a clip up or down to change its gain (G)"],
+                                       ["warp", "Warp", "Warp tool: drag inside a clip to stretch its timing; double-click a marker to remove it (W)"]]) {
+      const b = iconButton("", tool, title, () => this.setTool(tool));
       b.dataset.tool = tool;
       this.tools.append(b);
     }
@@ -884,7 +937,7 @@ class DawScreen {
       return input;
     };
     // Logarithmic, so each step of the slider zooms by the same factor.
-    zoom.append(button("tool fit-button", "Fit", "Zoom to fit the whole song (Shift+Z)", () => this.run("zoomFit")));
+    zoom.append(iconButton("tool fit-button", "fit", "Zoom to fit the whole song (Shift+Z)", () => this.run("zoomFit")));
     this.zoomSlider = slider("↔", "Horizontal zoom (+ / − or Ctrl+scroll)", (p) => this.setZoom(MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, p), true));
     this.heightSlider = slider("↕", "Track height (Shift+↑ / Shift+↓)", (p) => this.setRowHeight(MIN_ROW + (MAX_ROW - MIN_ROW) * p));
 
@@ -892,39 +945,39 @@ class DawScreen {
     right.append(
       this.tools,
       zoom,
-      (this.undoButton = button("tool", "Undo", "Undo (Ctrl+Z)", () => daw("undo"))),
-      (this.redoButton = button("tool", "Redo", "Redo (Ctrl+Shift+Z)", () => daw("redo"))));
+      (this.undoButton = iconButton("tool", "undo", "Undo (Ctrl+Z)", () => daw("undo"))),
+      (this.redoButton = iconButton("tool", "redo", "Redo (Ctrl+Shift+Z)", () => daw("redo"))));
 
     this.viewTabs = html("div", "segmented view-tabs");
     for (const view of ["arrange", "mixer"]) {
-      const tab = button("", view === "arrange" ? "Tracks" : "Mixer", view === "arrange" ? "Tracks and clips (Tab)" : "Mixer (Tab)", () => this.setView(view));
+      const tab = iconButton("", view === "arrange" ? "tracks" : "mixer", view === "arrange" ? "Tracks and clips (Tab)" : "Mixer (Tab / X)", () => this.setView(view));
       tab.dataset.view = view;
       this.viewTabs.append(tab);
     }
-    right.append(this.viewTabs, button("tool icon", "?", "Keyboard shortcuts (?)", () => this.toggleShortcuts()));
+    this.pianoButton = button("tool icon piano-toggle", "", "Play MIDI from the computer keyboard (M)", () => this.togglePiano());
+    this.pianoButton.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.2"><rect x="1.5" y="3.5" width="13" height="9" rx="1"/><path d="M5.8 3.5v9M10.2 3.5v9"/><path d="M4.4 3.5v5M8 3.5v5M11.6 3.5v5" stroke-width="2.2"/></svg>`;
+    right.append(this.viewTabs, this.pianoButton, iconButton("tool", "help", "Keyboard shortcuts (?)", () => this.toggleShortcuts()));
 
-    bar.append(files, this.projectName, transport, clock, timing, right);
+    bar.append(files, sep(), transport, clock, sep(), timing, sep(), right);
   }
 
   renderTransport() {
     const s = this.session;
     if (!s) return;
 
-    this.projectName.replaceChildren(html("strong", "", s.project.name), html("span", "dirty", s.project.dirty ? "•" : ""));
-    this.projectName.title = s.project.open ? s.project.path : "Not saved yet. Save to keep your work in a project folder.";
     this.saveButton.classList.toggle("is-dirty", s.project.dirty || !s.project.open);
     const recent = (s.recent ?? []).filter((r) => r.path !== s.project.path);
     const recentKey = JSON.stringify(recent);
     if (recentKey !== this.recentKey) {
       this.recentKey = recentKey;
       this.recentSelect.replaceChildren(new Option("Recent…", ""), ...recent.map((r) => new Option(r.name, r.path)));
-      this.recentSelect.hidden = recent.length === 0;
+      this.recentWrap.hidden = recent.length === 0;
     }
     if (document.activeElement !== this.tempoInput) this.tempoInput.value = Math.round(s.tempo * 100) / 100;
     this.countIn.value = String(s.countIn);
     this.signature.value = String(s.beatsPerBar ?? 4);
     const songKey = s.key?.key ?? -1;
-    this.keyButton.textContent = songKey >= 0 ? `Key ${NOTE_NAMES[songKey]}${s.key.minor ? "m" : ""}` : "Key";
+    this.keyButton.innerHTML = icon("key") + (songKey >= 0 ? `<span class="ib-label">${NOTE_NAMES[songKey]}${s.key.minor ? "m" : ""}</span>` : "");
     this.keyButton.classList.toggle("is-set", songKey >= 0);
     this.renderKeyPanel();
     if (document.activeElement !== this.clickVolume) this.clickVolume.value = String(Math.round((s.metronomeVolume ?? 1) * 100));
@@ -2669,9 +2722,13 @@ class DawScreen {
                    ["Click the clock", "Type a bar or time to go to"]]],
     ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["Ctrl+Shift+T", "New MIDI track"], ["Ctrl+Shift+D", "Duplicate the selected track"],
                 ["Ctrl+R", "Rename the selected track"], ["Ctrl+Delete", "Delete the selected track"],
-                ["M", "Mute the selected track"], ["S", "Solo the selected track"], ["Alt+click S", "Solo only that track"],
+                ["0", "Mute the selected track"], ["S", "Solo the selected track"], ["Alt+click S", "Solo only that track"],
                 ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track"],
                 ["Q / Ctrl+U", "Quantize the selected clip (or track), with the Pitch & time settings"]]],
+    ["Computer keyboard piano", [["M", "Turn the computer keyboard into a MIDI keyboard on / off (toolbar piano button)"],
+                                 ["A S D F G H J K", "White keys, C to C (; adds one more)"], ["W E T Y U O P", "Black keys"],
+                                 ["Z / X", "Octave down / up"], ["C / V", "Velocity down / up"],
+                                 ["While on", "Plays the armed (or selected) MIDI track and records on it. The keys above stop doing their usual shortcuts."]]],
     ["Clips", [[", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
@@ -2746,6 +2803,77 @@ class DawScreen {
     this.select(track.id, next.id);
     const x = next.start * this.zoom, left = this.arrange.scrollLeft;
     if (x < left || x > left + this.arrange.clientWidth - HEAD_WIDTH - 40) this.scrollTo(x - 40);
+  }
+
+  //============================================================================ computer keyboard as MIDI
+  // Ableton's layout: A S D F G H J K are the white keys from C, W E T Y U (and O P) the
+  // black ones, Z / X change the octave, C / V the velocity. M turns it on and off.
+  static PIANO = { KeyA: 0, KeyW: 1, KeyS: 2, KeyE: 3, KeyD: 4, KeyF: 5, KeyT: 6, KeyG: 7, KeyY: 8, KeyH: 9, KeyU: 10, KeyJ: 11,
+                   KeyK: 12, KeyO: 13, KeyL: 14, KeyP: 15, Semicolon: 16 };
+  static PIANO_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+
+  togglePiano(on) {
+    this.piano ??= { on: false, octave: 0, velocity: 100, held: new Map() };
+    this.piano.on = on ?? !this.piano.on;
+    if (!this.piano.on) this.releasePianoKeys();
+    this.pianoButton?.classList.toggle("is-accent", this.piano.on);
+    this.pianoButton?.setAttribute("aria-pressed", String(this.piano.on));
+    if (this.piano.on) this.pianoToast();
+    else toast("Computer keyboard piano off.");
+  }
+
+  pianoToast() {
+    const { octave, velocity } = this.piano;
+    toast(`Computer keyboard piano on: A–K play from C${3 + octave} (Z / X octave, C / V velocity ${velocity}). M turns it off.`);
+  }
+
+  releasePianoKeys() {
+    if (!this.piano) return;
+    for (const note of this.piano.held.values()) daw("liveNote", { note, velocity: 0 });
+    this.piano.held.clear();
+  }
+
+  // The armed or monitored MIDI tracks play it. If none is, the selected MIDI track starts monitoring.
+  playPianoNote(note, velocity) {
+    const tracks = this.session?.tracks ?? [];
+    const listening = tracks.some((t) => t.kind === "midi" && (t.arm || t.monitor));
+    const selected = this.selectedTrackObject();
+    if (!listening && selected?.kind === "midi") daw("setTrack", { id: selected.id, monitor: true });
+    daw("liveNote", { note, velocity });
+  }
+
+  onPianoKey(event, down) {
+    if (!this.active || !this.piano) return;
+    const code = event.code;
+    const held = this.piano.held;
+    if (!down) {
+      if (held.has(code)) { daw("liveNote", { note: held.get(code), velocity: 0 }); held.delete(code); event.preventDefault(); }
+      return;
+    }
+    if (!this.piano.on) {
+      if (code === "KeyM" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !isTyping(event)) {
+        event.preventDefault(); event.stopPropagation(); if (!event.repeat) this.togglePiano(true);
+      }
+      return;
+    }
+    if (isTyping(event) || event.ctrlKey || event.metaKey || event.altKey) return;
+    const piano = this.piano;
+    const note = code in DawScreen.PIANO ? DawScreen.PIANO[code] : null;
+    if (note !== null && !event.shiftKey) {
+      event.preventDefault(); event.stopPropagation();
+      if (event.repeat || held.has(code)) return;
+      const pitch = Math.min(127, Math.max(0, 60 + piano.octave * 12 + note));
+      held.set(code, pitch);
+      this.playPianoNote(pitch, piano.velocity);
+    } else if (!event.shiftKey && ["KeyZ", "KeyX", "KeyC", "KeyV", "KeyM"].includes(code)) {
+      event.preventDefault(); event.stopPropagation();
+      if (event.repeat) return;
+      if (code === "KeyM") return this.togglePiano(false);
+      if (code === "KeyZ") piano.octave = Math.max(-4, piano.octave - 1);
+      else if (code === "KeyX") piano.octave = Math.min(4, piano.octave + 1);
+      else piano.velocity = Math.min(127, Math.max(1, piano.velocity + (code === "KeyC" ? -20 : 20)));
+      this.pianoToast();
+    }
   }
 
   toggleTrack(key) {
@@ -3013,7 +3141,7 @@ class DawScreen {
     else if (event.key === "]") command("nextMarker");
     else if (key === "t") command("tapTempo");
     else if (key === "s") command("soloTrack");
-    else if (key === "m") command("muteTrack");
+    else if (key === "0") command("muteTrack");
     else if (key === "q") command("quantize");
     else if (key === "l") command("loop");
     else if (key === "c") command("metronome");
@@ -3035,8 +3163,71 @@ class DawScreen {
 export function initDaw() {
   const root = document.querySelector(".daw");
   const modeSwitch = document.querySelector(".mode-switch");
-  const subtitle = document.querySelector(".brand p");
-  const liveSubtitle = subtitle.textContent;
+  const title = document.querySelector(".app-title");
+  const projectLine = document.querySelector(".app-project");
+  const liveTracks = document.querySelector(".live-tracks");
+  const liveTracksButton = liveTracks.querySelector(".live-tracks-button");
+  const liveTracksMenu = liveTracks.querySelector(".live-tracks-menu");
+  const backdrop = document.querySelector(".confirm-backdrop");
+  let sessionState = null;
+
+  // Asks before leaving one mode for the other; resolves true on "Switch".
+  const confirmSwitch = (toDaw) => new Promise((resolve) => {
+    const recording = screen.status?.recording;
+    backdrop.querySelector("h2").textContent = toDaw ? "Switch to MicFX DAW?" : "Switch to MicFX Live?";
+    backdrop.querySelector(".confirm-text").textContent = (toDaw
+      ? "The multitrack recorder takes over the window. Your live effects keep their settings."
+      : "Back to the live effects chain. The DAW project stays open and its tracks stay listed in Live.")
+      + (recording ? " A recording is in progress; switching stops it." : "");
+    const ok = backdrop.querySelector(".confirm-ok"), stay = backdrop.querySelector(".confirm-stay");
+    ok.textContent = toDaw ? "Switch to DAW" : "Switch to Live";
+    const done = (value) => {
+      backdrop.hidden = true;
+      ok.removeEventListener("click", yes); stay.removeEventListener("click", no);
+      backdrop.removeEventListener("click", away); document.removeEventListener("keydown", key, true);
+      resolve(value);
+    };
+    const yes = () => done(true), no = () => done(false);
+    const away = (event) => { if (event.target === backdrop) done(false); };
+    const key = (event) => {
+      if (event.key === "Escape") { event.stopPropagation(); done(false); }
+      else if (event.key === "Enter") { event.stopPropagation(); event.preventDefault(); done(true); }
+    };
+    ok.addEventListener("click", yes); stay.addEventListener("click", no);
+    backdrop.addEventListener("click", away); document.addEventListener("keydown", key, true);
+    backdrop.hidden = false;
+    ok.focus();
+  });
+  const requestMode = async (toDaw) => {
+    if (toDaw === screen.active) return;
+    if (await confirmSwitch(toDaw)) daw("mode", { daw: toDaw });
+  };
+
+  const renderLiveTracks = () => {
+    const tracks = sessionState?.tracks ?? [];
+    liveTracks.hidden = !sessionState?.available || screen.active || tracks.length === 0;
+    liveTracks.querySelector(".live-tracks-count").textContent = String(tracks.length);
+    if (liveTracks.hidden) { liveTracksMenu.hidden = true; liveTracksButton.setAttribute("aria-expanded", "false"); }
+    const anySolo = tracks.some((t) => t.solo);
+    liveTracksMenu.replaceChildren(
+      html("div", "live-tracks-head", sessionState?.project?.name ?? ""),
+      ...tracks.map((t) => {
+        const row = html("div", "live-track" + (t.mute || (anySolo && !t.solo) ? " is-off" : ""));
+        const dot = html("span", "live-track-dot"); dot.style.background = t.colour || "var(--accent)";
+        const flags = [t.kind === "midi" ? "MIDI" : "", t.arm ? "armed" : "", t.solo ? "solo" : "", t.mute ? "muted" : "",
+                       `${t.clips.length} clip${t.clips.length === 1 ? "" : "s"}`].filter(Boolean).join(" · ");
+        row.append(dot, html("span", "live-track-name", t.name), html("span", "live-track-flags", flags));
+        return row;
+      }),
+      html("div", "live-tracks-foot", "Read only. Switch to DAW to edit."));
+  };
+  liveTracksButton.addEventListener("click", () => {
+    liveTracksMenu.hidden = !liveTracksMenu.hidden;
+    liveTracksButton.setAttribute("aria-expanded", String(!liveTracksMenu.hidden));
+  });
+  document.addEventListener("click", (event) => {
+    if (!liveTracks.contains(event.target)) { liveTracksMenu.hidden = true; liveTracksButton.setAttribute("aria-expanded", "false"); }
+  });
   const screen = new DawScreen(root);
 
   Juce.getNativeFunction("getParameterInfo")().then((info) => {
@@ -3055,20 +3246,29 @@ export function initDaw() {
     const isDaw = session.available && session.mode === "daw";
     const changed = document.body.classList.contains("is-daw") !== isDaw;
     document.body.classList.toggle("is-daw", isDaw);
-    subtitle.textContent = isDaw ? "Multitrack recorder" : liveSubtitle;
+    title.textContent = isDaw ? "MicFX DAW" : "MicFX Live";
+    document.title = title.textContent;
+    // The active project's name sits in the top bar in both modes.
+    const project = session.project;
+    projectLine.hidden = !session.available;
+    projectLine.querySelector(".app-project-label").textContent = session.available ? project.name : "Live voice processor";
+    projectLine.querySelector(".dirty").textContent = session.available && project.dirty ? "•" : "";
+    projectLine.title = project?.open ? project.path : "Not saved yet. Save to keep your work in a project folder.";
+    sessionState = session;
+    renderLiveTracks();
     root.hidden = !isDaw;
     [...modeSwitch.children].forEach((b) => b.classList.toggle("is-selected", (b.dataset.mode === "daw") === isDaw));
     if (changed && isDaw) screen.render();
   };
 
   for (const b of modeSwitch.children)
-    b.addEventListener("click", () => daw("mode", { daw: b.dataset.mode === "daw" }));
+    b.addEventListener("click", () => requestMode(b.dataset.mode === "daw"));
 
   document.addEventListener("daw-session", (event) => applyMode(event.detail));
 
   // The app's menu bar (standalone only) sends the same commands as the buttons and keys.
   window.__JUCE__.backend.addEventListener("appMenu", (action) => {
-    if (action === "mode:live" || action === "mode:daw") daw("mode", { daw: action === "mode:daw" });
+    if (action === "mode:live" || action === "mode:daw") requestMode(action === "mode:daw");
     else screen.run(action);
   });
 
