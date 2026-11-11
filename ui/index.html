@@ -27,8 +27,8 @@
               stroke-linecap="round" stroke-linejoin="round" />
       </svg>
       <div>
-        <h1>MicFX</h1>
-        <p>Live voice processor</p>
+        <h1 class="app-title">MicFX Live</h1>
+        <p class="app-project" title=""><span class="app-project-label">Live voice processor</span><span class="dirty"></span></p>
       </div>
     </div>
 
@@ -54,8 +54,12 @@
       </button>
       <button class="chip dry-button" type="button" aria-pressed="false" title="Hold to hear your voice without effects (or hold D)">Hold for dry</button>
       <button class="chip keys-button" type="button" title="Keyboard shortcuts (?)">?</button>
+      <div class="live-tracks" hidden>
+        <button class="chip live-tracks-button" type="button" aria-haspopup="true" aria-expanded="false" title="The tracks of the active DAW project (read only)">DAW tracks <span class="live-tracks-count">0</span></button>
+        <div class="live-tracks-menu" hidden></div>
+      </div>
       <span class="chip chip--live"><span class="dot"></span>Live</span>
-      <span class="chip">Headphones recommended</span>
+      <span class="chip chip--tip">Headphones recommended</span>
     </div>
   </header>
 
@@ -91,6 +95,17 @@
         <p class="limiter-note">Limited at −1 dB</p>
       </section>
     </aside>
+  </div>
+
+  <div class="confirm-backdrop" hidden>
+    <div class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">
+      <h2 id="confirm-title"></h2>
+      <p class="confirm-text"></p>
+      <div class="confirm-buttons">
+        <button class="tool confirm-stay" type="button">Stay</button>
+        <button class="tool is-accent confirm-ok" type="button">Switch</button>
+      </div>
+    </div>
   </div>
 
   <!-- DAW mode: built by daw.js from the "dawSession" event. -->

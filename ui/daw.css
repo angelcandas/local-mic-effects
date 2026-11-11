@@ -1419,3 +1419,67 @@ body.library-dragging * { cursor: grabbing !important; }
 .warp-marker.is-dragging { border-left-style: dashed; }
 .clip.is-warped .clip-name::after { content: "  \21C4"; opacity: 0.7; }
 .daw-arrange[data-tool="warp"] .clip, [data-tool="warp"] .clip { cursor: ew-resize; }
+
+/* ---------- Icon toolbar ---------- */
+
+.daw-transport { gap: 8px 10px; }
+.daw-group { gap: 4px; }
+.tb-sep { align-self: stretch; width: 1px; margin: 3px 2px; background: var(--line); }
+.ib { display: inline-flex; align-items: center; justify-content: center; gap: 3px; width: 30px; padding: 0; }
+.ib .ico { width: 17px; height: 17px; flex: none; }
+.ib .ib-label { font: 600 11px var(--mono); }
+.ib.key-button.is-set { width: auto; padding: 0 8px; }
+.segmented .ib { width: auto; padding: 5px 10px; }
+.view-tabs .ib { padding: 5px 10px; }
+.ib-select { position: relative; display: inline-flex; align-items: center; justify-content: center; width: 30px; height: 30px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); color: var(--muted); }
+.ib-select:hover { color: var(--text); border-color: var(--line-strong); }
+.ib-select[hidden] { display: none; }
+.ib-select .ico { width: 17px; height: 17px; pointer-events: none; }
+.ib-select select { position: absolute; inset: 0; width: 100%; height: 100%; opacity: 0; cursor: pointer; }
+.daw .tempo span { display: none; }
+.daw .tempo-input { width: 50px; }
+.daw .click-volume { width: 56px; }
+.daw .zoom-slider input { width: 64px; }
+.daw select.count-in, .daw select.grid-size, .daw select.signature { padding-left: 8px; padding-right: 22px; }
+
+/* ---------- Top bar: app title, project, Live view of DAW tracks, mode confirm ---------- */
+
+.app-project { display: flex; align-items: baseline; gap: 4px; max-width: 260px; overflow: hidden; white-space: nowrap; }
+.app-project[hidden] { display: none; }
+.app-project-label { overflow: hidden; text-overflow: ellipsis; }
+.app-project .dirty { color: var(--warn); font-size: 18px; line-height: 0; }
+body.is-daw .app-project { color: var(--text); font-weight: 600; }
+
+.live-tracks { position: relative; }
+.live-tracks[hidden] { display: none; }
+.live-tracks-button { cursor: pointer; font: inherit; color: inherit; }
+.live-tracks-count { color: var(--accent-2); font-weight: 700; }
+.live-tracks-menu {
+  position: absolute; right: 0; top: calc(100% + 6px); z-index: 30; min-width: 300px; max-height: 60vh; overflow: auto;
+  padding: 6px; border: 1px solid var(--line-strong); border-radius: 12px; background: var(--panel-raised);
+  box-shadow: 0 14px 40px rgba(0, 0, 0, 0.5);
+}
+.live-tracks-menu[hidden] { display: none; }
+.live-tracks-head { padding: 6px 8px; color: var(--muted); font-size: 12px; font-weight: 600; }
+.live-track { display: flex; align-items: center; gap: 8px; padding: 6px 8px; border-radius: 8px; font-size: 13px; }
+.live-track.is-off { opacity: 0.45; }
+.live-track-dot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.live-track-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.live-track-flags { color: var(--muted); font-size: 11px; white-space: nowrap; }
+.live-tracks-foot { padding: 6px 8px 2px; color: var(--faint); font-size: 11px; }
+
+.confirm-backdrop { position: fixed; inset: 0; z-index: 100; display: grid; place-items: center; background: rgba(5, 7, 11, 0.6); }
+.confirm-backdrop[hidden] { display: none; }
+.confirm-dialog { width: min(420px, 90vw); padding: 20px 22px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--panel-raised); box-shadow: 0 20px 60px rgba(0, 0, 0, 0.6); }
+.confirm-dialog h2 { margin: 0 0 8px; font-size: 16px; }
+.confirm-dialog p { margin: 0 0 18px; color: var(--muted); font-size: 13px; line-height: 1.45; }
+.confirm-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+
+/* The title already says Live/DAW, so the status dot goes; the headphones tip yields first when narrow. */
+.chip--live { display: none; }
+.app-title { white-space: nowrap; }
+.chips { min-width: 0; }
+@media (max-width: 1180px) { .chip--tip { display: none; } }
+.topbar { grid-template-columns: auto minmax(0, 1fr) auto; }
+.topbar .preset-bar { justify-self: center; }
+.topbar .chips { grid-column: 3; }
