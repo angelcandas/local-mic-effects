@@ -273,6 +273,7 @@ namespace
                 { "addTrack",  "New track",              "Ctrl+T",       true },
                 { "", "", "", false },
                 { "autoMix",   "Auto Mix...",            "",             true },
+                { "songKey",   "Song key...",            "",             true },
             } },
             { "View", {
                 { "mode:live", "Live",                   "",             false },

@@ -154,6 +154,26 @@
         <button class="tool is-accent automix-apply" disabled>Apply</button>
       </div>
     </div>
+    <div class="key-panel" hidden>
+      <div class="export-head">
+        <strong>Song key</strong>
+        <button class="mini key-close" title="Close" aria-label="Close">×</button>
+      </div>
+      <p class="automix-intro">Listens to the instruments (voice tracks are left out) and finds the key the song is in. The autotune can then pull your voice to that key's notes.</p>
+      <div class="key-summary"></div>
+      <div class="key-chroma" hidden></div>
+      <div class="key-tracks"></div>
+      <div class="export-options">
+        <label>Key <span class="key-pick"><select class="dropdown" name="tonic"></select><select class="dropdown" name="mode"><option value="major">Major</option><option value="minor">Minor</option></select></span></label>
+      </div>
+      <div class="export-bar"><div></div></div>
+      <div class="export-footer">
+        <span class="export-result key-message"></span>
+        <button class="tool key-cancel">Cancel</button>
+        <button class="tool key-detect">Detect</button>
+        <button class="tool is-accent key-autotune" title="Set every autotune in the session to this key (one undo step)">Set autotune to key</button>
+      </div>
+    </div>
     <div class="daw-toast" role="status" aria-live="polite"></div>
   </section>
 

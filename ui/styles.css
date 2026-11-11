@@ -613,6 +613,19 @@ select.dropdown {
 
 .keys-picker .row { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
 .keys-picker .row .name { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; }
+.keys-picker .row .key-match {
+  margin-left: auto;
+  padding: 2px 8px;
+  border: 1px solid var(--line, #2a2f3b);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--muted);
+  font: inherit;
+  font-size: 10.5px;
+  cursor: pointer;
+}
+.keys-picker .row .key-match:hover:not(:disabled) { color: var(--text); border-color: var(--accent); }
+.keys-picker .row .key-match:disabled { opacity: 0.6; cursor: default; }
 
 /* ---------- Reverb graphic ---------- */
 
