@@ -62,6 +62,7 @@ private:
     juce::var handleAutoMix (const juce::var& args, Complete&);
     void startAutoMix (const juce::File& reference);
     void replanAutoMix();
+    void readAutoMixEffects (const juce::var& effects);
     juce::var describeAutoMix() const;
     void withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
                       std::function<juce::var (const juce::File&)> action, Complete);
@@ -96,6 +97,7 @@ private:
     std::map<int, analysis::Role> autoMixRoles;
     analysis::MixStyle autoMixStyle = analysis::MixStyle::pop;
     analysis::MixPlan autoMixPlan;
+    analysis::MixOptions autoMixOptions; // the effects it may add (the inserts are filled per plan)
     bool autoMixReference = false; // the plan matches a reference song
     juce::String autoMixReferenceName;
 
