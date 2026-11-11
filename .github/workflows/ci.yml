@@ -1,0 +1,83 @@
+# Builds MicFX and runs the headless tests on every pull request and push to main.
+#
+# Linux runs on every PR: it's the cheapest runner and catches compile errors and test
+# failures in the shared code. macOS (the main platform, with the AU) runs on pushes to
+# main and on demand (Actions tab -> CI -> Run workflow), since its runners cost more.
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  ui:
+    name: UI scripts parse
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Check every UI script for syntax errors
+        run: for f in ui/*.js; do node --check "$f"; done
+
+  linux:
+    name: Linux build + tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build ccache \
+            libxrandr-dev libxinerama-dev libxcursor-dev libxext-dev libxi-dev libxcomposite-dev \
+            libxrender-dev libfreetype-dev libfontconfig1-dev libasound2-dev libx11-dev libgl-dev \
+            libgtk-3-dev libwebkit2gtk-4.1-dev
+
+      - name: Restore compiler cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ccache
+          key: ccache-linux-${{ github.sha }}
+          restore-keys: ccache-linux-
+
+      - name: Configure
+        run: cmake --preset debug -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build the tests, the standalone app and the VST3
+        run: cmake --build build/debug --target MicFXTests MicFX_Standalone MicFX_VST3
+
+      - name: Run the tests
+        run: ./build/debug/MicFXTests_artefacts/Debug/MicFXTests
+
+  macos:
+    name: macOS build + tests
+    if: github.event_name != 'pull_request'
+    runs-on: macos-15
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: true
+
+      - name: Install Ninja
+        run: brew install ninja
+
+      - name: Configure
+        run: cmake --preset debug
+
+      - name: Build the tests, the app and the plugins
+        run: cmake --build build/debug --target MicFXTests MicFX_Standalone MicFX_VST3 MicFX_AU
+
+      - name: Run the tests
+        run: ./build/debug/MicFXTests_artefacts/Debug/MicFXTests
