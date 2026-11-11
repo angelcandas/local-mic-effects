@@ -419,7 +419,9 @@ body.is-daw .chip--live { display: none; }
 .clip.is-dragging { z-index: 5; cursor: grabbing; opacity: 0.85; }
 .clip.is-missing { border-style: dashed; border-color: var(--hot); background: rgba(255, 93, 108, 0.08); }
 
-.clip-wave, .clip-fades { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+.clip-fades { position: absolute; inset: 0; width: 100%; height: 100%; pointer-events: none; }
+/* Placed and sized in pixels by drawWaveform: never stretched with the clip. */
+.clip-wave { position: absolute; top: 0; left: 0; height: 100%; pointer-events: none; }
 .clip-wave { opacity: 0.85; }
 .clip-fades path { fill: rgba(8, 10, 14, 0.55); stroke: var(--text); stroke-width: 1; vector-effect: non-scaling-stroke; }
 
