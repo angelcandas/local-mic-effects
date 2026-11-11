@@ -1862,6 +1862,111 @@ namespace
         edit.setLoop (false, 1.0, 1.1);
         folder.deleteRecursively();
     }
+
+    void testLatency()
+    {
+        std::cout << "\nLatency (autotune and pitch shift)\n";
+
+        const auto nominal = fx::PsolaShifter::getNominalLatency (sampleRate);
+
+        fx::modules::Pitch pitch;
+        pitch.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+        check (pitch.getLatencySamples() == 0, "no delay while the pitch effects are off");
+        pitch.harmonyOn.store (1.0f);
+        check (pitch.getLatencySamples() == 0, "the harmonizer alone leaves the lead undelayed");
+        pitch.harmonyOn.store (0.0f);
+        pitch.tuneOn.store (1.0f);
+        check (pitch.getLatencySamples() == nominal, "autotune reports " + juce::String (nominal) + " samples ("
+                                                         + juce::String (1000.0 * nominal / sampleRate, 2) + " ms)");
+        pitch.tuneOn.store (0.0f);
+        pitch.shiftOn.store (1.0f);
+        check (pitch.getLatencySamples() == nominal, "pitch shift reports the same delay");
+
+        // The real delay of a 200 Hz voice through the shifter (at 0 semitones the output is
+        // the input, delayed). A steady tone only shows it modulo one period, which is enough
+        // here: the delay is shorter than a period.
+        const auto input = makeVoice ((float) fx::PsolaShifter::nominalVoiceHz, 1.0);
+        fx::PitchEngine::Settings settings;
+        settings.shiftOn = true;
+        const auto output = runPitchEngine (input, settings);
+        const auto period = (int) std::lround (sampleRate / fx::PsolaShifter::nominalVoiceHz);
+
+        auto measured = 0;
+        auto bestError = std::numeric_limits<double>::max();
+        for (int delay = 0; delay < period; ++delay)
+        {
+            double error = 0.0;
+            for (size_t i = 24000; i < 40000; ++i)
+                error += juce::square ((double) output[i] - (double) input[i - (size_t) delay]);
+            if (error < bestError)
+            {
+                bestError = error;
+                measured = delay;
+            }
+        }
+
+        // It wanders within half a period of the reported value, depending on where the
+        // first grain landed.
+        check (std::abs (measured - nominal) <= period / 2, "a 200 Hz voice comes out " + juce::String (measured)
+                                                              + " samples late (reported " + juce::String (nominal) + ")");
+
+        // The plugin tells the host.
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        check (processor.getLatencySamples() == 0, "the plugin reports no latency by default");
+
+        processor.getState().getParameter ("tuneOn")->setValueNotifyingHost (1.0f);
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        buffer.clear();
+        juce::MidiBuffer midi;
+        processor.processBlock (buffer, midi);
+        processor.updateLatency();
+        check (processor.getLatencySamples() == nominal, "with autotune on, the plugin reports its delay to the host");
+
+        processor.getState().getParameter ("tuneOn")->setValueNotifyingHost (0.0f);
+        processor.processBlock (buffer, midi);
+        processor.updateLatency();
+        check (processor.getLatencySamples() == 0, "and goes back to 0 when it's switched off");
+
+        // DAW mode: a track with autotune delays the others to match.
+        const auto folder = juce::File::createTempFile ("micfx-latency");
+        folder.createDirectory();
+        juce::AudioBuffer<float> click (1, (int) sampleRate / 2);
+        click.clear();
+        click.setSample (0, 0, 0.5f);
+        const auto clickFile = folder.getChildFile ("click.wav");
+        writeWav (clickFile, click, sampleRate);
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        const auto plain = (int) edit.addTrack ("Backing")[daw::ids::id];
+        const auto tuned = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        edit.addClip (plain, clickFile, 0.1, 0.5);
+        const auto tune = (int) edit.addInsert (tuned, fx::ModuleType::pitch)[daw::ids::id];
+        engine.loadAllNow();
+        check (engine.getLatencySamples() == nominal, "a track with autotune sets the session's delay");
+
+        const auto clickAt = [&]
+        {
+            engine.seek (0);
+            engine.play();
+            const auto out = render (engine, 0.3);
+            engine.stop();
+            for (size_t i = 0; i < out[0].size(); ++i)
+                if (std::abs (out[0][i]) > 0.1f)
+                    return (int) i - (int) (0.1 * sampleRate);
+            return -1;
+        };
+
+        check (clickAt() == nominal, "the other tracks are delayed by the same amount");
+
+        edit.setInsertValue (tune, "tuneOn", 0.0f);
+        engine.rebuildNow();
+        check (engine.getLatencySamples() == 0 && clickAt() == 0, "switching autotune off removes the delay");
+
+        folder.deleteRecursively();
+    }
 }
 
 int main()
@@ -1884,6 +1989,7 @@ int main()
     testDawMode();
     testAnalysis();
     testMixAssistant();
+    testLatency();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

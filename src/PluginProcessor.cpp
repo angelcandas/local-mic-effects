@@ -45,6 +45,16 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
             bindings.push_back ({ &module.getValue (v), parameter, kind });
         }
     }
+
+    startTimerHz (5);
+}
+
+void PluginProcessor::updateLatency()
+{
+    const auto latency = dawMode.load() ? dawEngine.getLatencySamples() : chain.getLatencySamples();
+
+    if (latency != getLatencySamples())
+        setLatencySamples (latency);
 }
 
 //==============================================================================
@@ -94,6 +104,8 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     inputGain.reset();
     outputGain.reset();
     limiter.reset();
+
+    updateLatency();
 }
 
 void PluginProcessor::updateDspParameters()

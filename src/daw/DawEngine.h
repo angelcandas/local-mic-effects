@@ -118,6 +118,7 @@ private:
         juce::String insertLayout; // insert ids in order: a different layout needs a new strip
         fx::FxChain chain;
         std::map<int, fx::Module*> modulesByInsertId;
+        int latencyAtBuild = 0; // the chain's delay when the current graph was built (message thread)
 
         std::atomic<float> targetLeft { 1.0f }, targetRight { 1.0f };
         std::atomic<float> peak { 0.0f };

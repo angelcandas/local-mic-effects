@@ -18,7 +18,8 @@
 //   -> auto-wah -> tremolo -> vibrato -> chorus -> flanger -> phaser -> doubler
 //   -> echo -> reverb -> stereo width
 // The plugin parameters drive the chain's module values once per block.
-class PluginProcessor final : public juce::AudioProcessor
+class PluginProcessor final : public juce::AudioProcessor,
+                              private juce::Timer
 {
 public:
     PluginProcessor();
@@ -68,7 +69,7 @@ public:
     daw::Edit& getDawEdit() noexcept                         { return dawEdit; }
     daw::DawEngine& getDawEngine() noexcept                  { return dawEngine; }
     daw::Project& getDawProject() noexcept                   { return dawProject; }
-    void setDawMode (bool on) noexcept                       { dawMode = on; }
+    void setDawMode (bool on) noexcept                       { dawMode = on; updateLatency(); }
     bool isDawMode() const noexcept                          { return dawMode.load(); }
 
     // Peak levels (linear gain) since the UI last read them. Written by the audio
@@ -78,10 +79,17 @@ public:
 
     std::atomic<int> currentPreset { 0 };
 
+    // Tells the host (and the recorder's take alignment) how late the output is: the
+    // Live chain's delay (autotune, pitch shift), or the DAW engine's in DAW mode.
+    // Runs on a timer, since switching autotune on or off changes it. Message thread.
+    void updateLatency();
+
 private:
     explicit PluginProcessor (juce::AudioProcessorValueTreeState::ParameterLayout layout);
 
     void updateDspParameters();
+
+    void timerCallback() override { updateLatency(); }
 
     Parameters params;
     juce::AudioProcessorValueTreeState state;
