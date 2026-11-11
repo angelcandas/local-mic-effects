@@ -204,6 +204,10 @@ cmake --build --preset debug --target MicFXTests
 ./build/debug/MicFXTests_artefacts/Debug/MicFXTests
 ```
 
+GitHub Actions (`.github/workflows/ci.yml`) runs them on every pull request: a Linux build of the
+tests, the standalone app and the VST3, plus a syntax check of the UI scripts. Pushes to `main` (and
+**Run workflow** in the Actions tab) also build and test on macOS, including the AU.
+
 ## VS Code
 
 Recommended extensions (auto-suggested): CMake Tools, clangd, CodeLLDB.
