@@ -2446,6 +2446,145 @@ namespace
 
         check (allMatch, "switches and lists step, knobs glide");
     }
+
+    // Live readings for the UI: per-module levels and spectra, and the chain's own
+    // input and output gain (DAW tracks) with its meters.
+    void testLiveMeters()
+    {
+        std::cout << "\nLive effect readings and chain gains\n";
+
+        const auto sineBlock = [] (juce::AudioBuffer<float>& buffer, double frequency, float level, int& phase)
+        {
+            for (int i = 0; i < buffer.getNumSamples(); ++i, ++phase)
+                for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                    buffer.setSample (ch, i, level * (float) std::sin (juce::MathConstants<double>::twoPi * frequency * phase / sampleRate));
+        };
+
+        // A compressor hit hard: less comes out than goes in.
+        {
+            fx::FxChain chain { { fx::ModuleType::compressor } };
+            chain[0].findValue ("compThreshold")->store (-30.0f);
+            chain[0].findValue ("compRatio")->store (8.0f);
+            chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            int phase = 0;
+            for (int b = 0; b < 100; ++b)
+            {
+                sineBlock (buffer, 440.0, 0.5f, phase);
+                juce::dsp::AudioBlock<float> block (buffer);
+                chain.process (fx::Module::Context (block));
+                if (b == 98) { chain[0].takeInputPeak(); chain[0].takeOutputPeak(); }
+            }
+
+            const auto in = chain[0].takeInputPeak(), out = chain[0].takeOutputPeak();
+            check (std::abs (in - 0.5f) < 0.01f, "a module reports the peak going in (" + juce::String (in, 3) + ")");
+            check (out < in * 0.5f, "and coming out: the compressor's reduction shows (" + juce::String (juce::Decibels::gainToDecibels (out / in), 1) + " dB)");
+            check (chain[0].takeInputPeak() == 0.0f, "reading a peak resets it");
+
+            fx::SpectrumAnalyser analyser;
+            check (fx::describeMeter (chain[0], analyser)["spectrum"].isVoid(), "dynamics readings carry no spectrum");
+        }
+
+        // An EQ's readings carry the spectrum before and after it, once the UI asks.
+        {
+            fx::FxChain chain { { fx::ModuleType::paraEq } };
+            chain[0].findValue ("peqOn")->store (1.0f);
+            chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            int phase = 0;
+            const auto run = [&] (int blocks)
+            {
+                for (int b = 0; b < blocks; ++b)
+                {
+                    sineBlock (buffer, 1000.0, 0.5f, phase);
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    chain.process (fx::Module::Context (block));
+                }
+            };
+
+            run (20);
+            check (! chain[0].getScope().isWanted(), "nothing is captured for a spectrum until the UI asks");
+
+            fx::SpectrumAnalyser analyser;
+            fx::describeMeter (chain[0], analyser); // asks
+            run (20);
+            const auto spectrum = fx::describeMeter (chain[0], analyser)["spectrum"];
+            const auto* post = spectrum["post"].getArray();
+
+            int loudest = -1;
+            float loudestDb = -1000.0f;
+            for (int b = 0; post != nullptr && b < post->size(); ++b)
+                if ((float) (*post)[b] > loudestDb)
+                    loudestDb = (float) (*post)[b], loudest = b;
+
+            const auto centre = 20.0 * std::pow (1000.0, (loudest + 0.5) / fx::SpectrumAnalyser::numBands);
+            check (post != nullptr && post->size() == fx::SpectrumAnalyser::numBands && spectrum["pre"].getArray() != nullptr,
+                   "the spectrum has before and after bands");
+            check (centre > 800.0 && centre < 1250.0 && loudestDb > -12.0f,
+                   "a 1 kHz tone peaks in the 1 kHz band (" + juce::String (centre, 0) + " Hz, " + juce::String (loudestDb, 0) + " dB)");
+            check ((float) (*post)[2] < loudestDb - 40.0f, "and the low bands stay quiet");
+
+            chain[0].findValue ("peqOn")->store (0.0f);
+            check (fx::describeMeter (chain[0], analyser).isVoid(), "a module that's off has no readings");
+        }
+
+        // The chain's input and output gain.
+        {
+            fx::FxChain chain { { fx::ModuleType::eq } };
+            chain.setGains (6.0f, -12.0f);
+            chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            int phase = 0;
+            for (int b = 0; b < 40; ++b)
+            {
+                sineBlock (buffer, 440.0, 0.25f, phase);
+                juce::dsp::AudioBlock<float> block (buffer);
+                chain.process (fx::Module::Context (block));
+            }
+
+            const auto in = chain.takeInputPeak(), out = chain.takeOutputPeak();
+            check (std::abs (juce::Decibels::gainToDecibels (in / 0.25f) - 6.0f) < 0.2f, "the chain's input gain raises what the effects get");
+            check (std::abs (juce::Decibels::gainToDecibels (buffer.getMagnitude (0, blockSize) / 0.25f) + 6.0f) < 0.2f
+                   && std::abs (juce::Decibels::gainToDecibels (out / 0.25f) + 6.0f) < 0.2f,
+                   "and its output gain sets what leaves (+6 - 12 = -6 dB)");
+        }
+
+        // DAW tracks: gains are saved on the track and reach its chain.
+        {
+            daw::Edit edit;
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+
+            const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+            edit.addInsert (vocal, fx::ModuleType::compressor);
+            edit.setTrackMonitor (vocal, true);
+            edit.setChainGain (vocal, false, 6.0f);
+            edit.setChainGain (vocal, true, 40.0f);
+            check (juce::approximatelyEqual ((float) edit.getTrack (vocal)[daw::ids::outGain], daw::Edit::maxChainGain), "chain gains are limited to +/-24 dB");
+            edit.setChainGain (vocal, true, -6.0f);
+            engine.rebuildNow();
+
+            juce::AudioBuffer<float> output (2, blockSize);
+            std::vector<float> mic ((size_t) blockSize, 0.0f);
+            for (int b = 0; b < 40; ++b)
+            {
+                for (int i = 0; i < blockSize; ++i)
+                    mic[(size_t) i] = 0.1f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * (b * blockSize + i) / sampleRate);
+                engine.process (output, 2, blockSize, mic.data());
+            }
+
+            const auto [in, out] = engine.takeChainPeaks (vocal);
+            check (std::abs (juce::Decibels::gainToDecibels (in / 0.1f) - 6.0f) < 0.3f, "a track's chain input gain is applied before its inserts");
+            check (out > 0.0f && out < in, "and its output gain after them");
+
+            int inserts = 0;
+            engine.forEachInsert (vocal, [&] (int, fx::Module& module) { inserts += module.takeInputPeak() > 0.0f ? 1 : 0; });
+            check (inserts == 1, "each insert's readings can be reached by insert id");
+        }
+    }
 }
 
 int main()
@@ -2474,6 +2613,7 @@ int main()
     testMixAssistant();
     testLatency();
     testSmoothing();
+    testLiveMeters();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

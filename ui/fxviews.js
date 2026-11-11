@@ -4,11 +4,18 @@
 // (EQ bands, high-pass, compressor and gate thresholds).
 //
 //   createFxView (moduleKey, { get (param), set (param, value, first), range (param) })
-//     -> { element, update() } or null when the effect has no picture.
+//     -> { element, update(), live (reading) } or null when the effect has no picture.
+//
+// live (reading) animates the picture from the signal, about 30 times a second:
+// reading is { in, out } peak dB going into and out of the effect (plus, for the
+// frequency pictures, spectrum { pre, post }: dB bands, log-spaced 20 Hz..20 kHz), or
+// null while the effect is off or silent. The spectrum sits behind the EQ and filter
+// curves, a dot rides the compressor and gate curves at the real level, echo taps
+// replay your voice, the LFOs show where they are...
 //
 // moduleKey is the C++ fx::getModuleKey name ("eq", "compressor"...). The curves
 // follow the DSP in src/dsp (same filter types, frequencies and Qs).
-import { clamp, svg } from "./widgets.js";
+import { clamp, html, svg } from "./widgets.js";
 
 const W = 240, H = 92;               // viewBox
 const FS = 48000;                    // sample rate the curves are drawn at
@@ -130,12 +137,57 @@ const path = (element, className) => {
   return p;
 };
 
+//============================================================================== live helpers
+const gainOf = (db) => Math.pow(10, (db ?? -100) / 20);
+// 0 (silent, -60 dB) .. 1 (full scale).
+const levelOf = (db) => clamp(((db ?? -100) + 60) / 60);
+
+// A round dot that keeps its shape however the picture stretches.
+function dot(element, className = "fx-dot") {
+  const p = svg("path", { class: className });
+  element.append(p);
+  return {
+    move(x, y, visible = true) {
+      p.setAttribute("d", visible ? `M${x.toFixed(1)} ${y.toFixed(1)} l0.01 0` : "");
+    },
+  };
+}
+
+// The live spectrum behind a frequency picture: what comes out, filled, and what goes
+// in, as a thin line. Bands fall back slowly so the picture doesn't flicker. Tilted
+// +3 dB per octave around 1 kHz, as analysers do, so a voice reads level.
+function spectrumLayer(element) {
+  const pre = path(element, "fx-spectrum-in"), post = path(element, "fx-spectrum");
+  let shownPre = null, shownPost = null;
+  const yOf = (db, i, count) => {
+    const f = 20 * Math.pow(1000, (i + 0.5) / count);
+    return H - clamp((db + 3 * Math.log2(f / 1000) + 84) / 84) * H * 0.8; // the top fifth stays clear for the curve
+  };
+  const fall = (shown, bands) => bands.map((v, i) => Math.max(v, (shown?.[i] ?? -100) - 2.5));
+  const line = (bands) => bands.map((db, i) => `${(((i + 0.5) / bands.length) * W).toFixed(1)},${yOf(db, i, bands.length).toFixed(1)}`);
+
+  return (reading) => {
+    const spectrum = reading?.spectrum;
+    if (!spectrum?.post?.length) {
+      shownPre = shownPost = null;
+      pre.setAttribute("d", "");
+      post.setAttribute("d", "");
+      return;
+    }
+    shownPre = fall(shownPre, spectrum.pre);
+    shownPost = fall(shownPost, spectrum.post);
+    pre.setAttribute("d", `M${line(shownPre).join(" L")}`);
+    post.setAttribute("d", `M0,${H} L${line(shownPost).join(" L")} L${W},${H} Z`);
+  };
+}
+
 //============================================================================== views
 const views = {
   eq({ get, set, range }) {
     const RANGE = 15;
     const element = frame("is-eq");
     frequencyGrid(element, RANGE);
+    const live = spectrumLayer(element);
     const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
     const gainRange = (p) => range(p) ?? { min: -12, max: 12 };
     const setGain = (p, y, first) => set(p, Math.round(clamp(dbOfY(y, RANGE), gainRange(p).min, gainRange(p).max) * 10) / 10, first);
@@ -160,6 +212,7 @@ const views = {
         mid.move(xOfF(get("eqMidFreq")), yOfDb(get("eqMidGain"), RANGE));
         high.move(xOfF(7000) + 8, yOfDb(get("eqHigh"), RANGE));
       },
+      live,
     };
   },
 
@@ -170,6 +223,7 @@ const views = {
     const RANGE = 18;
     const element = frame("is-eq");
     frequencyGrid(element, RANGE);
+    const live = spectrumLayer(element);
     const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
     const r = (p, fallback) => range(p) ?? fallback;
     const setFreq = (p, x, first) => set(p, Math.round(clamp(fOfX(x), r(p, { min: 20 }).min, r(p, { max: 20000 }).max)), first);
@@ -207,6 +261,7 @@ const views = {
         high.move(xOfF(get("peqHighFreq")), yOfDb(get("peqHighGain"), RANGE));
         highCut.move(xOfF(get("peqHighCutFreq")), yOfDb(get("peqHighCutOn") >= 0.5 ? -3 : -RANGE + 2, RANGE));
       },
+      live,
     };
   },
 
@@ -214,6 +269,7 @@ const views = {
     const RANGE = 24;
     const element = frame("is-filter");
     frequencyGrid(element);
+    const live = spectrumLayer(element);
     const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
     const r = () => range("hpfFreq") ?? { min: 20, max: 400 };
     const point = handle(element, (x, y, first) => set("hpfFreq", Math.round(clamp(fOfX(x), r().min, r().max)), first), "Cutoff: drag sideways");
@@ -225,6 +281,7 @@ const views = {
         fill.setAttribute("d", `${d} L${W},${H} L0,${H} Z`);
         point.move(xOfF(get("hpfFreq")), yOfDb(-3, RANGE));
       },
+      live,
     };
   },
 
@@ -232,6 +289,7 @@ const views = {
     const RANGE = 24;
     const element = frame("is-filter");
     frequencyGrid(element);
+    const live = spectrumLayer(element);
     const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
     return {
       element,
@@ -242,6 +300,7 @@ const views = {
         curve.setAttribute("d", d);
         fill.setAttribute("d", `${d} L${W},${H} L0,${H} Z`);
       },
+      live,
     };
   },
 
@@ -250,6 +309,7 @@ const views = {
     const RANGE = 24;
     const element = frame("is-filter");
     frequencyGrid(element);
+    const live = spectrumLayer(element);
     const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
     return {
       element,
@@ -260,12 +320,14 @@ const views = {
         curve.setAttribute("d", d);
         fill.setAttribute("d", `${d} L${W},${H} L0,${H} Z`);
       },
+      live,
     };
   },
 
   deEsser({ get }) {
     const element = frame("is-filter");
     frequencyGrid(element);
+    const spectrum = spectrumLayer(element);
     const band = svg("rect", { class: "fx-band", y: 0, height: H });
     const line = svg("line", { class: "fx-threshold", x1: 0, x2: W });
     element.append(band, line);
@@ -279,6 +341,13 @@ const views = {
         const y = clamp((-get("deessThreshold") / 60) * H, 4, H - 4);
         line.setAttribute("y1", y);
         line.setAttribute("y2", y);
+      },
+      // The band lights up while it's taking the esses down.
+      live(reading) {
+        spectrum(reading);
+        const reduction = reading ? Math.max(0, reading.in - reading.out) : 0;
+        band.style.opacity = reading ? 0.45 + clamp(reduction / 6) * 0.55 : "";
+        return reduction >= 0.5 ? `−${reduction.toFixed(1)} dB` : "";
       },
     };
   },
@@ -298,17 +367,25 @@ const views = {
                    svg("line", { class: "grid", x1: W / 2, x2: W / 2, y1: 0, y2: H }),
                    svg("line", { class: "grid dashed", x1: W / 2 - H / 2, y1: H, x2: W / 2 + H / 2, y2: 0 }));
     const curve = path(element, "fx-curve");
+    const marker = dot(element);
+    const shape = (x) => {
+      const drive = Math.pow(10, get("satDrive") / 20), makeup = 1 / Math.pow(drive, 0.7), mix = get("satMix") / 100;
+      return x + mix * (Math.tanh(drive * x) * makeup - x);
+    };
+    const at = (x) => [W / 2 + x * (H / 2 - 4), H / 2 - clamp(shape(x), -1.1, 1.1) * (H / 2 - 4)];
+    let peak = 0;
     return {
       element,
       update() {
-        const drive = Math.pow(10, get("satDrive") / 20), makeup = 1 / Math.pow(drive, 0.7), mix = get("satMix") / 100;
         const points = [];
-        for (let i = 0; i <= 60; ++i) {
-          const x = -1 + (2 * i) / 60;
-          const y = x + mix * (Math.tanh(drive * x) * makeup - x);
-          points.push(`${(W / 2 + x * (H / 2 - 4)).toFixed(1)},${(H / 2 - clamp(y, -1.1, 1.1) * (H / 2 - 4)).toFixed(1)}`);
-        }
+        for (let i = 0; i <= 60; ++i) points.push(at(-1 + (2 * i) / 60).map((v) => v.toFixed(1)).join(","));
         curve.setAttribute("d", `M${points.join(" L")}`);
+      },
+      // Your loudest peaks ride up the curve, into the bend when you push it.
+      live(reading) {
+        peak = reading ? Math.max(clamp(gainOf(reading.in)), peak * 0.8) : 0;
+        marker.move(...at(peak), peak > 0.002);
+        element.style.setProperty("--drive", reading ? clamp(peak * 1.5) : 0);
       },
     };
   },
@@ -317,8 +394,15 @@ const views = {
     const element = frame("is-curve");
     element.append(svg("line", { class: "grid", x1: 0, x2: W, y1: H / 2, y2: H / 2 }));
     const ghost = path(element, "fx-ghost"), curve = path(element, "fx-curve");
+    let amplitude = 0.9, phase = 0; // live: the wave scrolls and follows your level
     return {
       element,
+      live(reading) {
+        const target = reading ? 0.08 + clamp(gainOf(reading.in) * 2) * 0.82 : 0.9;
+        amplitude = Math.max(target, amplitude * 0.85);
+        phase = reading ? (phase + 0.35) % (Math.PI * 2) : 0;
+        this.update();
+      },
       update() {
         const levels = Math.pow(2, Math.max(1, get("crushBits")) - 1);
         const hold = Math.max(1, Math.round(48000 / Math.max(100, get("crushRate")) / 6)); // drawn 6x slower so steps show
@@ -326,7 +410,7 @@ const views = {
         const clean = [], crushed = [];
         let held = 0;
         for (let i = 0; i <= W; ++i) {
-          const x = Math.sin((i / W) * Math.PI * 4) * 0.9;
+          const x = Math.sin((i / W) * Math.PI * 4 - phase) * amplitude;
           if (i % hold === 0) held = Math.round(x * levels) / levels;
           const y = x + mix * (held - x);
           clean.push(`${i},${(H / 2 - x * (H / 2 - 4)).toFixed(1)}`);
@@ -342,15 +426,32 @@ const views = {
     const element = frame("is-taps");
     const taps = svg("g");
     element.append(svg("line", { class: "grid", x1: 0, x2: W, y1: H / 2, y2: H / 2 }), taps);
+    // Live: the input level over the last two seconds, so each tap replays what you
+    // sang one echo time (two, three...) ago.
+    let history = null;
+    const levelAgo = (seconds) => {
+      if (!history) return 1;
+      const t = performance.now() / 1000 - seconds;
+      for (let i = history.length - 1; i >= 0; --i) if (history[i][0] <= t) return history[i][1];
+      return 0;
+    };
     return {
       element,
+      live(reading) {
+        if (!reading) { if (history) { history = null; this.update(); } return; }
+        const now = performance.now() / 1000;
+        history = (history ?? []).filter(([t]) => t > now - 2.2);
+        history.push([now, levelOf(reading.in)]);
+        this.update();
+      },
       update() {
         const seconds = 2, time = Math.max(0.01, get("delayTime") / 1000), feedback = get("delayFeedback") / 100;
         const mix = get("delayMix") / 100, pingPong = get("delayPingPong") >= 0.5;
-        taps.replaceChildren(svg("rect", { class: "fx-tap is-dry", x: 2, width: 4, y: 6, height: H / 2 - 6 }));
+        const dry = history ? Math.max(0.04, levelAgo(0)) : 1;
+        taps.replaceChildren(svg("rect", { class: "fx-tap is-dry", x: 2, width: 4, y: H / 2 - dry * (H / 2 - 6), height: Math.max(1, dry * (H / 2 - 6)) }));
         let level = mix;
         for (let n = 1, t = time; t < seconds && level > 0.01; ++n, t += time, level *= feedback) {
-          const x = 2 + (t / seconds) * (W - 8), h = level * (H / 2 - 6);
+          const x = 2 + (t / seconds) * (W - 8), h = level * (history ? Math.max(0.04, levelAgo(t)) : 1) * (H / 2 - 6);
           const up = !pingPong || n % 2 === 1;
           taps.append(svg("rect", { class: "fx-tap", x, width: 4, y: up ? H / 2 - h : H / 2, height: Math.max(1, h) }));
         }
@@ -361,10 +462,15 @@ const views = {
   reverb({ get }) {
     const element = frame("is-decay");
     const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
+    let energy = 1; // live: the tail swells with what comes out and dies away with it
     return {
       element,
+      live(reading) {
+        energy = reading ? Math.max(0.05 + levelOf(reading.out) * 0.95, energy * 0.93) : 1;
+        this.update();
+      },
       update() {
-        const size = get("reverbSize") / 100, damping = get("reverbDamping") / 100, mix = get("reverbMix") / 100;
+        const size = get("reverbSize") / 100, damping = get("reverbDamping") / 100, mix = get("reverbMix") / 100 * energy;
         const decay = 0.3 + size * 4; // seconds to fade out, roughly
         const points = [];
         for (let x = 0; x <= W; x += 3) {
@@ -389,17 +495,33 @@ for (const [key, rate, depth] of [["tremolo", "tremoloRate", "tremoloDepth"], ["
     const element = frame("is-lfo");
     element.append(svg("line", { class: "grid", x1: 0, x2: W, y1: H / 2, y2: H / 2 }));
     const curve = path(element, "fx-curve");
+    const marker = dot(element);
+    const valueAt = (x) => {
+      const hz = rate ? get(rate) : 3;
+      // The auto-wah follows the voice: drawn as a syllable envelope instead of a sine.
+      return rate ? Math.sin((x / W) * 2 * Math.PI * hz * 2) : Math.pow(Math.abs(Math.sin((x / W) * Math.PI * hz)), 3) * 2 - 1;
+    };
+    let envelope = 0;
     return {
       element,
       update() {
-        const hz = rate ? get(rate) : 3, amount = clamp(get(depth) / 100);
+        const amount = clamp(get(depth) / 100);
         const points = [];
-        for (let x = 0; x <= W; x += 2) {
-          // The auto-wah follows the voice: drawn as a syllable envelope instead of a sine.
-          const v = rate ? Math.sin((x / W) * 2 * Math.PI * hz * 2) : Math.pow(Math.abs(Math.sin((x / W) * Math.PI * hz)), 3) * 2 - 1;
-          points.push(`${x},${(H / 2 - v * amount * (H / 2 - 6)).toFixed(1)}`);
-        }
+        for (let x = 0; x <= W; x += 2) points.push(`${x},${(H / 2 - valueAt(x) * amount * (H / 2 - 6)).toFixed(1)}`);
         curve.setAttribute("d", `M${points.join(" L")}`);
+      },
+      // Live: a dot sweeps the LFO in real time (the picture is half a second wide), or,
+      // for the auto-wah, rides your voice's level; it fades when you stop.
+      live(reading) {
+        envelope = reading ? Math.max(levelOf(reading.in), envelope * 0.8) : 0;
+        const amount = clamp(get(depth) / 100);
+        if (rate) {
+          const x = ((performance.now() / 500) % 1) * W;
+          marker.move(x, H / 2 - valueAt(x) * amount * (H / 2 - 6), envelope > 0.05);
+        } else {
+          marker.move(W / 2, H / 2 - (envelope * 2 - 1) * amount * (H / 2 - 6), envelope > 0.05);
+        }
+        element.style.setProperty("--live", envelope);
       },
     };
   };
@@ -415,9 +537,38 @@ function dynamics({ get, set, range, threshold, ratio, above }) {
   const r = () => range(threshold) ?? { min: -60, max: 0 };
   const point = handle(element, (px, py, first) => set(threshold, Math.round(clamp(FLOOR + (px / W) * -FLOOR, r().min, r().max) * 10) / 10, first),
                        "Threshold: drag sideways");
+  // Live: a bar for the gain reduction down the right edge, and a dot at the real level
+  // in (across) and out (up), so you see it ride the curve.
+  const reductionBar = svg("rect", { class: "fx-reduction", x: W - 5, width: 5, y: 0, height: 0 });
+  element.append(reductionBar);
+  const marker = dot(element);
+  let shownReduction = 0, shownIn = FLOOR, shownOut = FLOOR;
 
   return {
     element,
+    live(reading) {
+      if (!reading) {
+        shownReduction = 0;
+        reductionBar.setAttribute("height", 0);
+        marker.move(0, 0, false);
+        element.classList.remove("is-closed");
+        return "";
+      }
+      // Fast attack, slower release, like the meters.
+      shownIn = Math.max(reading.in, shownIn - 2);
+      shownOut = Math.max(reading.out, shownOut - 2);
+      const reduction = Math.max(0, shownIn - shownOut);
+      shownReduction = Math.max(reduction, shownReduction - 1.5);
+      reductionBar.setAttribute("height", clamp(shownReduction / 24) * H);
+      const audible = shownIn > FLOOR + 1;
+      marker.move(x(clamp(shownIn, FLOOR, 0)), y(clamp(shownOut, FLOOR, 0)), audible);
+      if (!above) {
+        const closed = audible ? shownReduction > 6 : true;
+        element.classList.toggle("is-closed", closed);
+        return closed ? "Closed" : "Open";
+      }
+      return shownReduction >= 0.5 ? `−${shownReduction.toFixed(1)} dB` : "";
+    },
     update() {
       const t = get(threshold), k = Math.max(1, ratio());
       const out = (db) => (above ? (db > t ? t + (db - t) / k : db) : (db < t ? t + (db - t) * k : db));
@@ -446,6 +597,42 @@ export function createFxView(moduleKey, access) {
     wrapper.append(span);
   }
 
+  // A corner readout for what the live picture measures (gain reduction, gate open...).
+  const badge = html("span", "fx-badge");
+  wrapper.append(badge);
+  let lastBadge = "";
+
   view.update();
-  return { element: wrapper, update: view.update };
+  return {
+    element: wrapper,
+    update: () => view.update(),
+    live(reading) {
+      const text = view.live?.(reading) ?? "";
+      wrapper.classList.toggle("is-live", Boolean(reading));
+      if (text !== lastBadge) badge.textContent = lastBadge = text;
+    },
+  };
+}
+
+// Two small level bars, in and out, for every effect card (also the ones without a
+// picture). push (reading) as for live(); null shows nothing.
+export function createActivity() {
+  const element = html("div", "fx-activity");
+  element.title = "Level going into and coming out of this effect";
+  const bars = ["in", "out"].map((name) => {
+    const bar = html("span", `fx-activity-bar is-${name}`);
+    element.append(bar);
+    return { bar, shown: 0 };
+  });
+  return {
+    element,
+    push(reading) {
+      const values = reading ? [levelOf(reading.in), levelOf(reading.out)] : [0, 0];
+      bars.forEach((entry, i) => {
+        entry.shown = Math.max(values[i], entry.shown - 0.06);
+        entry.bar.style.setProperty("--level", entry.shown.toFixed(3));
+      });
+      return Math.max(bars[0].shown, bars[1].shown);
+    },
+  };
 }
