@@ -1,5 +1,7 @@
 #include "Project.h"
 
+#include <algorithm>
+
 namespace daw
 {
 namespace
@@ -13,6 +15,38 @@ namespace
             else
                 forEachClip (child, callback);
         }
+    }
+
+    // XML keeps every property as text: "0.0", "1", "Vocal". Put the types back as the Edit
+    // makes them (ids and versions as ints, switches as bools, the rest numbers where they
+    // read as numbers), so a loaded project is the same as one built in memory. Without
+    // this, the DAW screen got volumes as text and couldn't draw a loaded project.
+    void restoreTypes (juce::ValueTree tree)
+    {
+        static const juce::Identifier textIds[] { ids::name, ids::file, ids::colour, ids::type };
+        static const juce::Identifier boolIds[] { ids::mute, ids::solo, ids::arm, ids::monitor, ids::loopOn };
+        static const juce::Identifier intIds[] { ids::id, ids::version };
+
+        for (int i = 0; i < tree.getNumProperties(); ++i)
+        {
+            const auto name = tree.getPropertyName (i);
+            const auto value = tree[name];
+
+            if (! value.isString() || std::find (std::begin (textIds), std::end (textIds), name) != std::end (textIds))
+                continue;
+
+            const auto text = value.toString().trim();
+
+            if (std::find (std::begin (boolIds), std::end (boolIds), name) != std::end (boolIds))
+                tree.setProperty (name, text == "1" || text.equalsIgnoreCase ("true"), nullptr);
+            else if (std::find (std::begin (intIds), std::end (intIds), name) != std::end (intIds))
+                tree.setProperty (name, text.getIntValue(), nullptr);
+            else if (text.isNotEmpty() && text.containsOnly ("0123456789.-+eE") && text.containsAnyOf ("0123456789"))
+                tree.setProperty (name, text.getDoubleValue(), nullptr);
+        }
+
+        for (auto child : tree)
+            restoreTypes (child);
     }
 
     juce::String createFolder (const juce::File& folder)
@@ -49,6 +83,7 @@ Project::Project (Edit& e) : edit (e)
 
 Project::~Project()
 {
+    stopTimer();
     close();
     edit.getState().removeListener (this);
 }
@@ -94,6 +129,20 @@ juce::String Project::createNew (const juce::File& requested)
     return save();
 }
 
+juce::File Project::findProjectFolder (const juce::File& picked)
+{
+    for (auto candidate = picked; candidate != juce::File(); candidate = candidate.getParentDirectory())
+    {
+        if (isProjectFolder (candidate))
+            return candidate;
+
+        if (candidate.getParentDirectory() == candidate) // the root
+            break;
+    }
+
+    return {};
+}
+
 juce::String Project::open (const juce::File& requested)
 {
     if (! isProjectFolder (requested))
@@ -135,6 +184,8 @@ juce::String Project::load (const juce::File& xmlFile, const juce::File& project
 
     if (! tree.hasType (ids::PROJECT))
         return xmlFile.getFileName() + " isn't a MicFX project.";
+
+    restoreTypes (tree);
 
     if ((int) tree.getProperty (ids::version, 0) > Edit::formatVersion)
         return "This project was saved by a newer version of MicFX. Update MicFX to open it.";
@@ -238,8 +289,8 @@ juce::String Project::saveAs (const juce::File& requested)
 
 void Project::close()
 {
-    stopTimer();
-
+    // The autosave timer keeps running: it only writes while a project is open, and
+    // stopping it here would end autosave for every project opened after this one.
     if (isOpen())
         getLockFile().deleteFile();
 

@@ -40,7 +40,10 @@ async function daw(command, args = {}) {
 
 const isTyping = (event) => Boolean(event.target.closest?.("input:not([type=range]):not([type=checkbox]), select, textarea, [contenteditable]"));
 const trackColour = (track, index) => track.colour || TRACK_COLOURS[(track.id ?? index) % TRACK_COLOURS.length];
-const dbText = (db) => (db <= FADER_MIN_DB ? "−∞" : `${db > 0.05 ? "+" : ""}${db.toFixed(1)}`);
+const dbText = (value) => {
+  const db = Number(value) || 0;
+  return db <= FADER_MIN_DB ? "−∞" : `${db > 0.05 ? "+" : ""}${db.toFixed(1)}`;
+};
 
 function button(className, text, title, onClick) {
   const element = html("button", className, text);
@@ -505,6 +508,7 @@ class DawScreen {
     this.meters = new Map();   // track id -> [Level]
     this.dragging = false;
     this.pendingSession = null;
+    this.reveal = null;        // { track, clip?, start? } to scroll into view once drawn
 
     this.buildTransport();
     this.buildArrange();
@@ -680,7 +684,7 @@ class DawScreen {
       button("tool", "Open…", "Open a project", () => daw("open")),
       (this.saveButton = button("tool", "Save", "Save the project (Ctrl+S)", () => daw("save"))),
       button("tool", "Save as…", "Save a copy under a new name", () => daw("saveAs")),
-      button("tool", "Import…", "Add an audio file at the playhead", () => daw("import", { track: this.selectedTrack ?? -1 })),
+      button("tool", "Import…", "Add an audio file at the playhead", () => this.importAudio()),
       button("tool", "Auto Mix…", "Listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix()),
       (this.exportButton = button("tool is-accent", "Export…", "Render the mix or stems to WAV", () => this.toggleExportPanel())));
 
@@ -983,7 +987,36 @@ class DawScreen {
 
   async addTrack() {
     const id = await daw("addTrack");
-    if (typeof id === "number") this.select(id, null);
+    if (typeof id === "number") this.showWhenDrawn({ track: id });
+  }
+
+  // Import an audio file at the playhead, on the selected track (or a new one).
+  async importAudio() {
+    const result = await daw("import", { track: this.selectedTrack ?? -1 });
+    if (result?.ok && typeof result.track === "number") this.showWhenDrawn({ track: result.track, clip: result.clip, start: result.start });
+  }
+
+  // Selects a track (and clip) that was just added, once a session that holds it arrives.
+  // The command's reply comes before that session: selecting at once would find no such
+  // track yet and fall back to the first one.
+  showWhenDrawn(reveal) {
+    this.reveal = reveal;
+    if (this.session?.tracks.some((t) => t.id === reveal.track)) this.onSession(this.session);
+  }
+
+  // Brings a track (and clip) that was just added into view once the session that holds
+  // it has been drawn: below a few rows, a new track would otherwise land out of sight.
+  revealPending() {
+    const reveal = this.reveal;
+    const row = reveal && this.rows.querySelector(`.track-row[data-track="${reveal.track}"]`);
+    if (!row) return;
+    this.reveal = null;
+    const arrange = this.arrange.getBoundingClientRect(), box = row.getBoundingClientRect();
+    if (box.top < arrange.top + 30 || box.bottom > arrange.bottom) row.scrollIntoView({ block: "nearest" });
+    if (reveal.start !== undefined) {
+      const x = reveal.start * this.zoom, left = this.arrange.scrollLeft;
+      if (x < left || x > left + this.arrange.clientWidth - HEAD_WIDTH - 40) this.scrollTo(x - 40);
+    }
   }
 
   renderArrange(force = false) {
@@ -1019,6 +1052,7 @@ class DawScreen {
     this.scrollTo(scroll);
     this.updateRecording();
     this.movePlayhead();
+    this.revealPending();
   }
 
   renderRuler(width) {
@@ -1886,6 +1920,20 @@ class DawScreen {
       return;
     }
     this.session = session;
+    // After New or Open the old selection points at tracks that are gone: fall back to the
+    // first track, so Import and the effects panel act on something you can see.
+    const tracks = session.tracks ?? [];
+    if (this.reveal && tracks.some((t) => t.id === this.reveal.track)) {
+      this.selectedTrack = this.reveal.track;
+      this.selectedClip = this.reveal.clip ?? null;
+    } else if (this.selectedTrack !== 0 && !tracks.some((t) => t.id === this.selectedTrack)) {
+      this.selectedTrack = tracks[0]?.id ?? null;
+      this.selectedClip = null;
+    }
+    // Another project: start at its top-left, not where the last one was scrolled to.
+    const path = session.project?.path ?? "";
+    if (this.projectPath !== undefined && path !== this.projectPath) this.arrange.scrollTop = this.arrange.scrollLeft = 0;
+    this.projectPath = path;
     document.dispatchEvent(new CustomEvent("daw-session", { detail: session }));
     if (this.active) this.render();
   }
@@ -2071,7 +2119,7 @@ class DawScreen {
       open: () => daw("open"),
       save: () => daw("save"),
       saveAs: () => daw("saveAs"),
-      import: () => daw("import", { track: this.selectedTrack ?? -1 }),
+      import: () => this.importAudio(),
       export: () => this.toggleExportPanel(true),
       autoMix: () => this.toggleAutoMix(true),
       undo: () => daw("undo"),
