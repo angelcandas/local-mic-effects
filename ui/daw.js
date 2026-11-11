@@ -1963,11 +1963,13 @@ class DawScreen {
     const style = () => $("[name=style]").value;
     const amount = () => Number($("[name=amount]").value) / 100;
     const roles = () => Object.fromEntries([...panel.querySelectorAll(".automix-role select")].map((s) => [s.dataset.track, s.value]));
+    const effects = () => Object.fromEntries([...panel.querySelectorAll(".automix-effects input")].map((c) => [c.name, c.checked]));
+    this.autoMixEffects = effects;
 
     $(".automix-close").addEventListener("click", () => this.toggleAutoMix(false));
     $(".automix-analyse").addEventListener("click", () => {
       this.setAutoMixResult("");
-      daw("autoMix", { action: "analyse", style: style() });
+      daw("autoMix", { action: "analyse", style: style(), effects: effects() });
     });
     $(".automix-reference").addEventListener("click", () => {
       this.setAutoMixResult("");
@@ -1975,8 +1977,13 @@ class DawScreen {
     });
     $(".automix-cancel").addEventListener("click", () => daw("autoMix", { action: "cancel" }));
     $("[name=style]").addEventListener("change", () => {
-      if (this.autoMix.plan?.kind === "mix") this.replanAutoMix({ style: style(), roles: roles() });
+      if (this.autoMix.plan?.kind === "mix") this.replanAutoMix({ style: style(), roles: roles(), effects: effects() });
     });
+    // Which effects it may add: the plan follows at once.
+    for (const box of panel.querySelectorAll(".automix-effects input"))
+      box.addEventListener("change", () => {
+        if (this.autoMix.plan?.kind === "mix") this.replanAutoMix({ style: style(), roles: roles(), effects: effects() });
+      });
 
     $(".automix-apply").addEventListener("click", async () => {
       const result = await daw("autoMix", { action: "apply", amount: amount() });
@@ -2151,6 +2158,10 @@ class DawScreen {
     Object.assign(this.autoMix, { plan: event, applied: false, after: true });
     this.setAutoMixResult("");
     if (event.style) panel.querySelector("[name=style]").value = event.style;
+    for (const [name, on] of Object.entries(event.effects ?? {})) {
+      const box = panel.querySelector(`.automix-effects [name=${name}]`);
+      if (box) box.checked = Boolean(on);
+    }
 
     // Who is who: change a role and the plan follows.
     const rolesBox = panel.querySelector(".automix-roles");
@@ -2161,11 +2172,11 @@ class DawScreen {
       name.append(html("small", "", track.active > 0 ? `${track.lufs.toFixed(1)} LUFS` : "silent"));
       const select = html("select", "dropdown");
       select.dataset.track = track.id;
-      for (const [value, label] of [["voice", "Voice"], ["backing", "Backing"], ["other", "Leave as is"]]) select.append(new Option(label, value));
+      for (const [value, label] of [["voice", "Voice"], ["instrument", "Instrument"], ["backing", "Backing"], ["other", "Leave as is"]]) select.append(new Option(label, value));
       select.value = track.role;
       select.addEventListener("change", () => {
         const roles = Object.fromEntries([...rolesBox.querySelectorAll("select")].map((s) => [s.dataset.track, s.value]));
-        this.replanAutoMix({ style: panel.querySelector("[name=style]").value, roles });
+        this.replanAutoMix({ style: panel.querySelector("[name=style]").value, roles, effects: this.autoMixEffects() });
       });
       row.append(name, select);
       rolesBox.append(row);

@@ -77,12 +77,14 @@ namespace
 {
     const char* roleKey (analysis::Role role)
     {
-        return role == analysis::Role::voice ? "voice" : role == analysis::Role::backing ? "backing" : "other";
+        return role == analysis::Role::voice ? "voice" : role == analysis::Role::backing ? "backing"
+             : role == analysis::Role::instrument ? "instrument" : "other";
     }
 
     analysis::Role roleFromKey (const juce::String& key)
     {
-        return key == "voice" ? analysis::Role::voice : key == "backing" ? analysis::Role::backing : analysis::Role::other;
+        return key == "voice" ? analysis::Role::voice : key == "backing" ? analysis::Role::backing
+             : key == "instrument" ? analysis::Role::instrument : analysis::Role::other;
     }
 
     const char* styleKey (analysis::MixStyle style)
@@ -244,7 +246,12 @@ juce::var DawBridge::describeSession()
                 continue;
 
             const juce::File file (clip[ids::file].toString());
-            const auto audio = engine.getAudioPool().get (file);
+            const auto warpSettings = daw::Edit::getWarpSettings (clip);
+            const auto audio = engine.getAudioPool().get (file, warpSettings);
+
+            juce::Array<juce::var> markers;
+            for (const auto& m : daw::Edit::getClipWarp (clip).getMarkers())
+                markers.add (juce::Array<juce::var> { m.source, m.target });
 
             // Typed explicitly: the page does arithmetic on these, and text ("0.0") breaks it.
             clips.add (object ({ { "id", (int) clip[ids::id] }, { "name", clip[ids::name].toString() }, { "file", file.getFullPathName() },
@@ -252,6 +259,9 @@ juce::var DawBridge::describeSession()
                                  { "length", number (clip, ids::length) }, { "gain", number (clip, ids::gain) },
                                  { "fadeIn", number (clip, ids::fadeIn) }, { "fadeOut", number (clip, ids::fadeOut) },
                                  { "mute", (bool) clip.getProperty (ids::mute, false) },
+                                 { "transpose", number (clip, ids::transpose) }, { "warp", markers },
+                                 // The audio the clip plays (its file, or a rendered copy): the page keys waveforms on it.
+                                 { "audioKey", warpSettings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, warpSettings) },
                                  { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
                                  { "missing", ! file.existsAsFile() } }));
         }
@@ -261,6 +271,7 @@ juce::var DawBridge::describeSession()
                               { "inGain", number (track, ids::inGain) }, { "outGain", number (track, ids::outGain) },
                               { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
+                              { "transpose", number (track, ids::transpose) },
                               { "inserts", describeInserts (track) }, { "clips", clips } }));
     }
 
@@ -343,14 +354,15 @@ juce::var DawBridge::describeStatus()
     });
 }
 
-juce::var DawBridge::getPeaks (const juce::File& file)
+juce::var DawBridge::getPeaks (const juce::File& file, const daw::warp::Settings& settings)
 {
-    const auto key = file.getFullPathName();
+    // A warped or transposed clip shows its rendered copy.
+    const auto key = settings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, settings);
 
     if (const auto it = peakCache.find (key); it != peakCache.end())
         return it->second;
 
-    const auto audio = engine.getAudioPool().get (file);
+    const auto audio = engine.getAudioPool().get (file, settings);
     if (audio == nullptr)
         return {}; // still decoding: the UI asks again
 
@@ -369,9 +381,9 @@ juce::var DawBridge::getPeaks (const juce::File& file)
 // Finer peaks for one stretch of a file, for drawing it zoomed in: the signed lowest
 // and highest sample (over all channels) of each bin of about `seconds`. Not cached:
 // the UI asks only for what is on screen.
-juce::var DawBridge::getDetailPeaks (const juce::File& file, double start, double end, double seconds)
+juce::var DawBridge::getDetailPeaks (const juce::File& file, double start, double end, double seconds, const daw::warp::Settings& settings)
 {
-    const auto audio = engine.getAudioPool().get (file);
+    const auto audio = engine.getAudioPool().get (file, settings);
     if (audio == nullptr || ! (end > start) || ! (seconds > 0.0))
         return {};
 
@@ -829,8 +841,35 @@ void DawBridge::replanAutoMix()
     for (const auto& track : edit.getTracks())
         volumes[(int) track[ids::id]] = track.getProperty (ids::volume, 0.0f);
 
+    auto options = autoMixOptions;
+    for (const auto& track : edit.getTracks())
+    {
+        const auto id = (int) track[ids::id];
+        options.trackNames[id] = track[ids::name].toString();
+        for (const auto& insert : daw::Edit::getInserts (track))
+            for (int type = 0; type < fx::numModuleTypes; ++type)
+                if (insert[ids::type].toString() == fx::getModuleKey ((fx::ModuleType) type))
+                    options.existingInserts[id].push_back ((fx::ModuleType) type);
+    }
+
     autoMixPlan = analysis::planMix (*autoMixAnalysis, autoMixRoles, volumes,
-                                     (float) edit.getMaster().getProperty (ids::volume, 0.0f), autoMixStyle);
+                                     (float) edit.getMaster().getProperty (ids::volume, 0.0f), autoMixStyle, options);
+}
+
+void DawBridge::readAutoMixEffects (const juce::var& effects)
+{
+    if (! effects.isObject())
+        return;
+
+    const auto read = [&effects] (const char* key, bool& flag)
+    {
+        if (effects.hasProperty (key))
+            flag = (bool) effects[key];
+    };
+    read ("eq", autoMixOptions.eq);
+    read ("compressor", autoMixOptions.compressor);
+    read ("deEsser", autoMixOptions.deEsser);
+    read ("reverb", autoMixOptions.reverb);
 }
 
 juce::var DawBridge::describeAutoMix() const
@@ -860,6 +899,7 @@ juce::var DawBridge::describeAutoMix() const
             effect = *move.insert == fx::ModuleType::paraEq     ? "Parametric EQ"
                    : *move.insert == fx::ModuleType::compressor ? "Compressor"
                    : *move.insert == fx::ModuleType::deEsser    ? "De-esser"
+                   : *move.insert == fx::ModuleType::reverb     ? "Reverb"
                                                                 : juce::String (fx::getModuleKey (*move.insert));
 
         juce::Array<juce::var> reasons;
@@ -872,8 +912,11 @@ juce::var DawBridge::describeAutoMix() const
     for (const auto& note : autoMixPlan.notes)
         notes.add (note);
 
+    const auto effects = object ({ { "eq", autoMixOptions.eq }, { "compressor", autoMixOptions.compressor },
+                                   { "deEsser", autoMixOptions.deEsser }, { "reverb", autoMixOptions.reverb } });
+
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
-                     { "style", styleKey (autoMixStyle) }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
+                     { "style", styleKey (autoMixStyle) }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
                      { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs } });
 }
 
@@ -1057,9 +1100,10 @@ int DawBridge::setAutotunesToKey()
 }
 
 // The "autoMix" command; args.action is one of:
-//   analyse {style}     listen to every track (background); "dawAutoMix" brings the plan
+//   analyse {style, effects}  listen to every track (background); "dawAutoMix" brings the plan
 //   reference           pick a song and plan a master match to it (background)
-//   replan {style, roles: {trackId: "voice" | "backing" | "other"}}
+//   replan {style, effects, roles: {trackId: "voice" | "backing" | "instrument" | "other"}}
+//                       effects: {eq, compressor, deEsser, reverb}, the effects it may add
 //   apply {amount, replace}  write the plan as one undo step ("Auto Mix"); with replace,
 //                       first undo the Auto Mix just applied (to change the amount)
 //   compare {after}     undo or redo the last Auto Mix, to hear before and after
@@ -1085,6 +1129,7 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
 
         if (args.hasProperty ("style"))
             autoMixStyle = styleFromKey (args["style"].toString());
+        readAutoMixEffects (args["effects"]);
 
         if (action == "analyse")
         {
@@ -1108,6 +1153,7 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
     {
         if (args.hasProperty ("style"))
             autoMixStyle = styleFromKey (args["style"].toString());
+        readAutoMixEffects (args["effects"]);
 
         if (auto* roles = args["roles"].getDynamicObject())
             for (const auto& property : roles->getProperties())
@@ -1173,9 +1219,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "redo")                  { undo.redo(); ok(); return; }
     if (command == "peaks")
     {
-        const juce::File file (args["file"].toString());
-        complete (args.hasProperty ("seconds") ? getDetailPeaks (file, arg (args, "start", 0.0), arg (args, "end", 0.0), arg (args, "seconds", 0.0))
-                                               : getPeaks (file));
+        // With a clip id, the audio that clip plays (warped and transposed); else the plain file.
+        const auto clip = edit.getClip (arg (args, "clip", -1));
+        const auto file = clip.isValid() ? juce::File (clip[ids::file].toString()) : juce::File (args["file"].toString());
+        const auto settings = clip.isValid() ? daw::Edit::getWarpSettings (clip) : daw::warp::Settings();
+        complete (args.hasProperty ("seconds") ? getDetailPeaks (file, arg (args, "start", 0.0), arg (args, "end", 0.0), arg (args, "seconds", 0.0), settings)
+                                               : getPeaks (file, settings));
         return;
     }
 
@@ -1208,6 +1257,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("solo"))    edit.setTrackSolo (id, args["solo"]);
             if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
             if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
+            if (args.hasProperty ("transpose")) edit.setTrackTranspose (id, args["transpose"]);
             if (args.hasProperty ("inGain"))  edit.setChainGain (id, false, args["inGain"]);
             if (args.hasProperty ("outGain")) edit.setChainGain (id, true, args["outGain"]);
         }
@@ -1286,6 +1336,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         if (args.hasProperty ("name")) edit.setClipName (id, args["name"].toString());
         if (args.hasProperty ("mute")) edit.setClipMute (id, args["mute"]);
+        if (args.hasProperty ("transpose")) edit.setClipTranspose (id, args["transpose"]);
         ok();
         return;
     }
@@ -1295,7 +1346,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "normaliseClip" || command == "stripSilence")
     {
         const auto clip = edit.getClip (id);
-        const auto audio = clip.isValid() ? engine.getAudioPool().get (juce::File (clip[ids::file].toString())) : nullptr;
+        // The audio the clip plays: offset and length are measured in the rendered copy when it's warped.
+        const auto audio = clip.isValid() ? engine.getAudioPool().get (juce::File (clip[ids::file].toString()), daw::Edit::getWarpSettings (clip))
+                                          : nullptr;
         if (audio == nullptr)
         {
             complete (error (clip.isValid() ? "The clip's audio is still loading. Try again in a moment." : "Select a clip first."));
@@ -1333,6 +1386,20 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
         const auto created = edit.keepClipParts (id, parts);
         complete (object ({ { "ok", true }, { "clips", created.size() } }));
+        return;
+    }
+    // Warp markers: [[source, target], ...] in seconds (file time, rendered time). An
+    // empty list clears the warp.
+    if (command == "setWarp")
+    {
+        std::vector<daw::warp::Marker> markers;
+        if (const auto* list = args["markers"].getArray())
+            for (const auto& pair : *list)
+                if (pair.isArray() && pair.size() == 2)
+                    markers.push_back ({ (double) pair[0], (double) pair[1] });
+
+        edit.setClipWarp (id, daw::warp::Map (std::move (markers)));
+        ok();
         return;
     }
     if (command == "clipFades")  { edit.setClipFades (id, args["fadeIn"], args["fadeOut"]); ok(); return; }

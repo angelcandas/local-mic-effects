@@ -55,8 +55,8 @@ public:
 private:
     juce::var describeStatus();
     juce::var describeInserts (const juce::ValueTree& trackOrMaster) const;
-    juce::var getPeaks (const juce::File&);
-    juce::var getDetailPeaks (const juce::File&, double start, double end, double seconds);
+    juce::var getPeaks (const juce::File&, const daw::warp::Settings& = {});
+    juce::var getDetailPeaks (const juce::File&, double start, double end, double seconds, const daw::warp::Settings& = {});
 
     void setMode (bool daw);
     void rememberProject();
@@ -70,6 +70,7 @@ private:
     juce::var handleAutoMix (const juce::var& args, Complete&);
     void startAutoMix (const juce::File& reference);
     void replanAutoMix();
+    void readAutoMixEffects (const juce::var& effects);
     juce::var describeAutoMix() const;
 
     // Song key (src/analysis/Key.h): detection runs on a background thread.
@@ -112,6 +113,7 @@ private:
     std::map<int, analysis::Role> autoMixRoles;
     analysis::MixStyle autoMixStyle = analysis::MixStyle::pop;
     analysis::MixPlan autoMixPlan;
+    analysis::MixOptions autoMixOptions; // the effects it may add (the inserts are filled per plan)
     bool autoMixReference = false; // the plan matches a reference song
     juce::String autoMixReferenceName;
 
