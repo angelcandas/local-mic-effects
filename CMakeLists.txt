@@ -68,7 +68,40 @@ set(MICFX_DSP_SOURCES
     src/dsp/PitchDetector.h
     src/dsp/ParametricEq.h
     src/dsp/PitchEngine.h
-    src/dsp/PsolaShifter.h)
+    src/dsp/PsolaShifter.h
+    src/stems/StemSplitter.cpp
+    src/stems/StemSplitter.h)
+
+# Stem splitting (Split into stems in DAW mode) runs Demucs with demucs.cpp (MIT) on
+# Eigen (MPL 2.0), both git submodules. Without them the app still builds; the split
+# button then says it isn't available in this build.
+set(MICFX_DEMUCS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libs/demucs.cpp" CACHE PATH "demucs.cpp checkout")
+set(MICFX_EIGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libs/eigen" CACHE PATH "Eigen checkout")
+
+if(EXISTS "${MICFX_DEMUCS_DIR}/src/model.hpp" AND EXISTS "${MICFX_EIGEN_DIR}/Eigen/Dense")
+    file(GLOB MICFX_DEMUCS_LIB_SOURCES CONFIGURE_DEPENDS "${MICFX_DEMUCS_DIR}/src/*.cpp")
+    add_library(MicFXDemucs STATIC ${MICFX_DEMUCS_LIB_SOURCES})
+    target_include_directories(MicFXDemucs SYSTEM PUBLIC "${MICFX_DEMUCS_DIR}/src" "${MICFX_EIGEN_DIR}")
+    target_compile_features(MicFXDemucs PUBLIC cxx_std_17)
+    set_target_properties(MicFXDemucs PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    # Eigen is far too slow unoptimised, so this library is optimised even in Debug
+    # builds (a 4-minute song would take hours). Its own warnings are not ours to fix.
+    target_compile_definitions(MicFXDemucs PRIVATE NDEBUG EIGEN_NO_DEBUG)
+    if(MSVC)
+        target_compile_options(MicFXDemucs PRIVATE /O2 /W0)
+    else()
+        target_compile_options(MicFXDemucs PRIVATE -O3 -w)
+    endif()
+
+    list(APPEND MICFX_DSP_SOURCES src/stems/DemucsSeparator.cpp)
+    set(MICFX_DEMUCS_LIBRARY MicFXDemucs)
+    set(MICFX_HAS_DEMUCS 1)
+    message(STATUS "MicFX: stem splitting enabled (demucs.cpp)")
+else()
+    set(MICFX_DEMUCS_LIBRARY "")
+    set(MICFX_HAS_DEMUCS 0)
+    message(STATUS "MicFX: stem splitting disabled (run: git submodule update --init libs/demucs.cpp libs/eigen)")
+endif()
 
 target_sources(MicFX
     PRIVATE
@@ -89,6 +122,7 @@ target_compile_definitions(MicFX
     PRIVATE
         # Where scripts/update.sh lives, for "Check for updates...".
         MICFX_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+        MICFX_HAS_DEMUCS=${MICFX_HAS_DEMUCS}
         # Debug builds load ui/ from disk so UI edits only need a page reload.
         $<$<CONFIG:Debug>:MICFX_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ui">
         $<$<CONFIG:Debug>:MICFX_JUCE_JS_FILE="${CMAKE_CURRENT_SOURCE_DIR}/libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js">)
@@ -96,7 +130,9 @@ target_compile_definitions(MicFX
 target_link_libraries(MicFX
     PRIVATE
         MicFX_WebUI
+        ${MICFX_DEMUCS_LIBRARY}
         juce::juce_audio_utils
+        juce::juce_cryptography
         juce::juce_dsp
     PUBLIC
         juce::juce_recommended_config_flags
@@ -116,6 +152,7 @@ if(MICFX_BUILD_TESTS)
     target_compile_definitions(MicFXTests
         PRIVATE
             JucePlugin_Name="MicFX"
+            MICFX_HAS_DEMUCS=${MICFX_HAS_DEMUCS}
             JUCE_WEB_BROWSER=0
             JUCE_USE_CURL=0)
 
@@ -123,7 +160,9 @@ if(MICFX_BUILD_TESTS)
         PRIVATE
             juce::juce_audio_processors
             juce::juce_audio_formats
+            juce::juce_cryptography
             juce::juce_dsp
+            ${MICFX_DEMUCS_LIBRARY}
         PUBLIC
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)

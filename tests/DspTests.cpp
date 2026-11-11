@@ -23,6 +23,7 @@
 #include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
+#include "stems/StemSplitter.h"
 
 // The real editor needs the WebView; the tests only exercise the processor.
 juce::AudioProcessorEditor* PluginProcessor::createEditor() { return nullptr; }
@@ -2448,6 +2449,144 @@ namespace
     }
 }
 
+// Split into stems, without the model: a stand-in separator checks the chunking,
+// crossfades, threads, cancelling and file writing, and the DAW side puts the stems on
+// tracks. (The Demucs separator itself needs the downloaded model; see the README.)
+static void testStems()
+{
+    std::cout << "\nSplit into stems\n";
+
+    // Stand-in: stem s is (s + 1) / 10 of the input, so the stems sum to the mix.
+    std::atomic<int> calls { 0 };
+    const stems::Separator fake = [&calls] (const juce::AudioBuffer<float>& input, const stems::Progress& progress)
+    {
+        ++calls;
+        std::vector<juce::AudioBuffer<float>> out;
+        for (int s = 0; s < stems::numStems; ++s)
+        {
+            auto& stem = out.emplace_back (input);
+            stem.applyGain ((float) (s + 1) / 10.0f);
+        }
+        return progress (1.0) ? out : std::vector<juce::AudioBuffer<float>>();
+    };
+
+    juce::Random random (7);
+    juce::AudioBuffer<float> mix (2, (int) (75.3 * stems::modelSampleRate));
+    for (int ch = 0; ch < 2; ++ch)
+        for (int i = 0; i < mix.getNumSamples(); ++i)
+            mix.setSample (ch, i, random.nextFloat() - 0.5f);
+
+    stems::Settings settings;
+    settings.threads = 3;
+    settings.chunkSeconds = 20.0;
+
+    std::vector<double> reported;
+    std::mutex reportedLock;
+    const auto separated = stems::separate (mix, fake, [&] (double p) { const std::scoped_lock l (reportedLock); reported.push_back (p); return true; },
+                                            settings);
+
+    auto worst = 0.0f;
+    if (separated.size() == (size_t) stems::numStems)
+        for (int s = 0; s < stems::numStems; ++s)
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < mix.getNumSamples(); ++i)
+                    worst = std::max (worst, std::abs (separated[(size_t) s].getSample (ch, i) - mix.getSample (ch, i) * (s + 1) / 10.0f));
+
+    check (separated.size() == (size_t) stems::numStems && separated[0].getNumSamples() == mix.getNumSamples() && worst < 1.0e-5f,
+           "chunks crossfade back into seamless stems (worst error " + juce::String (worst, 8) + ")");
+    check (calls == 4, "a 75 s song separates as four 20 s chunks");
+    check (! reported.empty() && std::abs (reported.back() - 1.0) < 1.0e-9, "progress ends at 100%");
+
+    // Cancelling stops the work and returns nothing.
+    calls = 0;
+    std::atomic<int> asked { 0 };
+    const auto cancelled = stems::separate (mix, fake, [&] (double) { return ++asked < 2; }, settings);
+    check (cancelled.empty() && calls < 4, "cancelling stops the split");
+
+    // split(): a mono 48 kHz file becomes four stereo 44.1 kHz WAVs named after the song.
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-stems", {});
+    folder.createDirectory();
+    const auto song = folder.getChildFile ("Song.wav");
+    juce::AudioBuffer<float> mono (1, (int) (3.0 * sampleRate));
+    for (int i = 0; i < mono.getNumSamples(); ++i)
+        mono.setSample (0, i, 0.5f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * i / sampleRate));
+    writeWav (song, mono, sampleRate);
+
+    const auto out = folder.getChildFile ("Stems");
+    const auto result = stems::split (song, out, "Song", fake, [] (double) { return true; }, settings);
+    auto filesOk = result.error.isEmpty() && ! result.cancelled;
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    for (int s = 0; s < stems::numStems && filesOk; ++s)
+    {
+        const auto& file = result.files[(size_t) s];
+        const std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+        filesOk = reader != nullptr && file.getFileName() == "Song - " + juce::String (stems::stemNames[(size_t) s]) + ".wav"
+               && reader->numChannels == 2 && juce::approximatelyEqual (reader->sampleRate, stems::modelSampleRate)
+               && std::abs ((double) reader->lengthInSamples / reader->sampleRate - 3.0) < 0.001;
+    }
+    check (filesOk, "split writes Song - Drums/Bass/Other/Vocals.wav, stereo at 44.1 kHz, as long as the song");
+
+    const auto unreadable = stems::split (folder.getChildFile ("missing.wav"), out, "Missing", fake, nullptr, settings);
+    check (unreadable.error.contains ("missing.wav"), "split reports a file it can't read");
+
+    // The model check rejects anything that isn't the expected download.
+    const auto bogus = folder.getChildFile (stems::Model::fileName);
+    bogus.replaceWithText ("not a model");
+    check (stems::Model::verify (bogus).isNotEmpty() && stems::Model::verify (folder.getChildFile ("nothing.bin")).isNotEmpty(),
+           "a wrong or missing model file is refused");
+    juce::String loadError;
+    check (stems::Model::load (bogus, loadError) == nullptr && loadError.isNotEmpty(), "loading a wrong model fails with a message");
+
+    // DawBridge: the stems land on four tracks under the song, lined up with its clip, and
+    // the song's clip is muted. One undo takes it all back.
+    {
+        juce::PropertiesFile::Options options;
+        options.applicationName = "MicFXTests";
+        options.filenameSuffix = ".settings";
+        juce::PropertiesFile props (folder.getChildFile ("test.settings"), options);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, props, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        bridge.handle ("mode", juce::JSON::parse ("{\"daw\": true}"), [] (juce::var) {});
+
+        const auto first = (int) edit.getTracks()[0][daw::ids::id];
+        const auto last = (int) edit.addTrack ("Keys")[daw::ids::id];
+        const auto clip = edit.addClip (first, song, 2.0, 1.5, 0.5);
+        edit.setClipGain ((int) clip[daw::ids::id], -3.0f);
+        edit.getUndoManager().beginNewTransaction();
+
+        const auto added = bridge.addStemTracks (clip.createCopy(), first, result.files);
+        const auto tracks = edit.getTracks();
+        auto lined = (bool) added["ok"] && tracks.size() == 6 && (int) tracks[5][daw::ids::id] == last;
+        const char* order[] { "Vocals", "Drums", "Bass", "Other" };
+        for (int i = 0; i < 4 && lined; ++i)
+        {
+            const auto stemClip = tracks[i + 1].getChildWithName (daw::ids::CLIP);
+            lined = tracks[i + 1][daw::ids::name].toString() == order[i] && stemClip.isValid()
+                 && (double) stemClip[daw::ids::start] == 2.0 && (double) stemClip[daw::ids::offset] == 0.5
+                 && (double) stemClip[daw::ids::length] == 1.5 && (float) stemClip[daw::ids::gain] == -3.0f
+                 && stemClip[daw::ids::file].toString().contains (order[i]);
+        }
+        check (lined, "the stems go on Vocals, Drums, Bass and Other tracks under the song, lined up with its clip");
+        check ((bool) edit.getClip ((int) clip[daw::ids::id])[daw::ids::mute], "the song's clip is muted");
+
+        edit.getUndoManager().undo();
+        check (edit.getTracks().size() == 2 && ! (bool) edit.getClip ((int) clip[daw::ids::id]).getProperty (daw::ids::mute, false),
+               "one undo removes the stem tracks and unmutes the song");
+
+        juce::var started;
+        bridge.handle ("stems", juce::JSON::parse ("{\"action\": \"start\", \"id\": -5}"), [&] (juce::var r) { started = r; });
+        check (! (bool) started["ok"] && started["error"].toString().isNotEmpty(), "Split into stems without a clip says why");
+        DawBridge::availableForTesting = false;
+    }
+
+    folder.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juce;
@@ -2474,6 +2613,7 @@ int main()
     testMixAssistant();
     testLatency();
     testSmoothing();
+    testStems();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

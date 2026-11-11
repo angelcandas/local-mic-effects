@@ -5,6 +5,7 @@
 #include "PluginProcessor.h"
 #include "daw/Exporter.h"
 #include "analysis/MixAssistant.h"
+#include "stems/StemSplitter.h"
 
 // Connects the web UI's DAW screen (ui/daw.js) to the processor's DAW session.
 //
@@ -13,6 +14,9 @@
 //                 any change
 //   "dawStatus"   transport, recording and meters, 30 times a second (while in DAW mode)
 //   "dawExport"   { progress } while an export runs, then { done, error, files }
+//   "dawStems"    { state: "downloading" | "loading" | "splitting", progress } while a
+//                 song splits into stems, then { state: "done", tracks } / "cancelled" /
+//                 { state: "error", error }
 //   "dawAutoMix"  { state: "analysing", progress } while Auto Mix listens, then
 //                 { state: "ready", plan... } (see describeAutoMix), or "cancelled"/"error"
 // See handle() for the commands. Message thread only.
@@ -41,6 +45,10 @@ public:
     juce::var saveProjectAs (const juce::File& folder);
     juce::var importAudio (const juce::File& file, int trackId); // -> { ok, error, track, clip }
 
+    // Puts finished stems (in stems::Stem order) on new tracks under the clip's track,
+    // lined up with the clip, and mutes the clip. One undo step. -> { ok, error, tracks }
+    juce::var addStemTracks (const juce::ValueTree& clip, int trackId, const std::array<juce::File, stems::numStems>&);
+
     // The tests run outside the standalone app; this lets them switch DAW mode on.
     static inline bool availableForTesting = false;
 
@@ -56,6 +64,10 @@ private:
     juce::File getRecordingFolder() const;
     void loadPresetInto (int trackId, int presetIndex);
     void startExport (const juce::var& args, const juce::File& destination);
+
+    // Split into stems (src/stems/StemSplitter.h): downloads the model the first time,
+    // then separates on background threads.
+    juce::var handleStems (const juce::var& args);
 
     // Auto Mix (src/analysis/MixAssistant.h): analysis runs on a background thread;
     // planning and applying on the message thread.
@@ -88,6 +100,10 @@ private:
     // A running export (at most one).
     struct ExportJob;
     std::shared_ptr<ExportJob> exportJob;
+
+    // A running stem split (at most one).
+    struct StemJob;
+    std::shared_ptr<StemJob> stemJob;
 
     // Auto Mix: the running analysis (at most one), the last analysis and its plan.
     struct AutoMixJob;

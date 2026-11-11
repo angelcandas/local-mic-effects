@@ -544,10 +544,12 @@ class DawScreen {
     this.buildInspector();
     this.buildBanners();
     this.buildAutoMix();
+    this.buildStems();
 
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
     window.__JUCE__.backend.addEventListener("dawExport", (progress) => this.onExport(progress));
+    window.__JUCE__.backend.addEventListener("dawStems", (event) => this.onStems(event));
     document.addEventListener("keydown", (event) => this.onKey(event));
     new ResizeObserver(() => this.layoutArrange()).observe(this.arrange);
 
@@ -1749,7 +1751,8 @@ class DawScreen {
               button("tool", "Loop clip", "Loop the clip's range (Shift+L)", () => this.run("loopClip")),
               button("tool", "Zoom to clip", "Fit the clip in the view (Shift+Z)", () => this.run("zoomClip"))),
       toolRow(button("tool", "Strip silence", "Split the clip into phrases and remove the silent gaps between them", () => this.run("stripSilence")),
-              threshold));
+              threshold),
+      toolRow(button("tool", "Split into stems", "Separate the song into vocals, drums, bass and other, each on its own track", () => this.run("splitStems"))));
     element.append(head, row, tools);
 
     return { element, update: (c) => {
@@ -1876,6 +1879,7 @@ class DawScreen {
   toggleExportPanel(show = this.exportPanel.hidden) {
     this.exportPanel.hidden = !show;
     if (show && this.autoMixPanel) this.autoMixPanel.hidden = true;
+    if (show && this.stemsPanel) this.stemsPanel.hidden = true;
     if (show) {
       this.exportPanel.querySelector("[name=loopOnly]").disabled = !this.session?.loop.on;
       this.exportPanel.querySelector(".export-result").replaceChildren();
@@ -1898,6 +1902,66 @@ class DawScreen {
       const count = progress.files.length;
       result.append(html("span", "", `Exported ${count === 1 ? "the mix" : `${count} stems`} (peak ${progress.peak.toFixed(1)} dBFS). `),
                     button("text-button", "Show in folder", "", () => daw("reveal", { path: progress.files[0] })));
+    }
+  }
+
+  //============================================================================ Split into stems
+  buildStems() {
+    const panel = (this.stemsPanel = this.root.querySelector(".stems-panel"));
+    this.stems = { clip: null, running: false };
+    panel.querySelector(".stems-close").addEventListener("click", () => this.toggleStems(false));
+    panel.querySelector(".stems-cancel").addEventListener("click", () => daw("stems", { action: "cancel" }));
+    panel.querySelector(".stems-go").addEventListener("click", async () => {
+      if (!this.stems.clip) return;
+      this.setStemsStatus("Starting…");
+      const result = await daw("stems", { action: "start", id: this.stems.clip.id });
+      if (result?.ok === false) this.setStemsStatus(result.error, true);
+    });
+  }
+
+  toggleStems(show, clip = null) {
+    const panel = this.stemsPanel;
+    panel.hidden = !show;
+    if (!show) return;
+    if (this.exportPanel) this.exportPanel.hidden = true;
+    if (this.autoMixPanel) this.autoMixPanel.hidden = true;
+    if (!this.stems.running) {
+      this.stems.clip = clip;
+      panel.querySelector("strong").textContent = clip ? `Split “${clip.name}” into stems` : "Split into stems";
+      this.setStemsStatus("");
+    }
+  }
+
+  setStemsStatus(text, isError = false) {
+    const status = this.stemsPanel.querySelector(".stems-status");
+    status.replaceChildren(html("span", isError ? "is-error" : "", text));
+  }
+
+  onStems(event) {
+    const panel = this.stemsPanel;
+    const running = ["downloading", "loading", "splitting"].includes(event.state);
+    this.stems.running = running;
+    panel.classList.toggle("is-running", running);
+
+    if (running) {
+      panel.hidden = false;
+      const progress = event.progress ?? 0;
+      panel.querySelector(".export-bar").style.setProperty("--progress", event.state === "loading" ? 0 : progress);
+      const percent = `${Math.round(progress * 100)}%`;
+      this.setStemsStatus(event.state === "downloading" ? `Downloading the separation model… ${percent}`
+                        : event.state === "loading" ? "Loading the separation model…"
+                        : `Separating… ${percent}`);
+      return;
+    }
+
+    panel.querySelector(".export-bar").style.setProperty("--progress", 0);
+    if (event.state === "done") {
+      panel.hidden = true;
+      toast(`Added ${event.tracks?.length ?? 0} stem tracks and muted the original clip. Ctrl+Z undoes it.`);
+    } else if (event.state === "cancelled") {
+      this.setStemsStatus("Cancelled.");
+    } else if (event.state === "error") {
+      this.setStemsStatus(event.error || "The split failed.", true);
     }
   }
 
@@ -2338,6 +2402,7 @@ class DawScreen {
           toast(`Kept ${result.clips} phrase${result.clips === 1 ? "" : "s"}. Ctrl+Z puts the clip back.`);
         }
       }),
+      splitStems: () => this.withClip((clip) => this.toggleStems(true, clip)),
       loopClip: () => this.withClip((clip) => daw("loop", { on: true, start: clip.start, end: clip.start + clip.length })),
       zoomClip: () => this.withClip((clip) => this.zoomToRange(clip.start, clip.start + clip.length)),
       zoomFit: () => this.zoomToRange(0, Math.max(this.songEnd(), 10)),
