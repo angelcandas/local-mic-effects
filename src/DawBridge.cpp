@@ -329,6 +329,43 @@ juce::var DawBridge::getPeaks (const juce::File& file)
     return result;
 }
 
+// Finer peaks for one stretch of a file, for drawing it zoomed in: the signed lowest
+// and highest sample (over all channels) of each bin of about `seconds`. Not cached:
+// the UI asks only for what is on screen.
+juce::var DawBridge::getDetailPeaks (const juce::File& file, double start, double end, double seconds)
+{
+    const auto audio = engine.getAudioPool().get (file);
+    if (audio == nullptr || ! (end > start) || ! (seconds > 0.0))
+        return {};
+
+    constexpr int maxBins = 60000;
+    const auto rate = engine.getSampleRate();
+    const auto total = audio->getNumSamples();
+    const auto first = juce::jlimit (0, total, (int) std::floor (start * rate));
+    const auto last = juce::jlimit (first, total, (int) std::ceil (end * rate));
+    const auto step = juce::jmax ({ 1, (int) std::round (seconds * rate), (last - first) / maxBins + 1 });
+
+    juce::Array<juce::var> lows, highs;
+    lows.ensureStorageAllocated ((last - first) / step + 1);
+    highs.ensureStorageAllocated ((last - first) / step + 1);
+
+    for (int i = first; i < last; i += step)
+    {
+        const auto count = juce::jmin (step, last - i);
+        auto range = juce::Range<float>::emptyRange (0.0f);
+        for (int channel = 0; channel < audio->getNumChannels(); ++channel)
+        {
+            const auto r = audio->findMinMax (channel, i, count);
+            range = channel == 0 ? r : range.getUnionWith (r);
+        }
+        lows.add (std::round (range.getStart() * 10000.0f) / 10000.0f);
+        highs.add (std::round (range.getEnd() * 10000.0f) / 10000.0f);
+    }
+
+    return object ({ { "start", first / rate }, { "end", last / rate }, { "seconds", step / rate },
+                     { "min", lows }, { "max", highs } });
+}
+
 //==============================================================================
 void DawBridge::tick()
 {
@@ -819,7 +856,13 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "mode")                  { setMode (arg (args, "daw", false)); ok(); return; }
     if (command == "undo")                  { undo.undo(); ok(); return; }
     if (command == "redo")                  { undo.redo(); ok(); return; }
-    if (command == "peaks")                 { complete (getPeaks (juce::File (args["file"].toString()))); return; }
+    if (command == "peaks")
+    {
+        const juce::File file (args["file"].toString());
+        complete (args.hasProperty ("seconds") ? getDetailPeaks (file, arg (args, "start", 0.0), arg (args, "end", 0.0), arg (args, "seconds", 0.0))
+                                               : getPeaks (file));
+        return;
+    }
 
     //================================================================ tracks
     if (command == "addTrack")
