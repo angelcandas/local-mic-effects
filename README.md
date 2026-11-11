@@ -167,6 +167,26 @@ up with the clip (same start, trim, gain and fades), and mutes the song's clip. 
 - The stems are 24-bit 44.1 kHz WAVs (`Song - Vocals.wav`, ...) in the project's `Audio` folder, or
   next to your recordings when no project is open.
 
+### Song key
+
+**Key** next to the time signature (or **Edit → Song key…**) finds the key the song is in, locally:
+
+1. Press **Detect**. It listens to every track offline, works out which notes sound (whatever the
+   octave) and compares them with how major and minor keys use their notes. Voice tracks are left
+   out, since your melody may be the thing that's off key; the harmony comes from the instruments.
+2. It shows the key ("A minor"), how clear the match is (and the runner-up when it isn't), the
+   notes the music uses with the key's scale lit up, and what each track on its own sounds like.
+   A song tuned away from A = 440 Hz (e.g. a 432 Hz recording) still lands on the right key, and
+   the panel tells you how far off it is.
+3. The key is saved with the project and shown on the button ("Key Am"). Pick another by hand if
+   you disagree.
+4. **Set autotune to key** points every Autotune in the session at it in one undo step. A scale
+   that already fits keeps (a minor pentatonic for a minor song); otherwise it becomes Major or
+   Minor. A new Autotune insert starts in the song's key.
+
+In **Live** mode, the Autotune card has **Match song**: it listens to the loaded backing track and
+sets the autotune's key and scale to it.
+
 Press **?** in DAW mode for every keyboard shortcut (transport, ← → to move the playhead, ↑ ↓ to pick
 a track, M / Shift+S / A / I for mute, solo, arm and monitor, and more).
 
@@ -264,7 +284,8 @@ src/daw/                DAW mode: Edit (the session as an undoable ValueTree), A
 src/analysis/           Auto Mix measurements: loudness (BS.1770 / EBU R128), 1/3-octave spectrum,
                         activity, how a backing track masks the voice, and offline per-track analysis
                         of a DAW session; MixAssistant turns them into EQ, compressor, de-esser and
-                        volume moves (Auto Mix)
+                        volume moves (Auto Mix); Key finds the song's key from chroma and key
+                        profiles
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/stems/              Split into stems: chunked, multi-threaded separation, model download and
                         check (StemSplitter), and the Demucs adapter (DemucsSeparator)

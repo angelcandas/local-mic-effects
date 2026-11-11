@@ -19,6 +19,8 @@
 //                 { state: "error", error }
 //   "dawAutoMix"  { state: "analysing", progress } while Auto Mix listens, then
 //                 { state: "ready", plan... } (see describeAutoMix), or "cancelled"/"error"
+//   "dawKey"      { state: "analysing", progress } while the key is detected, then
+//                 { state: "ready", key... } (see describeKey), or "cancelled"
 // See handle() for the commands. Message thread only.
 class DawBridge final : private juce::ValueTree::Listener
 {
@@ -82,6 +84,12 @@ private:
     void replanAutoMix();
     void readAutoMixEffects (const juce::var& effects);
     juce::var describeAutoMix() const;
+
+    // Song key (src/analysis/Key.h): detection runs on a background thread.
+    juce::var handleKey (const juce::var& args);
+    void finishKeyDetection();
+    juce::var describeKey() const;
+    int setAutotunesToKey();
     void withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
                       std::function<juce::var (const juce::File&)> action, Complete);
 
@@ -124,6 +132,13 @@ private:
     analysis::MixOptions autoMixOptions; // the effects it may add (the inserts are filled per plan)
     bool autoMixReference = false; // the plan matches a reference song
     juce::String autoMixReferenceName;
+
+    // Key detection: the running analysis (at most one) and the last result.
+    struct KeyJob;
+    std::shared_ptr<KeyJob> keyJob;
+    analysis::KeyEstimate lastKey;
+    juce::Array<juce::var> lastKeyTracks; // per track: { id, name, key, used }
+    bool keyDetected = false;
 
     JUCE_DECLARE_NON_COPYABLE (DawBridge)
 };

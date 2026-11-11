@@ -6,6 +6,7 @@
 #include "Presets.h"
 #include "dsp/FxModules.h"
 
+#include <numeric>
 #include <variant>
 
 
@@ -76,6 +77,13 @@ struct DawBridge::AutoMixJob
     juce::File reference;                     // set for a reference match
     analysis::SessionAnalyser::Result result; // the tracks, or (reference) the mix
     analysis::Profile referenceProfile;
+};
+
+struct DawBridge::KeyJob
+{
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> cancel { false }, finished { false };
+    analysis::SessionAnalyser::Result result;
 };
 
 namespace
@@ -152,6 +160,8 @@ DawBridge::~DawBridge()
         autoMixJob->cancel = true;
     if (stemJob != nullptr)
         stemJob->cancel = true;
+    if (keyJob != nullptr)
+        keyJob->cancel = true;
 }
 
 bool DawBridge::isAvailable()
@@ -292,6 +302,8 @@ juce::var DawBridge::describeSession()
                                { "missing", project.getMissingFiles().size() } }) },
         { "tempo", edit.getTempo() },
         { "beatsPerBar", edit.getBeatsPerBar() },
+        { "key", object ({ { "key", edit.getKey() }, { "minor", edit.isKeyMinor() },
+                           { "name", analysis::KeyEstimate::getName (edit.getKey(), edit.isKeyMinor()) } }) },
         { "markers", [this]
           {
               juce::Array<juce::var> markers;
@@ -518,6 +530,14 @@ void DawBridge::tick()
             emit ("dawStems", object ({ { "state", phases[juce::jlimit (0, 2, stemJob->phase.load())] },
                                         { "progress", stemJob->progress.load() } }));
         }
+    }
+
+    if (keyJob != nullptr)
+    {
+        if (keyJob->finished)
+            finishKeyDetection();
+        else
+            emit ("dawKey", object ({ { "state", "analysing" }, { "progress", keyJob->progress.load() } }));
     }
 
     if (exportJob != nullptr)
@@ -1047,6 +1067,185 @@ juce::var DawBridge::describeAutoMix() const
                      { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs } });
 }
 
+//==============================================================================
+// The "key" command; args.action is one of:
+//   detect      listen to every track (background); "dawKey" brings the result, which
+//               also becomes the session's key (one undo step)
+//   cancel
+//   get         the last result (describeKey)
+//   set {key, minor}   pick the key by hand (key -1 forgets it)
+//   autotune    set every autotune insert in the session to the key -> { ok, count }
+juce::var DawBridge::handleKey (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+
+    if (action == "detect")
+    {
+        if (keyJob != nullptr)
+            return error ("Already listening for the key.");
+        if (edit.getTracks().isEmpty())
+            return error ("Add a track with some music first.");
+
+        auto job = std::make_shared<KeyJob>();
+        auto analyser = std::make_shared<analysis::SessionAnalyser> (edit, analysis::SessionAnalyser::Point::source, false,
+                                                                     engine.getSampleRate());
+        keyJob = job;
+
+        juce::Thread::launch ([analyser, job]
+        {
+            job->result = analyser->run ([job] (double p) { job->progress = p; return ! job->cancel.load(); });
+            job->finished = true;
+        });
+
+        emit ("dawKey", object ({ { "state", "analysing" }, { "progress", 0.0 } }));
+        return error ({});
+    }
+
+    if (action == "cancel")
+    {
+        if (keyJob != nullptr)
+            keyJob->cancel = true;
+        return error ({});
+    }
+
+    if (action == "get")
+        return describeKey();
+
+    if (action == "set")
+    {
+        edit.setKey (arg (args, "key", -1), arg (args, "minor", false));
+        return error ({});
+    }
+
+    if (action == "autotune")
+    {
+        if (edit.getKey() < 0)
+            return error ("Detect or pick the song's key first.");
+
+        auto result = error ({});
+        result.getDynamicObject()->setProperty ("count", setAutotunesToKey());
+        return result;
+    }
+
+    return error ("Unknown key action: " + action);
+}
+
+void DawBridge::finishKeyDetection()
+{
+    auto job = std::move (keyJob);
+
+    if (job->result.cancelled)
+    {
+        emit ("dawKey", object ({ { "state", "cancelled" } }));
+        return;
+    }
+
+    // The harmony comes from the instruments: leave out the voices (whose melody may be
+    // the very thing that's off key), unless there's nothing else.
+    const auto& tracks = job->result.tracks;
+    const auto songSeconds = tracks.empty() ? 0.0 : tracks.front().second.getNumFrames() * analysis::Profile::hopSeconds;
+
+    analysis::Chroma instruments {}, everything {};
+    double instrumentWeight = 0.0;
+    juce::Array<juce::var> described;
+    std::vector<int> used;
+
+    for (const auto& [id, profile] : tracks)
+    {
+        const auto track = edit.getTrack (id);
+        if (! track.isValid())
+            continue;
+
+        const auto known = autoMixRoles.find (id);
+        const auto role = known != autoMixRoles.end() ? known->second
+                                                      : analysis::guessRole (track[ids::name].toString(), profile, songSeconds);
+        const auto sum = profile.getChromaSum();
+        const auto weight = std::accumulate (sum.begin(), sum.end(), 0.0);
+
+        analysis::addChroma (everything, sum);
+        if (role != analysis::Role::voice)
+        {
+            analysis::addChroma (instruments, sum);
+            instrumentWeight += weight;
+        }
+
+        described.add (object ({ { "id", id }, { "name", track[ids::name].toString() },
+                                 { "key", weight > 0.0 ? analysis::estimateKey (sum).getName() : juce::String() },
+                                 { "voice", role == analysis::Role::voice } }));
+    }
+
+    const auto useInstruments = instrumentWeight > 0.0;
+    lastKey = analysis::estimateKey (useInstruments ? instruments : everything);
+    for (auto& track : described)
+        track.getDynamicObject()->setProperty ("used", track["key"].toString().isNotEmpty() && (! useInstruments || ! (bool) track["voice"]));
+    lastKeyTracks = described;
+    keyDetected = true;
+
+    if (lastKey.isValid())
+    {
+        edit.getUndoManager().beginNewTransaction ("Detect key");
+        edit.setKey (lastKey.key, lastKey.minor);
+    }
+
+    emit ("dawKey", describeKey());
+}
+
+juce::var DawBridge::describeKey() const
+{
+    if (! keyDetected)
+        return object ({ { "state", "none" } });
+
+    juce::Array<juce::var> chroma;
+    for (auto value : lastKey.chroma)
+        chroma.add (value);
+
+    return object ({ { "state", "ready" }, { "key", lastKey.key }, { "minor", lastKey.minor }, { "name", lastKey.getName() },
+                     { "confidence", lastKey.confidence },
+                     { "runnerUp", analysis::KeyEstimate::getName (lastKey.runnerUpKey, lastKey.runnerUpMinor) },
+                     { "tuningCents", lastKey.tuningCents }, { "chroma", chroma }, { "tracks", lastKeyTracks } });
+}
+
+int DawBridge::setAutotunesToKey()
+{
+    const auto tonic = edit.getKey();
+    const auto minor = edit.isKeyMinor();
+    if (tonic < 0)
+        return 0;
+
+    // Keep a scale that already fits the mode (a minor pentatonic for a minor song);
+    // anything else becomes plain Major or Minor.
+    const auto& names = fx::PitchEngine::getScaleNames();
+    const juce::StringArray minorScales { "Minor", "Harmonic Minor", "Minor Pentatonic", "Blues" };
+    const juce::StringArray majorScales { "Major", "Major Pentatonic" };
+    const auto& fitting = minor ? minorScales : majorScales;
+
+    edit.getUndoManager().beginNewTransaction ("Autotune to the song's key");
+    int count = 0;
+
+    auto owners = edit.getTracks();
+    owners.add (edit.getMaster());
+
+    for (const auto& owner : owners)
+    {
+        const auto inserts = daw::Edit::getInserts (owner);
+        for (int i = 0; i < inserts.getNumChildren(); ++i)
+        {
+            const auto insert = inserts.getChild (i);
+            if (insert[ids::type].toString() != fx::getModuleKey (fx::ModuleType::pitch))
+                continue;
+
+            const auto id = (int) insert[ids::id];
+            const auto scale = names[juce::roundToInt (number (insert, "tuneScale"))];
+            edit.setInsertValue (id, "tuneKey", (float) tonic);
+            if (! fitting.contains (scale))
+                edit.setInsertValue (id, "tuneScale", (float) names.indexOf (minor ? "Minor" : "Major"));
+            ++count;
+        }
+    }
+
+    return count;
+}
+
 // The "autoMix" command; args.action is one of:
 //   analyse {style, effects}  listen to every track (background); "dawAutoMix" brings the plan
 //   reference           pick a song and plan a master match to it (background)
@@ -1227,7 +1426,22 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "addInsert")
     {
         const auto type = daw::Edit::moduleTypeFromKey (args["type"].toString());
-        complete (type.has_value() ? edit.addInsert (arg (args, "track", -1), *type, arg (args, "index", -1))[ids::id] : juce::var (-1));
+        if (! type.has_value())
+        {
+            complete (-1);
+            return;
+        }
+
+        const auto insert = edit.addInsert (arg (args, "track", -1), *type, arg (args, "index", -1));
+
+        // A new autotune starts in the song's key, when the session knows it.
+        if (insert.isValid() && *type == fx::ModuleType::pitch && edit.getKey() >= 0)
+        {
+            edit.setInsertValue (insert[ids::id], "tuneKey", (float) edit.getKey());
+            edit.setInsertValue (insert[ids::id], "tuneScale", edit.isKeyMinor() ? 2.0f : 1.0f);
+        }
+
+        complete (insert[ids::id]);
         return;
     }
 
@@ -1644,6 +1858,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                          return error ({});
                      },
                      complete);
+        return;
+    }
+
+    if (command == "key")
+    {
+        complete (handleKey (args));
         return;
     }
 
