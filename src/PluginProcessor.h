@@ -57,6 +57,9 @@ public:
     juce::AudioProcessorValueTreeState& getState() noexcept { return state; }
     const fx::PitchEngine& getPitchEngine() const noexcept  { return pitchModule.getEngine(); }
 
+    // The Live chain, for the effect cards' live readings (module meters are atomics).
+    fx::FxChain& getLiveChain() noexcept                    { return chain; }
+
     // Records the processed output (and optionally the dry mic) to WAV. Start/stop it
     // from the message thread; processBlock feeds it.
     Recorder& getRecorder() noexcept                        { return recorder; }

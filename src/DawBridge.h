@@ -86,6 +86,8 @@ private:
     std::function<juce::int64()> roundTripLatency;
 
     bool sessionChanged = true;
+    int watchedTrack = -1;                    // whose inserts get live readings
+    fx::SpectrumAnalyser spectrumAnalyser;
     bool lastDirty = false, lastCanUndo = false, lastCanRedo = false;
 
     std::unique_ptr<juce::FileChooser> chooser;

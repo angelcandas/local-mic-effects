@@ -2,6 +2,8 @@
 
 #include <juce_dsp/juce_dsp.h>
 
+#include "FxMeter.h"
+
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -95,6 +97,16 @@ public:
     virtual int getLatencySamples() const noexcept { return 0; }
 
     //==============================================================================
+    // Metering, for the UI's live pictures. Peak levels (linear) going into and out of
+    // the module since the last call; both stay at 0 while it's off. Any thread.
+    float takeInputPeak() noexcept   { return inputPeak.exchange (0.0f, std::memory_order_relaxed); }
+    float takeOutputPeak() noexcept  { return outputPeak.exchange (0.0f, std::memory_order_relaxed); }
+
+    // The latest samples in and out, captured only while requested (see Scope).
+    Scope& getScope() noexcept               { return scope; }
+    double getSampleRate() const noexcept    { return sampleRate; }
+
+    //==============================================================================
     void prepare (const juce::dsp::ProcessSpec& spec)
     {
         sampleRate = spec.sampleRate;
@@ -143,6 +155,14 @@ public:
         auto& block = context.getOutputBlock();
         const auto numSamples = block.getNumSamples();
 
+        raisePeak (inputPeak, blockPeak (block));
+
+        // The spectrum wants the signal before and after; keep the input aside.
+        const auto capture = scope.isWanted() && block.getNumChannels() > 0;
+        const auto captureLength = juce::jmin (numSamples, scopeInput.size());
+        if (capture)
+            std::copy_n (block.getChannelPointer (0), captureLength, scopeInput.begin());
+
         for (size_t start = 0; start < numSamples;)
         {
             const auto length = advanceSmoothing() ? std::min (smoothingSliceSamples, numSamples - start) : numSamples - start;
@@ -152,6 +172,11 @@ public:
             render (Context (slice));
             start += length;
         }
+
+        raisePeak (outputPeak, blockPeak (block));
+
+        if (capture)
+            scope.push (scopeInput.data(), block.getChannelPointer (0), (int) captureLength);
     }
 
 protected:
@@ -237,6 +262,9 @@ private:
     static constexpr float smoothingSeconds = 0.015f; // time constant: ~90% of the way in 35 ms
 
     const ModuleType type;
+    std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };
+    Scope scope;
+    std::array<float, 4096> scopeInput {}; // audio thread: this block's input, while capturing
     std::deque<Entry> entries; // a deque keeps references stable as values are added
     bool wasOn = false;
     double sampleRate = 48000.0;

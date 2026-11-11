@@ -214,6 +214,13 @@ void Edit::setTrackMute (int trackId, bool mute)        { getTrack (trackId).set
 void Edit::setTrackSolo (int trackId, bool solo)        { getTrack (trackId).setProperty (ids::solo, solo, &undoManager); }
 void Edit::setMasterVolume (float decibels)             { getMaster().setProperty (ids::volume, decibels, &undoManager); }
 
+void Edit::setChainGain (int trackId, bool output, float decibels)
+{
+    auto tree = trackId == masterId ? getMaster() : getTrack (trackId);
+    if (tree.isValid())
+        tree.setProperty (output ? ids::outGain : ids::inGain, juce::jlimit (-maxChainGain, maxChainGain, decibels), &undoManager);
+}
+
 // Arm and monitor are recording state, not edits: not undoable.
 void Edit::setTrackArm (int trackId, bool arm)          { getTrack (trackId).setProperty (ids::arm, arm, nullptr); }
 void Edit::setTrackMonitor (int trackId, bool monitor)  { getTrack (trackId).setProperty (ids::monitor, monitor, nullptr); }

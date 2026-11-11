@@ -248,6 +248,7 @@ juce::var DawBridge::describeSession()
 
         tracks.add (object ({ { "id", (int) track[ids::id] }, { "name", track[ids::name].toString() }, { "colour", track[ids::colour].toString() },
                               { "volume", number (track, ids::volume) }, { "pan", number (track, ids::pan) },
+                              { "inGain", number (track, ids::inGain) }, { "outGain", number (track, ids::outGain) },
                               { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
                               { "inserts", describeInserts (track) }, { "clips", clips } }));
@@ -280,7 +281,8 @@ juce::var DawBridge::describeSession()
         { "countIn", engine.getCountInBars() },
         { "canUndo", undo.canUndo() },
         { "canRedo", undo.canRedo() },
-        { "master", object ({ { "volume", number (master, ids::volume) }, { "inserts", describeInserts (master) } }) },
+        { "master", object ({ { "volume", number (master, ids::volume) }, { "inGain", number (master, ids::inGain) },
+                              { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) } }) },
         { "tracks", tracks },
     });
 }
@@ -290,8 +292,29 @@ juce::var DawBridge::describeStatus()
     const auto rate = engine.getSampleRate();
     auto* peaks = new juce::DynamicObject();
 
+    auto* chains = new juce::DynamicObject();
+
+    const auto addChain = [&] (int id)
+    {
+        const auto [in, out] = engine.takeChainPeaks (id);
+        chains->setProperty (juce::String (id), object ({ { "in", fx::peakToDecibels (in) }, { "out", fx::peakToDecibels (out) } }));
+    };
+
     for (const auto& track : edit.getTracks())
+    {
         peaks->setProperty (juce::String ((int) track[ids::id]), peakToDecibels (engine.takePeak ((int) track[ids::id])));
+        addChain ((int) track[ids::id]);
+    }
+
+    addChain (daw::Edit::masterId);
+
+    // The live readings of the inserts on screen (one track's, or the master's).
+    auto* inserts = new juce::DynamicObject();
+    if (watchedTrack >= 0)
+        engine.forEachInsert (watchedTrack, [&] (int insertId, fx::Module& module)
+        {
+            inserts->setProperty (juce::String (insertId), fx::describeMeter (module, spectrumAnalyser));
+        });
 
     return object ({
         { "position", (double) engine.getPosition() / rate },
@@ -302,6 +325,8 @@ juce::var DawBridge::describeStatus()
         { "input", peakToDecibels (processor.inputPeak.exchange (0.0f)) },
         { "master", peakToDecibels (engine.takePeak (daw::Edit::masterId)) },
         { "tracks", juce::var (peaks) },
+        { "chains", juce::var (chains) },
+        { "inserts", juce::var (inserts) },
         { "loading", engine.getAudioPool().isLoading() },
     });
 }
@@ -932,6 +957,10 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
     auto& undo = edit.getUndoManager();
 
+    // The track (or master, 0) whose inserts are on screen gets live readings in
+    // "dawStatus" (-1: none). Not an edit.
+    if (command == "watchInserts") { watchedTrack = arg (args, "track", -1); complete (object ({ { "ok", true } })); return; }
+
     // Each command is one undo step, unless it continues a drag (args.continue).
     if (! arg (args, "continue", false))
         undo.beginNewTransaction (command);
@@ -980,13 +1009,22 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("solo"))    edit.setTrackSolo (id, args["solo"]);
             if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
             if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
+            if (args.hasProperty ("inGain"))  edit.setChainGain (id, false, args["inGain"]);
+            if (args.hasProperty ("outGain")) edit.setChainGain (id, true, args["outGain"]);
         }
 
         ok();
         return;
     }
 
-    if (command == "setMaster") { edit.setMasterVolume (arg (args, "volume", 0.0f)); ok(); return; }
+    if (command == "setMaster")
+    {
+        if (args.hasProperty ("volume"))  edit.setMasterVolume (args["volume"]);
+        if (args.hasProperty ("inGain"))  edit.setChainGain (daw::Edit::masterId, false, args["inGain"]);
+        if (args.hasProperty ("outGain")) edit.setChainGain (daw::Edit::masterId, true, args["outGain"]);
+        ok();
+        return;
+    }
 
     //================================================================ inserts
     if (command == "addInsert")

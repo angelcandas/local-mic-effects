@@ -143,6 +143,22 @@ std::bitset<128> DawEngine::getHeldNotes() const noexcept
     return held;
 }
 
+std::pair<float, float> DawEngine::takeChainPeaks (int trackId)
+{
+    const auto it = strips.find (trackId);
+    if (it == strips.end())
+        return { 0.0f, 0.0f };
+
+    return { it->second->chain.takeInputPeak(), it->second->chain.takeOutputPeak() };
+}
+
+void DawEngine::forEachInsert (int trackId, const std::function<void (int, fx::Module&)>& visit)
+{
+    if (const auto it = strips.find (trackId); it != strips.end())
+        for (const auto& [insertId, module] : it->second->modulesByInsertId)
+            visit (insertId, *module);
+}
+
 float DawEngine::takePeak (int trackId)
 {
     const auto it = strips.find (trackId);
@@ -205,7 +221,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     if (tree.hasType (ids::TRACK) || tree.hasType (ids::MASTER))
     {
         if (property == ids::volume || property == ids::pan || property == ids::mute || property == ids::solo
-            || property == ids::monitor || property == ids::arm)
+            || property == ids::monitor || property == ids::arm || property == ids::inGain || property == ids::outGain)
             updateMix();
         else if (property == ids::kind)
             triggerAsyncUpdate();
@@ -229,6 +245,8 @@ void DawEngine::setStripTargets (Strip& strip, const juce::ValueTree& tree, bool
 
     strip.targetLeft = gain * left;
     strip.targetRight = gain * right;
+
+    strip.chain.setGains ((float) tree.getProperty (ids::inGain, 0.0f), (float) tree.getProperty (ids::outGain, 0.0f));
 
     if (jump)
     {
@@ -297,7 +315,8 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
         strip->modulesByInsertId[(int) insert[ids::id]] = &module;
     }
 
-    strip->chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+    strip->chain.setGains ((float) trackOrMaster.getProperty (ids::inGain, 0.0f), (float) trackOrMaster.getProperty (ids::outGain, 0.0f));
+    strip->chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 }); // starts at those gains
     strip->buffer.setSize (2, blockSize);
     strip->isMidi = isMidi;
 

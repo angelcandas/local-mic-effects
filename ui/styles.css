@@ -624,7 +624,7 @@ select.dropdown {
   background: #0d1016;
 }
 
-.reverb-graphic rect { fill: var(--cat); }
+.reverb-graphic rect { fill: var(--cat); transform: scaleY(var(--energy, 1)); transform-origin: bottom; transform-box: fill-box; }
 
 /* ---------- Levels ---------- */
 
@@ -945,6 +945,34 @@ select.dropdown {
 .fx-graph .fx-handle { fill: none; stroke: var(--cat); stroke-width: 11; stroke-linecap: round; vector-effect: non-scaling-stroke; pointer-events: none; }
 .fx-graph .fx-hit { fill: none; stroke: transparent; stroke-width: 24; stroke-linecap: round; vector-effect: non-scaling-stroke; pointer-events: stroke; cursor: grab; touch-action: none; }
 .fx-graph g:hover .fx-handle { stroke: var(--text); }
+
+/* Live: drawn from the signal going through the effect (fxviews.js live()). */
+.fx-graph .fx-spectrum { fill: color-mix(in srgb, var(--cat) 13%, transparent); stroke: color-mix(in srgb, var(--cat) 45%, transparent); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.fx-graph .fx-spectrum-in { fill: none; stroke: rgba(255, 255, 255, 0.16); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.fx-graph .fx-dot { fill: none; stroke: #fff; stroke-width: 7; stroke-linecap: round; vector-effect: non-scaling-stroke; pointer-events: none; filter: drop-shadow(0 0 4px var(--cat)); }
+.fx-graph .fx-reduction { fill: var(--warn); opacity: 0.85; }
+.fx-graph.is-dynamics.is-closed .fx-curve { opacity: 0.45; }
+.fx-graph .fx-band { transition: opacity 0.1s; }
+.fx-graph.is-curve .fx-curve { filter: drop-shadow(0 0 calc(var(--drive, 0) * 6px) var(--cat)); }
+.fx-badge { position: absolute; top: 4px; right: 10px; color: var(--warn); font: 600 9.5px/1 var(--mono); pointer-events: none; }
+.fx-badge:empty { display: none; }
+
+/* In and out level bars on every effect card's header. */
+.fx-activity { display: flex; flex: none; flex-direction: column; justify-content: center; gap: 2px; width: 26px; height: 14px; }
+.fx-activity-bar { position: relative; height: 3px; overflow: hidden; border-radius: 2px; background: rgba(255, 255, 255, 0.07); }
+.fx-activity-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: var(--cat);
+  transform: scaleX(var(--level, 0));
+  transform-origin: left;
+}
+.fx-activity-bar.is-in::after { opacity: 0.55; }
+/* Cards glow with the effect's output level (--act, set by the page, 0..1). */
+.card.is-live { box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 10px 30px rgba(0, 0, 0, 0.25),
+                            0 0 calc(var(--act, 0) * 18px) color-mix(in srgb, var(--cat) calc(var(--act, 0) * 35%), transparent); }
+.insert.is-live { box-shadow: 0 0 calc(var(--act, 0) * 14px) color-mix(in srgb, var(--cat) calc(var(--act, 0) * 35%), transparent); }
 
 /* ---------- Performance controls: preset search and favourites, card tools, panic, dry, mic check, keys ---------- */
 
