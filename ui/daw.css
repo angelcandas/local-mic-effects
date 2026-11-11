@@ -567,8 +567,9 @@ body.is-daw .chip--live { display: none; }
 
 /* ---------- Inspector ---------- */
 
-/* The effects panel sits under the tracks (or the mixer): the clip, then the track's chain,
-   left to right. Drag the bar above it to resize; E or the bar's button folds it away. */
+/* The bottom panel sits under the tracks (or the mixer), with two tabs: Effects (the track's
+   insert chain, left to right) and Track (the clip card, then Pitch & time). Drag the bar
+   above it to resize; E or the bar's button folds it away. */
 .dock-splitter {
   position: relative;
   display: flex;
@@ -598,7 +599,23 @@ body.is-daw .chip--live { display: none; }
 .dock-splitter:focus-visible::before,
 .dock-splitter.is-dragging::before { background: var(--accent); }
 .dock-splitter:focus-visible { outline: none; }
-.dock-title { color: var(--faint); font-size: 10.5px; font-weight: 650; text-transform: uppercase; letter-spacing: 0.8px; }
+.dock-tabs { display: flex; gap: 2px; }
+.dock-tab {
+  padding: 2px 10px;
+  border: 1px solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--faint);
+  font: inherit;
+  font-size: 10.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  cursor: pointer;
+}
+.dock-tab:hover { color: var(--text); }
+.dock-tab.is-active { border-color: var(--line); background: var(--panel-raised); color: var(--text); }
+.daw.dock-hidden .dock-tab.is-active { border-color: transparent; background: transparent; color: var(--muted); }
 .dock-toggle { margin-left: auto; padding: 1px 8px; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: var(--muted); font: inherit; font-size: 10.5px; cursor: pointer; }
 .dock-toggle:hover { color: var(--text); border-color: var(--muted); }
 
@@ -617,13 +634,13 @@ body.is-daw .chip--live { display: none; }
 .inspector .panel { display: flex; flex: none; gap: 10px; min-height: 0; }
 .inspector .panel + .panel { padding-left: 12px; border-left: 1px solid var(--line); }
 .inspector .panel-head { display: flex; flex: none; flex-direction: column; width: 190px; min-height: 0; overflow-y: auto; }
-/* Clip panel: one compact card, stacked vertically. */
-.inspector .clip-panel {
+/* Track tab: the clip card and the Pitch & time card, both the panel's full height. */
+.inspector .clip-panel,
+.inspector .rhythm-panel {
   flex-direction: column;
   gap: 6px;
-  align-self: flex-start;
+  align-self: stretch;
   width: 320px;
-  max-height: 100%;
   padding: 8px 10px 10px;
   overflow-y: auto;
   border: 1px solid var(--line);
@@ -1340,12 +1357,47 @@ body.library-dragging * { cursor: grabbing !important; }
 
 /* ---------- Pitch & time (ui/rhythm.js) ---------- */
 
-.inspector .rhythm-panel .panel-head { width: 170px; }
+.inspector .clip-panel.is-empty .panel-caption { margin: 4px 0 0; }
+.inspector .panel + .rhythm-panel { padding-left: 10px; border-left: 1px solid var(--line); }
+.inspector .rhythm-panel { width: auto; overflow: hidden; }
+.rhythm-head { display: flex; flex: none; align-items: baseline; gap: 10px; }
+.rhythm-head .panel-caption { margin: 0; }
 .rhythm-panel .knob { --cat: var(--accent-2); }
-.rhythm-knobs { align-self: flex-start; width: 150px; }
-.rhythm-body { display: flex; flex: none; flex-direction: column; gap: 6px; width: 230px; min-height: 0; overflow-y: auto; }
-.rhythm-body .insert-sub { margin-top: 2px; }
-.rhythm-body .panel-actions { margin-top: 2px; }
+.rhythm-sections { display: flex; flex: 1; gap: 0; min-height: 0; }
+.rhythm-section { display: flex; flex: none; flex-direction: column; min-height: 0; padding: 0 12px; }
+.rhythm-section:first-child { padding-left: 0; }
+.rhythm-section + .rhythm-section { border-left: 1px solid var(--line); }
+.rhythm-summary {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0 6px;
+  color: var(--faint);
+  font-size: 10.5px;
+  font-weight: 650;
+  text-transform: uppercase;
+  letter-spacing: 0.8px;
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+.rhythm-summary::-webkit-details-marker { display: none; }
+.rhythm-summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin: 0 2px 0 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.12s;
+}
+.rhythm-section[open] > .rhythm-summary::before { transform: rotate(45deg); }
+.rhythm-summary:hover { color: var(--text); }
+.rhythm-section-body { display: flex; flex-direction: column; gap: 6px; width: 230px; min-height: 0; overflow-y: auto; }
+.rhythm-section:first-child .rhythm-section-body { width: 150px; }
+.rhythm-section-body .panel-actions { margin-top: 2px; }
 .rhythm-check { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11.5px; cursor: pointer; }
 .rhythm-warp-info { margin: 4px 0 0; }
 

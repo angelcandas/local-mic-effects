@@ -111,9 +111,11 @@ tracks instead of one live chain:
   **Follow** keeps the playhead in view while playing; scrolling yourself switches it off so you can
   look and edit elsewhere while the song plays. Clicking a lane while playing only selects.
 - Each track header has volume and pan; armed tracks show the take growing while you record.
-- The **effects panel** sits under the tracks (and the mixer): the selected clip, then the selected
-  track's effects left to right, in chain order. Drag the bar above it to resize, or press **E** (or
-  its **Hide** button) to fold it away.
+- The **bottom panel** sits under the tracks (and the mixer), with two tabs. **Effects** shows the
+  selected track's effects left to right, in chain order. **Track** shows the selected clip (gain,
+  fades, split, loop, strip silence) and **Pitch & time** (transpose, quantize, tempo), whose
+  sections fold away to their titles. Drag the bar above it to resize, or press **E** (or its
+  **Hide** button) to fold it away.
 - The **library** on the left lists audio files (this project, Recordings, Music, Downloads,
   Desktop and any folder you add with **+ Add folder…**), the effects, instruments (with MIDI
   tracks) and presets. Drag a file onto a track to put a clip where you drop it, or below the
@@ -128,7 +130,7 @@ tracks instead of one live chain:
   from the ♫ button on the track. Their settings are saved in the project.
   Arm a MIDI track to play it from your MIDI keyboard (every MIDI input is opened) and record: the
   take becomes a MIDI clip (the sustain pedal is kept). Double-click a MIDI track's lane for an
-  empty clip, and select a MIDI clip to edit its notes in the **piano roll** in the effects panel:
+  empty clip, and select a MIDI clip to edit its notes in the **piano roll** on the bottom panel's **Track** tab:
   click to add, drag to move, drag the end to resize, double-click to delete, box-select, ↑↓ to
   transpose, Q to quantize to the grid. Exports play the instruments too.
 - **Menus**: the standalone app has File (new, open, save, import, export, audio settings), Edit,

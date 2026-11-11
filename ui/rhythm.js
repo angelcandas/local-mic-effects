@@ -29,15 +29,30 @@ const semitoneText = (v) => {
   return `${st > 0 ? "+" : ""}${st} st${cents ? ` ${cents > 0 ? "+" : ""}${cents}¢` : ""}`;
 };
 
-// The "Pitch & time" panel for a track (and its selected clip). `ui` carries what the
-// DAW screen shares: daw (command, args), ValueKnob, button, toast.
+// A section of the Pitch & time card that folds to its title; open or closed is remembered.
+function section(key, title, open, ...content) {
+  const details = html("details", "rhythm-section");
+  details.open = prefs.get(`open.${key}`, open);
+  const summary = html("summary", "rhythm-summary", title);
+  summary.title = "Show or hide";
+  details.addEventListener("toggle", () => prefs.set(`open.${key}`, details.open));
+  const body = html("div", "rhythm-section-body");
+  body.append(...content);
+  details.append(summary, body);
+  return details;
+}
+
+// The "Pitch & time" card for a track (and its selected clip), on the bottom panel's Track
+// tab: Transpose, Quantize and Tempo side by side, each folding away to its title.
+// `ui` carries what the DAW screen shares: daw (command, args), ValueKnob, button, toast.
 export function createRhythmPanel(screen, track, clip, ui) {
   const { daw, ValueKnob, button, toast } = ui;
   const element = html("section", "panel rhythm-panel");
-  const head = html("div", "panel-head");
+  const head = html("div", "rhythm-head");
   head.append(html("h3", "", "Pitch & time"),
-              html("p", "panel-caption", "Non-destructive: the take stays as recorded, and every change undoes."));
-  element.append(head);
+              html("span", "panel-caption", "Non-destructive: the take stays as recorded, and every change undoes."));
+  const sections = html("div", "rhythm-sections");
+  element.append(head, sections);
 
   // Transpose: whole semitones and cents, for the track and for the selected clip.
   const knobs = html("div", "insert-controls rhythm-knobs");
@@ -56,10 +71,9 @@ export function createRhythmPanel(screen, track, clip, ui) {
     (v, first) => daw("setTrack", { id: track.id, transpose: v, continue: !first }));
   const updateClip = clip ? transposeKnobs("Clip key", clip.transpose,
     (v, first) => daw("setClip", { id: clip.id, transpose: v, continue: !first })) : null;
-  element.append(knobs);
+  sections.append(section("transpose", "Transpose", true, knobs));
 
   // Quantize.
-  const body = html("div", "rhythm-body");
   const grid = html("select", "dropdown");
   grid.title = "What to quantize to: the project's tempo grid, or the groove of another track";
   grid.append(new Option("Project grid", -1));
@@ -122,9 +136,8 @@ export function createRhythmPanel(screen, track, clip, ui) {
     }), lineUp);
 
   const warpInfo = html("p", "panel-caption rhythm-warp-info");
-  body.append(html("div", "insert-sub", "Quantize"), grid, steps, quantizeKnobs, quantizeRow,
-              html("div", "insert-sub", "Tempo"), tempoRow, warpInfo);
-  element.append(body);
+  sections.append(section("quantize", "Quantize", true, grid, steps, quantizeKnobs, quantizeRow, warpInfo),
+                  section("tempo", "Tempo", true, tempoRow));
 
   const update = (t, c) => {
     updateTrack(t.transpose);

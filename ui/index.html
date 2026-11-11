@@ -100,11 +100,14 @@
     <div class="daw-main">
       <div class="arrange"></div>
       <div class="mixer"></div>
-      <div class="dock-splitter" role="separator" aria-orientation="horizontal" aria-label="Drag to resize the effects panel" tabindex="0">
-        <span class="dock-title">Effects</span>
-        <button class="dock-toggle" type="button" title="Show or hide the effects panel (E)">Hide</button>
+      <div class="dock-splitter" role="separator" aria-orientation="horizontal" aria-label="Drag to resize the bottom panel" tabindex="0">
+        <div class="dock-tabs" role="tablist" aria-label="Bottom panel">
+          <button class="dock-tab" type="button" role="tab" data-tab="effects" title="The track's insert effects">Effects</button>
+          <button class="dock-tab" type="button" role="tab" data-tab="track" title="The selected clip, pitch &amp; time, quantize and tempo">Track</button>
+        </div>
+        <button class="dock-toggle" type="button" title="Show or hide the bottom panel (E)">Hide</button>
       </div>
-      <aside class="inspector" aria-label="Effects and clip settings"></aside>
+      <aside class="inspector" aria-label="Effects, clip and track settings"></aside>
     </div>
     <div class="export-panel" hidden>
       <div class="export-head">
