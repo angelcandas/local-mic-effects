@@ -280,6 +280,52 @@ double Edit::snapToGrid (double seconds, double beats) const
     return std::round (seconds / step) * step;
 }
 
+void Edit::setBeatsPerBar (int beats)
+{
+    state.setProperty (ids::beatsPerBar, juce::jlimit (2, 12, beats), &undoManager);
+}
+
+//==============================================================================
+juce::ValueTree Edit::addMarker (double timeSeconds, const juce::String& name)
+{
+    juce::ValueTree marker (ids::MARKER);
+    marker.setProperty (ids::id, takeNextId(), nullptr);
+    marker.setProperty (ids::name, name.isNotEmpty() ? name : "Marker " + juce::String (getMarkers().size() + 1), nullptr);
+    marker.setProperty (ids::time, juce::jmax (0.0, timeSeconds), nullptr);
+    state.appendChild (marker, &undoManager);
+    return marker;
+}
+
+void Edit::removeMarker (int markerId)
+{
+    if (auto marker = findById (ids::MARKER, markerId); marker.isValid())
+        state.removeChild (marker, &undoManager);
+}
+
+void Edit::setMarkerTime (int markerId, double timeSeconds)
+{
+    if (auto marker = findById (ids::MARKER, markerId); marker.isValid())
+        marker.setProperty (ids::time, juce::jmax (0.0, timeSeconds), &undoManager);
+}
+
+void Edit::setMarkerName (int markerId, const juce::String& name)
+{
+    if (auto marker = findById (ids::MARKER, markerId); marker.isValid() && name.trim().isNotEmpty())
+        marker.setProperty (ids::name, name.trim().substring (0, 60), &undoManager);
+}
+
+juce::Array<juce::ValueTree> Edit::getMarkers() const
+{
+    juce::Array<juce::ValueTree> markers;
+    for (const auto& child : state)
+        if (child.hasType (ids::MARKER))
+            markers.add (child);
+
+    std::stable_sort (markers.begin(), markers.end(), [] (const auto& a, const auto& b)
+                      { return (double) a[ids::time] < (double) b[ids::time]; });
+    return markers;
+}
+
 void Edit::setLoop (bool on, double startSeconds, double endSeconds)
 {
     const auto start = juce::jmax (0.0, juce::jmin (startSeconds, endSeconds));

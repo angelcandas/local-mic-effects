@@ -829,3 +829,80 @@ body.is-daw .chip--live { display: none; }
 .shortcuts-grid h4 { margin: 10px 0 4px; color: var(--faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; }
 .shortcut { display: grid; grid-template-columns: 140px 1fr; gap: 10px; padding: 3px 0; color: var(--muted); }
 .shortcut kbd { color: var(--text); font: 600 11px/1.6 var(--mono); }
+
+/* ---------- Timeline extras: markers, go-to clock, tap tempo, click volume ---------- */
+
+.daw-clock { position: relative; cursor: text; }
+.daw-clock.is-editing > span { visibility: hidden; }
+.clock-input {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  padding: 0 8px;
+  border: 1px solid var(--accent-2);
+  border-radius: 9px;
+  background: #080a0e;
+  color: var(--text);
+  font: 600 14px var(--mono);
+  text-align: right;
+}
+
+.tap-tempo { padding: 0 9px; }
+.click-group { display: flex; align-items: center; gap: 4px; }
+.click-volume { width: 54px; accent-color: var(--accent-2); }
+.daw select.signature { width: 62px; }
+.daw select.grid-size { width: 86px; }
+.daw select.grid-size:disabled { opacity: 0.45; }
+
+.marker {
+  position: absolute;
+  bottom: 0;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  max-width: 160px;
+  height: 14px;
+  padding: 0 4px 0 5px;
+  border-left: 2px solid var(--warn);
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--warn) 22%, var(--panel));
+  color: var(--text);
+  font: 600 10px/14px var(--mono);
+  white-space: nowrap;
+  cursor: grab;
+}
+
+.marker-name { overflow: hidden; text-overflow: ellipsis; }
+.marker-remove {
+  display: none;
+  padding: 0 2px;
+  border: 0;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  line-height: 1;
+  cursor: pointer;
+}
+.marker:hover .marker-remove { display: inline; }
+.marker-remove:hover { color: var(--hot); }
+.marker-input {
+  width: 110px;
+  height: 14px;
+  padding: 0 3px;
+  border: 1px solid var(--accent-2);
+  border-radius: 3px;
+  background: #080a0e;
+  color: var(--text);
+  font: 600 10px var(--mono);
+}
+
+.marker-line {
+  position: absolute;
+  top: 30px;
+  bottom: 0;
+  z-index: 1;
+  width: 0;
+  border-left: 1px dashed color-mix(in srgb, var(--warn) 45%, transparent);
+  pointer-events: none;
+}

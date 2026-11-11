@@ -1378,6 +1378,31 @@ namespace
                    && rms (clicks[0], spb / 2 - 100, spb / 2 + 100) < 1.0e-4f,
                "metronome clicks on the beat at 120 BPM");
 
+        // Time signature: in 3/4 the accent (higher, louder click) is on every third beat.
+        {
+            edit.setBeatsPerBar (3);
+            engine.setMetronome (true);
+            engine.seek (0);
+            engine.play();
+            const auto bar = render (engine, 2.1);
+            engine.stop();
+            const auto peakAt = [&] (size_t beat) { return std::abs (*std::max_element (bar[0].begin() + (long) (beat * spb), bar[0].begin() + (long) (beat * spb + 200),
+                                                                                        [] (float a, float b) { return std::abs (a) < std::abs (b); })); };
+            check (peakAt (3) > peakAt (1) * 1.3f && peakAt (3) > peakAt (2) * 1.3f && peakAt (0) > peakAt (1) * 1.3f,
+                   "3/4: the click accents beats 1 and 4, not 2 and 3");
+
+            engine.setMetronomeVolume (0.5f);
+            engine.seek (0);
+            engine.play();
+            const auto quieter = render (engine, 0.2);
+            engine.stop();
+            const auto loud = rms (bar[0], 0, 400), soft = rms (quieter[0], 0, 400);
+            check (std::abs (soft / loud - 0.5f) < 0.05f, "click volume scales the click (" + juce::String (soft / loud, 2) + ")");
+            engine.setMetronomeVolume (1.0f);
+            engine.setMetronome (false);
+            edit.setBeatsPerBar (4);
+        }
+
         // Count-in: one bar of clicks before the take starts, not recorded.
         edit.setTrackArm (second, true);
         engine.setCountInBars (1);
@@ -1440,6 +1465,10 @@ namespace
         edit.setInsertValue (insert, "delayTime", 420.0f);
         edit.addInsert (daw::Edit::masterId, fx::ModuleType::compressor);
         edit.setTempo (96.0);
+        edit.setBeatsPerBar (3);
+        const auto chorus = (int) edit.addMarker (8.5, "Chorus")[daw::ids::id];
+        edit.addMarker (2.0);
+        edit.setMarkerName (chorus, "  Chorus 1 ");
 
         check (project.hasUnsavedChanges() && project.save().isEmpty() && ! project.hasUnsavedChanges(), "saves, and tracks unsaved changes");
 
@@ -1469,6 +1498,19 @@ namespace
         check (juce::File (reClip[daw::ids::file].toString()) == moved.getChildFile ("Audio/loop.wav") && second.getMissingFiles().isEmpty(),
                "a moved project still finds its audio");
         check (! reopened.getUndoManager().canUndo() && ! second.hasUnsavedChanges(), "opening starts with a clean undo history");
+
+        {
+            const auto markers = reopened.getMarkers();
+            check (reopened.getBeatsPerBar() == 3 && markers.size() == 2 && (double) markers[0][daw::ids::time] == 2.0
+                       && markers[0][daw::ids::name].toString() == "Marker 2" && markers[1][daw::ids::name].toString() == "Chorus 1"
+                       && (double) markers[1][daw::ids::time] == 8.5,
+                   "the time signature and markers come back, markers in time order");
+            reopened.setMarkerTime (chorus, 1.0);
+            check (reopened.getMarkers()[0][daw::ids::id].equals (chorus), "moving a marker keeps the list in time order");
+            reopened.removeMarker (chorus);
+            reopened.getUndoManager().undo();
+            check (reopened.getMarkers().size() == 2, "deleting a marker can be undone");
+        }
 
         // The engine plays the reopened project.
         {
