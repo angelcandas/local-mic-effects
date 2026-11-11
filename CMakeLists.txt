@@ -51,6 +51,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/Analysis.h
     src/analysis/MixAssistant.cpp
     src/analysis/MixAssistant.h
+    src/analysis/Beats.cpp
+    src/analysis/Beats.h
     src/Parameters.cpp
     src/Presets.cpp
     src/PluginProcessor.cpp
@@ -61,6 +63,8 @@ set(MICFX_DSP_SOURCES
     src/daw/Edit.cpp
     src/daw/Exporter.cpp
     src/daw/Project.cpp
+    src/daw/Quantize.cpp
+    src/daw/Quantize.h
     src/daw/Warp.cpp
     src/daw/Warp.h
     src/dsp/Biquad.h

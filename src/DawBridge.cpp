@@ -1,4 +1,6 @@
 #include "DawBridge.h"
+
+#include "daw/Quantize.h"
 #include "daw/ClipTools.h"
 
 #include "Presets.h"
@@ -1174,6 +1176,108 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         complete (object ({ { "ok", true }, { "clips", created.size() } }));
         return;
     }
+    //================================================================ rhythm: tempo, quantize, warp
+    // Selected clips (args.clips) or every clip on a track (args.track).
+    const auto clipsFrom = [&] (const juce::var& a)
+    {
+        juce::Array<int> clips;
+        if (const auto* list = a["clips"].getArray())
+            for (const auto& c : *list)
+                clips.add ((int) c);
+        if (clips.isEmpty())
+            clips = daw::rhythm::getClipIds (edit, arg (a, "track", -1));
+        return clips;
+    };
+
+    // Tempo and beats of a leading track. With apply, sets the project tempo; with lineUp
+    // too, slides the whole song so the track's downbeats sit on the bar lines.
+    if (command == "detectTempo")
+    {
+        const auto track = edit.getTrack (arg (args, "track", -1));
+        if (! track.isValid())
+        {
+            complete (error ("Pick the track that leads the tempo first."));
+            return;
+        }
+
+        const auto tempo = daw::rhythm::analyseTrack (edit, engine.getAudioPool(), (int) track[ids::id]);
+        if (tempo.bpm <= 0.0)
+        {
+            complete (error ("No steady beat found in " + track[ids::name].toString() + ". It needs a few bars of rhythm."));
+            return;
+        }
+
+        const auto bpm = std::round (tempo.bpm * 100.0) / 100.0;
+        auto shift = 0.0;
+
+        if (arg (args, "apply", false))
+        {
+            edit.setTempo (bpm);
+            if (arg (args, "lineUp", false))
+            {
+                auto fitted = tempo;
+                fitted.bpm = bpm;
+                shift = daw::rhythm::getLineUpShift (edit, fitted);
+                daw::rhythm::shiftSong (edit, shift);
+            }
+        }
+
+        complete (object ({ { "ok", true }, { "bpm", bpm }, { "confidence", tempo.confidence },
+                            { "beats", (int) tempo.beats.size() }, { "shift", shift } }));
+        return;
+    }
+
+    // Quantize audio: warps the clips so their onsets land on the project grid (steps in
+    // beats: 1 = quarters, 0.5 = eighths...) or on a leading track's groove (args.groove =
+    // its track id). Strength, swing, catch (share of a step) and sensitivity are 0..1.
+    if (command == "quantize")
+    {
+        const auto clips = clipsFrom (args);
+        if (clips.isEmpty())
+        {
+            complete (error ("Select clips or a track to quantize."));
+            return;
+        }
+
+        const auto steps = juce::jlimit (1.0 / 16.0, 16.0, arg (args, "steps", 0.5));
+        const auto swing = juce::jlimit (0.0, 1.0, arg (args, "swing", 0.0));
+        const auto songEnd = (double) engine.getLength() / engine.getSampleRate() + 10.0;
+        std::vector<double> grid;
+
+        if (const auto leader = edit.getTrack (arg (args, "groove", -1)); leader.isValid())
+        {
+            const auto tempo = daw::rhythm::analyseTrack (edit, engine.getAudioPool(), (int) leader[ids::id]);
+            if (tempo.beats.size() < 4)
+            {
+                complete (error ("No steady beat found in " + leader[ids::name].toString() + " to quantize to."));
+                return;
+            }
+            grid = analysis::rhythm::makeGroove (tempo.beats, steps, 0.0, songEnd, swing);
+        }
+        else
+        {
+            grid = analysis::rhythm::makeGrid (edit.getTempo(), steps, 0.0, songEnd, 0.0, swing);
+        }
+
+        daw::rhythm::Options options;
+        options.strength = juce::jlimit (0.0, 1.0, arg (args, "strength", 1.0));
+        options.catchRange = juce::jlimit (0.0, 0.5, arg (args, "catch", 0.5));
+        options.sensitivity = juce::jlimit (0.0f, 1.0f, arg (args, "sensitivity", 0.5f));
+
+        const auto result = daw::rhythm::quantizeClips (edit, engine.getAudioPool(), clips, grid, options);
+        complete (object ({ { "ok", true }, { "onsets", result.onsets }, { "moved", result.moved } }));
+        return;
+    }
+
+    // Back to the audio as recorded (time only; transposes stay).
+    if (command == "clearWarp")
+    {
+        for (auto clip : clipsFrom (args))
+            edit.setClipWarp (clip, {});
+        ok();
+        return;
+    }
+
     // Warp markers: [[source, target], ...] in seconds (file time, rendered time). An
     // empty list clears the warp.
     if (command == "setWarp")
