@@ -4,7 +4,8 @@
 // daw (command, args). Every edit is one undo step: drags only send on release.
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES } from "./modules.js";
-import { createFxView } from "./fxviews.js";
+import { createActivity, createFxView } from "./fxviews.js";
+import { LibraryBrowser } from "./browser.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
@@ -367,6 +368,11 @@ class InsertRack {
     for (const insert of owner.inserts) this.cards.get(insert.id)?.update(insert);
   }
 
+  // From "dawStatus": live readings by insert id ({ in, out, spectrum? }, null when off).
+  live(readings) {
+    for (const [id, card] of this.cards) card.live(readings?.[id] ?? null);
+  }
+
   build() {
     this.element.replaceChildren();
     this.cards.clear();
@@ -397,8 +403,9 @@ class InsertCard {
 
     const head = html("header", "insert-head");
     const title = html("span", "insert-name", insert.type === "pitch" ? "Pitch" : main?.name ?? insert.type);
+    this.activity = createActivity();
     if (insert.type !== "pitch") head.append(this.addSwitch(main.power, `Switch ${main.name} on or off`));
-    head.append(title,
+    head.append(title, this.activity.element,
       button("mini", "↑", "Earlier in the chain", () => daw("moveInsert", { id: insert.id, index: index - 1 })),
       button("mini", "↓", "Later in the chain", () => daw("moveInsert", { id: insert.id, index: index + 1 })),
       button("mini is-danger", "×", "Remove this effect", () => daw("removeInsert", { id: insert.id })));
@@ -439,6 +446,14 @@ class InsertCard {
     }
 
     this.update(insert);
+  }
+
+  // Animates the picture and the level bars from the signal (see fxviews.js).
+  live(reading) {
+    this.view?.live(reading);
+    const level = this.activity.push(reading);
+    this.element.classList.toggle("is-live", Boolean(reading));
+    this.element.style.setProperty("--act", level.toFixed(2));
   }
 
   addSwitch(param, title) {
@@ -537,6 +552,7 @@ class DawScreen {
     this.dragging = false;
     this.pendingSession = null;
     this.reveal = null;        // { track, clip?, start? } to scroll into view once drawn
+    this.trackWaiters = new Map(); // track id -> resolve, see waitForTrack
 
     this.buildTransport();
     this.buildArrange();
@@ -544,6 +560,7 @@ class DawScreen {
     this.buildInspector();
     this.buildBanners();
     this.buildAutoMix();
+    this.buildLibrary();
 
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
@@ -1556,6 +1573,7 @@ class DawScreen {
   createStrip(track, index) {
     const isMaster = track.id === 0;
     const element = html("div", isMaster ? "strip is-master" : "strip");
+    if (!isMaster) element.dataset.track = track.id;
     element.style.setProperty("--track-color", isMaster ? "var(--accent-2)" : trackColour(track, index));
     element.addEventListener("pointerdown", (event) => {
       if (!event.target.closest(".fader, .knob, button")) this.select(track.id, null);
@@ -1657,6 +1675,7 @@ class DawScreen {
     this.dockToggle.textContent = show ? "Hide" : "Show";
     this.dockToggle.setAttribute("aria-expanded", String(show));
     if (save) try { localStorage.setItem("micfx.dock", JSON.stringify({ height, hidden: !show })); } catch { /* not kept */ }
+    if (this.session) this.watchInserts(show && this.chainGains ? this.chainGains.id : -1);
   }
 
   select(trackId, clipId, render = true, openAdd = false) {
@@ -1707,6 +1726,19 @@ class DawScreen {
 
     if (found && this.clipPanel) this.clipPanel.update(found.clip);
     if (owner) this.rack?.update(owner);
+    if (owner && this.chainGains?.id === owner.id) {
+      this.chainGains.input.knob.update(owner.inGain ?? 0);
+      this.chainGains.output.knob.update(owner.outGain ?? 0);
+    }
+    this.watchInserts(owner && !this.root.classList.contains("dock-hidden") ? owner.id : -1);
+  }
+
+  // Asks for live readings of the effects on screen (or none, -1, while the panel is hidden).
+  watchInserts(id) {
+    if (id === this.watchedInserts) return;
+    this.watchedInserts = id;
+    daw("watchInserts", { track: id });
+    if (id < 0) this.rack?.live(null);
   }
 
   createClipPanel(clip) {
@@ -1788,16 +1820,10 @@ class DawScreen {
       for (const module of MODULES.filter((m) => m.category === categoryId)) group.append(new Option(module.name, module.id));
       add.append(group);
     }
-    add.addEventListener("change", async () => {
-      const module = MODULES.find((m) => m.id === add.value);
+    add.addEventListener("change", () => {
+      const moduleId = add.value;
       add.value = "";
-      if (!module) return;
-      const id = await daw("addInsert", { track: owner.id, type: MODULE_KEYS[module.id] });
-      // The pitch insert switches on autotune by default; switch to the part that was picked.
-      if (id >= 0 && MODULE_KEYS[module.id] === "pitch" && module.id !== "tune") {
-        await daw("setInsert", { id, param: "tuneOn", value: 0, continue: true });
-        await daw("setInsert", { id, param: module.power, value: 1, continue: true });
-      }
+      this.addEffect(owner.id, moduleId);
     });
 
     const preset = html("select", "dropdown load-preset");
@@ -1820,7 +1846,26 @@ class DawScreen {
     if (!isMaster) effectsRow.append(button("tool", "Duplicate track", "A copy of this track with its clips and effects (Ctrl+Shift+D)", () => this.duplicateTrack(owner.id)));
     head.append(effectsRow);
     head.append(footer);
-    element.append(list);
+
+    // The chain's own input and output gain, with meters, either side of the effects.
+    const chainGain = (name, key, caption) => {
+      const column = html("div", `chain-gain is-${key}`);
+      const knob = new ValueKnob({
+        label: "Gain", min: -24, max: 24, value: owner[key] ?? 0, defaultValue: 0, bipolar: true, unit: "dB",
+        onChange: (v, first) => daw(isMaster ? "setMaster" : "setTrack", { ...(isMaster ? {} : { id: owner.id }), [key]: v, continue: !first }),
+      });
+      const meter = new Level(true);
+      column.title = caption;
+      column.append(html("span", "chain-gain-title", name), knob.element, meter.element);
+      return { column, knob, meter, key };
+    };
+    const input = chainGain("In", "inGain", "Chain input: the level going into the first effect");
+    const output = chainGain("Out", "outGain", "Chain output: the level after the last effect, before the fader");
+    this.chainGains = { id: owner.id, input, output };
+
+    const chain = html("div", "chain-row");
+    chain.append(input.column, list, output.column);
+    element.append(chain);
     this.rack.update(owner);
     return element;
   }
@@ -2085,10 +2130,52 @@ class DawScreen {
     }
     // Another project: start at its top-left, not where the last one was scrolled to.
     const path = session.project?.path ?? "";
+    const pathChanged = this.projectPath !== undefined && path !== this.projectPath;
     if (this.projectPath !== undefined && path !== this.projectPath) this.arrange.scrollTop = this.arrange.scrollLeft = 0;
     this.projectPath = path;
+    if (pathChanged) this.library?.refresh();
     document.dispatchEvent(new CustomEvent("daw-session", { detail: session }));
     if (this.active) this.render();
+    for (const [id, resolve] of this.trackWaiters) if (tracks.some((t) => t.id === id)) { this.trackWaiters.delete(id); resolve(); }
+  }
+
+  // Resolves once a session holding the track has arrived (a command's reply comes
+  // before the session that shows its result).
+  waitForTrack(id) {
+    if (this.session?.tracks.some((t) => t.id === id)) return Promise.resolve();
+    return new Promise((resolve) => {
+      this.trackWaiters.set(id, resolve);
+      setTimeout(() => { if (this.trackWaiters.get(id) === resolve) { this.trackWaiters.delete(id); resolve(); } }, 2000);
+    });
+  }
+
+  //============================================================================ library
+  // The sidebar on the left (ui/browser.js): it sits beside the tracks, mixer and
+  // effects panel.
+  buildLibrary() {
+    const main = this.root.querySelector(".daw-main");
+    const body = html("div", "daw-body");
+    main.replaceWith(body);
+    this.library = new LibraryBrowser(this, {
+      call: (command, args = {}) => nativeDaw(command, args),
+      run: daw,
+      toast: (message, kind) => toast(message, kind),
+      onEvent: (name, handler) => window.__JUCE__.backend.addEventListener(name, handler),
+    });
+    body.append(this.library.element, main);
+  }
+
+  // Adds an effect (a modules.js id) at the end of a track's (or the master's) chain.
+  async addEffect(trackId, moduleId) {
+    const module = MODULES.find((m) => m.id === moduleId);
+    if (!module) return -1;
+    const id = await daw("addInsert", { track: trackId, type: MODULE_KEYS[module.id] });
+    // The pitch insert switches on autotune by default; switch to the part that was picked.
+    if (id >= 0 && MODULE_KEYS[module.id] === "pitch" && module.id !== "tune") {
+      await daw("setInsert", { id, param: "tuneOn", value: 0, continue: true });
+      await daw("setInsert", { id, param: module.power, value: 1, continue: true });
+    }
+    return id;
   }
 
   flushSession() {
@@ -2118,6 +2205,7 @@ class DawScreen {
       this.recLevels.push([status.position, Math.pow(10, (status.input ?? -100) / 20)]);
     if (!status.recording) this.recLevels = [];
     this.status = status;
+    if (this.watchedInserts >= 0) this.rack?.live(status.inserts);
     this.playButton.classList.toggle("is-playing", status.playing);
     this.root.classList.toggle("is-playing", status.playing);
     this.recordButton.setAttribute("aria-pressed", String(status.recording));
@@ -2141,6 +2229,12 @@ class DawScreen {
       this.inputReadout.textContent = this.inputPeak <= METER_FLOOR_DB ? "−∞" : this.inputPeak.toFixed(0);
     }
     this.status.input = undefined;
+    if (this.chainGains) {
+      const chain = this.status.chains?.[this.chainGains.id];
+      this.chainGains.input.meter.push(chain?.in, elapsed);
+      this.chainGains.output.meter.push(chain?.out, elapsed);
+      this.status.chains = undefined;
+    }
     if (this.view === "mixer") for (const [id, strip] of this.strips) strip.meter.push(level(id), elapsed);
     this.status.master = undefined;
     if (this.status.tracks) this.status.tracks = {};
@@ -2161,7 +2255,7 @@ class DawScreen {
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
                ["V / B / G", "Select, cut and gain tools"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Shift+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
-    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Z / Shift+Z", "Zoom to fit the song / the selected clip"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
+    ["View", [["Tab", "Tracks / mixer"], ["E", "Show / hide the effects panel"], ["Shift+B", "Show / hide the library"], ["Ctrl+F", "Search the library"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"], ["Z / Shift+Z", "Zoom to fit the song / the selected clip"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
               ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"], ["Ctrl+S", "Save (Shift: save as)"], ["?", "This list"], ["F11 / Ctrl+Cmd+F", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
   ];
 
@@ -2319,6 +2413,8 @@ class DawScreen {
       addTrack: () => this.addTrack(),
       toggleView: () => this.setView(this.view === "arrange" ? "mixer" : "arrange"),
       toggleDock: () => this.setDock(this.root.classList.contains("dock-hidden")),
+      toggleLibrary: () => this.library.toggle(),
+      searchLibrary: () => this.library.focusSearch(),
       follow: () => this.setFollow(!this.follow),
       zoomIn: () => this.setZoom(this.zoom * 1.5),
       zoomOut: () => this.setZoom(this.zoom / 1.5),
@@ -2380,6 +2476,7 @@ class DawScreen {
     else if (mod && key === "x") { handled(); this.run("cut"); }
     else if (mod && key === "c") { handled(); this.run("copy"); }
     else if (mod && key === "v") { handled(); this.run("paste"); }
+    else if (mod && key === "f") { handled(); this.run("searchLibrary"); }
     else if (mod) return;
     else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { handled(); this.nudgeSelected(event.key === "ArrowLeft" ? -step : step); }
     else if (event.altKey) return;
@@ -2410,6 +2507,7 @@ class DawScreen {
     else if (event.shiftKey && key === "m") { handled(); this.run("muteClip"); }
     else if (event.shiftKey && key === "l") { handled(); this.run("loopClip"); }
     else if (event.shiftKey && key === "z") { handled(); this.run("zoomClip"); }
+    else if (event.shiftKey && key === "b") { handled(); this.run("toggleLibrary"); }
     else if (event.shiftKey) return;
     else if (key === "r") { handled(); this.run("record"); }
     else if (key === "k") { handled(); this.run("addMarker"); }
