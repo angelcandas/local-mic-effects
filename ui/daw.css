@@ -1383,8 +1383,17 @@ body.library-dragging * { cursor: grabbing !important; }
   user-select: none;
 }
 .rhythm-summary::-webkit-details-marker { display: none; }
-.rhythm-summary::before { content: "▸"; font-size: 10px; transition: transform 0.12s; }
-.rhythm-section[open] > .rhythm-summary::before { transform: rotate(90deg); }
+.rhythm-summary::before {
+  content: "";
+  width: 5px;
+  height: 5px;
+  margin: 0 2px 0 1px;
+  border-right: 1.5px solid currentColor;
+  border-bottom: 1.5px solid currentColor;
+  transform: rotate(-45deg);
+  transition: transform 0.12s;
+}
+.rhythm-section[open] > .rhythm-summary::before { transform: rotate(45deg); }
 .rhythm-summary:hover { color: var(--text); }
 .rhythm-section-body { display: flex; flex-direction: column; gap: 6px; width: 230px; min-height: 0; overflow-y: auto; }
 .rhythm-section:first-child .rhythm-section-body { width: 150px; }
