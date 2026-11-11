@@ -6,9 +6,11 @@
 #include "AudioPool.h"
 #include "Recorder.h"
 #include "Edit.h"
+#include "Instruments.h"
 #include "dsp/FxChain.h"
 
 #include <algorithm>
+#include <bitset>
 #include <map>
 
 namespace daw
@@ -29,6 +31,10 @@ namespace daw
 // Recording is always dry: the raw mic goes to a WAV file and becomes a clip on every
 // armed track, and the track's inserts are applied on playback. Tracks with monitor on
 // hear the mic live through their inserts.
+//
+// MIDI tracks play their MIDI clips through their instrument (Instruments.h) and then
+// their inserts. Armed or monitored MIDI tracks also play the live MIDI input, and
+// recording on an armed MIDI track turns what's played into a MIDI clip.
 class DawEngine : private juce::ValueTree::Listener,
                   private juce::AsyncUpdater,
                   private juce::Timer
@@ -78,13 +84,32 @@ public:
     // the playhead (after the count-in, if any) and writes the dry mic to a new WAV in
     // `folder`. stopRecording() stops the transport and adds the take as a clip on
     // every armed track, in one undo step. Returns an error message, or empty.
+    // Armed MIDI tracks record the MIDI input (no file): stopRecording() adds a MIDI clip
+    // with what was played to each of them.
     juce::String startRecording (const juce::File& folder);
     Recorder::Take stopRecording();
-    bool isRecording() const noexcept { return recorder.isRecording() || countingIn.load(); }
+    bool isRecording() const noexcept { return recorder.isRecording() || countingIn.load() || recordingMidi.load(); }
     juce::int64 getRecordStart() const noexcept { return recordStart.load(); } // where the take begins
 
     // Interface input + output latency, so takes line up with what was heard.
     void setRecordingLatency (juce::int64 samples) noexcept { recordingLatency = samples; }
+    // Output latency only, for MIDI takes: keys are played to what's heard.
+    void setMidiRecordingLatency (juce::int64 samples) noexcept { midiRecordingLatency = samples; }
+
+    //==============================================================================
+    // Instruments (MIDI tracks). Message thread.
+    //
+    // The running instrument of a track (for its editor window), or null.
+    InstrumentPtr getInstrument (int trackId) const;
+    // Why a track's instrument didn't load (empty when it did).
+    juce::String getInstrumentError (int trackId) const;
+    // Writes every instrument's current settings into its INSTRUMENT `state`, so a save
+    // or an export has them. Not an undoable edit.
+    void captureInstrumentStates();
+    // Live MIDI from code (the on-screen keyboard), as if from the MIDI input. Any thread.
+    void addLiveMidi (const juce::MidiMessage&) noexcept;
+    // Note numbers being played on the MIDI input right now (for the piano roll's keys).
+    std::bitset<128> getHeldNotes() const noexcept;
 
     // Click on every beat at the project tempo while playing (accent on the first beat
     // of each bar, from the Edit's time signature).
@@ -108,8 +133,9 @@ public:
     // while stopped, so reverb and echo tails ring out.
     // `input` is the mono mic (numSamples long), or null when there isn't one. It may
     // alias the first output channel: each chunk is read before it's overwritten.
+    // `midi` is the MIDI input for this block (timestamps 0..numSamples), or null.
     void process (juce::AudioBuffer<float>& output, int numChannels, int numSamples,
-                  const float* input = nullptr) noexcept;
+                  const float* input = nullptr, const juce::MidiBuffer* midi = nullptr) noexcept;
 
 private:
     // A track's (or the master's) chain and mixer state. Shared between consecutive
@@ -125,11 +151,29 @@ private:
 
         std::atomic<float> targetLeft { 1.0f }, targetRight { 1.0f };
         std::atomic<float> peak { 0.0f };
-        std::atomic<bool> monitoring { false }; // mic in, through the inserts
+        std::atomic<bool> monitoring { false }; // mic in (audio tracks) or MIDI in (MIDI tracks)
+
+        // MIDI tracks: the instrument (null if it didn't load) and what it was made from.
+        InstrumentPtr instrument;
+        juce::String instrumentError;
+        juce::ValueTree instrumentTree;
+        bool isMidi = false;
+
+        int getLatency() const { return chain.getLatencySamples() + (instrument != nullptr ? instrument->getLatencySamples() : 0); }
 
         // Audio thread.
         juce::SmoothedValue<float> left, right;
         juce::AudioBuffer<float> buffer;
+        juce::AudioBuffer<float> instrumentBuffer;
+        juce::MidiBuffer midi;
+        std::bitset<128> sounding;          // notes the timeline has started and not ended
+        juce::int64 nextBlock = -1;         // where playback would carry on; else it jumped
+    };
+
+    struct MidiEvent
+    {
+        juce::int64 time = 0; // timeline samples
+        int note = 0, velocity = 0; // velocity 0 = note off
     };
 
     struct Clip
@@ -143,6 +187,7 @@ private:
     {
         std::shared_ptr<Strip> strip;
         std::vector<Clip> clips;
+        std::vector<MidiEvent> midiEvents; // MIDI tracks, in time order
 
         // Latency compensation, before the inserts (audio thread).
         juce::AudioBuffer<float> delayBuffer;
@@ -154,6 +199,7 @@ private:
         std::vector<Track> tracks;
         std::shared_ptr<Strip> master;
         int blockSize = 512; // the strips' buffer size: the most one chunk can render
+        bool fresh = true;   // not played yet: notes from the previous graph get their note-offs
     };
 
     // ValueTree::Listener
@@ -165,7 +211,7 @@ private:
     void valueTreeRedirected (juce::ValueTree&) override                          { triggerAsyncUpdate(); }
 
     void handleAsyncUpdate() override { rebuild(); }
-    void timerCallback() override     { collectGarbage(); }
+    void timerCallback() override     { collectGarbage(); drainRecordedMidi(); }
 
     void rebuild();
     std::shared_ptr<Strip> getStrip (const juce::ValueTree& trackOrMaster);
@@ -178,7 +224,12 @@ private:
     static void renderClip (const Clip&, juce::AudioBuffer<float>&, juce::int64 blockStart, int numSamples) noexcept;
     static void applyDelay (Track&, int numSamples) noexcept;
     void renderBlock (Graph&, juce::AudioBuffer<float>& output, int outputOffset, int numChannels, int numSamples,
-                      const float* input) noexcept;
+                      const float* input, const juce::MidiBuffer* midi, int midiOffset) noexcept;
+    void renderInstrument (Track&, bool isPlaying, bool fresh, juce::int64 blockStart, int numSamples,
+                           const juce::MidiBuffer* midi, int midiOffset) noexcept;
+    void recordMidi (const juce::MidiBuffer&, int midiOffset, int numSamples, juce::int64 blockStart) noexcept;
+    void drainRecordedMidi();
+    static void buildMidiEvents (Track&, const juce::ValueTree& trackTree, double sampleRate, juce::int64& end);
     void renderClick (juce::AudioBuffer<float>&, int offset, int numChannels, int numSamples, juce::int64 blockStart) noexcept;
     void updateTempo();
     void updateLoop();
@@ -208,7 +259,23 @@ private:
     Recorder recorder;
     std::atomic<bool> countingIn { false };
     std::atomic<juce::int64> recordStart { 0 };
-    std::atomic<juce::int64> recordingLatency { 0 };
+    std::atomic<juce::int64> recordingLatency { 0 }, midiRecordingLatency { 0 };
+
+    // MIDI recording: the audio thread pushes what's played (note on/off, sustain pedal)
+    // with its timeline time; the message thread collects it.
+    struct RecordedMidi { juce::int64 time; juce::uint8 status, data1, data2; };
+    static constexpr int midiFifoCapacity = 8192;
+    juce::AbstractFifo midiFifo { midiFifoCapacity };
+    std::array<RecordedMidi, midiFifoCapacity> midiFifoData {};
+    std::vector<RecordedMidi> recordedMidi; // message thread
+    std::atomic<bool> recordingMidi { false };
+
+    // Live MIDI from addLiveMidi(), merged into the next block.
+    static constexpr int liveFifoCapacity = 512;
+    juce::AbstractFifo liveFifo { liveFifoCapacity };
+    std::array<juce::uint32, liveFifoCapacity> liveFifoData {};
+    juce::MidiBuffer liveMidi; // audio thread
+    std::array<std::atomic<juce::uint32>, 4> heldNotes {}; // 128 bits, set by the audio thread
 
     std::atomic<bool> loopOn { false };
     std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 };

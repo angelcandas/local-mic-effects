@@ -11,7 +11,10 @@ namespace
         for (auto child : tree)
         {
             if (child.hasType (ids::CLIP))
-                callback (child);
+            {
+                if (! Edit::isMidiClip (child)) // MIDI clips hold notes, not a file
+                    callback (child);
+            }
             else
                 forEachClip (child, callback);
         }
@@ -23,7 +26,8 @@ namespace
     // this, the DAW screen got volumes as text and couldn't draw a loaded project.
     void restoreTypes (juce::ValueTree tree)
     {
-        static const juce::Identifier textIds[] { ids::name, ids::file, ids::colour, ids::type };
+        static const juce::Identifier textIds[] { ids::name, ids::file, ids::colour, ids::type, ids::kind, ids::plugin,
+                                                  ids::format, ids::vendor, ids::description, ids::state };
         static const juce::Identifier boolIds[] { ids::mute, ids::solo, ids::arm, ids::monitor, ids::loopOn };
         static const juce::Identifier intIds[] { ids::id, ids::version };
 
@@ -234,6 +238,9 @@ juce::String Project::save()
     if (! isOpen())
         return "No project is open.";
 
+    if (onBeforeWrite)
+        onBeforeWrite();
+
     if (const auto error = writeTree (getProjectFile()); error.isNotEmpty())
         return error;
 
@@ -344,6 +351,9 @@ juce::String Project::writeBackup()
 {
     if (! isOpen())
         return "No project is open.";
+
+    if (onBeforeWrite)
+        onBeforeWrite();
 
     // Strictly increasing times, even for two backups in the same millisecond.
     auto time = juce::jmax (juce::Time::currentTimeMillis(), lastSaveTime + 1);

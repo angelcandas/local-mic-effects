@@ -23,6 +23,7 @@ DawEngine::DawEngine (Edit& e, bool isRealtime) : edit (e), realtime (isRealtime
     pool.setSampleRate (sampleRate);
     pool.onLoaded = [this] { triggerAsyncUpdate(); };
     recorder.prepare (sampleRate, 1);
+    liveMidi.ensureSize (4096);
 
     edit.getState().addListener (this);
     updateTempo();
@@ -68,9 +69,12 @@ void DawEngine::prepare (double newSampleRate, int maximumBlockSize)
     blockSize = juce::jmax (1, maximumBlockSize);
     recorder.prepare (sampleRate, 1); // stops (and keeps) a take in progress
     countingIn = false;
+    recordingMidi = false;
     updateTempo();
 
-    // Fresh strips: every chain is prepared for the new rate and block size.
+    // Fresh strips: every chain (and instrument) is prepared for the new rate and block
+    // size. The instruments are made again, from their current settings.
+    captureInstrumentStates();
     strips.clear();
     rebuild();
 }
@@ -91,6 +95,54 @@ void DawEngine::loadAllNow()
     rebuildNow();
 }
 
+InstrumentPtr DawEngine::getInstrument (int trackId) const
+{
+    const auto it = strips.find (trackId);
+    return it != strips.end() ? it->second->instrument : nullptr;
+}
+
+juce::String DawEngine::getInstrumentError (int trackId) const
+{
+    const auto it = strips.find (trackId);
+    return it != strips.end() ? it->second->instrumentError : juce::String();
+}
+
+void DawEngine::captureInstrumentStates()
+{
+    for (auto& [id, strip] : strips)
+    {
+        if (strip->instrument == nullptr || ! strip->instrumentTree.isValid() || ! strip->instrumentTree.getParent().isValid())
+            continue;
+
+        const auto state = instruments::getState (*strip->instrument);
+        if (state != strip->instrumentTree[ids::state].toString())
+            strip->instrumentTree.setProperty (ids::state, state, nullptr);
+    }
+}
+
+void DawEngine::addLiveMidi (const juce::MidiMessage& message) noexcept
+{
+    if (message.getRawDataSize() > 3)
+        return;
+
+    const auto* data = message.getRawData();
+    juce::uint32 packed = 0;
+    for (int i = 0; i < message.getRawDataSize(); ++i)
+        packed |= (juce::uint32) data[i] << (8 * i);
+
+    const auto scope = liveFifo.write (1);
+    if (scope.blockSize1 == 1)
+        liveFifoData[(size_t) scope.startIndex1] = packed;
+}
+
+std::bitset<128> DawEngine::getHeldNotes() const noexcept
+{
+    std::bitset<128> held;
+    for (int i = 0; i < 128; ++i)
+        held[(size_t) i] = ((heldNotes[(size_t) (i / 32)].load (std::memory_order_relaxed) >> (i % 32)) & 1u) != 0;
+    return held;
+}
+
 float DawEngine::takePeak (int trackId)
 {
     const auto it = strips.find (trackId);
@@ -100,6 +152,20 @@ float DawEngine::takePeak (int trackId)
 //==============================================================================
 void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier& property)
 {
+    if (tree.hasType (ids::INSTRUMENT))
+    {
+        // A different plugin needs a new instrument; its saved settings and names don't.
+        if (property == ids::plugin)
+            triggerAsyncUpdate();
+        return;
+    }
+
+    if (tree.hasType (ids::NOTE))
+    {
+        triggerAsyncUpdate();
+        return;
+    }
+
     if (tree.hasType (ids::INSERT))
     {
         if (property == ids::type)
@@ -119,7 +185,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
 
             // Switching autotune or pitch shift on or off changes the track's delay, so
             // the latency compensation is worked out again.
-            if (it->second->chain.getLatencySamples() != it->second->latencyAtBuild)
+            if (it->second->getLatency() != it->second->latencyAtBuild)
                 triggerAsyncUpdate();
         }
 
@@ -139,8 +205,10 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     if (tree.hasType (ids::TRACK) || tree.hasType (ids::MASTER))
     {
         if (property == ids::volume || property == ids::pan || property == ids::mute || property == ids::solo
-            || property == ids::monitor)
+            || property == ids::monitor || property == ids::arm)
             updateMix();
+        else if (property == ids::kind)
+            triggerAsyncUpdate();
 
         return;
     }
@@ -181,7 +249,8 @@ void DawEngine::updateMix()
         if (const auto it = strips.find ((int) track[ids::id]); it != strips.end())
         {
             setStripTargets (*it->second, track, ! (bool) track[ids::mute] && (! anySolo || (bool) track[ids::solo]), false);
-            it->second->monitoring = (bool) track[ids::monitor];
+            // MIDI tracks play the MIDI input when armed too, so you hear what you record.
+            it->second->monitoring = (bool) track[ids::monitor] || (Edit::isMidiTrack (track) && (bool) track[ids::arm]);
         }
     }
 
@@ -197,6 +266,12 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
     juce::String layout;
     for (const auto& insert : inserts)
         layout << insert[ids::type].toString() << ":" << (int) insert[ids::id] << " ";
+
+    const auto isMidi = trackOrMaster.hasType (ids::TRACK) && Edit::isMidiTrack (trackOrMaster);
+    const auto instrumentTree = isMidi ? trackOrMaster.getChildWithName (ids::INSTRUMENT) : juce::ValueTree();
+
+    if (isMidi)
+        layout << "| instrument:" << (int) instrumentTree[ids::id] << ":" << instrumentTree[ids::plugin].toString();
 
     if (const auto it = strips.find (id); it != strips.end() && it->second->insertLayout == layout)
         return it->second;
@@ -224,6 +299,24 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
 
     strip->chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
     strip->buffer.setSize (2, blockSize);
+    strip->isMidi = isMidi;
+
+    if (instrumentTree.isValid())
+    {
+        strip->instrumentTree = instrumentTree;
+        strip->instrument = instruments::create (instrumentTree, sampleRate, blockSize, realtime, strip->instrumentError);
+
+        if (auto* instrument = strip->instrument.get())
+        {
+            const auto channels = juce::jmax (2, instrument->getTotalNumInputChannels(), instrument->getTotalNumOutputChannels());
+            strip->instrumentBuffer.setSize (channels, blockSize);
+            strip->midi.ensureSize (4096);
+        }
+        else
+        {
+            juce::Logger::writeToLog ("[MicFX DAW] instrument: " + strip->instrumentError);
+        }
+    }
     setStripTargets (*strip, trackOrMaster, true, true);
 
     strips[id] = strip;
@@ -255,11 +348,14 @@ void DawEngine::rebuild()
     {
         Track track;
         track.strip = reuse (trackTree);
-        maxLatency = juce::jmax (maxLatency, track.strip->chain.getLatencySamples());
+        maxLatency = juce::jmax (maxLatency, track.strip->getLatency());
+
+        if (track.strip->isMidi)
+            buildMidiEvents (track, trackTree, sampleRate, end);
 
         for (const auto& clipTree : trackTree)
         {
-            if (! clipTree.hasType (ids::CLIP))
+            if (! clipTree.hasType (ids::CLIP) || Edit::isMidiClip (clipTree))
                 continue;
 
             Clip clip;
@@ -317,8 +413,8 @@ void DawEngine::rebuild()
     // Delay every track to line up with the slowest chain.
     for (auto& track : graph->tracks)
     {
-        track.strip->latencyAtBuild = track.strip->chain.getLatencySamples();
-        track.delaySamples = maxLatency - track.strip->chain.getLatencySamples();
+        track.strip->latencyAtBuild = track.strip->getLatency();
+        track.delaySamples = maxLatency - track.strip->latencyAtBuild;
 
         if (track.delaySamples > 0)
         {
@@ -333,6 +429,52 @@ void DawEngine::rebuild()
 
     updateMix();
     publish (std::move (graph));
+}
+
+void DawEngine::buildMidiEvents (Track& track, const juce::ValueTree& trackTree, double rate, juce::int64& end)
+{
+    const auto toSamples = [rate] (double seconds) { return (juce::int64) std::llround (seconds * rate); };
+
+    for (const auto& clip : trackTree)
+    {
+        if (! clip.hasType (ids::CLIP) || ! Edit::isMidiClip (clip))
+            continue;
+
+        const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+        if (length <= 0.0)
+            continue;
+
+        end = juce::jmax (end, toSamples (start + length));
+
+        if ((bool) clip.getProperty (ids::mute, false))
+            continue;
+
+        const auto clipEnd = toSamples (start + length);
+
+        for (const auto& note : clip)
+        {
+            if (! note.hasType (ids::NOTE))
+                continue;
+
+            // Only notes that start inside the clip's window play; they end at its edge.
+            const auto time = (double) note[ids::time];
+            if (time < offset || time >= offset + length)
+                continue;
+
+            const auto on = toSamples (start + time - offset);
+            const auto off = juce::jmin (clipEnd, toSamples (start + time - offset + (double) note[ids::length]));
+            const auto pitch = juce::jlimit (0, 127, (int) note[ids::pitch]);
+
+            track.midiEvents.push_back ({ on, pitch, juce::jlimit (1, 127, (int) note.getProperty (ids::velocity, 100)) });
+            track.midiEvents.push_back ({ juce::jmax (on + 1, off), pitch, 0 });
+        }
+    }
+
+    // In time order; at the same time, note-offs first so a repeated note restarts.
+    std::sort (track.midiEvents.begin(), track.midiEvents.end(), [] (const MidiEvent& a, const MidiEvent& b)
+    {
+        return a.time != b.time ? a.time < b.time : a.velocity < b.velocity;
+    });
 }
 
 //==============================================================================
@@ -378,11 +520,19 @@ juce::String DawEngine::startRecording (const juce::File& folder)
         return "Already recording.";
 
     const auto tracks = edit.getTracks();
-    if (std::none_of (tracks.begin(), tracks.end(), [] (const auto& t) { return (bool) t[ids::arm]; }))
+    const auto armedAudio = std::any_of (tracks.begin(), tracks.end(), [] (const auto& t) { return (bool) t[ids::arm] && ! Edit::isMidiTrack (t); });
+    const auto armedMidi = std::any_of (tracks.begin(), tracks.end(), [] (const auto& t) { return (bool) t[ids::arm] && Edit::isMidiTrack (t); });
+
+    if (! armedAudio && ! armedMidi)
         return "Arm a track to record on first.";
 
-    if (const auto error = recorder.start (folder, false); error.isNotEmpty())
-        return error;
+    if (armedAudio)
+        if (const auto error = recorder.start (folder, false); error.isNotEmpty())
+            return error;
+
+    drainRecordedMidi();
+    recordedMidi.clear();
+    recordingMidi = armedMidi;
 
     const auto start = position.load();
     recordStart = start;
@@ -397,16 +547,107 @@ juce::String DawEngine::startRecording (const juce::File& folder)
     return {};
 }
 
+void DawEngine::drainRecordedMidi()
+{
+    const auto scope = midiFifo.read (midiFifo.getNumReady());
+    scope.forEach ([this] (int index) { recordedMidi.push_back (midiFifoData[(size_t) index]); });
+}
+
 Recorder::Take DawEngine::stopRecording()
 {
     playing = false;
     countingIn = false;
+    const auto stopAt = position.load();
+    const auto wasRecordingMidi = recordingMidi.exchange (false);
+    drainRecordedMidi();
 
     const auto wasRecording = recorder.isRecording();
     auto take = recorder.stop();
+    const auto hasAudio = wasRecording && take.file.existsAsFile() && take.seconds > 0.0;
 
-    if (! wasRecording || ! take.file.existsAsFile() || take.seconds <= 0.0)
+    // The notes played, from the MIDI events: times in seconds from the record start,
+    // moved earlier by the output latency (the keys were played to what was heard). Held
+    // by the sustain pedal until it lifts; anything still held ends at the stop.
+    struct Played { int pitch, velocity; double time, length; };
+    std::vector<Played> notes;
+    const auto takeStart = recordStart.load();
+
+    if (wasRecordingMidi)
+    {
+        const auto seconds = [&] (juce::int64 t) { return juce::jmax (0.0, (double) (t - midiRecordingLatency.load() - takeStart) / sampleRate); };
+        std::array<int, 128> open; // index into notes, or -1
+        open.fill (-1);
+        std::array<bool, 128> sustained {};
+        bool pedal = false;
+
+        const auto end = [&] (int pitch, double time)
+        {
+            if (const auto index = open[(size_t) pitch]; index >= 0)
+                notes[(size_t) index].length = juce::jmax (0.01, time - notes[(size_t) index].time);
+            open[(size_t) pitch] = -1;
+            sustained[(size_t) pitch] = false;
+        };
+
+        for (const auto& event : recordedMidi)
+        {
+            const auto type = event.status & 0xf0;
+            const auto time = seconds (event.time);
+
+            if (type == 0x90 && event.data2 > 0)
+            {
+                end (event.data1, time);
+                open[event.data1] = (int) notes.size();
+                notes.push_back ({ event.data1, event.data2, time, 0.0 });
+            }
+            else if (type == 0x80 || type == 0x90)
+            {
+                if (pedal)
+                    sustained[event.data1] = open[event.data1] >= 0;
+                else
+                    end (event.data1, time);
+            }
+            else if (type == 0xb0 && event.data1 == 64)
+            {
+                pedal = event.data2 >= 64;
+                if (! pedal)
+                    for (int p = 0; p < 128; ++p)
+                        if (sustained[(size_t) p])
+                            end (p, time);
+            }
+        }
+
+        for (int p = 0; p < 128; ++p)
+            end (p, seconds (stopAt));
+
+        recordedMidi.clear();
+    }
+
+    if (! hasAudio && notes.empty())
         return take;
+
+    edit.getUndoManager().beginNewTransaction ("Record");
+
+    if (! notes.empty())
+    {
+        const auto start = (double) takeStart / sampleRate;
+        const auto takeLength = juce::jmax (Edit::minClipSeconds, (double) (stopAt - takeStart) / sampleRate);
+
+        for (const auto& track : edit.getTracks())
+        {
+            if (! (bool) track[ids::arm] || ! Edit::isMidiTrack (track))
+                continue;
+
+            const auto clip = edit.addMidiClip ((int) track[ids::id], start, takeLength, track[ids::name].toString());
+            for (const auto& note : notes)
+                edit.addNote ((int) clip[ids::id], note.pitch, note.time, note.length, note.velocity);
+        }
+    }
+
+    if (! hasAudio)
+    {
+        edit.getUndoManager().beginNewTransaction();
+        return take;
+    }
 
     // Where the first sample was heard: the playhead minus the interface's round trip.
     auto start = (double) (take.timelineStart - recordingLatency.load()) / sampleRate;
@@ -418,10 +659,8 @@ Recorder::Take DawEngine::stopRecording()
         start = 0.0;
     }
 
-    edit.getUndoManager().beginNewTransaction ("Record");
-
     for (const auto& track : edit.getTracks())
-        if ((bool) track[ids::arm])
+        if ((bool) track[ids::arm] && ! Edit::isMidiTrack (track))
             edit.addClip ((int) track[ids::id], take.file, start, take.seconds - offset, offset);
 
     edit.getUndoManager().beginNewTransaction();
@@ -526,11 +765,109 @@ void DawEngine::applyDelay (Track& track, int numSamples) noexcept
     }
 }
 
+void DawEngine::recordMidi (const juce::MidiBuffer& midi, int midiOffset, int numSamples, juce::int64 blockStart) noexcept
+{
+    const auto start = recordStart.load();
+
+    for (const auto metadata : midi)
+    {
+        if (metadata.samplePosition < midiOffset || metadata.samplePosition >= midiOffset + numSamples)
+            continue;
+
+        const auto time = blockStart + (metadata.samplePosition - midiOffset);
+        const auto message = metadata.getMessage();
+
+        if (time < start || ! (message.isNoteOnOrOff() || message.isSustainPedalOn() || message.isSustainPedalOff()))
+            continue;
+
+        const auto* data = message.getRawData();
+        const auto scope = midiFifo.write (1);
+        if (scope.blockSize1 == 1)
+            midiFifoData[(size_t) scope.startIndex1] = { time, data[0], data[1], data[2] };
+    }
+}
+
+void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce::int64 blockStart, int numSamples,
+                                  const juce::MidiBuffer* input, int midiOffset) noexcept
+{
+    auto& strip = *track.strip;
+    auto* instrument = strip.instrument.get();
+    if (instrument == nullptr)
+        return;
+
+    auto& midi = strip.midi;
+    midi.clear();
+
+    // The timeline's notes are scheduled late by the track's compensation delay, so they
+    // line up with the delayed audio tracks (the live input isn't delayed).
+    const auto windowStart = blockStart - track.delaySamples;
+    const auto jumped = isPlaying && strip.nextBlock != windowStart;
+
+    if (strip.sounding.any() && (fresh || ! isPlaying || jumped))
+    {
+        for (int note = 0; note < 128; ++note)
+            if (strip.sounding[(size_t) note])
+                midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
+
+        strip.sounding.reset();
+    }
+
+    if (isPlaying)
+    {
+        const auto& events = track.midiEvents;
+        auto it = std::lower_bound (events.begin(), events.end(), windowStart,
+                                    [] (const MidiEvent& e, juce::int64 t) { return e.time < t; });
+
+        for (; it != events.end() && it->time < windowStart + numSamples; ++it)
+        {
+            const auto at = (int) (it->time - windowStart);
+
+            if (it->velocity > 0)
+            {
+                midi.addEvent (juce::MidiMessage::noteOn (1, it->note, (juce::uint8) it->velocity), at);
+                strip.sounding.set ((size_t) it->note);
+            }
+            else if (strip.sounding[(size_t) it->note])
+            {
+                midi.addEvent (juce::MidiMessage::noteOff (1, it->note), at);
+                strip.sounding.reset ((size_t) it->note);
+            }
+        }
+
+        strip.nextBlock = windowStart + numSamples;
+    }
+    else
+    {
+        strip.nextBlock = -1;
+    }
+
+    if (input != nullptr && strip.monitoring.load (std::memory_order_relaxed))
+        midi.addEvents (*input, midiOffset, numSamples, -midiOffset);
+
+    const juce::ScopedLock lock (instrument->getCallbackLock());
+
+    if (instrument->isSuspended())
+        return;
+
+    const auto channels = strip.instrumentBuffer.getNumChannels();
+    juce::AudioBuffer<float> view (strip.instrumentBuffer.getArrayOfWritePointers(), channels, numSamples);
+    view.clear();
+    instrument->processBlock (view, midi);
+
+    const auto outputs = juce::jlimit (1, channels, instrument->getTotalNumOutputChannels());
+    strip.buffer.addFrom (0, 0, view, 0, 0, numSamples);
+    strip.buffer.addFrom (1, 0, view, juce::jmin (1, outputs - 1), 0, numSamples);
+}
+
 void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int outputOffset, int numChannels,
-                             int numSamples, const float* input) noexcept
+                             int numSamples, const float* input, const juce::MidiBuffer* midi, int midiOffset) noexcept
 {
     const auto isPlaying = playing.load();
     const auto blockStart = position.load();
+    const auto fresh = std::exchange (graph.fresh, false);
+
+    if (isPlaying && countingIn.load() && blockStart + numSamples > recordStart.load())
+        countingIn = false;
 
     // The dry take: the raw mic from the record start on (not during the count-in).
     if (isPlaying && input != nullptr && recorder.isRecording())
@@ -543,10 +880,10 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
             const float* channels[] = { input + skip };
             recorder.write (channels, nullptr, numSamples - skip, blockStart + skip);
         }
-
-        if (blockStart + numSamples > start)
-            countingIn = false;
     }
+
+    if (isPlaying && midi != nullptr && recordingMidi.load())
+        recordMidi (*midi, midiOffset, numSamples, blockStart);
 
     auto& master = *graph.master;
     master.buffer.clear (0, numSamples);
@@ -562,8 +899,13 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 
         applyDelay (track, numSamples);
 
+        // The instrument after the delay line: its notes are scheduled late instead, so
+        // what's played live isn't delayed.
+        if (strip.isMidi)
+            renderInstrument (track, isPlaying, fresh, blockStart, numSamples, midi, midiOffset);
+
         // Live mic after the delay line: monitoring shouldn't wait for compensation.
-        if (input != nullptr && strip.monitoring.load (std::memory_order_relaxed))
+        else if (input != nullptr && strip.monitoring.load (std::memory_order_relaxed))
         {
             strip.buffer.addFrom (0, 0, input, numSamples);
             strip.buffer.addFrom (1, 0, input, numSamples);
@@ -616,8 +958,49 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     }
 }
 
-void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int numSamples, const float* input) noexcept
+void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int numSamples, const float* input,
+                         const juce::MidiBuffer* midiIn) noexcept
 {
+    // The MIDI input plus anything from addLiveMidi(); held notes for the UI.
+    const juce::MidiBuffer* midi = midiIn;
+
+    if (liveFifo.getNumReady() > 0)
+    {
+        liveMidi.clear();
+        if (midiIn != nullptr)
+            liveMidi.addEvents (*midiIn, 0, numSamples, 0);
+
+        const auto scope = liveFifo.read (liveFifo.getNumReady());
+        scope.forEach ([this] (int index)
+        {
+            const auto packed = liveFifoData[(size_t) index];
+            const juce::uint8 bytes[] = { (juce::uint8) packed, (juce::uint8) (packed >> 8), (juce::uint8) (packed >> 16) };
+            const auto size = juce::MidiMessage::getMessageLengthFromFirstByte (bytes[0]);
+            liveMidi.addEvent (bytes, size, 0);
+        });
+
+        midi = &liveMidi;
+    }
+
+    if (midi != nullptr)
+    {
+        for (const auto metadata : *midi)
+        {
+            const auto message = metadata.getMessage();
+            if (! message.isNoteOnOrOff())
+                continue;
+
+            const auto note = message.getNoteNumber();
+            const auto bit = 1u << (note % 32);
+            auto& word = heldNotes[(size_t) (note / 32)];
+
+            if (message.isNoteOn())
+                word.fetch_or (bit, std::memory_order_relaxed);
+            else
+                word.fetch_and (~bit, std::memory_order_relaxed);
+        }
+    }
+
     if (auto* next = incoming.exchange (nullptr, std::memory_order_acq_rel))
     {
         if (! realtime)
@@ -659,7 +1042,7 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
         if (const auto pos = position.load(); looping && pos < end && pos + chunk > end)
             chunk = (int) (end - pos);
 
-        renderBlock (*active, output, done, numChannels, chunk, input != nullptr ? input + done : nullptr);
+        renderBlock (*active, output, done, numChannels, chunk, input != nullptr ? input + done : nullptr, midi, done);
 
         if (looping && position.load() == end)
             position = loopStart.load();

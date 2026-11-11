@@ -89,6 +89,15 @@ int Edit::takeNextId()
     return nextId++;
 }
 
+void Edit::renumber (juce::ValueTree& tree)
+{
+    if (tree.hasProperty (ids::id))
+        tree.setProperty (ids::id, takeNextId(), nullptr);
+
+    for (auto child : tree)
+        renumber (child);
+}
+
 juce::ValueTree Edit::findById (const juce::Identifier& type, int id) const
 {
     return findRecursive (state, type, id);
@@ -145,13 +154,6 @@ int Edit::duplicateTrack (int trackId)
         return -1;
 
     auto copy = track.createCopy();
-    std::function<void (juce::ValueTree&)> renumber = [&] (juce::ValueTree& tree)
-    {
-        if (tree.hasProperty (ids::id))
-            tree.setProperty (ids::id, takeNextId(), nullptr);
-        for (auto child : tree)
-            renumber (child);
-    };
     renumber (copy);
     copy.setProperty (ids::name, (track[ids::name].toString() + " copy").substring (0, 60), nullptr);
     copy.setProperty (ids::arm, false, nullptr);
@@ -216,6 +218,114 @@ void Edit::setMasterVolume (float decibels)             { getMaster().setPropert
 void Edit::setTrackArm (int trackId, bool arm)          { getTrack (trackId).setProperty (ids::arm, arm, nullptr); }
 void Edit::setTrackMonitor (int trackId, bool monitor)  { getTrack (trackId).setProperty (ids::monitor, monitor, nullptr); }
 void Edit::setTempo (double bpm)                        { state.setProperty (ids::tempo, juce::jlimit (20.0, 400.0, bpm), &undoManager); }
+
+//==============================================================================
+namespace
+{
+    juce::ValueTree makeInstrument (const Edit::InstrumentInfo& info, int id)
+    {
+        juce::ValueTree instrument (ids::INSTRUMENT);
+        instrument.setProperty (ids::id, id, nullptr);
+        instrument.setProperty (ids::plugin, info.id, nullptr);
+        instrument.setProperty (ids::name, info.name, nullptr);
+        instrument.setProperty (ids::format, info.format, nullptr);
+        instrument.setProperty (ids::vendor, info.vendor, nullptr);
+        instrument.setProperty (ids::description, info.description, nullptr);
+        instrument.setProperty (ids::state, info.state, nullptr);
+        return instrument;
+    }
+}
+
+juce::ValueTree Edit::addMidiTrack (const juce::String& name, const InstrumentInfo& info, int index)
+{
+    auto track = addTrack (name, index);
+    track.setProperty (ids::kind, midiKind, &undoManager);
+    track.appendChild (makeInstrument (info, takeNextId()), &undoManager);
+    return track;
+}
+
+void Edit::setInstrument (int trackId, const InstrumentInfo& info)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid())
+        return;
+
+    if (! isMidiTrack (track))
+        track.setProperty (ids::kind, midiKind, &undoManager);
+
+    // A new INSTRUMENT (with a new id), so the engine loads a fresh one.
+    const auto index = track.indexOf (track.getChildWithName (ids::INSTRUMENT));
+    if (index >= 0)
+        track.removeChild (index, &undoManager);
+
+    track.addChild (makeInstrument (info, takeNextId()), index, &undoManager);
+}
+
+juce::ValueTree Edit::getInstrument (int trackId) const
+{
+    return getTrack (trackId).getChildWithName (ids::INSTRUMENT);
+}
+
+juce::ValueTree Edit::addMidiClip (int trackId, double startSeconds, double lengthSeconds, const juce::String& name)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid() || ! isMidiTrack (track))
+        return {};
+
+    juce::ValueTree clip (ids::CLIP);
+    clip.setProperty (ids::id, takeNextId(), nullptr);
+    clip.setProperty (ids::kind, midiKind, nullptr);
+    clip.setProperty (ids::name, name.isNotEmpty() ? name : track[ids::name].toString(), nullptr);
+    clip.setProperty (ids::start, juce::jmax (0.0, startSeconds), nullptr);
+    clip.setProperty (ids::offset, 0.0, nullptr);
+    clip.setProperty (ids::length, juce::jmax (minClipSeconds, lengthSeconds), nullptr);
+    clip.setProperty (ids::gain, 0.0f, nullptr);
+    clip.setProperty (ids::fadeIn, 0.0, nullptr);
+    clip.setProperty (ids::fadeOut, 0.0, nullptr);
+    track.appendChild (clip, &undoManager);
+    return clip;
+}
+
+namespace
+{
+    void setNoteProperties (juce::ValueTree& note, int pitch, double time, double length, int velocity, juce::UndoManager* undo)
+    {
+        note.setProperty (ids::pitch, juce::jlimit (0, 127, pitch), undo);
+        note.setProperty (ids::time, juce::jmax (0.0, time), undo);
+        note.setProperty (ids::length, juce::jmax (0.001, length), undo);
+        note.setProperty (ids::velocity, juce::jlimit (1, 127, velocity), undo);
+    }
+}
+
+juce::ValueTree Edit::addNote (int clipId, int pitch, double time, double length, int velocity)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid() || ! isMidiClip (clip))
+        return {};
+
+    juce::ValueTree note (ids::NOTE);
+    note.setProperty (ids::id, takeNextId(), nullptr);
+    setNoteProperties (note, pitch, time, length, velocity, nullptr);
+    clip.appendChild (note, &undoManager);
+    return note;
+}
+
+void Edit::setNote (int noteId, int pitch, double time, double length, int velocity)
+{
+    if (auto note = getNote (noteId); note.isValid())
+        setNoteProperties (note, pitch, time, length, velocity, &undoManager);
+}
+
+void Edit::removeNote (int noteId)
+{
+    if (auto note = getNote (noteId); note.isValid())
+        note.getParent().removeChild (note, &undoManager);
+}
+
+juce::ValueTree Edit::getNote (int noteId) const
+{
+    return findById (ids::NOTE, noteId);
+}
 
 //==============================================================================
 juce::ValueTree Edit::addClip (int trackId, const juce::File& file, double startSeconds, double lengthSeconds,
@@ -303,8 +413,8 @@ int Edit::splitClip (int clipId, double time)
         return -1;
 
     auto right = clip.createCopy();
-    const auto id = takeNextId();
-    right.setProperty (ids::id, id, nullptr);
+    renumber (right);
+    const auto id = (int) right[ids::id];
     right.setProperty (ids::start, time, nullptr);
     right.setProperty (ids::offset, offset + (time - start), nullptr);
     right.setProperty (ids::length, start + length - time, nullptr);
@@ -323,8 +433,8 @@ int Edit::duplicateClip (int clipId)
         return -1;
 
     auto copy = clip.createCopy();
-    const auto id = takeNextId();
-    copy.setProperty (ids::id, id, nullptr);
+    renumber (copy);
+    const auto id = (int) copy[ids::id];
     copy.setProperty (ids::start, (double) clip[ids::start] + (double) clip[ids::length], nullptr);
     clip.getParent().addChild (copy, clip.getParent().indexOf (clip) + 1, &undoManager);
     return id;
@@ -365,8 +475,8 @@ juce::Array<int> Edit::keepClipParts (int clipId, const std::vector<std::pair<do
             continue;
 
         auto part = clip.createCopy();
-        const auto id = takeNextId();
-        part.setProperty (ids::id, id, nullptr);
+        renumber (part);
+        const auto id = (int) part[ids::id];
         part.setProperty (ids::start, start + a, nullptr);
         part.setProperty (ids::offset, offset + a, nullptr);
         part.setProperty (ids::length, b - a, nullptr);
