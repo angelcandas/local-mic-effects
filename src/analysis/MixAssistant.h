@@ -11,17 +11,21 @@ namespace daw { class Edit; }
 // using the effects the app already has. Everything it proposes is ordinary track
 // state (volumes and insert values), so you can see it, tweak it and undo it.
 //
-//   Voice:   parametric EQ (low cut from the lowest sung note, a cut where it's muddy or
-//            boxy, a cut where it's harsh or a lift where it lacks presence, air),
-//            compressor from how much the level swings, de-esser if the S's stick out.
-//   Backing: a parametric EQ dip where it covers the words most.
-//   Balance: the voice's volume so it sits a style's number of LU over the backing.
+//   Voice:      parametric EQ (low cut from the lowest sung note, a cut where it's muddy
+//               or boxy, a cut where it's harsh or a lift where it lacks presence, air),
+//               compressor from how much the level swings, de-esser if the S's stick out,
+//               reverb at the end of the chain when the recording is dry and the style
+//               wants space.
+//   Instrument: parametric EQ (low cut under its lowest notes, a dip where it covers the
+//               words), compressor when its level swings a lot.
+//   Backing:    a parametric EQ dip where it covers the words most.
+//   Balance:    the voice's volume so it sits a style's number of LU over everything else.
 //   Master:  volume towards a loudness target, kept below clipping.
 //
 // Plain computation: plan() runs anywhere; apply() on the message thread.
 namespace analysis
 {
-enum class Role { voice, backing, other };
+enum class Role { voice, backing, instrument, other };
 
 enum class MixStyle { pop, ballad, rock, coaching };
 
@@ -31,13 +35,29 @@ struct MixTargets
     float presenceDb;          // tilt of the voice target above 2 kHz (+ is brighter)
     float warmthDb;            // tilt of the voice target in 150-400 Hz (+ is warmer)
     float masterLufs = -14.0f; // integrated loudness of the mix
+    float reverbMix = 0.0f;    // % of reverb on a dry voice (0: none)
+    float reverbSize = 50.0f;  // % room size
+};
+
+// Which effects Auto Mix may add. Volumes are always planned.
+struct MixOptions
+{
+    bool eq = true, compressor = true, deEsser = true, reverb = true;
+
+    // Insert types each track already has (by track id). A voice that already has a
+    // reverb or an echo keeps its own space: Auto Mix doesn't add or change one.
+    std::map<int, std::vector<fx::ModuleType>> existingInserts;
+
+    // Track names by id, for the notes (optional).
+    std::map<int, juce::String> trackNames;
 };
 
 MixTargets getTargets (MixStyle);
 juce::String getStyleName (MixStyle);
 
 // A guess from the name and the sound: voice when the name says so or the track is
-// mostly pitched; backing when it plays most of the song; otherwise other.
+// mostly pitched; instrument when the name says so (guitar, keys...); backing when it
+// plays most of the song; otherwise instrument, or other when it's silent.
 Role guessRole (const juce::String& trackName, const Profile&, double songSeconds);
 
 //==============================================================================
@@ -45,6 +65,7 @@ struct MixMove
 {
     int trackId = 0;                 // daw::Edit::masterId for the master bus
     std::optional<fx::ModuleType> insert; // empty: the track's (or master's) volume
+    bool atEnd = false;              // a new insert goes after the track's own effects (reverb)
     std::map<juce::String, float> values; // insert values by ID, or "volume" in dB
     juce::StringArray reasons;       // one line per change, for the UI
 };
@@ -62,7 +83,8 @@ struct MixPlan
 // Plans the moves from a SessionAnalyser result at Point::source, the roles of the
 // tracks and the session's current volumes (dB) by track id.
 MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Role>& roles,
-                 const std::map<int, float>& currentVolumes, float currentMasterVolume, MixStyle);
+                 const std::map<int, float>& currentVolumes, float currentMasterVolume, MixStyle,
+                 const MixOptions& = {});
 
 // Matches the mix to a reference song you like: a gentle master EQ (shelves and three
 // wide bells) towards the reference's long-term tonal balance, and the master volume
@@ -71,8 +93,8 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
 MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float currentMasterVolume);
 
 // Writes the plan into the session as one undo step. Inserts it needs are reused when
-// the track already has one of that type, otherwise added at the start of the chain.
-// `amount` 0..1 scales every move from neutral (EQ gains, compression) or from the
-// current volume.
+// the track already has one of that type, otherwise added at the start of the chain
+// (at the end for a move with atEnd). `amount` 0..1 scales every move from neutral
+// (EQ gains, compression, reverb mix) or from the current volume.
 void applyMix (daw::Edit&, const MixPlan&, float amount = 1.0f);
 }
