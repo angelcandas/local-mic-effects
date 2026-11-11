@@ -4,7 +4,7 @@
 // daw (command, args). Every edit is one undo step: drags only send on release.
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES } from "./modules.js";
-import { createFxView } from "./fxviews.js";
+import { createActivity, createFxView } from "./fxviews.js";
 import { LibraryBrowser } from "./browser.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 
@@ -368,6 +368,11 @@ class InsertRack {
     for (const insert of owner.inserts) this.cards.get(insert.id)?.update(insert);
   }
 
+  // From "dawStatus": live readings by insert id ({ in, out, spectrum? }, null when off).
+  live(readings) {
+    for (const [id, card] of this.cards) card.live(readings?.[id] ?? null);
+  }
+
   build() {
     this.element.replaceChildren();
     this.cards.clear();
@@ -398,8 +403,9 @@ class InsertCard {
 
     const head = html("header", "insert-head");
     const title = html("span", "insert-name", insert.type === "pitch" ? "Pitch" : main?.name ?? insert.type);
+    this.activity = createActivity();
     if (insert.type !== "pitch") head.append(this.addSwitch(main.power, `Switch ${main.name} on or off`));
-    head.append(title,
+    head.append(title, this.activity.element,
       button("mini", "↑", "Earlier in the chain", () => daw("moveInsert", { id: insert.id, index: index - 1 })),
       button("mini", "↓", "Later in the chain", () => daw("moveInsert", { id: insert.id, index: index + 1 })),
       button("mini is-danger", "×", "Remove this effect", () => daw("removeInsert", { id: insert.id })));
@@ -440,6 +446,14 @@ class InsertCard {
     }
 
     this.update(insert);
+  }
+
+  // Animates the picture and the level bars from the signal (see fxviews.js).
+  live(reading) {
+    this.view?.live(reading);
+    const level = this.activity.push(reading);
+    this.element.classList.toggle("is-live", Boolean(reading));
+    this.element.style.setProperty("--act", level.toFixed(2));
   }
 
   addSwitch(param, title) {
@@ -1661,6 +1675,7 @@ class DawScreen {
     this.dockToggle.textContent = show ? "Hide" : "Show";
     this.dockToggle.setAttribute("aria-expanded", String(show));
     if (save) try { localStorage.setItem("micfx.dock", JSON.stringify({ height, hidden: !show })); } catch { /* not kept */ }
+    if (this.session) this.watchInserts(show && this.chainGains ? this.chainGains.id : -1);
   }
 
   select(trackId, clipId, render = true, openAdd = false) {
@@ -1711,6 +1726,19 @@ class DawScreen {
 
     if (found && this.clipPanel) this.clipPanel.update(found.clip);
     if (owner) this.rack?.update(owner);
+    if (owner && this.chainGains?.id === owner.id) {
+      this.chainGains.input.knob.update(owner.inGain ?? 0);
+      this.chainGains.output.knob.update(owner.outGain ?? 0);
+    }
+    this.watchInserts(owner && !this.root.classList.contains("dock-hidden") ? owner.id : -1);
+  }
+
+  // Asks for live readings of the effects on screen (or none, -1, while the panel is hidden).
+  watchInserts(id) {
+    if (id === this.watchedInserts) return;
+    this.watchedInserts = id;
+    daw("watchInserts", { track: id });
+    if (id < 0) this.rack?.live(null);
   }
 
   createClipPanel(clip) {
@@ -1818,7 +1846,26 @@ class DawScreen {
     if (!isMaster) effectsRow.append(button("tool", "Duplicate track", "A copy of this track with its clips and effects (Ctrl+Shift+D)", () => this.duplicateTrack(owner.id)));
     head.append(effectsRow);
     head.append(footer);
-    element.append(list);
+
+    // The chain's own input and output gain, with meters, either side of the effects.
+    const chainGain = (name, key, caption) => {
+      const column = html("div", `chain-gain is-${key}`);
+      const knob = new ValueKnob({
+        label: "Gain", min: -24, max: 24, value: owner[key] ?? 0, defaultValue: 0, bipolar: true, unit: "dB",
+        onChange: (v, first) => daw(isMaster ? "setMaster" : "setTrack", { ...(isMaster ? {} : { id: owner.id }), [key]: v, continue: !first }),
+      });
+      const meter = new Level(true);
+      column.title = caption;
+      column.append(html("span", "chain-gain-title", name), knob.element, meter.element);
+      return { column, knob, meter, key };
+    };
+    const input = chainGain("In", "inGain", "Chain input: the level going into the first effect");
+    const output = chainGain("Out", "outGain", "Chain output: the level after the last effect, before the fader");
+    this.chainGains = { id: owner.id, input, output };
+
+    const chain = html("div", "chain-row");
+    chain.append(input.column, list, output.column);
+    element.append(chain);
     this.rack.update(owner);
     return element;
   }
@@ -2147,6 +2194,7 @@ class DawScreen {
       this.recLevels.push([status.position, Math.pow(10, (status.input ?? -100) / 20)]);
     if (!status.recording) this.recLevels = [];
     this.status = status;
+    if (this.watchedInserts >= 0) this.rack?.live(status.inserts);
     this.playButton.classList.toggle("is-playing", status.playing);
     this.root.classList.toggle("is-playing", status.playing);
     this.recordButton.setAttribute("aria-pressed", String(status.recording));
@@ -2170,6 +2218,12 @@ class DawScreen {
       this.inputReadout.textContent = this.inputPeak <= METER_FLOOR_DB ? "−∞" : this.inputPeak.toFixed(0);
     }
     this.status.input = undefined;
+    if (this.chainGains) {
+      const chain = this.status.chains?.[this.chainGains.id];
+      this.chainGains.input.meter.push(chain?.in, elapsed);
+      this.chainGains.output.meter.push(chain?.out, elapsed);
+      this.status.chains = undefined;
+    }
     if (this.view === "mixer") for (const [id, strip] of this.strips) strip.meter.push(level(id), elapsed);
     this.status.master = undefined;
     if (this.status.tracks) this.status.tracks = {};
