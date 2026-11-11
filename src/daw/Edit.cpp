@@ -138,6 +138,60 @@ juce::ValueTree Edit::getTrack (int trackId) const
     return track.hasType (ids::TRACK) ? track : juce::ValueTree();
 }
 
+int Edit::duplicateTrack (int trackId)
+{
+    const auto track = getTrack (trackId);
+    if (! track.isValid())
+        return -1;
+
+    auto copy = track.createCopy();
+    std::function<void (juce::ValueTree&)> renumber = [&] (juce::ValueTree& tree)
+    {
+        if (tree.hasProperty (ids::id))
+            tree.setProperty (ids::id, takeNextId(), nullptr);
+        for (auto child : tree)
+            renumber (child);
+    };
+    renumber (copy);
+    copy.setProperty (ids::name, (track[ids::name].toString() + " copy").substring (0, 60), nullptr);
+    copy.setProperty (ids::arm, false, nullptr);
+    copy.setProperty (ids::monitor, false, nullptr);
+
+    state.addChild (copy, state.indexOf (track) + 1, &undoManager);
+    return (int) copy[ids::id];
+}
+
+void Edit::copyInserts (int fromTrackId, int toTrackId)
+{
+    const auto from = getInserts (getTrackOrMaster (fromTrackId));
+    auto to = getInserts (getTrackOrMaster (toTrackId));
+    if (! from.isValid() || ! to.isValid() || from == to)
+        return;
+
+    to.removeAllChildren (&undoManager);
+    for (const auto& insert : from)
+    {
+        auto copy = insert.createCopy();
+        copy.setProperty (ids::id, takeNextId(), nullptr);
+        to.appendChild (copy, &undoManager);
+    }
+}
+
+void Edit::soloExclusive (int trackId)
+{
+    for (auto track : getTracks())
+        track.setProperty (ids::solo, (int) track[ids::id] == trackId, &undoManager);
+}
+
+void Edit::clearMuteAndSolo()
+{
+    for (auto track : getTracks())
+    {
+        track.setProperty (ids::solo, false, &undoManager);
+        track.setProperty (ids::mute, false, &undoManager);
+    }
+}
+
 juce::Array<juce::ValueTree> Edit::getTracks() const
 {
     juce::Array<juce::ValueTree> tracks;

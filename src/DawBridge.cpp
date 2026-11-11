@@ -174,6 +174,26 @@ void DawBridge::setMode (bool daw)
 void DawBridge::rememberProject()
 {
     settings.setValue ("dawProject", project.isOpen() ? project.getFolder().getFullPathName() : juce::String());
+
+    if (! project.isOpen())
+        return;
+
+    // Most recent first, at most 8.
+    auto recent = juce::StringArray::fromLines (settings.getValue ("dawRecentProjects"));
+    recent.removeString (project.getFolder().getFullPathName());
+    recent.insert (0, project.getFolder().getFullPathName());
+    recent.removeEmptyStrings();
+    recent.removeRange (8, recent.size());
+    settings.setValue ("dawRecentProjects", recent.joinIntoString ("\n"));
+}
+
+juce::var DawBridge::describeRecentProjects() const
+{
+    juce::Array<juce::var> list;
+    for (const auto& path : juce::StringArray::fromLines (settings.getValue ("dawRecentProjects")))
+        if (const juce::File folder (path); path.isNotEmpty() && daw::Project::isProjectFolder (folder))
+            list.add (object ({ { "name", folder.getFileNameWithoutExtension() }, { "path", path } }));
+    return list;
 }
 
 juce::File DawBridge::getRecordingFolder() const
@@ -253,6 +273,7 @@ juce::var DawBridge::describeSession()
               return juce::var (markers);
           }() },
         { "metronomeVolume", engine.getMetronomeVolume() },
+        { "recent", describeRecentProjects() },
         { "loop", object ({ { "on", (bool) state.getProperty (ids::loopOn, false) }, { "start", number (state, ids::loopStart) },
                             { "end", number (state, ids::loopEnd) } }) },
         { "metronome", engine.getMetronome() },
@@ -808,6 +829,10 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    if (command == "duplicateTrack") { complete (edit.duplicateTrack (id)); return; }
+    if (command == "pasteInserts")   { edit.copyInserts (arg (args, "from", -1), arg (args, "to", -1)); ok(); return; }
+    if (command == "soloExclusive")  { edit.soloExclusive (id); ok(); return; }
+    if (command == "clearMuteSolo")  { edit.clearMuteAndSolo(); ok(); return; }
     if (command == "removeTrack") { edit.removeTrack (id); ok(); return; }
     if (command == "moveTrack")   { edit.moveTrack (id, arg (args, "index", 0)); ok(); return; }
 
@@ -1024,6 +1049,24 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         withChooser ("Open project", projectsFolder, "*.micfx;*.xml", Flags::openMode | Flags::canSelectFiles | Flags::canSelectDirectories,
                      [this] (const juce::File& picked) { return openProject (picked); },
                      complete);
+        return;
+    }
+
+    if (command == "openRecent")
+    {
+        const juce::File folder (args["path"].toString());
+        if (! daw::Project::isProjectFolder (folder))
+        {
+            complete (error ("That project isn't there any more."));
+            return;
+        }
+
+        engine.stop();
+        const auto result = project.open (folder);
+        peakCache.clear();
+        rememberProject();
+        sessionChanged = true;
+        complete (error (result));
         return;
     }
 
