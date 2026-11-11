@@ -34,6 +34,16 @@ public:
 
     static bool isAvailable(); // DAW mode is a standalone-app feature
 
+    // What the file commands do once a file is picked (public for the tests, which can't
+    // click through a file chooser). Each returns { ok, error, ... } like handle().
+    juce::var openProject (const juce::File& picked);       // a project folder, or any file in one
+    juce::var newProject (const juce::File& folder);
+    juce::var saveProjectAs (const juce::File& folder);
+    juce::var importAudio (const juce::File& file, int trackId); // -> { ok, error, track, clip }
+
+    // The tests run outside the standalone app; this lets them switch DAW mode on.
+    static inline bool availableForTesting = false;
+
 private:
     juce::var describeStatus();
     juce::var describeInserts (const juce::ValueTree& trackOrMaster) const;
@@ -52,8 +62,8 @@ private:
     void startAutoMix (const juce::File& reference);
     void replanAutoMix();
     juce::var describeAutoMix() const;
-    juce::String withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
-                              std::function<juce::String (const juce::File&)> action, Complete);
+    void withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
+                      std::function<juce::var (const juce::File&)> action, Complete);
 
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override { sessionChanged = true; }
     void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree&) override            { sessionChanged = true; }

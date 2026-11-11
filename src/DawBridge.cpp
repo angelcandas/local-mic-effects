@@ -4,6 +4,8 @@
 #include "Presets.h"
 #include "dsp/FxModules.h"
 
+#include <variant>
+
 
 namespace
 {
@@ -11,6 +13,7 @@ namespace
 
     constexpr double peakSeconds = 0.02;
     constexpr int autosaveSeconds = 60;
+    constexpr double maxImportMinutes = 30.0; // as Multitrack (Live mode's backing tracks)
 
     juce::var object (std::initializer_list<std::pair<const char*, juce::var>> properties)
     {
@@ -23,6 +26,14 @@ namespace
     juce::var error (const juce::String& message)
     {
         return object ({ { "ok", message.isEmpty() }, { "error", message } });
+    }
+
+    // A numeric property as a number, whether the tree holds it as one or as text (as
+    // a tree read from XML does); 0 if it's missing.
+    double number (const juce::ValueTree& tree, const juce::Identifier& name)
+    {
+        const auto& value = tree[name];
+        return value.isString() ? value.toString().getDoubleValue() : (double) value;
     }
 
     float peakToDecibels (float gain)
@@ -128,6 +139,9 @@ DawBridge::~DawBridge()
 
 bool DawBridge::isAvailable()
 {
+    if (availableForTesting)
+        return true;
+
    #if JucePlugin_Build_Standalone
     return juce::JUCEApplicationBase::isStandaloneApp();
    #else
@@ -197,9 +211,9 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
         auto* values = new juce::DynamicObject();
         for (int i = 0; i < insert.getNumProperties(); ++i)
             if (const auto name = insert.getPropertyName (i); name != ids::id && name != ids::type)
-                values->setProperty (name, insert[name]);
+                values->setProperty (name, number (insert, name));
 
-        list.add (object ({ { "id", insert[ids::id] }, { "type", insert[ids::type] }, { "values", juce::var (values) } }));
+        list.add (object ({ { "id", (int) insert[ids::id] }, { "type", insert[ids::type].toString() }, { "values", juce::var (values) } }));
     }
 
     return list;
@@ -222,17 +236,20 @@ juce::var DawBridge::describeSession()
             const juce::File file (clip[ids::file].toString());
             const auto audio = engine.getAudioPool().get (file);
 
-            clips.add (object ({ { "id", clip[ids::id] }, { "name", clip[ids::name] }, { "file", file.getFullPathName() },
-                                 { "start", clip[ids::start] }, { "offset", clip[ids::offset] }, { "length", clip[ids::length] },
-                                 { "gain", clip[ids::gain] }, { "fadeIn", clip[ids::fadeIn] }, { "fadeOut", clip[ids::fadeOut] },
-                                 { "mute", clip.getProperty (ids::mute, false) },
+            // Typed explicitly: the page does arithmetic on these, and text ("0.0") breaks it.
+            clips.add (object ({ { "id", (int) clip[ids::id] }, { "name", clip[ids::name].toString() }, { "file", file.getFullPathName() },
+                                 { "start", number (clip, ids::start) }, { "offset", number (clip, ids::offset) },
+                                 { "length", number (clip, ids::length) }, { "gain", number (clip, ids::gain) },
+                                 { "fadeIn", number (clip, ids::fadeIn) }, { "fadeOut", number (clip, ids::fadeOut) },
+                                 { "mute", (bool) clip.getProperty (ids::mute, false) },
                                  { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
                                  { "missing", ! file.existsAsFile() } }));
         }
 
-        tracks.add (object ({ { "id", track[ids::id] }, { "name", track[ids::name] }, { "colour", track[ids::colour] },
-                              { "volume", track[ids::volume] }, { "pan", track[ids::pan] }, { "mute", track[ids::mute] },
-                              { "solo", track[ids::solo] }, { "arm", track[ids::arm] }, { "monitor", track[ids::monitor] },
+        tracks.add (object ({ { "id", (int) track[ids::id] }, { "name", track[ids::name].toString() }, { "colour", track[ids::colour].toString() },
+                              { "volume", number (track, ids::volume) }, { "pan", number (track, ids::pan) },
+                              { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
+                              { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
                               { "inserts", describeInserts (track) }, { "clips", clips } }));
     }
 
@@ -252,18 +269,18 @@ juce::var DawBridge::describeSession()
           {
               juce::Array<juce::var> markers;
               for (const auto& m : edit.getMarkers())
-                  markers.add (object ({ { "id", m[ids::id] }, { "name", m[ids::name] }, { "time", m[ids::time] } }));
+                  markers.add (object ({ { "id", (int) m[ids::id] }, { "name", m[ids::name].toString() }, { "time", number (m, ids::time) } }));
               return juce::var (markers);
           }() },
         { "metronomeVolume", engine.getMetronomeVolume() },
         { "recent", describeRecentProjects() },
-        { "loop", object ({ { "on", state.getProperty (ids::loopOn, false) }, { "start", state.getProperty (ids::loopStart, 0.0) },
-                            { "end", state.getProperty (ids::loopEnd, 0.0) } }) },
+        { "loop", object ({ { "on", (bool) state.getProperty (ids::loopOn, false) }, { "start", number (state, ids::loopStart) },
+                            { "end", number (state, ids::loopEnd) } }) },
         { "metronome", engine.getMetronome() },
         { "countIn", engine.getCountInBars() },
         { "canUndo", undo.canUndo() },
         { "canRedo", undo.canRedo() },
-        { "master", object ({ { "volume", master[ids::volume] }, { "inserts", describeInserts (master) } }) },
+        { "master", object ({ { "volume", number (master, ids::volume) }, { "inserts", describeInserts (master) } }) },
         { "tracks", tracks },
     });
 }
@@ -410,8 +427,8 @@ void DawBridge::tick()
 }
 
 //==============================================================================
-juce::String DawBridge::withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
-                                     std::function<juce::String (const juce::File&)> action, Complete complete)
+void DawBridge::withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
+                             std::function<juce::var (const juce::File&)> action, Complete complete)
 {
     chooser = std::make_unique<juce::FileChooser> (title, start, patterns);
     chooser->launchAsync (flags, [action = std::move (action), complete = std::move (complete)] (const juce::FileChooser& fc)
@@ -421,10 +438,105 @@ juce::String DawBridge::withChooser (const juce::String& title, const juce::File
         if (file == juce::File())
             complete (object ({ { "ok", false }, { "cancelled", true } }));
         else
-            complete (error (action (file)));
+            complete (action (file));
     });
+}
 
-    return {};
+//==============================================================================
+juce::var DawBridge::openProject (const juce::File& picked)
+{
+    const auto folder = daw::Project::findProjectFolder (picked);
+    if (folder == juce::File())
+        return error (picked.getFileName() + " isn't a MicFX project. Pick a .micfx folder, or the project.xml inside it.");
+
+    engine.stop();
+    const auto result = project.open (folder);
+    peakCache.clear();
+    rememberProject();
+    sessionChanged = true;
+    return error (result);
+}
+
+juce::var DawBridge::newProject (const juce::File& folder)
+{
+    engine.stop();
+    auto result = project.createNew (folder);
+
+    if (result.isEmpty())
+    {
+        setMode (true); // adds the first track
+        result = project.save();
+    }
+
+    peakCache.clear();
+    rememberProject();
+    sessionChanged = true;
+    return error (result);
+}
+
+juce::var DawBridge::saveProjectAs (const juce::File& folder)
+{
+    auto result = project.saveAs (folder);
+    rememberProject();
+    sessionChanged = true;
+    return error (result);
+}
+
+namespace
+{
+    // The file's length in seconds, from its header (no decoding), or a message saying why
+    // it can't be read.
+    std::variant<double, juce::String> readAudioLength (const juce::File& file)
+    {
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        const std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+
+        if (reader == nullptr)
+            return juce::String ("Couldn't open " + file.getFileName() + ". Try a WAV, AIFF, FLAC, Ogg or MP3 file.");
+        if (reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+            return juce::String (file.getFileName() + " is empty.");
+        if ((double) reader->lengthInSamples / reader->sampleRate > maxImportMinutes * 60.0)
+            return juce::String (file.getFileName() + " is longer than " + juce::String ((int) maxImportMinutes) + " minutes.");
+
+        return (double) reader->lengthInSamples / reader->sampleRate;
+    }
+
+    juce::String getAudioFilePatterns()
+    {
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        return formats.getWildcardForAllFormats();
+    }
+}
+
+juce::var DawBridge::importAudio (const juce::File& file, int trackId)
+{
+    // Check the file before copying it anywhere. Only the header is read: the audio
+    // itself loads in the background (AudioPool), so a long song doesn't freeze the app.
+    const auto length = readAudioLength (file);
+    if (const auto* message = std::get_if<juce::String> (&length))
+        return error (*message);
+
+    const auto source = project.isOpen() ? project.importAudio (file) : file;
+    if (! source.existsAsFile())
+        return error ("Couldn't copy " + file.getFileName() + " into the project's Audio folder.");
+
+    auto& undo = edit.getUndoManager();
+    undo.beginNewTransaction ("Import " + file.getFileName());
+
+    if (! edit.getTrack (trackId).isValid())
+        trackId = (int) edit.addTrack (file.getFileNameWithoutExtension())[ids::id];
+
+    const auto start = juce::jmax (0.0, (double) engine.getPosition() / engine.getSampleRate());
+    const auto clip = edit.addClip (trackId, source, start, std::get<double> (length));
+    sessionChanged = true;
+
+    if (! clip.isValid())
+        return error ("Couldn't add " + file.getFileName() + " to the track.");
+
+    return object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId }, { "clip", clip[ids::id] },
+                     { "start", start } });
 }
 
 void DawBridge::loadPresetInto (int trackId, int presetIndex)
@@ -638,7 +750,7 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
                      [this] (const juce::File& file)
                      {
                          startAutoMix (file);
-                         return juce::String();
+                         return error ({});
                      },
                      complete);
         return {}; // the chooser completes
@@ -686,6 +798,14 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
 
 void DawBridge::handle (const juce::String& command, const juce::var& args, Complete complete)
 {
+    // Failures show in the page as a toast; log them too, so they're in the terminal.
+    complete = [command, inner = std::move (complete)] (juce::var result)
+    {
+        if (result.isObject() && ! (bool) result.getProperty ("ok", true) && result["error"].toString().isNotEmpty())
+            juce::Logger::writeToLog ("[MicFX DAW] " + command + ": " + result["error"].toString());
+        inner (std::move (result));
+    };
+
     auto& undo = edit.getUndoManager();
 
     // Each command is one undo step, unless it continues a drag (args.continue).
@@ -906,20 +1026,10 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "new" || command == "saveAs" || (command == "save" && ! project.isOpen()))
     {
         const auto isNew = command == "new";
-        withChooser (isNew ? "New project" : "Save project as", projectsFolder.getChildFile (isNew ? "New Song" : project.getName()), {},
+        const auto name = isNew || ! project.isOpen() ? juce::String ("New Song") : project.getName();
+        withChooser (isNew ? "New project" : "Save project as", projectsFolder.getChildFile (name), {},
                      Flags::saveMode | Flags::canSelectFiles,
-                     [this, isNew] (const juce::File& file)
-                     {
-                         engine.stop();
-                         const auto result = isNew ? project.createNew (file) : project.saveAs (file);
-                         if (result.isEmpty() && isNew)
-                             setMode (true); // adds the first track
-                         if (result.isEmpty())
-                             project.save();
-                         rememberProject();
-                         sessionChanged = true;
-                         return result;
-                     },
+                     [this, isNew] (const juce::File& file) { return isNew ? newProject (file) : saveProjectAs (file); },
                      complete);
         return;
     }
@@ -934,17 +1044,10 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
     if (command == "open")
     {
-        withChooser ("Open project", projectsFolder, "*.micfx;project.xml", Flags::openMode | Flags::canSelectFiles | Flags::canSelectDirectories,
-                     [this] (const juce::File& picked)
-                     {
-                         const auto folder = picked.existsAsFile() ? picked.getParentDirectory() : picked;
-                         engine.stop();
-                         const auto result = project.open (folder);
-                         peakCache.clear();
-                         rememberProject();
-                         sessionChanged = true;
-                         return result;
-                     },
+        // A project is a folder. Both the folder and the project.xml inside it can be picked
+        // ("*.xml": macOS filters by extension only, so "project.xml" would grey it out).
+        withChooser ("Open project", projectsFolder, "*.micfx;*.xml", Flags::openMode | Flags::canSelectFiles | Flags::canSelectDirectories,
+                     [this] (const juce::File& picked) { return openProject (picked); },
                      complete);
         return;
     }
@@ -985,27 +1088,10 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
     if (command == "import")
     {
-        withChooser ("Import audio", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3",
+        const auto trackId = arg (args, "track", -1);
+        withChooser ("Import audio", juce::File::getSpecialLocation (juce::File::userMusicDirectory), getAudioFilePatterns(),
                      Flags::openMode | Flags::canSelectFiles,
-                     [this, args] (const juce::File& file)
-                     {
-                         const auto source = project.isOpen() ? project.importAudio (file) : file;
-                         if (! source.existsAsFile())
-                             return juce::String ("Couldn't import " + file.getFileName() + ".");
-
-                         auto decoded = Multitrack::decode (source, engine.getSampleRate());
-                         if (decoded.error.isNotEmpty())
-                             return decoded.error;
-
-                         auto trackId = arg (args, "track", -1);
-                         if (! edit.getTrack (trackId).isValid())
-                             trackId = (int) edit.addTrack (source.getFileNameWithoutExtension())[ids::id];
-
-                         const auto start = (double) engine.getPosition() / engine.getSampleRate();
-                         edit.addClip (trackId, source, juce::jmax (0.0, start),
-                                       (double) decoded.audio.getNumSamples() / engine.getSampleRate());
-                         return juce::String();
-                     },
+                     [this, trackId] (const juce::File& file) { return importAudio (file, trackId); },
                      complete);
         return;
     }
@@ -1028,7 +1114,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                      [this, args, stems] (const juce::File& file)
                      {
                          startExport (args, stems ? file : file.withFileExtension ("wav"));
-                         return juce::String();
+                         return error ({});
                      },
                      complete);
         return;
