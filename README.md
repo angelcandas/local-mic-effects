@@ -90,8 +90,13 @@ tracks instead of one live chain:
   gain reduction (or gate open/closed), echo taps replaying what you sang, and in/out level bars.
 - Every effect also has its own **In** and **Out** gain and a **Presets** menu (factory settings, plus
   your own saved with *Save current as…*, shared between Live and DAW).
-- Every track feeds the **master** bus, which has its own inserts and volume. **Mixer** shows a
-  channel strip per track plus the master.
+- Every track feeds the **master** bus, which has its own inserts, volume and balance. **Mixer**
+  shows a channel strip per track, the return tracks, and the master pinned at the right edge.
+- **Return tracks** hold shared effects. A new project starts with a **Reverb** (A) and a
+  **Chorus** (B) return, fully wet. Each track has a **send** knob per return (post-fader, or
+  **Pre** in the Effects panel), and an output picker that can play the whole track into a return
+  instead of the master (a group bus). **+ Return…** adds more (Echo, Doubler, Flanger, Phaser or
+  empty); returns have their own inserts, pan, mute and solo.
 - **Recording is always dry.** Arm one or more tracks and press **Rec** (or **R**). The take is the
   unprocessed mic; the track's inserts play on top, so you can change the effects afterwards.
   Optional click and count-in; the take is shifted by the audio round-trip latency.

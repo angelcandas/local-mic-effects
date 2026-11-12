@@ -536,12 +536,15 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress)
         {
             auto child = session.getChild (c);
 
-            if (child.hasType (daw::ids::TRACK) && (int) child[daw::ids::id] != id)
+            // Return tracks out too: a track is measured as it plays itself, without
+            // the shared reverb its sends add.
+            if ((child.hasType (daw::ids::TRACK) && (int) child[daw::ids::id] != id) || child.hasType (daw::ids::RETURN))
             {
                 session.removeChild (c, nullptr);
             }
             else if (child.hasType (daw::ids::TRACK))
             {
+                child.removeProperty (daw::ids::output, nullptr);
                 child.setProperty (daw::ids::mute, false, nullptr);
                 child.setProperty (daw::ids::solo, false, nullptr);
 

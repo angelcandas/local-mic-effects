@@ -1750,6 +1750,149 @@ namespace
         return out;
     }
 
+    void testReturns()
+    {
+        std::cout << "\nReturn tracks and sends\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-returns");
+        folder.createDirectory();
+
+        juce::AudioBuffer<float> tone (2, (int) sampleRate);
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                tone.setSample (ch, i, 0.2f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * i / sampleRate));
+
+        const auto toneFile = folder.getChildFile ("tone.wav");
+        writeWav (toneFile, tone, sampleRate);
+
+        daw::Edit edit;
+        const auto defaults = edit.getReturns();
+        check (defaults.size() == 2 && defaults[0][daw::ids::name].toString() == "Reverb" && defaults[1][daw::ids::name].toString() == "Chorus"
+                   && (float) daw::Edit::getInserts (defaults[0]).getChild (0)["reverbMix"] == 100.0f
+                   && (float) daw::Edit::getInserts (defaults[1]).getChild (0)["chorusMix"] == 100.0f
+                   && ! edit.getUndoManager().canUndo(),
+               "a new project has fully wet Reverb and Chorus returns (not an undo step)");
+
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        engine.getAudioPool().loadNow (toneFile);
+
+        const auto track = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        edit.addClip (track, toneFile, 0.0, 1.0);
+        check (edit.getTracks().size() == 1 && edit.getState().indexOf (edit.getTrack (track)) < edit.getState().indexOf (defaults[0]),
+               "tracks stay before the returns");
+
+        const auto bus = (int) edit.addReturn ("Bus")[daw::ids::id];
+        engine.rebuildNow();
+
+        const auto playRms = [&]
+        {
+            engine.rebuildNow(); // no message loop here: apply the changes now
+            engine.seek (0);
+            engine.play();
+            const auto out = render (engine, 0.8);
+            engine.stop();
+            return std::array<float, 2> { rms (out[0], 9600, 33600), rms (out[1], 9600, 33600) };
+        };
+
+        const auto dry = playRms()[0];
+        check (dry > 0.1f, "with every send off, the track plays as before");
+
+        edit.setSend (track, bus, 0.0f);
+        check (std::abs (playRms()[0] / dry - 2.0f) < 0.01f, "a 0 dB send to an empty return doubles the level (dry + return)");
+
+        edit.setSend (track, bus, -6.0f);
+        check (std::abs (playRms()[0] / dry - (1.0f + juce::Decibels::decibelsToGain (-6.0f))) < 0.01f, "send level -6 dB");
+
+        edit.setSend (track, bus, 0.0f);
+        edit.setTrackVolume (track, -100.0f);
+        check (playRms()[0] < 1.0e-4f, "a post-fader send follows the fader");
+
+        edit.setSendPre (track, bus, true);
+        check (std::abs (playRms()[0] / dry - 1.0f) < 0.01f, "a pre-fader send ignores the fader");
+
+        edit.setTrackMute (track, true);
+        check (playRms()[0] < 1.0e-4f, "muting the track silences its pre-fader sends too");
+        edit.setTrackMute (track, false);
+        edit.setTrackVolume (track, 0.0f);
+        edit.setSendPre (track, bus, false);
+        edit.setSend (track, bus, -100.0f);
+
+        edit.setTrackPan (bus, -1.0f);
+        edit.setSend (track, bus, 0.0f);
+        const auto panned = playRms();
+        check (std::abs (panned[0] / dry - 2.0f) < 0.01f && std::abs (panned[1] / dry - 1.0f) < 0.01f, "a return's pan");
+        edit.setTrackPan (bus, 0.0f);
+
+        edit.setTrackSolo (bus, true);
+        check (std::abs (playRms()[0] / dry - 1.0f) < 0.01f, "soloing a return leaves only what is sent to it");
+        edit.setTrackSolo (track, true);
+        check (std::abs (playRms()[0] / dry - 2.0f) < 0.01f, "soloing the track too brings its direct sound back");
+        edit.clearMuteAndSolo();
+        check (! (bool) edit.getReturn (bus)[daw::ids::solo], "Clear M/S clears the returns");
+        edit.setSend (track, bus, -100.0f);
+
+        edit.setTrackOutput (track, bus);
+        edit.setTrackVolume (bus, -6.0f);
+        check (std::abs (playRms()[0] / dry - juce::Decibels::decibelsToGain (-6.0f)) < 0.01f, "a track can play into a return (a group bus)");
+        edit.setTrackVolume (bus, 0.0f);
+
+        edit.setSend (track, bus, 0.0f);
+        edit.getUndoManager().beginNewTransaction();
+        edit.removeReturn (bus);
+        engine.rebuildNow();
+        check (daw::Edit::getTrackOutput (edit.getTrack (track)) == daw::Edit::masterId && ! daw::Edit::getSend (edit.getTrack (track), bus).isValid()
+                   && std::abs (playRms()[0] / dry - 1.0f) < 0.01f,
+               "deleting a return removes its sends and routes its tracks back to the master");
+        edit.getUndoManager().undo();
+        engine.rebuildNow();
+        check (edit.getReturn (bus).isValid() && daw::Edit::getTrackOutput (edit.getTrack (track)) == bus, "undo brings the return back with its routing");
+        edit.setTrackOutput (track, daw::Edit::masterId);
+        edit.setSend (track, bus, -100.0f);
+
+        // The default reverb return: its tail rings on after the clip.
+        edit.setSend (track, (int) defaults[0][daw::ids::id], 0.0f);
+        engine.rebuildNow();
+        engine.seek (0);
+        engine.play();
+        const auto withReverb = render (engine, 1.5);
+        engine.stop();
+        check (rms (withReverb[0], (size_t) (1.05 * sampleRate), (size_t) (1.4 * sampleRate)) > 1.0e-3f, "sending to the Reverb return adds a tail");
+        edit.setSend (track, (int) defaults[0][daw::ids::id], -100.0f);
+        edit.setTrackMute ((int) defaults[0][daw::ids::id], true); // its tail would still be ringing
+
+        // Latency on a return: everything that plays straight to the master waits for it.
+        const auto before = engine.getLatencySamples();
+        auto pitch = edit.addInsert (bus, fx::ModuleType::pitch);
+        edit.setInsertValue ((int) pitch[daw::ids::id], "tuneOn", 0.0f);
+        edit.setInsertValue ((int) pitch[daw::ids::id], "pitchOn", 1.0f);
+        engine.rebuildNow();
+        const auto added = engine.getLatencySamples() - before;
+        render (engine, 0.2); // stopped: lets the muted reverb's fade finish
+        engine.seek (0);
+        engine.play();
+        const auto delayed = render (engine, 0.5);
+        engine.stop();
+        float worst = 0.0f;
+        for (int i = 0; i < 4800; ++i)
+            worst = std::max (worst, std::abs (delayed[0][(size_t) (added + i)] - tone.getSample (0, i)));
+        check (added > 0 && worst < 1.0e-6f, "latency on a return delays the direct sound to match (" + juce::String (added) + " samples, error " + juce::String (worst) + ")");
+
+        // Projects from before returns get the defaults once; deleting them sticks.
+        juce::ValueTree old (daw::ids::PROJECT);
+        old.setProperty (daw::ids::version, 1, nullptr);
+        daw::Edit loaded;
+        loaded.replaceState (old);
+        check (loaded.getReturns().size() == 2, "an older project gets the default returns");
+        for (const auto& r : loaded.getReturns())
+            loaded.removeReturn ((int) r[daw::ids::id]);
+        const auto saved = loaded.getState().createCopy();
+        loaded.replaceState (saved);
+        check (loaded.getReturns().isEmpty(), "deleted default returns stay deleted");
+
+        folder.deleteRecursively();
+    }
+
     void testDawEngine()
     {
         std::cout << "\nDAW engine (tracks, inserts, master bus)\n";
@@ -4475,6 +4618,7 @@ int main()
     testRecorder();
     testMultitrack();
     testDawEngine();
+    testReturns();
     testDawRecording();
     testMidiTracks();
     testPluginHosting();

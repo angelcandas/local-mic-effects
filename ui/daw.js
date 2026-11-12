@@ -51,6 +51,15 @@ async function daw(command, args = {}) {
 
 const isTyping = (event) => Boolean(event.target.closest?.("input:not([type=range]):not([type=checkbox]), select, textarea, [contenteditable]"));
 const trackColour = (track, index) => track.colour || TRACK_COLOURS[(track.id ?? index) % TRACK_COLOURS.length];
+
+// Return tracks: lettered A, B, C... in mixer order, coloured apart from the tracks.
+const RETURN_COLOURS = ["#5fd0ff", "#b38cff", "#ffd166", "#7ee0a1"];
+const returnLetter = (index) => String.fromCharCode(65 + (index % 26));
+const returnColour = (bus, index) => bus.colour || RETURN_COLOURS[index % RETURN_COLOURS.length];
+const sendText = (v) => (v <= -59.5 ? "off" : `${v > 0 ? "+" : ""}${v.toFixed(v > -10 ? 1 : 0)}`);
+// What "+ Return…" offers: [module key (addReturn's effect), name]. The effect starts fully wet.
+const RETURN_EFFECTS = [["reverb", "Reverb"], ["chorus", "Chorus"], ["echo", "Echo"], ["doubler", "Doubler"],
+                        ["flanger", "Flanger"], ["phaser", "Phaser"], ["none", "Empty return"]];
 const dbText = (value) => {
   const db = Number(value) || 0;
   return db <= FADER_MIN_DB ? "−∞" : `${db > 0.05 ? "+" : ""}${db.toFixed(1)}`;
@@ -1113,6 +1122,7 @@ class DawScreen {
     rulerRow.append(corner, this.ruler);
 
     this.rows = html("div", "track-rows");
+    this.returnRows = html("div", "return-rows");
     this.masterRow = html("div", "track-row master-row");
     this.loopShade = html("div", "loop-shade");
     this.playhead = html("div", "daw-playhead");
@@ -1121,7 +1131,7 @@ class DawScreen {
 
     this.cutGuide = html("div", "cut-guide");
     this.cutGuide.hidden = true;
-    this.inner.append(rulerRow, this.rows, this.masterRow, this.loopShade, this.playhead, this.cutGuide);
+    this.inner.append(rulerRow, this.rows, this.returnRows, this.masterRow, this.loopShade, this.playhead, this.cutGuide);
 
     // Scrolling by hand while playing switches Follow off, so you can look around
     // (and edit) elsewhere while the song keeps playing.
@@ -1295,6 +1305,7 @@ class DawScreen {
     const width = this.timelineSeconds() * this.zoom;
     const signature = JSON.stringify([
       session.tracks.map(({ inserts, ...track }) => [track, inserts.length]),
+      (session.returns ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
       session.master.volume, session.master.inserts.length, session.tempo, session.loop, session.beatsPerBar, session.markers,
       this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight,
     ]);
@@ -1320,9 +1331,10 @@ class DawScreen {
       for (const canvas of this.rows.querySelectorAll("canvas.clip-wave"))
         if (canvas.clip && canvas.drawn) this.oldWaves.set(canvas.clip.id, canvas);
     this.rows.replaceChildren(...session.tracks.map((track, index) => this.createTrackRow(track, index)));
+    this.renderReturnRows();
     this.renderMasterRow();
     this.emptyHint.hidden = session.tracks.some((track) => track.clips.length > 0);
-    this.clearButton.hidden = !session.tracks.some((track) => track.mute || track.solo);
+    this.clearButton.hidden = ![...session.tracks, ...(session.returns ?? [])].some((track) => track.mute || track.solo);
     this.scrollTo(scroll);
     this.updateRecording();
     this.movePlayhead();
@@ -1477,6 +1489,36 @@ class DawScreen {
     const wrap = html("div", "lane-ride-wrap");
     wrap.append(box, label);
     return wrap;
+  }
+
+  // Return tracks under the tracks: no clips, just their name, level and effects.
+  renderReturnRows() {
+    const returns = this.session.returns ?? [];
+    this.returnRows.replaceChildren(...returns.map((bus, index) => {
+      const row = html("div", "track-row master-row return-row");
+      row.dataset.track = bus.id;
+      row.style.setProperty("--track-color", returnColour(bus, index));
+      const head = html("div", "track-head");
+      head.addEventListener("pointerdown", (event) => { if (!event.target.closest("button")) this.select(bus.id, null); });
+      const meter = new Level(false, bus.id);
+      this.meters.set(bus.id, meter);
+      const top = html("div", "track-head-top");
+      top.append(html("span", "track-swatch return-letter", returnLetter(index)), html("span", "track-name is-static", bus.name),
+                 html("span", "master-volume", `${dbText(bus.volume)} dB`));
+      const toggles = html("div", "track-toggles");
+      for (const [key, text, title] of [["mute", "M", "Mute this return"], ["solo", "S", "Solo this return"]]) {
+        const b = button(`tt tt-${key}`, text, title, (event) => this.toggleTrackKey(bus, key, !bus[key], event));
+        b.setAttribute("aria-pressed", String(Boolean(bus[key])));
+        toggles.append(b);
+      }
+      const fx = button("fx-count", bus.inserts.length ? `${bus.inserts.length} fx` : "+ fx", "Effects on this return", () => this.select(bus.id, null));
+      const bottom = html("div", "track-head-bottom");
+      bottom.append(html("span", "track-caption", "Return"), toggles, fx);
+      head.append(top, bottom, meter.element);
+      row.classList.toggle("is-selected", this.selectedTrack === bus.id);
+      row.append(head, html("div", "lane"));
+      return row;
+    }));
   }
 
   renderMasterRow() {
@@ -1856,37 +1898,114 @@ class DawScreen {
 
   renderMixer() {
     const session = this.session;
-    const signature = session.tracks.map((t) => `${t.id}:${t.name}:${t.inserts.map((i) => i.type).join("+")}:${t.colour}`).join("|")
+    const returns = session.returns ?? [];
+    const describe = (t) => `${t.id}:${t.name}:${t.inserts.map((i) => i.type).join("+")}:${t.colour}`;
+    const signature = session.tracks.map(describe).join("|") + `|r:${returns.map(describe).join("|")}`
                       + `|m:${session.master.inserts.map((i) => i.type).join("+")}`;
 
     if (signature !== this.mixerSignature) {
       this.mixerSignature = signature;
       this.strips.clear();
       const strips = session.tracks.map((track, index) => this.createStrip(track, index));
-      strips.push(html("div", "strip-gap"), this.createStrip({ ...session.master, id: 0, name: "Master" }, -1));
-      this.mixer.replaceChildren(...strips);
+      strips.push(html("div", "strip-gap"));
+      returns.forEach((bus, index) => strips.push(this.createStrip(bus, index, "return")));
+      strips.push(this.createAddReturnStrip());
+      // The master stays pinned at the right edge while the strips scroll under it.
+      const masterStrip = this.createStrip({ ...session.master, id: 0, name: "Master" }, -1, "master");
+      this.mixer.replaceChildren(...strips, masterStrip);
     }
 
-    for (const track of session.tracks) {
+    for (const track of [...session.tracks, ...returns]) {
       const strip = this.strips.get(track.id);
       strip.fader.update(track.volume);
       strip.pan.update(track.pan);
       strip.readout.textContent = dbText(track.volume);
       for (const [key, b] of Object.entries(strip.toggles)) b.setAttribute("aria-pressed", String(Boolean(track[key])));
       strip.element.classList.toggle("is-selected", this.selectedTrack === track.id);
+      strip.sends?.update(track);
     }
 
     const master = this.strips.get(0);
     master.fader.update(session.master.volume);
+    master.pan.update(session.master.pan ?? 0);
     master.readout.textContent = dbText(session.master.volume);
     master.element.classList.toggle("is-selected", this.selectedTrack === 0);
   }
 
-  createStrip(track, index) {
-    const isMaster = track.id === 0;
-    const element = html("div", isMaster ? "strip is-master" : "strip");
+  // The dashed strip after the returns: adds a return track, empty or with an effect.
+  createAddReturnStrip() {
+    const element = html("div", "strip is-add-return");
+    const pick = html("select", "dropdown add-return");
+    pick.title = "Add a return track: a shared effect every track can send to";
+    pick.append(new Option("+ Return…", ""));
+    for (const [effect, name] of RETURN_EFFECTS) pick.append(new Option(name, effect));
+    pick.addEventListener("change", () => {
+      const effect = pick.value;
+      pick.value = "";
+      if (effect !== "") this.addReturn(effect === "none" ? "" : effect);
+    });
+    element.append(html("div", "strip-add-caption", "Returns hold shared effects: turn up a track's send to feed one."), pick);
+    return element;
+  }
+
+  async addReturn(effect) {
+    const name = RETURN_EFFECTS.find(([key]) => key === effect)?.[1];
+    const id = await daw("addReturn", { effect, name: effect ? name : "" });
+    if (typeof id === "number" && id > 0) this.select(id, null);
+  }
+
+  // A track's sends to the returns, one small knob each, plus where the track plays.
+  createSends(track, { compact = false } = {}) {
+    const returns = this.session.returns ?? [];
+    const element = html("div", compact ? "strip-sends" : "send-row");
+    const knobs = new Map();
+    const pres = new Map();
+    returns.forEach((bus, index) => {
+      const cell = html("div", "send");
+      const knob = new ValueKnob({
+        label: compact ? returnLetter(index) : `${returnLetter(index)} ${bus.name}`, min: -60, max: 6, skew: 2.2,
+        value: -100, defaultValue: -60, format: sendText,
+        onChange: (v, first) => daw("setSend", { id: track.id, target: bus.id, level: v <= -59.5 ? -100 : v, continue: !first }),
+      });
+      knob.element.title = `Send to ${bus.name} · Drag or scroll · Double-click to turn off`;
+      knob.element.classList.add("send-knob");
+      cell.append(knob.element);
+      knobs.set(bus.id, knob);
+      if (!compact) {
+        const pre = button("mini send-pre", "Pre", "Pre-fader: send before the track's volume and pan (Post when off)",
+                           () => daw("setSend", { id: track.id, target: bus.id, pre: pre.getAttribute("aria-pressed") !== "true" }));
+        cell.append(pre);
+        pres.set(bus.id, pre);
+      }
+      element.append(cell);
+    });
+
+    const output = html("select", "dropdown track-output");
+    output.title = "Where this track plays: the master, or into a return (a group bus)";
+    output.append(new Option(compact ? "Master" : "Out: Master", "0"));
+    returns.forEach((bus, index) => output.append(new Option(`${compact ? "" : "Out: "}${returnLetter(index)} · ${bus.name}`, String(bus.id))));
+    output.addEventListener("change", () => daw("setOutput", { id: track.id, output: Number(output.value) }));
+    element.append(output);
+
+    const update = (t) => {
+      for (const [target, knob] of knobs) {
+        const send = (t.sends ?? []).find((x) => x.target === target);
+        knob.update(send ? send.level : -100);
+        pres.get(target)?.setAttribute("aria-pressed", String(Boolean(send?.pre)));
+        knob.element.classList.toggle("is-on", Boolean(send && send.level > -60));
+      }
+      if (document.activeElement !== output) output.value = String(t.output ?? 0);
+    };
+    update(track);
+    return { element, update };
+  }
+
+  createStrip(track, index, kind = "track") {
+    const isMaster = kind === "master";
+    const isReturn = kind === "return";
+    const element = html("div", `strip${isMaster ? " is-master" : ""}${isReturn ? " is-return" : ""}`);
     if (!isMaster) element.dataset.track = track.id;
-    element.style.setProperty("--track-color", isMaster ? "var(--accent-2)" : trackColour(track, index));
+    element.style.setProperty("--track-color", isMaster ? "var(--accent-2)" : isReturn ? returnColour(track, index) : trackColour(track, index));
     element.addEventListener("pointerdown", (event) => {
       if (!event.target.closest(".fader, .knob, button")) this.select(track.id, null);
     });
@@ -1899,12 +2018,11 @@ class DawScreen {
     inserts.append(button("strip-insert is-add", "+ Effect", "Add an effect", () => this.select(track.id, null, true, true)));
 
     const send = (key) => (value, first) =>
-      daw(isMaster ? "setMaster" : "setTrack", isMaster ? { volume: value, continue: !first } : { id: track.id, [key]: value, continue: !first });
+      daw(isMaster ? "setMaster" : "setTrack", isMaster ? { [key]: value, continue: !first } : { id: track.id, [key]: value, continue: !first });
 
-    const pan = isMaster ? { update() {}, element: html("div", "knob-spacer") }
-                         : new ValueKnob({ label: "Pan", min: -1, max: 1, value: track.pan, defaultValue: 0, bipolar: true,
-                                           format: (v) => (Math.abs(v) < 0.01 ? "C" : `${Math.round(Math.abs(v) * 100)}${v < 0 ? "L" : "R"}`),
-                                           onChange: send("pan") });
+    const pan = new ValueKnob({ label: isMaster ? "Balance" : "Pan", min: -1, max: 1, value: track.pan ?? 0, defaultValue: 0, bipolar: true,
+                                format: (v) => (Math.abs(v) < 0.01 ? "C" : `${Math.round(Math.abs(v) * 100)}${v < 0 ? "L" : "R"}`),
+                                onChange: send("pan") });
     const fader = new Fader({ value: track.volume, onChange: send("volume") });
     const meter = new Level(true, track.id);
 
@@ -1914,15 +2032,25 @@ class DawScreen {
 
     const toggles = {};
     const buttons = html("div", "strip-toggles");
-    if (!isMaster)
-      for (const [key, text, title] of [["mute", "M", "Mute"], ["solo", "S", "Solo"], ["arm", "●", "Arm"], ["monitor", "In", "Monitor"]]) {
+    const keys = isMaster ? [] : isReturn ? [["mute", "M", "Mute"], ["solo", "S", "Solo"]]
+                                          : [["mute", "M", "Mute"], ["solo", "S", "Solo"], ["arm", "●", "Arm"], ["monitor", "In", "Monitor"]];
+    for (const [key, text, title] of keys) {
         toggles[key] = button(`tt tt-${key}`, text, key === "solo" ? "Solo (Alt+click: solo only this track)" : title,
                               (event) => this.toggleTrackKey(track, key, toggles[key].getAttribute("aria-pressed") !== "true", event));
         buttons.append(toggles[key]);
       }
 
-    element.append(inserts, pan.element, buttons, faderRow, readout, html("div", "strip-name", track.name));
-    this.strips.set(track.id, { element, fader, pan, readout, toggles, meter });
+    const sends = kind === "track" && (this.session.returns ?? []).length ? this.createSends(track, { compact: true }) : null;
+    const name = html("div", "strip-name", isReturn ? `${returnLetter(index)} · ${track.name}` : track.name);
+    if (isReturn) {
+      const remove = button("mini is-danger strip-remove", "×", `Delete the ${track.name} return (its sends go too)`, async () => {
+        await daw("removeReturn", { id: track.id });
+        toast(`Deleted the "${track.name}" return. Ctrl+Z brings it back.`);
+      });
+      element.append(remove);
+    }
+    element.append(inserts, ...(sends ? [sends.element] : []), pan.element, buttons, faderRow, readout, name);
+    this.strips.set(track.id, { element, fader, pan, readout, toggles, meter, sends });
     return element;
   }
 
@@ -2050,8 +2178,10 @@ class DawScreen {
 
   renderInspector() {
     const session = this.session;
+    const selectedReturn = (session.returns ?? []).find((r) => r.id === this.selectedTrack);
     let owner = this.selectedTrack === 0 ? { ...session.master, id: 0, name: "Master" }
-                                         : session.tracks.find((t) => t.id === this.selectedTrack);
+              : selectedReturn ? { ...selectedReturn, isReturn: true }
+              : session.tracks.find((t) => t.id === this.selectedTrack);
     if (!owner && session.tracks.length) {
       owner = session.tracks[0];
       this.selectedTrack = owner.id;
@@ -2062,7 +2192,8 @@ class DawScreen {
     // Rebuild only when what's shown changes, so knobs keep working mid-drag.
     // Effects tab: the track's insert chain. Track tab: the clip, then pitch & time.
     const onTrackTab = this.dockTab === "track";
-    const key = `${this.dockTab}|${owner?.id}|${found?.clip.id}|${owner?.name}`;
+    const returnsKey = (session.returns ?? []).map((r) => `${r.id}:${r.name}`).join(",");
+    const key = `${this.dockTab}|${owner?.id}|${found?.clip.id}|${owner?.name}|${returnsKey}`;
     if (key !== this.inspectorKey) {
       this.inspectorKey = key;
       this.inspector.replaceChildren();
@@ -2070,10 +2201,11 @@ class DawScreen {
       this.clipPanel = this.rhythmPanel = null;
       this.rack = null;
       this.chainGains = null;
+      this.panelSends = null;
       if (onTrackTab) {
         this.clipPanel = !found ? null : found.clip.midi ? this.createPianoRoll(found.clip, found.track) : this.createClipPanel(found.clip);
         this.inspector.append(this.clipPanel?.element ?? this.createNoClipPanel(owner));
-        this.rhythmPanel = owner && owner.id !== 0 && owner.kind !== "midi" // audio quantize/warp only
+        this.rhythmPanel = owner && owner.id !== 0 && !owner.isReturn && owner.kind !== "midi" // audio quantize/warp only
           ? createRhythmPanel(this, owner, found?.clip ?? null, { daw, ValueKnob, button, toast: (...a) => toast(...a) }) : null;
         if (this.rhythmPanel) this.inspector.append(this.rhythmPanel.element);
       } else if (owner) {
@@ -2085,6 +2217,7 @@ class DawScreen {
 
     if (found && this.clipPanel) this.clipPanel.update(found.clip, found.track);
     if (owner) this.rack?.update(owner);
+    if (owner && this.panelSends?.id === owner.id) this.panelSends.update(owner);
     if (owner && this.chainGains?.id === owner.id) {
       this.chainGains.input.knob.update(owner.inGain ?? 0);
       this.chainGains.output.knob.update(owner.outGain ?? 0);
@@ -2099,6 +2232,7 @@ class DawScreen {
     head.append(html("h3", "", "Clip"));
     element.append(head, html("p", "panel-caption",
       owner?.id === 0 ? "The master has no clips. Select a clip on a track to edit it here."
+      : owner?.isReturn ? "A return track has no clips: tracks send to it. Select a clip on a track to edit it here."
       : owner?.kind === "midi" ? "Select a MIDI clip to edit its notes here, or double-click the lane for a new one."
       : "Select a clip to change its gain and fades, split, loop or strip silence."));
     return element;
@@ -2178,10 +2312,12 @@ class DawScreen {
   createTrackPanel(owner) {
     const element = html("section", "panel track-panel");
     const isMaster = owner.id === 0;
+    const isReturn = Boolean(owner.isReturn);
     const head = html("div", "panel-head");
     element.append(head);
-    head.append(html("h3", "", isMaster ? "Master effects" : `${owner.name} effects`),
-                   html("p", "panel-caption", isMaster ? "Applied to the whole mix, after the tracks."
+    head.append(html("h3", "", isMaster ? "Master effects" : isReturn ? `${owner.name} return effects` : `${owner.name} effects`),
+                   html("p", "panel-caption", isMaster ? "Applied to the whole mix, after the tracks and returns."
+                     : isReturn ? "Shared by every track that sends here. Keep effects fully wet: the dry sound stays on the tracks."
                      : owner.kind === "midi" ? `After the instrument (${owner.instrument?.name ?? "none"}). Change them any time.` : "The take is recorded dry. These play on top, and you can change them any time."));
 
     if (!isMaster) {
@@ -2228,9 +2364,11 @@ class DawScreen {
     if (clipboard && clipboard.id !== owner.id) {
       effectsRow.append(button("tool", `Paste from ${clipboard.name}`, `Replace this chain with the ${clipboard.count} effects copied from ${clipboard.name}`, () => this.pasteEffects(owner.id)));
     }
-    if (!isMaster) effectsRow.append(button("tool", "Duplicate track", "A copy of this track with its clips and effects (Ctrl+Shift+D)", () => this.duplicateTrack(owner.id)));
+    if (!isMaster && !isReturn) effectsRow.append(button("tool", "Duplicate track", "A copy of this track with its clips and effects (Ctrl+Shift+D)", () => this.duplicateTrack(owner.id)));
     head.append(effectsRow);
     head.append(footer);
+
+
 
     // The chain's own input and output gain, with meters, either side of the effects.
     const chainGain = (name, key, caption) => {
@@ -2250,6 +2388,16 @@ class DawScreen {
 
     const chain = html("div", "chain-row");
     chain.append(input.column, list, output.column);
+
+    // After the chain: the track's sends to the returns, and where it plays.
+    if (!isMaster && !isReturn && (this.session.returns ?? []).length) {
+      const sends = this.createSends(owner);
+      this.panelSends = { id: owner.id, update: sends.update };
+      const box = html("div", "panel-sends");
+      box.title = "Sends: feed the return tracks' shared effects";
+      box.append(html("span", "chain-gain-title", "Sends"), sends.element);
+      chain.append(box);
+    }
     element.append(chain);
     this.rack.update(owner);
     return element;
@@ -3222,7 +3370,7 @@ class DawScreen {
 
   copyEffects(owner = this.selectedTrack) {
     if (owner == null) return toast("Select a track first.");
-    const from = owner === 0 ? this.session.master : this.session.tracks.find((t) => t.id === owner);
+    const from = owner === 0 ? this.session.master : [...this.session.tracks, ...(this.session.returns ?? [])].find((t) => t.id === owner);
     if (!from?.inserts.length) return toast("This track has no effects to copy.");
     this.effectsClipboard = { id: owner, name: owner === 0 ? "Master" : from.name, count: from.inserts.length };
     toast(`Copied ${from.inserts.length} effect${from.inserts.length === 1 ? "" : "s"} from "${this.effectsClipboard.name}".`);
