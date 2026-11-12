@@ -1807,3 +1807,120 @@ body:not(.is-daw) .daw-project-actions { display: none; }
 .daw-transport .tb-sep { margin: 3px 4px; }
 .daw-transport.is-wrapped { flex-wrap: wrap; row-gap: 8px; }
 .daw-transport.is-wrapped .tb-spacer { min-width: 8px; }
+/* ---------- Take lanes (ui/takes.js) ---------- */
+
+.tt-takes { display: inline-flex; align-items: center; gap: 3px; width: auto; min-width: 24px; padding: 0 5px; white-space: nowrap; }
+.tt-takes[aria-pressed="true"] { border-color: var(--track-color); color: var(--track-color); }
+
+.take-tools-row, .take-row {
+  position: relative;
+  display: flex;
+  border-bottom: 1px solid color-mix(in srgb, var(--line) 60%, transparent);
+  background: color-mix(in srgb, var(--track-color) 3%, #0a0c11);
+}
+.take-tools-row { height: 26px; }
+
+.take-head {
+  position: sticky;
+  left: 0;
+  z-index: 3;
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 4px;
+  width: var(--head);
+  padding: 0 6px 0 22px;
+  overflow: hidden;
+  border-right: 1px solid var(--line);
+  background: color-mix(in srgb, var(--track-color) 5%, var(--panel));
+}
+/* A thin stripe in the track's colour ties the lanes to their track. */
+.take-head::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: 10px;
+  width: 3px;
+  border-radius: 2px;
+  background: color-mix(in srgb, var(--track-color) 55%, transparent);
+}
+.take-tools-label { margin-right: auto; color: var(--muted); font-size: 10.5px; font-weight: 700; letter-spacing: 0.04em; text-transform: uppercase; }
+.take-pick, .take-comp-listen { width: auto; padding: 0 7px; font-size: 10.5px; white-space: nowrap; }
+.take-pick { border-color: color-mix(in srgb, var(--track-color) 60%, var(--line)); color: var(--text); }
+.take-pick:disabled { opacity: 0.55; cursor: default; }
+.take-comp-listen[aria-pressed="true"], .take-listen[aria-pressed="true"] { border-color: var(--accent); color: var(--accent); }
+
+.take-name {
+  min-width: 0;
+  flex: 1;
+  padding: 1px 4px;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: none;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 600;
+}
+.take-name:hover, .take-name:focus { border-color: var(--line); color: var(--text); outline: none; }
+.take-row.is-listening .take-name { color: var(--accent); }
+.take-listen { font-size: 11px; }
+.take-remove { visibility: hidden; }
+.take-row:hover .take-remove { visibility: visible; }
+
+.take-lane, .take-tools-lane { position: relative; flex: 1; }
+.take-lane { cursor: pointer; touch-action: none; }
+.take-clip {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--track-color) 25%, transparent);
+  border-radius: 5px;
+  background: rgba(255, 255, 255, 0.025);
+  pointer-events: none;
+}
+.take-clip .clip-wave { opacity: 0.35; filter: saturate(0.4); }
+.take-clip.is-missing { border-style: dashed; border-color: var(--hot); }
+/* What the comp plays from this take. */
+.take-used {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  border-right: 1px solid var(--track-color);
+  border-left: 1px solid var(--track-color);
+  background: color-mix(in srgb, var(--track-color) 30%, transparent);
+  mix-blend-mode: screen;
+}
+.take-row.is-listening .take-clip { border-color: var(--accent); }
+.take-row.is-listening .take-clip .clip-wave { opacity: 0.8; filter: none; }
+.take-select {
+  position: absolute;
+  top: 2px;
+  bottom: 2px;
+  z-index: 2;
+  border: 1px dashed var(--text);
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.08);
+  pointer-events: none;
+}
+.take-note {
+  position: absolute;
+  top: 4px;
+  height: 18px;
+  overflow: hidden;
+  padding: 1px 6px;
+  border-left: 2px solid var(--track-color);
+  border-radius: 0 4px 4px 0;
+  background: color-mix(in srgb, var(--track-color) 12%, transparent);
+  color: var(--muted);
+  font-size: 10px;
+  line-height: 16px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.take-lane {
+  background-image: linear-gradient(90deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px);
+  background-size: var(--bar) 100%;
+}
+.arrange-inner.tempo-varies .take-lane { background-image: var(--grid-image); background-size: var(--grid-width) 100%; background-repeat: no-repeat; }

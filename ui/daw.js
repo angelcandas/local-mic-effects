@@ -8,6 +8,7 @@ import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
+import { TakeLanes } from "./takes.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createRhythmPanel, drawHitpoints, drawWarpMarkers, savedQuantizeArgs, startWarpDrag } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
@@ -849,6 +850,7 @@ class DawScreen {
     this.buildLibrary();
     this.buildKeyPanel();
 
+    this.takes = new TakeLanes(this, { daw, toast: (...args) => toast(...args) });
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
     window.__JUCE__.backend.addEventListener("dawExport", (progress) => this.onExport(progress));
@@ -1641,7 +1643,7 @@ class DawScreen {
       session.tracks.map(({ inserts, ...track }) => [track, inserts.length]),
       (session.returns ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
       session.master.volume, session.master.inserts.length, session.tempo, session.tempoMap, this.showTempo, session.loop, session.beatsPerBar, session.markers,
-      this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight,
+      this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight, this.takes.version,
     ]);
     if (!force && signature === this.arrangeSignature) return this.movePlayhead();
     this.arrangeSignature = signature;
@@ -1692,8 +1694,8 @@ class DawScreen {
     const viewKey = JSON.stringify([this.zoom, this.rowHeight, session.tempo, session.tempoMap, session.beatsPerBar, this.snap, this.tool, session.inputs]);
     const rebuild = force || viewKey !== this.rowsViewKey;
     this.rowsViewKey = viewKey;
-    const existing = new Map(rebuild ? [] : [...this.rows.children].map((row) => [row.dataset.track, row]));
-    const rows = session.tracks.map((track, index) => {
+    const existing = new Map(rebuild ? [] : [...this.rows.querySelectorAll(":scope > .track-row")].map((row) => [row.dataset.track, row]));
+    const trackRows = session.tracks.map((track, index) => {
       const key = this.trackRowKey(track);
       let row = existing.get(String(track.id));
       if (row?.key === key) {
@@ -1702,15 +1704,23 @@ class DawScreen {
         row = this.createTrackRow(track, index);
         row.key = key;
       }
+      // Its take lanes follow it (built again only when the takes or the comp change).
+      const takesKey = JSON.stringify([track.takes, track.takesShown, track.listenTake, this.takes.version,
+                                       track.clips.filter((c) => c.take >= 0).map((c) => [c.take, c.start, c.length, c.fadeIn, c.fadeOut])]);
+      if (row.takesKey !== takesKey) {
+        row.takesKey = takesKey;
+        row.takeRows = this.takes.createRows(track, trackColour(track, index));
+      }
       return row;
     });
+    const rows = trackRows.flatMap((row) => [row, ...row.takeRows]);
     // Move only rows that are out of place: rows left in the document keep their focus.
     rows.forEach((row, i) => {
       if (this.rows.children[i] !== row) this.rows.insertBefore(row, this.rows.children[i] ?? null);
     });
     while (this.rows.children.length > rows.length) this.rows.lastElementChild.remove();
     this.meters.clear();
-    for (const row of rows) this.meters.set(row.track.id, row.meter);
+    for (const row of trackRows) this.meters.set(row.track.id, row.meter);
   }
 
   renderRuler(width) {
@@ -1786,6 +1796,9 @@ class DawScreen {
     toggles.append(toggle("mute", "M", "Mute"), toggle("solo", "S", "Solo (Alt+click: solo only this track)"),
                    toggle("arm", "●", isMidi ? "Arm to record from your MIDI keyboard (you hear it while armed)" : "Arm for recording"),
                    toggle("monitor", "In", isMidi ? "Play this track's instrument from your MIDI keyboard" : `Hear the input (${inputText(track.input, this.session.inputs)}) through this track's effects`));
+    const takesToggle = this.takes.createToggle(track);
+    if (takesToggle) toggles.append(takesToggle);
+    row.classList.toggle("has-takes", Boolean(takesToggle && track.takesShown));
     if (track.link) {
       // Linked tracks warp as one (Pitch & time → Linked tracks).
       const others = this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name);
@@ -2082,7 +2095,7 @@ class DawScreen {
           edit = { command: "moveClip", args: { id: clip.id, start } };
           place(start, clip.length);
 
-          const row = [...this.rows.children].find((r) => {
+          const row = [...this.rows.querySelectorAll(":scope > .track-row")].find((r) => {
             const box = r.getBoundingClientRect();
             return e.clientY >= box.top && e.clientY < box.bottom;
           });
@@ -2150,7 +2163,7 @@ class DawScreen {
     const cssLeft = (s0 - clip.start) * zoom;
     const cssWidth = Math.min((s1 - s0) * zoom, 16000 / ratio);
     const width = Math.max(1, Math.round(cssWidth * ratio));
-    const height = Math.max(1, Math.round((this.rowHeight - 8) * ratio));
+    const height = Math.max(1, Math.round((canvas.laneHeight ?? this.rowHeight - 8) * ratio));
     const f0 = clip.offset + (s0 - clip.start);       // file time at the canvas's left edge
     const perPixel = cssWidth / zoom / width;         // file seconds per canvas pixel
     const f1 = f0 + width * perPixel;
@@ -2310,8 +2323,10 @@ class DawScreen {
         region.append(html("canvas"), html("span", "rec-label", "Recording"));
         row.querySelector(".lane").append(region);
       }
+      const pass = this.recPass?.number ?? 1;
+      region.lastChild.textContent = pass > 1 ? `Recording · take ${pass} of the loop` : "Recording";
 
-      const start = this.status.recordStart ?? 0;
+      const start = this.recPass?.start ?? this.status.recordStart ?? 0;
       const length = Math.max(0, this.status.position - start);
       region.style.left = `${start * this.zoom}px`;
       region.style.width = `${length * this.zoom}px`;
@@ -2866,6 +2881,7 @@ class DawScreen {
       toolRow(muteButton,
               button("tool", "Loop clip", "Loop the clip's range (Ctrl+L)", () => this.run("loopClip")),
               button("tool", "Zoom to clip", "Fit the clip in the view (Z)", () => this.run("zoomClip"))),
+      ...(clip.midi ? [] : [toolRow(button("tool", "Keep as a take", "Copy this clip into a new take lane, so you can record over it and still pick parts of it", () => daw("takes", { action: "fromClip", clip: id })))]),
       html("p", "clip-tools-hint", "Normalise, Strip silence and Split into stems change the audio itself: they are in the Audio menu and on the clip's right-click menu."));
     element.append(head, row, tools);
 
@@ -3160,8 +3176,14 @@ class DawScreen {
     const planArgs = () => ({ style: style(), roles: roles(), effects: effects(), ...mode() });
 
     $(".automix-close").addEventListener("click", () => this.toggleAutoMix(false));
-    $(".automix-analyse").addEventListener("click", () => {
+    $(".automix-analyse").addEventListener("click", async () => {
       this.setAutoMixResult("");
+      // First the comps: the best parts of every track's takes, then the mix of those.
+      if (effects().comp && this.session?.tracks.some((t) => (t.takes?.length ?? 0) >= 2)) {
+        this.setAutoMixResult("Picking the best takes…");
+        if (!(await this.takes.autoComp(-1))) return this.setAutoMixResult("");
+        this.setAutoMixResult("");
+      }
       daw("autoMix", { action: "analyse", style: style(), effects: effects(), ...mode() });
     });
     $(".automix-reference").addEventListener("click", () => {
@@ -3631,8 +3653,17 @@ class DawScreen {
 
   onStatus(status) {
     const lengthChanged = Math.abs((status.length ?? 0) - (this.status.length ?? 0)) > 1e-3;
-    if (status.recording && !this.status.recording) this.recLevels = [];
-    if (status.recording && status.position >= (status.recordStart ?? 0))
+    if (status.recording && !this.status.recording) {
+      this.recLevels = [];
+      this.recPass = { number: 1, start: null };
+    }
+    // Loop recording: the playhead jumped back to the loop start, so a new pass began.
+    if (status.recording && this.status.recording && status.position < this.status.position - 0.05
+        && this.status.position >= (status.recordStart ?? 0) && this.session?.loop?.on) {
+      this.recLevels = [];
+      this.recPass = { number: (this.recPass?.number ?? 1) + 1, start: this.session.loop.start };
+    }
+    if (status.recording && status.position >= (this.recPass?.start ?? status.recordStart ?? 0))
       this.recLevels.push([status.position, Math.pow(10, (status.input ?? -100) / 20)]);
     if (!status.recording) this.recLevels = [];
     this.status = status;

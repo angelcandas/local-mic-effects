@@ -21,6 +21,9 @@
 //                 runs and when it ends (refresh the "instruments" list then)
 //   "dawAutoMix"  { state: "analysing", progress } while Auto Mix listens, then
 //                 { state: "ready", plan... } (see describeAutoMix), or "cancelled"/"error"
+//   "dawTakeComp" { state: "analysing", progress } while Auto Comp listens to the takes,
+//                 then { state: "done", tracks: [{ track, picks, summary }] }, "cancelled"
+//                 or { state: "error", error }
 //   "dawKey"      { state: "analysing", progress } while the key is detected, then
 //                 { state: "ready", key... } (see describeKey), or "cancelled"
 // See handle() for the commands. Message thread only.
@@ -105,6 +108,11 @@ private:
     juce::var describeAutoMix() const;
     juce::var describeAutoMixTags() const;
 
+    // Take lanes and comping (daw::Edit "Takes and comping"), and Auto Comp
+    // (src/analysis/TakeComp.h), which listens on a background thread.
+    juce::var handleTakes (const juce::var& args);
+    void finishTakeComp();
+
     // Song key (src/analysis/Key.h): detection runs on a background thread.
     juce::var handleKey (const juce::var& args);
     void finishKeyDetection();
@@ -170,6 +178,8 @@ private:
     // Key detection: the running analysis (at most one) and the last result.
     struct KeyJob;
     std::shared_ptr<KeyJob> keyJob;
+    struct TakeCompJob;
+    std::shared_ptr<TakeCompJob> takeCompJob;
     analysis::KeyEstimate lastKey;
     juce::Array<juce::var> lastKeyTracks; // per track: { id, name, key, used }
     bool keyDetected = false;
