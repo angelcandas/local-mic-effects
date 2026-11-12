@@ -2,6 +2,8 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
+#include "analysis/Pitch.h"
+
 #include <functional>
 #include <vector>
 
@@ -97,7 +99,13 @@ struct Settings
     // same timing and phase decisions, so the mics stay in phase with each other.
     juce::StringArray linked;
 
-    bool isNeutral() const noexcept { return map.isIdentity() && std::abs (semitones) < 1.0e-4; }
+    // The take's sung notes with their edits (the note pitch editor), in file time. Only
+    // matters when one is edited; the voice's formants are then always kept, and each note
+    // can move them on its own. Not for linked files.
+    std::vector<analysis::pitch::Note> notes;
+    bool hasNoteEdits() const noexcept { return analysis::pitch::anyEdited (notes); }
+
+    bool isNeutral() const noexcept { return map.isIdentity() && std::abs (semitones) < 1.0e-4 && ! hasNoteEdits(); }
 
     // Identifies the rendered copy (with the file's path) in the AudioPool's cache.
     juce::String getKey() const;

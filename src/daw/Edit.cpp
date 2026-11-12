@@ -854,6 +854,22 @@ void Edit::setClipFormant (int clipId, bool keep)
     }
 }
 
+void Edit::setClipNotes (int clipId, const std::vector<analysis::pitch::Note>& notes)
+{
+    if (auto clip = getClip (clipId); clip.isValid() && ! isMidiClip (clip))
+    {
+        if (analysis::pitch::anyEdited (notes))
+            clip.setProperty (ids::pitchNotes, analysis::pitch::toString (notes), undoTarget);
+        else
+            clip.removeProperty (ids::pitchNotes, undoTarget);
+    }
+}
+
+std::vector<analysis::pitch::Note> Edit::getClipNotes (const juce::ValueTree& clip)
+{
+    return analysis::pitch::fromString (clip[ids::pitchNotes].toString());
+}
+
 void Edit::setTrackTranspose (int trackId, double semitones)
 {
     if (auto track = getTrack (trackId); track.isValid())
@@ -1213,6 +1229,8 @@ warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
     settings.semitones = juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, settings.semitones);
     settings.algorithm = warp::algorithmFromKey (clip[ids::stretch].toString());
     settings.formant = (bool) clip.getProperty (ids::formant, false);
+    if (getLinkedClips (clip).isEmpty())
+        settings.notes = getClipNotes (clip);
 
     // Linked: rendered with its partners' files, so they all stay in phase.
     if (! settings.isNeutral())
