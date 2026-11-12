@@ -2431,6 +2431,92 @@ namespace
         return out;
     }
 
+    void testGroups()
+    {
+        std::cout << "\nGroup tracks\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-groups");
+        folder.createDirectory();
+
+        juce::AudioBuffer<float> tone (2, (int) sampleRate);
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                tone.setSample (ch, i, 0.2f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * i / sampleRate));
+
+        const auto toneFile = folder.getChildFile ("tone.wav");
+        writeWav (toneFile, tone, sampleRate);
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        engine.getAudioPool().loadNow (toneFile);
+
+        const auto a = (int) edit.addTrack ("A")[daw::ids::id];
+        const auto other = (int) edit.addTrack ("Other")[daw::ids::id];
+        const auto b = (int) edit.addTrack ("B")[daw::ids::id];
+        edit.addClip (a, toneFile, 0.0, 1.0);
+        edit.addClip (b, toneFile, 0.0, 1.0);
+
+        const auto playRms = [&]
+        {
+            engine.rebuildNow();
+            engine.seek (0);
+            engine.play();
+            const auto out = render (engine, 0.8);
+            engine.stop();
+            return rms (out[0], 9600, 33600);
+        };
+
+        const auto dry = playRms();
+        const auto group = edit.groupTracks ({ a, b }, "Tones");
+        const auto tracks = edit.getTracks();
+        check (group >= 0 && daw::Edit::isGroup (edit.getReturn (group)) && edit.getReturn (group)[daw::ids::name].toString() == "Tones",
+               "grouping makes a group track");
+        check ((int) tracks[0][daw::ids::id] == a && (int) tracks[1][daw::ids::id] == b && (int) tracks[2][daw::ids::id] == other,
+               "the grouped tracks sit next to each other");
+        check (daw::Edit::getTrackGroup (tracks[0]) == group && daw::Edit::getTrackOutput (tracks[1]) == group && daw::Edit::getTrackGroup (tracks[2]) < 0,
+               "members play into the group, the others don't");
+        check (std::abs (playRms() / dry - 1.0f) < 0.01f, "a group left at its defaults changes nothing");
+
+        edit.setTrackVolume (group, -6.0f);
+        check (std::abs (playRms() / dry - juce::Decibels::decibelsToGain (-6.0f)) < 0.01f, "the group's fader scales what its tracks sum to");
+
+        edit.setTrackVolume (group, 0.0f);
+        edit.setTrackMute (group, true);
+        check (playRms() < 1.0e-4f, "muting the group silences its tracks");
+        edit.setTrackMute (group, false);
+
+        const auto bus = (int) edit.addReturn ("Bus")[daw::ids::id];
+        edit.setSend (group, bus, 0.0f);
+        check (std::abs (playRms() / dry - 2.0f) < 0.01f, "a group can send into a return");
+        edit.setSend (group, group, 0.0f);
+        edit.setSend (bus, bus, 0.0f);
+        check (! daw::Edit::getSend (edit.getReturn (group), group).isValid() && ! daw::Edit::getSend (edit.getReturn (bus), bus).isValid(),
+               "only a group sends, and never into itself");
+        edit.setSend (group, bus, -100.0f);
+
+        edit.setGroupFolded (group, true);
+        check ((bool) edit.getReturn (group)[daw::ids::folded] , "folding is saved on the group");
+
+        edit.setTrackGroup (b, -1);
+        check (daw::Edit::getTrackGroup (edit.getTrack (b)) < 0 && daw::Edit::getTrackOutput (edit.getTrack (b)) == daw::Edit::masterId,
+               "a track can leave its group");
+        edit.setTrackGroup (other, group);
+        const auto order = edit.getTracks();
+        check (daw::Edit::getTrackGroup (edit.getTrack (other)) == group && (int) order[0][daw::ids::id] == a && (int) order[1][daw::ids::id] == other,
+               "a track joining a group lands after its tracks");
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.ungroup (group);
+        check (! edit.getReturn (group).isValid() && daw::Edit::getTrackGroup (edit.getTrack (a)) < 0
+                   && daw::Edit::getTrackOutput (edit.getTrack (a)) == daw::Edit::masterId && edit.getTracks().size() == 3,
+               "ungrouping keeps the tracks and sends them to the master");
+        edit.getUndoManager().undo();
+        check (daw::Edit::isGroup (edit.getReturn (group)) && daw::Edit::getTrackGroup (edit.getTrack (a)) == group, "undo brings the group back");
+
+        folder.deleteRecursively();
+    }
+
     void testReturns()
     {
         std::cout << "\nReturn tracks and sends\n";
@@ -6960,6 +7046,7 @@ int main()
     testMultitrack();
     testDawEngine();
     testReturns();
+    testGroups();
     testMastering();
     testDawRecording();
     testTakes();

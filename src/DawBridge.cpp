@@ -242,6 +242,7 @@ namespace
             { "editNotes", "Edit notes" }, { "addInsert", "Add effect" }, { "removeInsert", "Remove effect" },
             { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "pasteInserts", "Paste effects" },
             { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
+            { "groupTracks", "Group tracks" }, { "ungroup", "Ungroup tracks" }, { "setGroup", "Move to group" },
             { "addReturn", "Add return" }, { "removeReturn", "Delete return" }, { "moveReturn", "Move return" },
             { "tempo", "Tempo" }, { "tempoMap", "Tempo change" }, { "beatsPerBar", "Time signature" }, { "loop", "Loop range" },
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
@@ -499,6 +500,7 @@ juce::var DawBridge::describeSession()
                               { "link", daw::Edit::getLink (track) },
                               { "inserts", describeInserts (track) }, { "clips", clips },
                               { "output", daw::Edit::getTrackOutput (track) }, { "sends", describeSends (track) },
+                              { "group", daw::Edit::getTrackGroup (track) },
                               { "input", [&track]
                                 {
                                     const auto input = daw::Edit::getTrackInput (track);
@@ -537,6 +539,8 @@ juce::var DawBridge::describeSession()
                                { "volume", number (bus, ids::volume) }, { "pan", number (bus, ids::pan) },
                                { "inGain", number (bus, ids::inGain) }, { "outGain", number (bus, ids::outGain) },
                                { "mute", (bool) bus[ids::mute] }, { "solo", (bool) bus[ids::solo] },
+                               { "group", daw::Edit::isGroup (bus) }, { "folded", (bool) bus.getProperty (ids::folded, false) },
+                               { "sends", describeSends (bus) },
                                { "inserts", describeInserts (bus) } }));
 
     if (lastInputNames.isEmpty())
@@ -2254,6 +2258,26 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         complete (edit.addReturn (name.substring (0, 60), effect)[ids::id]);
         return;
     }
+
+    if (command == "groupTracks")
+    {
+        juce::Array<int> trackIds;
+        if (const auto* list = args["tracks"].getArray())
+            for (const auto& item : *list)
+                trackIds.add ((int) item);
+
+        auto name = arg (args, "name", juce::String());
+        if (name.trim().isEmpty())
+            name = "Group";
+        const auto group = edit.groupTracks (trackIds, name.substring (0, 60));
+        if (group < 0) { complete (error ("Pick at least one track to group.")); return; }
+        complete (group);
+        return;
+    }
+
+    if (command == "ungroup")   { edit.ungroup (id); ok(); return; }
+    if (command == "setGroup")  { edit.setTrackGroup (id, arg (args, "group", -1)); ok(); return; }
+    if (command == "foldGroup") { edit.setGroupFolded (id, arg (args, "folded", true)); ok(); return; }
 
     if (command == "removeReturn") { edit.removeReturn (id); ok(); return; }
     if (command == "moveReturn")   { edit.moveReturn (id, arg (args, "index", 0)); ok(); return; }
