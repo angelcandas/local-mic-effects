@@ -567,7 +567,7 @@ export class LibraryBrowser {
     const area = under.closest(".arrange, .mixer");
     if (area) {
       const firstLane = screen.rows.querySelector(".lane") ?? screen.masterRow.querySelector(".lane");
-      const start = kind === "audio" && firstLane && !screen.root.classList.contains("show-mixer") ? timeIn(firstLane) : -1;
+      const start = kind === "audio" && firstLane && area.classList.contains("arrange") ? timeIn(firstLane) : -1;
       return { track: -1, start: kind === "audio" ? start : undefined, element: area, label: kind === "instrument" ? "New MIDI track" : "New track" };
     }
     return null;

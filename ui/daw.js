@@ -38,6 +38,8 @@ const prefs = {
   set(key, value) { try { localStorage.setItem(`micfx.daw.${key}`, JSON.stringify(value)); } catch { /* no storage */ } },
 };
 
+const DOCK_TABS = ["effects", "track", "mixer"];
+const MIXER_HEIGHT = 400; // px: the bottom panel opens at least this tall for the mixer
 const TRACK_COLOURS = ["#8c7bff", "#3fd9c6", "#ffb547", "#ff6fb1", "#5aafff", "#9be15d", "#ff8a5c", "#c78bff"];
 
 
@@ -1588,12 +1590,8 @@ class DawScreen {
     this.autoMixButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Auto Mix</span>');
     this.buildActivity();
 
-    this.viewTabs = html("div", "segmented view-tabs");
-    for (const view of ["arrange", "mixer"]) {
-      const tab = iconButton("", view === "arrange" ? "tracks" : "mixer", view === "arrange" ? "Tracks and clips (Tab)" : "Mixer (Tab / X)", () => this.setView(view));
-      tab.dataset.view = view;
-      this.viewTabs.append(tab);
-    }
+    // The mixer is a tab of the bottom panel: this shows or hides it.
+    this.viewTabs = iconButton("toggle mixer-button", "mixer", "Mixer (Tab / X)", () => this.run("toggleView"));
     this.libraryButton = iconButton("toggle", "library", "Show / hide the library (Shift+B)", () => this.library.toggle());
     this.dockButton = iconButton("toggle", "panel", "Show / hide the bottom panel (E)", () => this.run("toggleDock"));
     this.pianoButton = iconButton("tool", "piano", "Play MIDI from the computer keyboard (M)", () => this.togglePiano());
@@ -1750,7 +1748,7 @@ class DawScreen {
     this.redoButton.title = s.canRedo ? `Redo${what(s.redoName)} (Ctrl+Shift+Z)` : "Nothing to redo";
     this.undoButton.setAttribute("aria-label", this.undoButton.title.replace(/ \(.*\)$/, ""));
     this.redoButton.setAttribute("aria-label", this.redoButton.title.replace(/ \(.*\)$/, ""));
-    [...this.viewTabs.children].forEach((tab) => tab.classList.toggle("is-selected", tab.dataset.view === this.view));
+    this.viewTabs.setAttribute("aria-pressed", String(this.mixerShown));
     this.timelineTools.hidden = this.view !== "arrange";
   }
 
@@ -1851,6 +1849,7 @@ class DawScreen {
         b.setAttribute("aria-pressed", String(this[key]));
         this.rememberView();
         this.renderArrange();
+        if (this.mixerShown) this.renderMixer();
       });
       b.dataset.key = key;
       return b;
@@ -3005,6 +3004,9 @@ class DawScreen {
     const signature = session.tracks.map(describe).join("|") + `|r:${returns.map(describe).join("|")}` + `|in:${(session.inputs ?? []).join(",")}`
                       + `|m:${session.master.inserts.map((i) => i.type).join("+")}`;
 
+    // The track headers' I/O and Sends switches show the same sections on the strips.
+    this.mixer.classList.toggle("show-routing", this.showRouting);
+    this.mixer.classList.toggle("show-sends", this.showSends);
     if (signature !== this.mixerSignature) {
       this.mixerSignature = signature;
       this.strips.clear();
@@ -3023,6 +3025,13 @@ class DawScreen {
       strip.pan.update(track.pan);
       strip.readout.textContent = dbText(track.volume);
       for (const [key, b] of Object.entries(strip.toggles)) b.setAttribute("aria-pressed", String(Boolean(track[key])));
+      const monitor = !strip.toggles.monitor && strip.element.querySelector(".tt-monitor");
+      if (monitor) {
+        const mode = monitorMode(track);
+        monitor.textContent = { in: "In", auto: "Auto", off: "Off" }[mode];
+        monitor.dataset.mode = mode;
+        monitor.setAttribute("aria-pressed", String(mode !== "off"));
+      }
       strip.element.classList.toggle("is-selected", this.selectedTrack === track.id);
       strip.sends?.update(track);
       strip.input?.update(track);
@@ -3222,10 +3231,19 @@ class DawScreen {
     const keys = isMaster ? [] : isReturn ? [["mute", "M", "Mute"], ["solo", "S", "Solo"]]
                                           : [["mute", "M", "Mute"], ["solo", "S", "Solo"], ["arm", "●", "Arm"], ["monitor", "In", "Monitor"]];
     for (const [key, text, title] of keys) {
-        toggles[key] = button(`tt tt-${key}`, text, key === "solo" ? "Solo (Alt+click: solo only this track)" : title,
-                              (event) => this.toggleTrackKey(track, key, toggles[key].getAttribute("aria-pressed") !== "true", event));
-        buttons.append(toggles[key]);
+      if (key === "monitor" && track.kind !== "midi") {
+        // In / Auto / Off, as on the track header.
+        const monitor = button("tt tt-monitor", "Off", "Monitor: In → Auto → Off", () => {
+          const latest = this.session.tracks.find((t) => t.id === track.id) ?? track;
+          daw("setTrack", { id: track.id, monitorMode: { off: "in", in: "auto", auto: "off" }[monitorMode(latest)] });
+        });
+        buttons.append(monitor);
+        continue;
       }
+      toggles[key] = button(`tt tt-${key}`, text, key === "solo" ? "Solo (Alt+click: solo only this track)" : title,
+                            (event) => this.toggleTrackKey(track, key, toggles[key].getAttribute("aria-pressed") !== "true", event));
+      buttons.append(toggles[key]);
+    }
 
     const sends = kind === "track" && (this.session.returns ?? []).length ? this.createSends(track, { compact: true }) : null;
     const name = html("div", "strip-name", isReturn ? `${returnLetter(index)} · ${track.name}` : track.name);
@@ -3237,16 +3255,34 @@ class DawScreen {
       element.append(remove);
     }
     const input = kind === "track" && track.kind !== "midi" ? this.createInputPicker(track) : null;
-    element.append(...(input ? [input.element] : []), inserts, ...(sends ? [sends.element] : []), pan.element, buttons, faderRow, readout, name);
+    // Top to bottom in signal order: input, effects, sends, pan, fader and meter,
+    // M S arm monitor, output, name.
+    const output = sends?.element.querySelector(".track-output");
+    if (output) output.classList.add("strip-output");
+    if (input) input.element.classList.add("strip-input");
+    element.append(...(input ? [input.element] : []), inserts, ...(sends ? [sends.element] : []), pan.element, faderRow, readout, buttons,
+                   ...(output ? [output] : []), name);
     this.strips.set(track.id, { element, fader, pan, readout, toggles, meter, sends, input });
     return element;
   }
 
+  // The mixer is the bottom panel's Mixer tab; "arrange" goes back to the tab before it.
   setView(view) {
-    this.view = view;
-    this.root.classList.toggle("show-mixer", view === "mixer");
-    this.render();
-    this.rememberView();
+    this.showMixer(view === "mixer");
+  }
+
+  get mixerShown() { return this.dockTab === "mixer" && !this.root.classList.contains("dock-hidden"); }
+
+  showMixer(on) {
+    if (on) {
+      if (this.dockTab !== "mixer") this.tabBeforeMixer = this.dockTab;
+      this.setDockTab("mixer");
+      // Tall enough for the strips' faders.
+      this.setDock(true, Math.max(this.dockHeight, MIXER_HEIGHT));
+    } else if (this.dockTab === "mixer") {
+      this.setDockTab(this.tabBeforeMixer ?? "effects");
+    }
+    this.renderTransport();
   }
 
   //============================================================================ view state
@@ -3256,7 +3292,7 @@ class DawScreen {
   viewState() {
     return {
       zoom: this.zoom, rowHeight: this.rowHeight, left: Math.round(this.arrange.scrollLeft), top: Math.round(this.arrange.scrollTop),
-      track: this.selectedTrack, view: this.view, follow: this.follow, grid: this.grid, snap: this.snap,
+      track: this.selectedTrack, view: "arrange", follow: this.follow, grid: this.grid, snap: this.snap,
       dock: { hidden: this.root.classList.contains("dock-hidden"), height: this.dockHeight, tab: this.dockTab },
       head: this.headWidth, heights: Object.fromEntries(this.trackHeights), folded: [...this.folded],
       routing: this.showRouting, sends: this.showSends, pinnedFolded: this.pinnedFolded, foldedFx: [...this.foldedInserts],
@@ -3306,12 +3342,10 @@ class DawScreen {
     this.showSends = Boolean(state.sends);
     this.pinnedFolded = Boolean(state.pinnedFolded);
     this.headSwitches.forEach((b) => b.setAttribute("aria-pressed", String(this[b.dataset.key])));
-    if (state.view === "arrange" || state.view === "mixer") {
-      this.view = state.view;
-      this.root.classList.toggle("show-mixer", this.view === "mixer");
-    }
     if (state.dock && typeof state.dock === "object") {
-      if (state.dock.tab === "effects" || state.dock.tab === "track") this.setDockTab(state.dock.tab, false);
+      if (DOCK_TABS.includes(state.dock.tab)) this.setDockTab(state.dock.tab, false);
+      // Projects saved before the mixer moved into the bottom panel.
+      if (state.view === "mixer") this.setDockTab("mixer", false);
       this.setDock(!state.dock.hidden, clamp(num(state.dock.height, this.dockHeight), 140, 900), false);
     }
     this.restoringView = false;
@@ -3330,12 +3364,13 @@ class DawScreen {
     const saved = (() => { try { return JSON.parse(localStorage.getItem("micfx.dock") ?? "null"); } catch { return null; } })();
     this.dockHeight = saved?.height ?? 290;
     this.dockTabs = [...splitter.querySelectorAll(".dock-tab")];
-    this.setDockTab(saved?.tab === "track" ? "track" : "effects", false);
+    this.setDockTab(DOCK_TABS.includes(saved?.tab) ? saved.tab : "effects", false);
     this.setDock(saved?.hidden ? false : true, this.dockHeight);
 
     // Two tabs: Effects (the track's inserts) and Track (the clip, pitch & time, quantize, tempo).
     // Clicking the open tab while the panel is folded away shows it again.
     this.dockTabs.forEach((tab) => tab.addEventListener("click", () => {
+      if (tab.dataset.tab === "mixer") return this.showMixer(true);
       this.setDockTab(tab.dataset.tab);
       if (this.root.classList.contains("dock-hidden")) this.setDock(true);
     }));
@@ -3391,10 +3426,12 @@ class DawScreen {
     } catch { /* not kept */ }
   }
 
-  // Picks the bottom panel's tab: "effects" or "track".
+  // Picks the bottom panel's tab: "effects", "track" or "mixer".
   setDockTab(tab, save = true) {
     if (tab === this.dockTab) return;
+    if (tab !== "mixer" && this.dockTab) this.tabBeforeMixer = tab;
     this.dockTab = tab;
+    this.root.classList.toggle("dock-mixer", tab === "mixer");
     this.dockTabs.forEach((t) => {
       const on = t.dataset.tab === tab;
       t.classList.toggle("is-active", on);
@@ -3406,6 +3443,8 @@ class DawScreen {
     if (this.session) {
       this.inspectorKey = "";
       this.renderInspector();
+      if (tab === "mixer") this.renderMixer();
+      this.renderTransport();
     }
   }
 
@@ -3439,6 +3478,10 @@ class DawScreen {
   }
 
   renderInspector() {
+    if (this.dockTab === "mixer") {
+      this.watchInserts(-1);
+      return;
+    }
     const session = this.session;
     const selectedReturn = (session.returns ?? []).find((r) => r.id === this.selectedTrack);
     let owner = this.selectedTrack === 0 ? { ...session.master, id: 0, name: "Master" }
@@ -4343,11 +4386,10 @@ class DawScreen {
 
   render() {
     if (!this.session) return;
-    this.root.classList.toggle("show-mixer", this.view === "mixer");
     this.renderTransport();
     this.renderBanner();
     if (!this.dragging) this.renderArrange();
-    if (this.view === "mixer") this.renderMixer();
+    if (this.mixerShown) this.renderMixer();
     this.renderInspector();
   }
 
@@ -4399,7 +4441,7 @@ class DawScreen {
       this.chainGains.output.meter.push(chain?.out, elapsed);
       this.status.chains = undefined;
     }
-    if (this.view === "mixer") for (const [id, strip] of this.strips) strip.meter.push(stereo(id), elapsed);
+    if (this.mixerShown) for (const [id, strip] of this.strips) strip.meter.push(stereo(id), elapsed);
     this.status.master = undefined;
     if (this.status.tracks) this.status.tracks = {};
     this.status.stereo = undefined;
@@ -4875,7 +4917,7 @@ class DawScreen {
       split: () => this.splitSelected(),
       delete: () => this.deleteSelected(),
       addTrack: () => this.addTrack(),
-      toggleView: () => this.setView(this.view === "arrange" ? "mixer" : "arrange"),
+      toggleView: () => this.showMixer(!this.mixerShown),
       toggleDock: () => this.setDock(this.root.classList.contains("dock-hidden")),
       toggleLibrary: () => this.library.toggle(),
       searchLibrary: () => this.library.focusSearch(),
@@ -4936,7 +4978,6 @@ class DawScreen {
   renameTrack() {
     const input = this.rows.querySelector(`.track-row[data-track="${this.selectedTrack}"] .track-name`);
     if (!input) return toast("Select a track first.");
-    if (this.view !== "arrange") this.setView("arrange");
     input.scrollIntoView({ block: "nearest" });
     input.focus();
     input.select();
