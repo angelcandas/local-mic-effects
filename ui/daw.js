@@ -9,6 +9,7 @@ import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
+import { decorateAiPanels } from "./aiviews.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createRhythmPanel, drawHitpoints, drawWarpMarkers, savedQuantizeArgs, startWarpDrag } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
@@ -1093,6 +1094,7 @@ class DawScreen {
     this.buildStems();
     this.buildLibrary();
     this.buildKeyPanel();
+    decorateAiPanels(this.root);
 
     this.takes = new TakeLanes(this, { daw, toast: (...args) => toast(...args) });
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
@@ -3692,12 +3694,33 @@ class DawScreen {
   }
 
   toggleAutoMix(show = this.autoMixPanel.hidden) {
+    const wasOpen = !this.autoMixPanel.hidden;
     this.autoMixPanel.hidden = !show;
+    // Closing ends the run: opened again, it starts clean from the tracks as they are now.
+    if (!show && wasOpen) this.resetAutoMix();
     if (show) {
       this.toggleExportPanel(false);
       this.renderAutoMixMode();
       if (!this.autoMix.plan) this.refreshAutoMixTags(true);
     }
+  }
+
+  // Forgets the last run (its plan, roles, results and amount, and its mode and track),
+  // unless it's still listening. The style and the effects it may add are kept.
+  resetAutoMix() {
+    const panel = this.autoMixPanel;
+    if (panel.classList.contains("is-running")) return;
+    this.autoMix = { plan: null, applied: false, after: true };
+    panel.querySelector("[name=mode]").value = "mix";
+    panel.querySelector("[name=focus]").value = "0";
+    panel.querySelector("[name=masterLufs]").value = "-14";
+    const slider = panel.querySelector("[name=amount]");
+    slider.value = "100";
+    panel.querySelector(".automix-amount-value").textContent = "100%";
+    panel.querySelector(".automix-plan").replaceChildren();
+    panel.querySelector(".automix-roles").replaceChildren();
+    this.setAutoMixResult("");
+    this.renderAutoMixControls();
   }
 
   // The mode's own line, and the track it works on (fit and clean only), listed from the session.

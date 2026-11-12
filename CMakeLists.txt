@@ -49,6 +49,8 @@ juce_add_binary_data(MicFX_WebUI
         ui/pianoroll.js
         ui/takes.js
         ui/daw.css
+        ui/aiviews.css
+        ui/aiviews.js
         libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js)
 
 set(MICFX_DSP_SOURCES
