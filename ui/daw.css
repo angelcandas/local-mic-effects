@@ -2034,3 +2034,160 @@ body:not(.is-daw) .daw-project-actions { display: none; }
 .bus-row .th-name .track-name.is-static { flex: 1 1 auto; min-width: 64px; }
 .bus-row .th-name .hslider { flex: 0 1 64px; min-width: 36px; }
 .bus-row .th-name .track-toggles { flex: none; }
+
+/* ---------- Effect chain: slim header, "+" slots, content-sized and foldable cards ---------- */
+
+.inspector .chain-head {
+  width: 116px;
+  gap: 6px;
+  padding: 8px 10px;
+  border-left: 3px solid var(--track-color, var(--accent));
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--track-color, var(--accent)) 6%, var(--panel));
+}
+.chain-kind { color: var(--faint); font-size: 10px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; }
+.chain-title { overflow: hidden; color: var(--track-color, var(--text)); font-size: 13px; font-weight: 650; text-overflow: ellipsis; white-space: nowrap; }
+.chain-menu-button { align-self: flex-start; height: 26px; padding: 0 10px; }
+.chain-menu-button::after { content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 0 3px 7px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+
+.insert-list { gap: 0; }
+.insert { width: var(--card, 250px); }
+.insert.is-wide { width: 330px; }
+.insert:focus { outline: none; }
+.insert:focus-visible { outline: 1px solid var(--accent); }
+
+/* Between two cards: a thin "+" on hover. */
+.insert-gap { position: relative; flex: none; width: 14px; }
+.insert-gap-add {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  z-index: 2;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: 1px solid var(--line-strong);
+  border-radius: 50%;
+  background: var(--panel-raised);
+  color: var(--muted);
+  font: 600 13px/1 var(--mono);
+  opacity: 0;
+  transform: translate(-50%, -50%);
+  cursor: pointer;
+  transition: opacity 0.12s;
+}
+.insert-gap:hover .insert-gap-add, .insert-gap-add:focus-visible { opacity: 1; }
+.insert-gap-add:hover { border-color: var(--accent); color: var(--text); }
+.is-reordering .insert-gap-add { display: none; }
+
+/* The end of the chain: add an effect. */
+.insert-add {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  width: 44px;
+  margin-left: 14px;
+  padding: 0;
+  border: 1px dashed var(--line-strong);
+  border-radius: 12px;
+  background: transparent;
+  color: var(--muted);
+  font: 500 20px/1 var(--mono);
+  cursor: pointer;
+}
+.insert-add:hover, .insert-add[aria-expanded="true"] { border-color: var(--accent); color: var(--text); background: rgba(255, 255, 255, 0.02); }
+.insert-add.is-empty { width: 150px; margin-left: 0; }
+.insert-add-text { font: 500 11.5px var(--sans, inherit); }
+
+/* Trims behind a switch in the title. */
+.insert-trim-switch {
+  flex: none;
+  height: 18px;
+  padding: 0 5px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--faint);
+  font: 600 9.5px var(--mono);
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.insert-trim-switch[aria-pressed="true"] { border-color: var(--line-strong); color: var(--text); }
+.insert-trim-switch.is-set { border-color: var(--cat); color: var(--cat); }
+.insert-gains[hidden] { display: none; }
+.insert-head .insert-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.insert-remove { visibility: hidden; }
+.insert:hover .insert-remove, .insert:focus-within .insert-remove { visibility: visible; }
+
+/* Folded: a narrow strip with the on/off light and the name, read upwards. */
+.insert-folded-name { display: none; }
+.insert.is-folded { width: 34px; padding: 8px 0; overflow: hidden; }
+.insert.is-folded .insert-body,
+.insert.is-folded .insert-name,
+.insert.is-folded .fx-activity,
+.insert.is-folded .insert-trim-switch,
+.insert.is-folded .insert-remove { display: none; }
+.insert.is-folded .insert-head { justify-content: center; }
+.insert.is-folded .insert-folded-name {
+  display: block;
+  margin: 10px auto 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 650;
+  white-space: nowrap;
+  writing-mode: vertical-rl;
+  transform: rotate(180deg);
+  cursor: pointer;
+}
+.insert.is-folded:hover .insert-folded-name { color: var(--text); }
+
+/* A send box set to pre-fader. */
+.send-box.is-pre::after { content: "pre"; position: absolute; top: 0; right: 2px; color: var(--faint); font: 600 7px/1 var(--mono); }
+
+/* ---------- Tooltips and the hint line ---------- */
+
+.tip {
+  position: fixed;
+  z-index: 200;
+  display: grid;
+  gap: 3px;
+  max-width: 320px;
+  padding: 6px 9px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5);
+  color: var(--text);
+  font-size: 11.5px;
+  pointer-events: none;
+}
+.tip[hidden] { display: none; }
+.tip-name { display: flex; align-items: center; gap: 8px; font-weight: 600; }
+.tip-name .key-chip { margin-left: auto; }
+.tip-more { color: var(--muted); line-height: 1.35; }
+
+.hint-line {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 8px;
+  height: 18px;
+  margin-top: -6px;
+  padding: 0 4px;
+  overflow: hidden;
+  color: var(--faint);
+  font-size: 11px;
+  white-space: nowrap;
+}
+.hint-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.hint-line .key-chip { margin-left: 0; }
+.hint-line .key-chip[hidden] { display: none; }
+body.is-daw .library-hint { display: none; }
+.track-menu.is-columns { column-count: 2; column-gap: 4px; max-width: 420px; }
+.track-menu.is-columns > * { break-inside: avoid; }
+.track-menu.is-columns .track-menu-item { width: 100%; }
+.insert-trim-switch:not(.is-set):not([aria-pressed="true"]) { visibility: hidden; }
+.insert:hover .insert-trim-switch, .insert:focus-within .insert-trim-switch { visibility: visible; }

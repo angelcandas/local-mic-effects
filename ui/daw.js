@@ -499,7 +499,11 @@ class Fader {
     this.onChange(db, first);
   }
 
-  update(db) {
+  update(db, pre = this.pre) {
+    if (pre !== this.pre) {
+      this.pre = pre;
+      this.element.classList.toggle("is-pre", pre);
+    }
     if (this.dragging || db === this.value) return;
     this.value = db;
     this.render();
@@ -689,15 +693,16 @@ class SendBox {
     return Math.abs(db) < 0.3 ? 0 : Math.round(db * 10) / 10;
   }
 
-  constructor({ letter, name, colour, value, onChange }) {
-    Object.assign(this, { onChange, value });
+  constructor({ letter, name, colour, value, onChange, onPre = null }) {
+    Object.assign(this, { onChange, onPre, value, name });
+    this.pre = false;
     this.dragging = false;
     this.element = html("div", "send-box");
     this.element.style.setProperty("--send-color", colour);
     this.element.tabIndex = 0;
     this.element.setAttribute("role", "slider");
     this.element.setAttribute("aria-label", `Send to ${name}`);
-    this.element.title = `Send to ${letter} · ${name}\nDrag up or down · Double-click to type · Ctrl+click: off`;
+    this.element.title = `Send to ${letter} · ${name}\nDrag up or down · Double-click to type · Ctrl+click: off · Right-click: pre-fader`;
     this.text = html("span", "send-box-value");
     this.element.append(html("span", "send-box-letter", letter), this.text);
     const wheelOk = wheelReady(this.element), step = stepper();
@@ -714,6 +719,20 @@ class SendBox {
         this.set(SendBox.toDecibels(clamp(start + (dx - dy) / (e.shiftKey ? 600 : 150))), first);
         first = false;
       }, () => { this.dragging = false; });
+    });
+    this.element.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      popMenu(event.clientX, event.clientY, ({ item, rule, heading }) => {
+        heading(`Send to ${this.name}`);
+        item("Off", () => this.set(-100, true), { checked: this.value <= -59.5 });
+        for (const db of [0, -6, -12]) item(`${db === 0 ? "0" : `−${-db}`} dB`, () => this.set(db, true), { checked: this.value === db });
+        item("Type a value…", () => this.element.dispatchEvent(new MouseEvent("dblclick")), { hint: "Or double-click the box" });
+        if (this.onPre) {
+          rule();
+          item("Pre-fader", () => this.onPre(!this.pre), { checked: this.pre, hint: "Send before the track's volume and pan (post-fader when off)" });
+        }
+      });
     });
     this.element.addEventListener("dblclick", (event) => {
       event.stopPropagation();
@@ -746,7 +765,11 @@ class SendBox {
     this.onChange(db, first);
   }
 
-  update(db) {
+  update(db, pre = this.pre) {
+    if (pre !== this.pre) {
+      this.pre = pre;
+      this.element.classList.toggle("is-pre", pre);
+    }
     if (this.dragging || db === this.value) return;
     this.value = db;
     this.render();
@@ -766,11 +789,12 @@ const panText = (v) => (Math.abs(v) < 0.01 ? "C" : `${Math.round(Math.abs(v) * 1
 //==============================================================================
 // The effect inserts of one track (or the master): a card per insert, plus "add".
 class InsertRack {
-  constructor(element, owner) {
+  constructor(element, owner, screen) {
     this.element = element;
     this.owner = owner; // { id, inserts }, id 0 = master
+    this.screen = screen;
     this.cards = new Map();
-    this.signature = "";
+    this.signature = null; // built on the first update, even for an empty chain
   }
 
   update(owner) {
@@ -778,7 +802,7 @@ class InsertRack {
     const signature = owner.inserts.map((insert) => `${insert.id}:${insert.type}`).join(",");
 
     if (signature !== this.signature) {
-      const grew = this.signature !== "" && owner.inserts.length > this.cards.size;
+      const grew = this.signature !== null && owner.inserts.length > this.cards.size;
       this.signature = signature;
       this.build();
       if (grew) {
@@ -808,15 +832,82 @@ class InsertRack {
   build() {
     this.element.replaceChildren();
     this.cards.clear();
-
-    if (this.owner.inserts.length === 0)
-      this.element.append(html("p", "inserts-empty", "No effects yet. The track plays dry; pick one from Add effect."));
+    const folded = this.screen.foldedInserts;
 
     this.owner.inserts.forEach((insert, index) => {
       const card = new InsertCard(insert, index, this.owner.inserts.length);
       this.cards.set(insert.id, card);
+      card.element.classList.toggle("is-folded", folded.has(insert.id));
+      // A thin "+" between two cards adds an effect right there.
+      if (index > 0) this.element.append(this.createGap(index));
       this.element.append(card.element);
       this.enableDrag(card, insert.id);
+      const head = card.element.querySelector(".insert-head");
+      const toggleFold = () => {
+        if (folded.has(insert.id)) folded.delete(insert.id); else folded.add(insert.id);
+        card.element.classList.toggle("is-folded", folded.has(insert.id));
+        this.screen.rememberView();
+      };
+      card.toggleFold = toggleFold;
+      head.addEventListener("dblclick", (event) => { if (!event.target.closest("button")) toggleFold(); });
+      card.element.querySelector(".insert-folded-name").addEventListener("click", toggleFold);
+      // Click its title, then Delete: removes it.
+      card.element.tabIndex = -1;
+      card.element.addEventListener("keydown", (event) => {
+        if (event.target !== card.element || (event.key !== "Delete" && event.key !== "Backspace")) return;
+        event.preventDefault();
+        event.stopPropagation();
+        daw("removeInsert", { id: insert.id });
+      });
+      card.element.addEventListener("contextmenu", (event) => {
+        if (event.target.closest("input, select")) return;
+        event.preventDefault();
+        this.openCardMenu(card, index, event.clientX, event.clientY);
+      });
+    });
+
+    // The end of the chain: add an effect (the library's effects can also be dropped here).
+    const add = button("insert-add", "+", "Add an effect at the end of the chain", (event) => this.openAddMenu(this.owner.inserts.length, event.currentTarget));
+    if (!this.owner.inserts.length) add.append(html("span", "insert-add-text", this.owner.id === 0 ? "Add an effect to the mix" : "Add an effect"));
+    add.classList.toggle("is-empty", !this.owner.inserts.length);
+    this.addButton = add;
+    this.element.append(add);
+  }
+
+  createGap(index) {
+    const gap = html("div", "insert-gap");
+    gap.append(button("insert-gap-add", "+", "Add an effect here", (event) => this.openAddMenu(index, event.currentTarget)));
+    return gap;
+  }
+
+  // The effects, by category, to add at `index` in the chain.
+  openAddMenu(index, anchor) {
+    const box = anchor.getBoundingClientRect();
+    popMenu(box.left, box.bottom + 4, ({ item, heading, menu }) => {
+      menu.classList.add("is-columns");
+      for (const [categoryId, category] of Object.entries(CATEGORIES)) {
+        const modules = MODULES.filter((m) => m.category === categoryId);
+        if (!modules.length) continue;
+        heading(category.name);
+        for (const module of modules) item(module.name, () => this.screen.addEffect(this.owner.id, module.id, index), { indent: true, hint: module.description ?? "" });
+      }
+    }, anchor);
+  }
+
+  openCardMenu(card, index, x, y) {
+    const count = this.owner.inserts.length, id = card.insert.id;
+    popMenu(x, y, ({ item, rule }) => {
+      item(card.isOn ? "Switch off" : "Switch on", () => card.setOn(!card.isOn));
+      item(this.screen.foldedInserts.has(id) ? "Unfold" : "Fold", () => card.toggleFold(), { hint: "Or double-click its title" });
+      item("Show trims", () => card.setTrimsShown(!card.trimsShown), { checked: !card.gains.hidden });
+      rule();
+      item("Move earlier", () => daw("moveInsert", { id, index: index - 1 }), { disabled: index === 0 });
+      item("Move later", () => daw("moveInsert", { id, index: index + 1 }), { disabled: index >= count - 1 });
+      item("Add an effect before…", () => this.openAddMenu(index, card.element));
+      item("Add an effect after…", () => this.openAddMenu(index + 1, card.element));
+      rule();
+      item("Copy the chain", () => this.screen.copyEffects(this.owner.id));
+      item("Remove", () => daw("removeInsert", { id }), { danger: true, shortcut: "Delete" });
     });
   }
 
@@ -827,7 +918,7 @@ class InsertRack {
     head.title = head.title || "Drag to reorder";
 
     head.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || event.target.closest("button, input, .switch, [role=switch]")) return;
+      if (event.button !== 0 || event.detail > 1 || event.target.closest("button, input, .switch, [role=switch]")) return;
       const startX = event.clientX;
       const cards = [...this.element.querySelectorAll(":scope > .insert")];
       const from = cards.indexOf(card.element);
@@ -837,7 +928,7 @@ class InsertRack {
 
       const place = () => {
         // Cards between the old and new slot slide aside to open the gap.
-        const width = rects[from].width + 8;
+        const width = rects[from].width + 14;
         cards.forEach((c, i) => {
           if (i === from) return;
           const shift = from < to && i > from && i <= to ? -width : from > to && i < from && i >= to ? width : 0;
@@ -890,15 +981,17 @@ class InsertCard {
     this.element.style.setProperty("--cat", category.color);
 
     const head = html("header", "insert-head");
-    const title = html("span", "insert-name", insert.type === "pitch" ? "Pitch" : main?.name ?? insert.type);
+    this.name = insert.type === "pitch" ? "Pitch" : main?.name ?? insert.type;
+    const title = html("span", "insert-name", this.name);
     this.activity = createActivity();
     if (insert.type !== "pitch") head.append(this.addSwitch(main.power, `Switch ${main.name} on or off`));
-    head.append(title, this.activity.element,
-      button("mini", "↑", "Earlier in the chain", () => daw("moveInsert", { id: insert.id, index: index - 1 })),
-      button("mini", "↓", "Later in the chain", () => daw("moveInsert", { id: insert.id, index: index + 1 })),
-      button("mini is-danger", "×", "Remove this effect", () => daw("removeInsert", { id: insert.id })));
-    head.children[head.children.length - 3].disabled = index === 0;
-    head.children[head.children.length - 2].disabled = index === count - 1;
+    // The trims (this effect's own in and out gain) hide behind a switch; they show by
+    // themselves while either is not 0 dB.
+    this.trimSwitch = button("insert-trim-switch", "trim", "Show this effect's input and output gain", () => this.setTrimsShown(!this.trimsShown));
+    head.append(title, this.activity.element, this.trimSwitch,
+      button("mini is-danger insert-remove", "×", "Remove this effect (Delete)", () => daw("removeInsert", { id: insert.id })));
+    head.title = "Drag to move it in the chain · Double-click to fold · Right-click for more";
+    this.trimsShown = false;
 
     this.body = html("div", "insert-body");
     this.element.append(head, this.body);
@@ -934,7 +1027,26 @@ class InsertCard {
     }
 
     this.body.append(this.createFooter(parts));
+    // As wide as its controls need: a one-knob effect is a narrow card.
+    const widest = Math.max(1, ...parts.map((part) => part.controls.filter((c) => ["knob", "choice", "toggle", "keys"].includes(c.type)).length));
+    if (!this.element.classList.contains("is-wide")) this.element.style.setProperty("--card", `${clamp(widest * 62 + 28, 190, 290)}px`);
+    this.element.append(html("span", "insert-folded-name", this.name));
     this.update(insert);
+  }
+
+  setTrimsShown(shown) {
+    this.trimsShown = shown;
+    this.renderTrims();
+  }
+
+  renderTrims() {
+    const values = ["InGain", "OutGain"].map((suffix) => this.insert.values[`${this.insert.type}${suffix}`] ?? 0);
+    const set = values.some((v) => Math.abs(v) > 0.05);
+    this.gains.hidden = !(this.trimsShown || set);
+    this.trimSwitch.setAttribute("aria-pressed", String(!this.gains.hidden));
+    this.trimSwitch.classList.toggle("is-set", set);
+    this.trimSwitch.title = set ? `Trim: in ${dbText(values[0])} dB, out ${dbText(values[1])} dB (shown while not 0 dB)`
+                                : "Show this effect's input and output gain";
   }
 
   // Presets for this effect, and its own input and output gain.
@@ -968,6 +1080,7 @@ class InsertCard {
       widget.title = `${title}. Drag or scroll · Double-click to reset`;
       gains.append(widget);
     }
+    this.gains = gains;
     footer.append(picker.element, gains);
     return footer;
   }
@@ -1045,7 +1158,48 @@ class InsertCard {
     this.view?.update();
     for (const { power, row } of this.parts) row.hidden = (insert.values[power] ?? 0) < 0.5;
     this.element.classList.toggle("is-off", !this.switches.some(({ param }) => (insert.values[param] ?? 0) >= 0.5));
+    this.renderTrims();
   }
+
+  get isOn() { return this.switches.some(({ param }) => (this.insert.values[param] ?? 0) >= 0.5); }
+
+  // On or off: every part of the pitch insert, or the effect's one switch.
+  setOn(on) {
+    const params = this.insert.type === "pitch" && on ? [this.switches[0].param] : this.switches.map(({ param }) => param);
+    params.forEach((param, i) => { this.insert.values[param] = on ? 1 : 0; this.send(param, on ? 1 : 0, i === 0); });
+    this.update(this.insert);
+  }
+}
+
+
+//==============================================================================
+// Tooltips and the hint line. In the DAW, every "title" becomes one styled tooltip
+// (after 400 ms: the name, its shortcut as a key chip, one line of help), and the hint
+// line under the panels shows the same help at once for whatever the mouse is over.
+const TIP_SHORTCUT = /\s*\(((?:(?:Ctrl|Cmd|Shift|Alt|Option)\+)*(?:[A-Z0-9?+\-]|F\d{1,2}|Space|Delete|Enter|Esc|Home|End|Tab|Up|Down|Left|Right))\)[.:]?\s*/;
+
+// "Play / pause (Space). Right-click: return on stop" -> name, shortcut chip, the rest as help.
+function parseTip(text) {
+  const lines = String(text).split("\n").map((line) => line.trim()).filter(Boolean);
+  let name = lines[0] ?? "", shortcut = "", rest = "";
+  const match = name.match(TIP_SHORTCUT);
+  if (match) {
+    shortcut = match[1];
+    rest = name.slice(match.index + match[0].length).replace(/^[·,;]\s*/, "");
+    name = name.slice(0, match.index);
+  }
+  return { name, more: [rest, ...lines.slice(1)].filter(Boolean).join(" · "), shortcut };
+}
+
+// Moves an element's title into data-tip (so the system tooltip stays away), keeping
+// it as the accessible name of a button with no text.
+function claimTitle(element) {
+  const title = element.getAttribute("title");
+  if (title === null) return;
+  element.removeAttribute("title");
+  if (!title) return;
+  element.dataset.tip = title;
+  if (!element.hasAttribute("aria-label") && !element.textContent.trim()) element.setAttribute("aria-label", parseTip(title).name);
 }
 
 //==============================================================================
@@ -1058,6 +1212,7 @@ class DawScreen {
     this.rowHeight = 84;       // track height, px (vertical zoom): tracks without their own
     this.trackHeights = new Map(); // track id -> its own height, px (dragged at its bottom edge)
     this.folded = new Set();   // track ids folded to one line
+    this.foldedInserts = new Set(); // effect (insert) ids folded to a narrow strip
     this.headWidth = HEAD_WIDTH; // the track header column, px (dragged at its right edge)
     this.showRouting = false;  // header sections, per project (view state)
     this.showSends = false;
@@ -1093,6 +1248,7 @@ class DawScreen {
     this.buildStems();
     this.buildLibrary();
     this.buildKeyPanel();
+    this.buildHints();
 
     this.takes = new TakeLanes(this, { daw, toast: (...args) => toast(...args) });
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
@@ -1238,6 +1394,18 @@ class DawScreen {
         }, (moved) => {
           if (moved) daw("setMarker", { id: marker.id, time });
           else this.seek(marker.time);
+        });
+      });
+      flag.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const next = this.markers.filter((m) => m.time > marker.time + 0.01).sort((a, b) => a.time - b.time)[0];
+        popMenu(event.clientX, event.clientY, ({ item, rule }) => {
+          item("Go here", () => this.seek(marker.time));
+          item("Rename", () => flag.dispatchEvent(new MouseEvent("dblclick", { bubbles: false })), { hint: "Or double-click the marker" });
+          item(next ? `Loop to "${next.name}"` : "Loop to the next marker", () => daw("loop", { on: true, start: marker.time, end: next.time }), { disabled: !next });
+          rule();
+          item("Delete", () => daw("removeMarker", { id: marker.id }), { danger: true });
         });
       });
       flag.addEventListener("dblclick", (event) => {
@@ -1761,6 +1929,13 @@ class DawScreen {
       });
     });
 
+    this.ruler.addEventListener("contextmenu", (event) => {
+      if (event.target.closest(".marker")) return;
+      event.preventDefault();
+      const box = this.ruler.getBoundingClientRect();
+      this.openTimeMenu(Math.max(0, (event.clientX - box.left) / this.zoom), event.clientX, event.clientY, null);
+    });
+
     this.arrange.addEventListener("wheel", (event) => {
       if (event.altKey) { // Alt+scroll: track height
         event.preventDefault();
@@ -2162,7 +2337,8 @@ class DawScreen {
     const sendBoxes = new Map();
     (this.session.returns ?? []).forEach((bus, i) => {
       const box = new SendBox({ letter: returnLetter(i), name: bus.name, colour: returnColour(bus, i), value: -100,
-        onChange: (db, first) => daw("setSend", { id: track.id, target: bus.id, level: db, continue: !first }) });
+        onChange: (db, first) => daw("setSend", { id: track.id, target: bus.id, level: db, continue: !first }),
+        onPre: (pre) => daw("setSend", { id: track.id, target: bus.id, pre }) });
       sendBoxes.set(bus.id, box);
       sendsLine.append(box.element);
     });
@@ -2186,6 +2362,13 @@ class DawScreen {
       if (this.status.playing) return;
       const box = lane.getBoundingClientRect();
       daw("transport", { action: "seek", time: Math.max(0, (event.clientX - box.left) / this.zoom) });
+    });
+    lane.addEventListener("contextmenu", (event) => {
+      if (event.target !== lane) return;
+      event.preventDefault();
+      this.select(track.id, null);
+      const box = lane.getBoundingClientRect();
+      this.openTimeMenu(Math.max(0, (event.clientX - box.left) / this.zoom), event.clientX, event.clientY, current());
     });
 
     if (isMidi) {
@@ -2227,7 +2410,7 @@ class DawScreen {
       output.update(latest);
       for (const [target, box] of sendBoxes) {
         const s = (latest.sends ?? []).find((x) => x.target === target);
-        box.update(s ? s.level : -100);
+        box.update(s ? s.level : -100, Boolean(s?.pre));
       }
       for (const clip of lane.querySelectorAll(":scope > .clip"))
         clip.classList.toggle("is-selected", String(this.selectedClip) === clip.dataset.clip);
@@ -2373,6 +2556,12 @@ class DawScreen {
     if (!isMaster) row.style.setProperty("--track-color", returnColour(bus, index));
     const head = html("div", "track-head");
     head.addEventListener("pointerdown", (event) => { if (!event.target.closest("button, .hslider, select")) this.select(id, null); });
+    row.addEventListener("contextmenu", (event) => {
+      if (event.target.closest("input, select")) return;
+      event.preventDefault();
+      this.select(id, null);
+      this.openStripMenu(kind, id, event.clientX, event.clientY);
+    });
     const nameText = isMaster ? "Master" : bus.name;
     const name = html("span", "track-name is-static", nameText);
     name.title = `${isMaster ? "All tracks sum here" : `Return ${returnLetter(index)}: tracks send to it`} · Double-click to fold or unfold the returns and master`;
@@ -2871,6 +3060,8 @@ class DawScreen {
   // A track's sends to the returns, one small knob each, plus where the track plays.
   createSends(track, { compact = false } = {}) {
     const returns = this.session.returns ?? [];
+    let latest = track;
+    const current = () => latest;
     const element = html("div", compact ? "strip-sends" : "send-row");
     const knobs = new Map();
     const pres = new Map();
@@ -2883,6 +3074,20 @@ class DawScreen {
       });
       knob.element.title = `Send to ${bus.name} · Drag or scroll · Double-click to turn off`;
       knob.element.classList.add("send-knob");
+      knob.element.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const send = (current().sends ?? []).find((x) => x.target === bus.id);
+        const level = (db) => daw("setSend", { id: track.id, target: bus.id, level: db });
+        popMenu(event.clientX, event.clientY, ({ item, rule, heading }) => {
+          heading(`Send to ${bus.name}`);
+          item("Off", () => level(-100), { checked: !send || send.level <= -59.5 });
+          for (const db of [0, -6, -12]) item(`${db === 0 ? "0" : `−${-db}`} dB`, () => level(db), { checked: send?.level === db });
+          rule();
+          item("Pre-fader", () => daw("setSend", { id: track.id, target: bus.id, pre: !send?.pre }),
+               { checked: Boolean(send?.pre), hint: "Send before the track's volume and pan (post-fader when off)" });
+        });
+      });
       cell.append(knob.element);
       knobs.set(bus.id, knob);
       if (!compact) {
@@ -2902,6 +3107,7 @@ class DawScreen {
     element.append(output);
 
     const update = (t) => {
+      latest = t;
       for (const [target, knob] of knobs) {
         const send = (t.sends ?? []).find((x) => x.target === target);
         knob.update(send ? send.level : -100);
@@ -2984,6 +3190,12 @@ class DawScreen {
     element.addEventListener("pointerdown", (event) => {
       if (!event.target.closest(".fader, .knob, button")) this.select(track.id, null);
     });
+    element.addEventListener("contextmenu", (event) => {
+      if (event.target.closest("input, select")) return;
+      event.preventDefault();
+      this.select(track.id, null);
+      this.openStripMenu(kind, track.id, event.clientX, event.clientY);
+    });
 
     const inserts = html("div", "strip-inserts");
     for (const insert of track.inserts) {
@@ -3047,7 +3259,7 @@ class DawScreen {
       track: this.selectedTrack, view: this.view, follow: this.follow, grid: this.grid, snap: this.snap,
       dock: { hidden: this.root.classList.contains("dock-hidden"), height: this.dockHeight, tab: this.dockTab },
       head: this.headWidth, heights: Object.fromEntries(this.trackHeights), folded: [...this.folded],
-      routing: this.showRouting, sends: this.showSends, pinnedFolded: this.pinnedFolded,
+      routing: this.showRouting, sends: this.showSends, pinnedFolded: this.pinnedFolded, foldedFx: [...this.foldedInserts],
     };
   }
 
@@ -3070,6 +3282,7 @@ class DawScreen {
     // Another project: its own heights, folds and sections (none saved: the defaults).
     this.trackHeights = new Map();
     this.folded = new Set();
+    this.foldedInserts = new Set();
     this.showRouting = this.showSends = this.pinnedFolded = false;
     this.headSwitches.forEach((b) => b.setAttribute("aria-pressed", "false"));
     if (!state || typeof state !== "object") return null;
@@ -3088,6 +3301,7 @@ class DawScreen {
     this.trackHeights = new Map(Object.entries(state.heights && typeof state.heights === "object" ? state.heights : {})
       .map(([id, h]) => [Number(id), Math.round(clamp(num(h, this.rowHeight), MIN_ROW, MAX_ROW))]));
     this.folded = new Set(Array.isArray(state.folded) ? state.folded.map(Number) : []);
+    this.foldedInserts = new Set(Array.isArray(state.foldedFx) ? state.foldedFx.map(Number) : []);
     this.showRouting = Boolean(state.routing);
     this.showSends = Boolean(state.sends);
     this.pinnedFolded = Boolean(state.pinnedFolded);
@@ -3211,7 +3425,8 @@ class DawScreen {
     if (openAdd) {
       this.setDockTab("effects");
       this.setDock(true);
-      this.inspector.querySelector(".add-effect")?.focus();
+      // Open the add menu on the chain's "+" (after the panel is drawn).
+      requestAnimationFrame(() => { if (this.rack?.addButton?.isConnected) this.rack.openAddMenu(this.rack.owner.inserts.length, this.rack.addButton); });
     }
   }
 
@@ -3248,7 +3463,6 @@ class DawScreen {
       this.clipPanel = this.rhythmPanel = null;
       this.rack = null;
       this.chainGains = null;
-      this.panelSends = null;
       if (onTrackTab) {
         this.clipPanel = !found ? null : found.clip.midi ? this.createPianoRoll(found.clip, found.track) : this.createClipPanel(found.clip);
         this.inspector.append(this.clipPanel?.element ?? this.createNoClipPanel(owner));
@@ -3264,7 +3478,6 @@ class DawScreen {
 
     if (found && this.clipPanel) this.clipPanel.update(found.clip, found.track);
     if (owner) this.rack?.update(owner);
-    if (owner && this.panelSends?.id === owner.id) this.panelSends.update(owner);
     if (owner && this.panelInput?.id === owner.id) this.panelInput.update(owner);
     if (owner && this.chainGains?.id === owner.id) {
       this.chainGains.input.knob.update(owner.inGain ?? 0);
@@ -3354,62 +3567,22 @@ class DawScreen {
     const element = html("section", "panel track-panel");
     const isMaster = owner.id === 0;
     const isReturn = Boolean(owner.isReturn);
-    const head = html("div", "panel-head");
-    element.append(head);
-    head.append(html("h3", "", isMaster ? "Master effects" : isReturn ? `${owner.name} return effects` : `${owner.name} effects`),
-                   html("p", "panel-caption", isMaster ? "Applied to the whole mix, after the tracks and returns."
-                     : isReturn ? "Shared by every track that sends here. Keep effects fully wet: the dry sound stays on the tracks."
-                     : owner.kind === "midi" ? `After the instrument (${owner.instrument?.name ?? "none"}). Change them any time.` : "The take is recorded dry. These play on top, and you can change them any time."));
+    const index = isReturn ? (this.session.returns ?? []).findIndex((r) => r.id === owner.id) : this.session.tracks.findIndex((t) => t.id === owner.id);
+    element.style.setProperty("--track-color", isMaster ? "var(--accent-2)" : isReturn ? returnColour(owner, index) : trackColour(owner, index));
 
-    if (!isMaster) {
-      const colours = html("div", "colour-row");
-      TRACK_COLOURS.forEach((colour) => {
-        const swatch = button("colour-swatch", "", "Track colour", () => daw("setTrack", { id: owner.id, colour }));
-        swatch.style.background = colour;
-        colours.append(swatch);
-      });
-      head.append(colours);
-    }
+    // A slim header: whose chain this is, and the chain's menu (presets, copy, paste).
+    const head = html("div", "panel-head chain-head");
+    head.title = isMaster ? "Master effects: applied to the whole mix, after the tracks and returns."
+      : isReturn ? "Return effects: shared by every track that sends here. Keep them fully wet; the dry sound stays on the tracks."
+      : owner.kind === "midi" ? `Effects after the instrument (${owner.instrument?.name ?? "none"}). Change them any time.`
+      : "Effects play on top of the take, which is recorded dry: change them any time.";
+    const name = html("strong", "chain-title", isMaster ? "Master" : owner.name);
+    const menuButton = button("tool chain-menu-button", "Chain", "Presets, copy and paste for this chain", (event) => this.openChainMenu(owner, event.currentTarget));
+    head.append(html("span", "chain-kind", isMaster ? "Mix effects" : isReturn ? "Return effects" : "Effects"), name, menuButton);
+    element.append(head);
 
     const list = html("div", "insert-list");
-    this.rack = new InsertRack(list, owner);
-
-    const add = html("select", "dropdown add-effect");
-    add.append(new Option("+ Add effect…", ""));
-    for (const [categoryId, category] of Object.entries(CATEGORIES)) {
-      const group = document.createElement("optgroup");
-      group.label = category.name;
-      for (const module of MODULES.filter((m) => m.category === categoryId)) group.append(new Option(module.name, module.id));
-      add.append(group);
-    }
-    add.addEventListener("change", () => {
-      const moduleId = add.value;
-      add.value = "";
-      this.addEffect(owner.id, moduleId);
-    });
-
-    const preset = html("select", "dropdown load-preset");
-    preset.append(new Option("Load a preset…", ""));
-    (this.presets ?? []).forEach((p, index) => preset.append(new Option(`${p.category}: ${p.name}`, index)));
-    preset.title = "Replace this chain with a preset's effects";
-    preset.addEventListener("change", () => {
-      if (preset.value !== "") daw("loadPreset", { track: owner.id, preset: Number(preset.value) });
-      preset.value = "";
-    });
-
-    const footer = html("div", "panel-actions");
-    footer.append(add, preset);
-    const clipboard = this.effectsClipboard;
-    const effectsRow = html("div", "panel-actions");
-    effectsRow.append(button("tool", "Copy effects", "Copy this chain to paste on another track", () => this.copyEffects(owner.id)));
-    if (clipboard && clipboard.id !== owner.id) {
-      effectsRow.append(button("tool", `Paste from ${clipboard.name}`, `Replace this chain with the ${clipboard.count} effects copied from ${clipboard.name}`, () => this.pasteEffects(owner.id)));
-    }
-    if (!isMaster && !isReturn) effectsRow.append(button("tool", "Duplicate track", "A copy of this track with its clips and effects (Ctrl+Shift+D)", () => this.duplicateTrack(owner.id)));
-    head.append(effectsRow);
-    head.append(footer);
-
-
+    this.rack = new InsertRack(list, owner, this);
 
     // The chain's own input and output gain, with meters, either side of the effects.
     const chainGain = (name, key, caption) => {
@@ -3440,18 +3613,27 @@ class DawScreen {
     }
     chain.append(input.column, list, output.column);
 
-    // After the chain: the track's sends to the returns, and where it plays.
-    if (!isMaster && !isReturn && (this.session.returns ?? []).length) {
-      const sends = this.createSends(owner);
-      this.panelSends = { id: owner.id, update: sends.update };
-      const box = html("div", "panel-sends");
-      box.title = "Sends: feed the return tracks' shared effects";
-      box.append(html("span", "chain-gain-title", "Sends"), sends.element);
-      chain.append(box);
-    }
     element.append(chain);
     this.rack.update(owner);
     return element;
+  }
+
+  // The chain's menu: load a preset in place of the chain, copy it, paste another's.
+  openChainMenu(owner, anchor) {
+    const box = anchor.getBoundingClientRect();
+    const clipboard = this.effectsClipboard;
+    popMenu(box.left, box.bottom + 4, ({ item, rule, heading }) => {
+      item("Copy the chain", () => this.copyEffects(owner.id), { disabled: !owner.inserts.length });
+      item(clipboard ? `Paste from ${clipboard.name}` : "Paste a chain", () => this.pasteEffects(owner.id),
+           { disabled: !clipboard || clipboard.id === owner.id, hint: clipboard ? `Replace this chain with the ${clipboard.count} effects copied from ${clipboard.name}` : "Copy a track's effects first" });
+      rule();
+      const groups = new Map();
+      (this.presets ?? []).forEach((p, i) => { if (!groups.has(p.category)) groups.set(p.category, []); groups.get(p.category).push([p, i]); });
+      for (const [category, presets] of groups) {
+        heading(category);
+        for (const [p, i] of presets) item(p.name, () => daw("loadPreset", { track: owner.id, preset: i }), { indent: true, hint: "Replace this chain with the preset's effects" });
+      }
+    }, anchor);
   }
 
   //============================================================================ clip commands
@@ -3473,6 +3655,65 @@ class DawScreen {
     if (this.selectedClip == null) return;
     daw("removeClip", { id: this.selectedClip });
     this.selectedClip = null;
+  }
+
+  //============================================================================ tooltips and hint line
+  buildHints() {
+    const DEFAULT_HINT = "Right-click anything for its menu · ? lists the keyboard shortcuts";
+    this.hintLine = html("div", "hint-line");
+    this.hintLine.setAttribute("aria-hidden", "true"); // the same text is each control's label or tooltip
+    const hintText = html("span", "hint-text", DEFAULT_HINT);
+    const hintKey = html("kbd", "key-chip hint-key");
+    hintKey.hidden = true;
+    this.hintLine.append(hintText, hintKey);
+    this.root.append(this.hintLine);
+
+    const tip = html("div", "tip");
+    tip.setAttribute("role", "tooltip");
+    tip.hidden = true;
+    document.body.append(tip);
+    let target = null, timer = 0;
+
+    const hide = () => { clearTimeout(timer); tip.hidden = true; };
+    const showHint = (parsed) => {
+      hintText.textContent = parsed ? [parsed.name, parsed.more].filter(Boolean).join(" · ")
+        : target === null && this.hoverLibrary ? (this.library?.hint?.textContent || DEFAULT_HINT) : DEFAULT_HINT;
+      hintKey.hidden = !parsed?.shortcut;
+      hintKey.textContent = parsed?.shortcut ? keyText(parsed.shortcut) : "";
+    };
+    const show = (element) => {
+      if (!element.isConnected || target !== element) return;
+      const parsed = parseTip(element.dataset.tip);
+      tip.replaceChildren(html("strong", "tip-name", parsed.name));
+      if (parsed.shortcut) tip.firstChild.append(html("kbd", "key-chip", keyText(parsed.shortcut)));
+      if (parsed.more) tip.append(html("span", "tip-more", parsed.more));
+      tip.hidden = false;
+      const box = element.getBoundingClientRect(), size = tip.getBoundingClientRect();
+      const below = box.bottom + 6 + size.height < innerHeight;
+      tip.style.left = `${clamp(box.left + box.width / 2 - size.width / 2, 4, innerWidth - size.width - 4)}px`;
+      tip.style.top = `${below ? box.bottom + 6 : Math.max(4, box.top - size.height - 6)}px`;
+    };
+
+    document.addEventListener("pointerover", (event) => {
+      if (!this.active) return;
+      const element = event.target.closest?.("[title], [data-tip]");
+      this.hoverLibrary = Boolean(event.target.closest?.(".library-panel"));
+      if (element) claimTitle(element);
+      const next = element?.dataset.tip ? element : null;
+      if (next === target) return;
+      target = next;
+      hide();
+      showHint(next ? parseTip(next.dataset.tip) : null);
+      if (next && event.buttons === 0) timer = setTimeout(() => show(next), 400);
+    }, true);
+    document.addEventListener("pointerout", (event) => {
+      if (target && !event.relatedTarget?.closest?.("[data-tip]")) {
+        target = null;
+        hide();
+        showHint(null);
+      }
+    }, true);
+    for (const type of ["pointerdown", "wheel", "keydown"]) document.addEventListener(type, hide, true);
   }
 
   //============================================================================ banners, export, toasts
@@ -4076,11 +4317,12 @@ class DawScreen {
     this.library.setCollapsed = (collapsed) => { setCollapsed(collapsed); this.renderTransport(); this.rememberView(); };
   }
 
-  // Adds an effect (a modules.js id) at the end of a track's (or the master's) chain.
-  async addEffect(trackId, moduleId) {
+  // Adds an effect (a modules.js id) to a track's (or the master's) chain: at `index`,
+  // or at the end.
+  async addEffect(trackId, moduleId, index = -1) {
     const module = MODULES.find((m) => m.id === moduleId);
     if (!module) return -1;
-    const id = await daw("addInsert", { track: trackId, type: MODULE_KEYS[module.id] });
+    const id = await daw("addInsert", { track: trackId, type: MODULE_KEYS[module.id], index });
     // The pitch insert switches on autotune by default; switch to the part that was picked.
     if (id >= 0 && MODULE_KEYS[module.id] === "pitch" && module.id !== "tune") {
       await daw("setInsert", { id, param: "tuneOn", value: 0, continue: true });
@@ -4471,7 +4713,7 @@ class DawScreen {
       item("Move up", () => daw("moveTrack", { id: track.id, index: index - 1 }), { disabled: index <= 0 });
       item("Move down", () => daw("moveTrack", { id: track.id, index: index + 1 }), { disabled: index >= tracks.length - 1 });
       rule();
-      item("Add effect…", () => { this.select(track.id, null); this.setDockTab?.("effects"); toast("Pick an effect from Add effect, or drag one from the library."); });
+      item("Add effect…", () => this.select(track.id, null, true, true));
       item("Clear volume ride", () => daw("setTrack", { id: track.id, clearRide: true }), { disabled: !track.ride?.length });
       item("Clear effect automation", () => daw("setTrack", { id: track.id, clearAutomation: true }), { disabled: !track.automation?.length });
       item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
@@ -4490,6 +4732,61 @@ class DawScreen {
   }
 
   closeTrackMenu() { closeMenu(); }
+
+  // Right-click on a mixer strip: a track's own menu, or the return's or master's.
+  openStripMenu(kind, id, x, y) {
+    const session = this.session;
+    if (kind === "track") {
+      const track = session.tracks.find((t) => t.id === id);
+      if (track) this.openTrackMenu(track, x, y);
+      return;
+    }
+    const owner = kind === "master" ? session.master : (session.returns ?? []).find((r) => r.id === id);
+    if (!owner) return;
+    const set = (args) => daw(kind === "master" ? "setMaster" : "setTrack", kind === "master" ? args : { id, ...args });
+    popMenu(x, y, ({ item, rule }) => {
+      if (kind === "return") {
+        item("Mute", () => set({ mute: !owner.mute }), { checked: Boolean(owner.mute) });
+        item("Solo", () => set({ solo: !owner.solo }), { checked: Boolean(owner.solo) });
+        rule();
+      }
+      item("Add effect…", () => this.select(id, null, true, true));
+      item("Copy effects", () => this.copyEffects(id), { disabled: !owner.inserts?.length });
+      item("Paste effects", () => this.pasteEffects(id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === id });
+      rule();
+      item("Reset volume", () => set({ volume: 0 }));
+      item(kind === "master" ? "Centre the balance" : "Centre the pan", () => set({ pan: 0 }));
+    });
+  }
+
+  // Right-click on the ruler or on an empty part of a lane (track is null on the ruler).
+  openTimeMenu(time, x, y, track) {
+    const map = this.tempoMap, bars = this.beatsPerBar;
+    const barStart = map.toSeconds(Math.floor(map.toBeats(time) / bars + 1e-6) * bars);
+    const barEnd = map.toSeconds((Math.floor(map.toBeats(time) / bars + 1e-6) + 1) * bars);
+    const snapped = this.snapTime(time);
+    const loop = this.session.loop ?? {};
+    popMenu(x, y, ({ item, rule }) => {
+      item("Move the playhead here", () => this.seek(snapped));
+      if (track && this.clipboard && track.kind !== "midi")
+        item("Paste here", async () => {
+          const id = await daw("pasteClip", { ...this.clipboard, track: track.id, start: snapped });
+          if (id >= 0) this.select(track.id, id);
+        }, { hint: "Paste the copied clip on this track, here" });
+      if (track?.kind === "midi") item("Add a MIDI clip here", () => this.addMidiClip(track, barStart), { hint: "Or double-click the lane" });
+      rule();
+      item("Add a marker here", () => {
+        if (this.markers.some((m) => Math.abs(m.time - snapped) < 0.01)) return toast("There is a marker here already.");
+        daw("addMarker", { time: snapped });
+      });
+      item("Loop this bar", () => daw("loop", { on: true, start: barStart, end: barEnd }));
+      item("Loop", () => this.toggleLoop(), { checked: Boolean(loop.on), shortcut: "L" });
+      if (track) {
+        rule();
+        item("Track…", () => this.openTrackMenu(track, x, y), { hint: "The track's own menu (or right-click its header)" });
+      }
+    });
+  }
 
   // A clip's right-click menu: editing, then the Audio processes (the same as the menu
   // bar's Audio menu, which the plug-in doesn't have).
