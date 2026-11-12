@@ -18,6 +18,7 @@
 #include "dsp/Biquad.h"
 #include "analysis/Key.h"
 #include "analysis/MixAssistant.h"
+#include "analysis/TakeComp.h"
 #include "Presets.h"
 #include "daw/DawEngine.h"
 #include "daw/ClipTools.h"
@@ -2916,6 +2917,264 @@ namespace
         copy.replaceState (edit.getState().createCopy());
         check (daw::Edit::getTrackInput (copy.getTrack (vocal)) == daw::Edit::Input { 9, daw::Edit::noInput },
                "inputs come back with the session");
+
+        folder.deleteRecursively();
+    }
+
+    // A sung line for the take tests: one note per phrase (A minor notes, on A = 440),
+    // `sung` seconds long every `period`, each phrase detuned by its entry in `cents`.
+    juce::AudioBuffer<float> makeTakeLine (const std::vector<double>& cents, double period = 2.5, double sung = 1.6, float level = 0.25f)
+    {
+        static constexpr int notes[] { 57, 60, 64, 62, 59, 57 };
+        juce::AudioBuffer<float> buffer (1, (int) (period * (double) cents.size() * sampleRate));
+        buffer.clear();
+        double phase = 0.0;
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto phrase = (size_t) (t / period);
+            const auto within = std::fmod (t, period);
+            if (within > sung || phrase >= cents.size())
+                continue;
+
+            const auto hz = 440.0 * std::pow (2.0, (notes[phrase % 6] - 69 + cents[phrase] / 100.0) / 12.0);
+            phase += juce::MathConstants<double>::twoPi * hz / sampleRate;
+            const auto envelope = juce::jmin (1.0, within / 0.03, (sung - within) / 0.03);
+            double value = 0.0;
+            for (int h = 1; h <= 8; ++h)
+                value += std::sin (phase * h) / h;
+            buffer.setSample (0, i, (float) (value * level * envelope * 0.6));
+        }
+
+        return buffer;
+    }
+
+    void testTakes()
+    {
+        std::cout << "\nTake lanes, comping and Auto Comp\n";
+        namespace ids = daw::ids;
+
+        const auto folder = juce::File::createTempFile ("micfx-takes");
+        folder.createDirectory();
+
+        const auto comp = [] (const juce::ValueTree& track)
+        {
+            std::vector<juce::ValueTree> clips;
+            for (const auto& child : track)
+                if (child.hasType (ids::CLIP))
+                    clips.push_back (child);
+            std::sort (clips.begin(), clips.end(), [] (const auto& a, const auto& b) { return (double) a[ids::start] < (double) b[ids::start]; });
+            return clips;
+        };
+        const auto near = [] (const juce::var& value, double expected) { return std::abs ((double) value - expected) < 1.0e-6; };
+
+        // Recording over a track: lanes, the newest take plays.
+        {
+            const auto first = folder.getChildFile ("first.wav"), second = folder.getChildFile ("second.wav");
+            writeWav (first, makeTones ({ { 4.0, 220.0, 0.2f, 0.2f } }), sampleRate);
+            writeWav (second, makeTones ({ { 4.0, 330.0, 0.2f, 0.2f } }), sampleRate);
+
+            daw::Edit edit;
+            const auto vocal = (int) edit.addTrack ("Vocal")[ids::id];
+            auto& undo = edit.getUndoManager();
+
+            undo.beginNewTransaction();
+            edit.addRecording (vocal, first, { { 0.0, 0.0, 4.0 } });
+            check (edit.getTakes (vocal).isEmpty() && comp (edit.getTrack (vocal)).size() == 1,
+                   "the first recording on an empty track is a plain clip, no lanes");
+
+            undo.beginNewTransaction();
+            edit.addRecording (vocal, second, { { 1.0, 0.0, 2.0 } });
+            const auto takes = edit.getTakes (vocal);
+            check (takes.size() == 2 && takes[0][ids::name].toString() == "Take 1" && takes[1][ids::name].toString() == "Take 2",
+                   "recording over it makes two take lanes: what was there, and the new one");
+            check ((bool) edit.getTrack (vocal)[ids::takesShown], "the lanes unfold");
+
+            const auto take1 = (int) takes[0][ids::id], take2 = (int) takes[1][ids::id];
+            const auto half = daw::Edit::compFadeSeconds / 2;
+            auto clips = comp (edit.getTrack (vocal));
+            check (clips.size() == 3
+                       && near (clips[0][ids::start], 0.0) && near ((double) clips[0][ids::length], 1.0 + half) && (int) clips[0][ids::take] == take1
+                       && near (clips[1][ids::start], 1.0) && near (clips[1][ids::length], 2.0) && (int) clips[1][ids::take] == take2
+                       && near (clips[2][ids::start], 3.0 - half) && (int) clips[2][ids::take] == take1
+                       && near (clips[2][ids::offset], 3.0 - half),
+                   "the comp plays the new take where it was recorded, the old one overlapping it by half a fade either side");
+            check (near (clips[0][ids::fadeOut], daw::Edit::compFadeSeconds) && near (clips[2][ids::fadeIn], daw::Edit::compFadeSeconds),
+                   "the old take fades out and back in under the new one");
+
+            // Comping by hand.
+            undo.beginNewTransaction();
+            edit.compTake (take1, 1.5, 2.5);
+            clips = comp (edit.getTrack (vocal));
+            check (clips.size() == 5 && (int) clips[1][ids::take] == take2 && (int) clips[2][ids::take] == take1
+                       && near (clips[2][ids::start], 1.5 - half) && near (clips[2][ids::offset], 1.5 - half)
+                       && near (clips[2][ids::fadeIn], daw::Edit::compFadeSeconds) && near (clips[2][ids::fadeOut], daw::Edit::compFadeSeconds)
+                       && near ((double) clips[1][ids::start] + (double) clips[1][ids::length], 1.5 + half)
+                       && (int) clips[3][ids::take] == take2 && near (clips[3][ids::start], 2.5 - half),
+                   "comping a range from Take 1 puts its audio there and keeps the rest");
+
+            undo.beginNewTransaction();
+            const auto [from, to] = edit.compTakeAt (take2, 2.0);
+            check (std::abs (from - 1.5) < 1.0e-6 && std::abs (to - 2.5) < 1.0e-6,
+                   "clicking a take comps the comp's piece under the click (" + juce::String (from, 3) + " .. " + juce::String (to, 3) + ")");
+            clips = comp (edit.getTrack (vocal));
+            check (std::count_if (clips.begin(), clips.end(), [&] (const auto& c) { return (int) c[ids::take] == take2; }) >= 2
+                       && std::none_of (clips.begin(), clips.end(), [&] (const auto& c)
+                                         { return (int) c[ids::take] == take1 && (double) c[ids::start] > 1.0 && (double) c[ids::start] < 2.4; }),
+                   "and that piece now plays Take 2");
+
+            undo.undo();
+            undo.undo();
+            check (comp (edit.getTrack (vocal)).size() == 3, "each comp is one undo step");
+
+            // Audition: the take plays instead of the comp.
+            {
+                daw::DawEngine engine (edit);
+                engine.prepare (sampleRate, blockSize);
+                engine.getAudioPool().loadNow (first);
+                engine.getAudioPool().loadNow (second);
+                engine.rebuildNow();
+
+                const auto dominantAt = [&] (double seconds)
+                {
+                    engine.seek ((juce::int64) (seconds * sampleRate));
+                    engine.play();
+                    juce::AudioBuffer<float> out (2, 4096);
+                    out.clear();
+                    std::vector<float> silenceIn (4096, 0.0f);
+                    for (int done = 0; done < 4096; done += blockSize)
+                    {
+                        juce::AudioBuffer<float> block (2, blockSize);
+                        block.clear();
+                        engine.process (block, 2, blockSize, silenceIn.data());
+                        out.copyFrom (0, done, block, 0, 0, blockSize);
+                    }
+                    engine.stop();
+                    // Zero crossings say which tone it is (220 or 330 Hz).
+                    int crossings = 0;
+                    for (int i = 1; i < 4096; ++i)
+                        crossings += (out.getSample (0, i - 1) < 0.0f) != (out.getSample (0, i) < 0.0f);
+                    return crossings * sampleRate / 4096.0 / 2.0;
+                };
+
+                check (std::abs (dominantAt (2.0) - 330.0) < 20.0, "the comp plays Take 2 in the middle");
+                undo.beginNewTransaction();
+                edit.setListenTake (vocal, take1);
+                const auto steps = undo.getNumActionsInCurrentTransaction();
+                engine.rebuildNow();
+                check (std::abs (dominantAt (2.0) - 220.0) < 20.0, "listening to Take 1 plays it instead");
+                check (steps == 0 && daw::Edit::getListenTake (edit.getTrack (vocal)) == take1, "listening isn't an undo step");
+                edit.setListenTake (vocal, -1);
+                engine.rebuildNow();
+                check (std::abs (dominantAt (2.0) - 330.0) < 20.0, "and back to the comp");
+            }
+
+            // Saving, duplicating and removing.
+            daw::Edit copy;
+            copy.replaceState (edit.getState().createCopy());
+            check (copy.getTakes (vocal).size() == 2 && comp (copy.getTrack (vocal)).size() == 3, "takes and the comp come back with the session");
+
+            const auto duplicate = edit.duplicateTrack (vocal);
+            const auto dupTakes = edit.getTakes (duplicate);
+            const auto dupComp = comp (edit.getTrack (duplicate));
+            check (dupTakes.size() == 2 && std::all_of (dupComp.begin(), dupComp.end(), [&] (const auto& c)
+                       { return (int) c[ids::take] == (int) dupTakes[0][ids::id] || (int) c[ids::take] == (int) dupTakes[1][ids::id]; }),
+                   "a duplicated track's comp points at its own takes");
+
+            undo.beginNewTransaction();
+            edit.removeTake (take2);
+            clips = comp (edit.getTrack (vocal));
+            check (edit.getTakes (vocal).size() == 1 && clips.size() == 3
+                       && std::none_of (clips.begin(), clips.end(), [&] (const auto& c) { return (int) c.getProperty (ids::take, -1) == take2; }),
+                   "deleting a take keeps the comp's pieces of it");
+        }
+
+        // Loop recording: every pass round the loop is a take.
+        {
+            daw::Edit edit;
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+            const auto vocal = (int) edit.addTrack ("Vocal")[ids::id];
+            edit.setTrackArm (vocal, true);
+            edit.setLoop (true, 1.0, 3.0);
+            engine.rebuildNow();
+            engine.seek ((juce::int64) sampleRate);
+
+            const auto mic = makeVoice (200.0f, 7.0);
+            check (engine.startRecording (folder).isEmpty(), "records with the loop on");
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            juce::int64 lowest = std::numeric_limits<juce::int64>::max(), highest = 0;
+            for (size_t start = 0; start + blockSize <= mic.size(); start += blockSize)
+            {
+                buffer.copyFrom (0, 0, mic.data() + start, blockSize);
+                engine.process (buffer, 2, blockSize, buffer.getReadPointer (0));
+                lowest = std::min (lowest, engine.getPosition());
+                highest = std::max (highest, engine.getPosition());
+            }
+            engine.stopRecording();
+
+            check (highest <= (juce::int64) (3.0 * sampleRate) && lowest >= (juce::int64) sampleRate,
+                   "playback keeps wrapping round the loop while it records");
+
+            const auto takes = edit.getTakes (vocal);
+            bool placed = takes.size() == 4;
+            for (int k = 0; placed && k < takes.size(); ++k)
+            {
+                const auto clip = takes[k].getChildWithName (ids::CLIP);
+                const auto expectedOffset = k == 0 ? 0.0 : 2.0 + (k - 1) * 2.0;
+                placed = near (clip[ids::start], 1.0) && std::abs ((double) clip[ids::offset] - expectedOffset) < 0.01
+                         && (k == 3 ? (double) clip[ids::length] > 0.5 && (double) clip[ids::length] < 1.1 : std::abs ((double) clip[ids::length] - 2.0) < 0.01);
+            }
+            check (placed, "four passes make four takes, each one loop from where it carries on in the file ("
+                               + juce::String (takes.size()) + " takes)");
+
+            const auto clips = comp (edit.getTrack (vocal));
+            check (! clips.empty() && (int) clips.front()[ids::take] == (int) takes[3][ids::id]
+                       && (int) clips.back()[ids::take] == (int) takes[2][ids::id],
+                   "the comp plays the newest pass, and the last full one after it");
+        }
+
+        // Auto Comp: two takes, each in tune where the other is off.
+        {
+            const auto fileA = folder.getChildFile ("a.wav"), fileB = folder.getChildFile ("b.wav");
+            writeWav (fileA, makeTakeLine ({ 0.0, 40.0, 0.0, 2.0 }), sampleRate);
+            writeWav (fileB, makeTakeLine ({ -35.0, 3.0, 30.0, 0.0 }), sampleRate);
+
+            daw::Edit edit;
+            const auto vocal = (int) edit.addTrack ("Vocal")[ids::id];
+            edit.addRecording (vocal, fileA, { { 2.0, 0.0, 10.0 } });
+            edit.addRecording (vocal, fileB, { { 2.0, 0.0, 10.0 } });
+            const auto takes = edit.getTakes (vocal);
+            check (takes.size() == 2, "two takes over the same part");
+
+            const auto input = analysis::measureTakes (edit.getTrack (vocal));
+            check (input.takes.size() == 2 && std::abs (input.start - 2.0) < 1.0e-6, "both takes are measured, from where they start");
+
+            const auto cuts = analysis::findPhraseCuts (input);
+            const auto inGap = [] (double t) { const auto within = std::fmod (t - 2.0, 2.5); return within > 1.6 && within < 2.5; };
+            check (cuts.size() == 3 && std::all_of (cuts.begin(), cuts.end(), inGap),
+                   "the phrases are cut in the rests between them (" + juce::String ((int) cuts.size()) + " cuts)");
+
+            const auto plan = analysis::planComp (input);
+            const auto a = (int) takes[0][ids::id], b = (int) takes[1][ids::id];
+            std::vector<int> chosen;
+            for (const auto& pick : plan.picks)
+                chosen.push_back (pick.takeId);
+            check (chosen == std::vector<int> { a, b, a },
+                   "it picks the in-tune take in each phrase, and keeps the last phrase on the same take (" + plan.summary + ")");
+            check (! plan.picks.empty() && plan.picks[1].reason.contains ("in tune"),
+                   "it says why: " + (plan.picks.size() > 1 ? plan.picks[1].reason : juce::String()));
+
+            for (const auto& pick : plan.picks)
+                edit.compTake (pick.takeId, pick.start, pick.end);
+            const auto clips = comp (edit.getTrack (vocal));
+            check (clips.size() == 3 && (int) clips[1][ids::take] == b, "the comp follows the plan");
+
+            // One take is no choice.
+            edit.removeTake (b);
+            check (analysis::planComp (analysis::measureTakes (edit.getTrack (vocal))).picks.empty(), "one take: nothing to choose");
+        }
 
         folder.deleteRecursively();
     }
@@ -5952,6 +6211,7 @@ int main()
     testReturns();
     testMastering();
     testDawRecording();
+    testTakes();
     testStereoInputs();
     testMidiTracks();
     testPluginHosting();

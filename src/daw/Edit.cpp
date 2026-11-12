@@ -180,6 +180,22 @@ int Edit::duplicateTrack (int trackId)
 
     auto copy = track.createCopy();
     renumber (copy);
+
+    // The comp's pieces point at the copy's own takes.
+    std::map<int, int> takeIds;
+    for (int i = 0; i < track.getNumChildren(); ++i)
+        if (track.getChild (i).hasType (ids::TAKE))
+            takeIds[(int) track.getChild (i)[ids::id]] = (int) copy.getChild (i)[ids::id];
+    for (auto clip : copy)
+        if (clip.hasType (ids::CLIP) && clip.hasProperty (ids::take))
+        {
+            if (const auto it = takeIds.find ((int) clip[ids::take]); it != takeIds.end())
+                clip.setProperty (ids::take, it->second, nullptr);
+            else
+                clip.removeProperty (ids::take, nullptr);
+        }
+    copy.removeProperty (ids::listenTake, nullptr);
+
     copy.setProperty (ids::name, (track[ids::name].toString() + " copy").substring (0, 60), nullptr);
     copy.setProperty (ids::arm, false, nullptr);
     copy.setProperty (ids::monitor, false, nullptr);
@@ -897,7 +913,7 @@ warp::Map Edit::getClipWarp (const juce::ValueTree& clip)
 //==============================================================================
 TempoMap Edit::getTempoMapFor (const juce::ValueTree& clip)
 {
-    const auto project = clip.getParent().getParent();
+    const auto project = getOwnerTrack (clip).getParent();
     if (! project.hasType (ids::PROJECT))
         return TempoMap();
     return TempoMap::fromProject (project.getProperty (ids::tempo, 120.0), project[ids::tempoChanges].toString());
@@ -1041,7 +1057,7 @@ void Edit::unlinkTrack (int trackId)
 juce::Array<juce::ValueTree> Edit::getLinkedClips (const juce::ValueTree& clip)
 {
     juce::Array<juce::ValueTree> partners;
-    const auto track = clip.getParent();
+    const auto track = clip.getParent(); // a take's clip has no partners: its TAKE has no link
     const auto group = getLink (track);
     const auto project = track.getParent();
     if (group == 0 || isMidiClip (clip) || ! project.isValid())
@@ -1088,7 +1104,7 @@ warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
 {
     warp::Settings settings;
     settings.map = getEffectiveWarp (clip);
-    settings.semitones = (double) clip.getProperty (ids::transpose, 0.0) + (double) clip.getParent().getProperty (ids::transpose, 0.0);
+    settings.semitones = (double) clip.getProperty (ids::transpose, 0.0) + (double) getOwnerTrack (clip).getProperty (ids::transpose, 0.0);
     settings.semitones = juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, settings.semitones);
     settings.algorithm = warp::algorithmFromKey (clip[ids::stretch].toString());
     settings.formant = (bool) clip.getProperty (ids::formant, false);
@@ -1185,6 +1201,320 @@ void Edit::setClipFades (int clipId, double fadeInSeconds, double fadeOutSeconds
     const auto fadeIn = juce::jlimit (0.0, length, fadeInSeconds);
     clip.setProperty (ids::fadeIn, fadeIn, undoTarget);
     clip.setProperty (ids::fadeOut, juce::jlimit (0.0, length - fadeIn, fadeOutSeconds), undoTarget);
+}
+
+//==============================================================================
+namespace
+{
+    bool isAudioClip (const juce::ValueTree& clip) { return clip.hasType (ids::CLIP) && ! Edit::isMidiClip (clip); }
+    double clipStart (const juce::ValueTree& clip)  { return (double) clip[ids::start]; }
+    double clipEnd (const juce::ValueTree& clip)    { return (double) clip[ids::start] + (double) clip[ids::length]; }
+    constexpr double timeEpsilon = 1.0e-6;
+}
+
+juce::ValueTree Edit::getOwnerTrack (const juce::ValueTree& clipOrTake)
+{
+    for (auto tree = clipOrTake; tree.isValid(); tree = tree.getParent())
+        if (tree.hasType (ids::TRACK))
+            return tree;
+    return {};
+}
+
+juce::Array<juce::ValueTree> Edit::getTakes (int trackId) const
+{
+    juce::Array<juce::ValueTree> takes;
+    for (const auto& child : getTrack (trackId))
+        if (child.hasType (ids::TAKE))
+            takes.add (child);
+    return takes;
+}
+
+juce::ValueTree Edit::getTake (int takeId) const
+{
+    return findById (ids::TAKE, takeId);
+}
+
+juce::ValueTree Edit::addTake (int trackId, const juce::String& name)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid() || isMidiTrack (track))
+        return {};
+
+    // "Take N" counts on from the highest number so far (deleting a take doesn't reuse it).
+    int number = 0;
+    for (const auto& take : getTakes (trackId))
+    {
+        const auto text = take[ids::name].toString();
+        number = juce::jmax (number, text.startsWith ("Take ") ? text.substring (5).getIntValue() : 0);
+    }
+    number = juce::jmax (number, getTakes (trackId).size()) + 1;
+
+    juce::ValueTree take (ids::TAKE);
+    take.setProperty (ids::id, takeNextId(), nullptr);
+    take.setProperty (ids::name, name.trim().isNotEmpty() ? name.trim().substring (0, 60) : "Take " + juce::String (number), nullptr);
+    track.appendChild (take, undoTarget);
+    return take;
+}
+
+void Edit::removeTake (int takeId)
+{
+    auto take = getTake (takeId);
+    if (! take.isValid())
+        return;
+
+    auto track = take.getParent();
+    for (auto clip : track)
+        if (clip.hasType (ids::CLIP) && (int) clip.getProperty (ids::take, -1) == takeId)
+            clip.removeProperty (ids::take, undoTarget);
+
+    if (getListenTake (track) == takeId)
+        track.removeProperty (ids::listenTake, nullptr);
+
+    track.removeChild (take, undoTarget);
+}
+
+void Edit::setTakeName (int takeId, const juce::String& name)
+{
+    if (auto take = getTake (takeId); take.isValid() && name.trim().isNotEmpty())
+        take.setProperty (ids::name, name.trim().substring (0, 60), undoTarget);
+}
+
+void Edit::setTakesShown (int trackId, bool shown)
+{
+    if (auto track = getTrack (trackId); track.isValid())
+        track.setProperty (ids::takesShown, shown, nullptr);
+}
+
+void Edit::setListenTake (int trackId, int takeId)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid())
+        return;
+
+    if (const auto take = getTake (takeId); take.isValid() && take.getParent() == track)
+        track.setProperty (ids::listenTake, takeId, nullptr);
+    else
+        track.removeProperty (ids::listenTake, nullptr);
+}
+
+int Edit::getListenTake (const juce::ValueTree& track)
+{
+    if (! track.hasProperty (ids::listenTake))
+        return -1;
+
+    const auto id = (int) track[ids::listenTake];
+    for (const auto& child : track)
+        if (child.hasType (ids::TAKE) && (int) child[ids::id] == id)
+            return id;
+    return -1;
+}
+
+void Edit::cutComp (juce::ValueTree track, double start, double end)
+{
+    // The new piece crossfades with what stays: it reaches half a fade past each end,
+    // and what's left on either side reaches half a fade in.
+    const auto half = compFadeSeconds * 0.5;
+
+    juce::Array<juce::ValueTree> clips;
+    for (const auto& child : track)
+        if (isAudioClip (child))
+            clips.add (child);
+
+    for (auto clip : clips)
+    {
+        const auto s = clipStart (clip), e = clipEnd (clip);
+        if (e <= start + timeEpsilon || s >= end - timeEpsilon)
+            continue;
+
+        const auto id = (int) clip[ids::id];
+        const auto keepLeft = s < start - half - timeEpsilon;
+        const auto keepRight = e > end + half + timeEpsilon;
+
+        if (! keepLeft && ! keepRight)
+        {
+            removeClip (id);
+            continue;
+        }
+
+        if (keepRight)
+        {
+            const auto rightStart = juce::jmax (s, end - half);
+            auto right = clip;
+            if (keepLeft)
+                right = getClip (splitClip (id, rightStart));
+            else
+                trimClipStart (id, rightStart);
+
+            if (right.isValid())
+                right.setProperty (ids::fadeIn, compFadeSeconds, undoTarget);
+        }
+
+        if (keepLeft)
+        {
+            trimClipEnd (id, juce::jmin (clipEnd (clip), start + half));
+            clip.setProperty (ids::fadeOut, compFadeSeconds, undoTarget);
+        }
+    }
+}
+
+void Edit::compTake (int takeId, double start, double end)
+{
+    const auto take = getTake (takeId);
+    if (! take.isValid() || end - start < minClipSeconds)
+        return;
+
+    auto track = take.getParent();
+    const auto half = compFadeSeconds * 0.5;
+    start = juce::jmax (0.0, start);
+
+    cutComp (track, start, end);
+
+    for (const auto& source : take)
+    {
+        if (! isAudioClip (source))
+            continue;
+
+        const auto s = clipStart (source), e = clipEnd (source);
+        const auto a = juce::jmax (s, start - half), b = juce::jmin (e, end + half);
+        if (b - a < minClipSeconds)
+            continue;
+
+        auto piece = source.createCopy();
+        renumber (piece);
+        piece.setProperty (ids::start, a, nullptr);
+        piece.setProperty (ids::offset, (double) source[ids::offset] + (a - s), nullptr);
+        piece.setProperty (ids::length, b - a, nullptr);
+        piece.setProperty (ids::fadeIn, a > s + timeEpsilon ? compFadeSeconds : (double) source.getProperty (ids::fadeIn, 0.0), nullptr);
+        piece.setProperty (ids::fadeOut, b < e - timeEpsilon ? compFadeSeconds : (double) source.getProperty (ids::fadeOut, 0.0), nullptr);
+        piece.setProperty (ids::take, takeId, nullptr);
+        track.appendChild (piece, undoTarget);
+    }
+}
+
+std::pair<double, double> Edit::compTakeAt (int takeId, double time)
+{
+    const auto take = getTake (takeId);
+    if (! take.isValid())
+        return {};
+
+    const auto track = take.getParent();
+    const auto half = compFadeSeconds * 0.5;
+
+    // The comp piece playing at `time` (in a crossfade, the one that started last).
+    juce::ValueTree piece;
+    for (const auto& clip : track)
+        if (isAudioClip (clip) && clipStart (clip) <= time && clipEnd (clip) > time
+              && (! piece.isValid() || clipStart (clip) > clipStart (piece)))
+            piece = clip;
+
+    double start = 0.0, end = 0.0;
+
+    if (piece.isValid())
+    {
+        // Its stretch between the crossfades' middles.
+        const auto isJoint = [] (const juce::var& fade) { return std::abs ((double) fade - compFadeSeconds) < 1.0e-4; };
+        start = clipStart (piece) + (isJoint (piece.getProperty (ids::fadeIn, 0.0)) ? half : 0.0);
+        end = clipEnd (piece) - (isJoint (piece.getProperty (ids::fadeOut, 0.0)) ? half : 0.0);
+    }
+    else
+    {
+        // A gap in the comp: the take's clip there, up to the comp's pieces either side.
+        juce::ValueTree source;
+        for (const auto& clip : take)
+            if (isAudioClip (clip) && clipStart (clip) <= time && clipEnd (clip) > time)
+                source = clip;
+        if (! source.isValid())
+            return {};
+
+        start = clipStart (source);
+        end = clipEnd (source);
+        for (const auto& clip : track)
+        {
+            if (! isAudioClip (clip))
+                continue;
+            if (clipEnd (clip) <= time)
+                start = juce::jmax (start, clipEnd (clip));
+            else if (clipStart (clip) >= time)
+                end = juce::jmin (end, clipStart (clip));
+        }
+    }
+
+    if (end - start < minClipSeconds)
+        return {};
+
+    compTake (takeId, start, end);
+    return { start, end };
+}
+
+juce::ValueTree Edit::addTakeFromClip (int clipId)
+{
+    auto clip = getClip (clipId);
+    auto track = clip.getParent();
+    if (! isAudioClip (clip) || ! track.hasType (ids::TRACK))
+        return {};
+
+    auto take = addTake ((int) track[ids::id]);
+    auto copy = clip.createCopy();
+    renumber (copy);
+    copy.removeProperty (ids::take, nullptr);
+    take.appendChild (copy, undoTarget);
+    clip.setProperty (ids::take, (int) take[ids::id], undoTarget);
+    return take;
+}
+
+void Edit::addRecording (int trackId, const juce::File& file, const std::vector<RecordedPass>& passes)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid() || isMidiTrack (track) || passes.empty())
+        return;
+
+    auto low = passes.front().start, high = low;
+    for (const auto& pass : passes)
+    {
+        low = juce::jmin (low, pass.start);
+        high = juce::jmax (high, pass.start + pass.length);
+    }
+
+    // What the track plays over the recorded stretch now.
+    juce::Array<juce::ValueTree> covered;
+    for (const auto& clip : track)
+        if (isAudioClip (clip) && juce::jmin (clipEnd (clip), high) - juce::jmax (clipStart (clip), low) > minClipSeconds)
+            covered.add (clip);
+
+    auto takes = getTakes (trackId);
+
+    if (passes.size() == 1 && takes.isEmpty() && covered.isEmpty())
+    {
+        addClip (trackId, file, passes.front().start, passes.front().length, passes.front().offset);
+        return;
+    }
+
+    // The first time, what was there becomes the first take, so it can still be picked.
+    if (takes.isEmpty() && ! covered.isEmpty())
+    {
+        auto first = addTake (trackId);
+        for (auto clip : covered)
+        {
+            auto copy = clip.createCopy();
+            renumber (copy);
+            copy.removeProperty (ids::take, nullptr);
+            first.appendChild (copy, undoTarget);
+            clip.setProperty (ids::take, (int) first[ids::id], undoTarget);
+        }
+    }
+
+    // Every pass is a take, and the comp plays them in order: the newest wins.
+    for (const auto& pass : passes)
+    {
+        auto take = addTake (trackId);
+        auto clip = addClip (trackId, file, pass.start, pass.length, pass.offset);
+        clip.setProperty (ids::name, take[ids::name], undoTarget);
+        track.removeChild (clip, undoTarget);
+        take.appendChild (clip, undoTarget);
+        compTake ((int) take[ids::id], pass.start, pass.start + pass.length);
+    }
+
+    setTakesShown (trackId, true);
 }
 
 double Edit::snapToGrid (double seconds, double beats) const

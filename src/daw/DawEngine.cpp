@@ -110,9 +110,15 @@ void DawEngine::rebuildNow()
 void DawEngine::loadAllNow()
 {
     for (const auto& track : edit.getTracks())
-        for (const auto& clip : track)
-            if (clip.hasType (ids::CLIP))
-                pool.loadNow (juce::File (clip[ids::file].toString()), Edit::getWarpSettings (clip));
+        for (const auto& child : track)
+        {
+            if (child.hasType (ids::CLIP))
+                pool.loadNow (juce::File (child[ids::file].toString()), Edit::getWarpSettings (child));
+            else if (child.hasType (ids::TAKE) && (int) child[ids::id] == Edit::getListenTake (track))
+                for (const auto& clip : child)
+                    if (clip.hasType (ids::CLIP))
+                        pool.loadNow (juce::File (clip[ids::file].toString()), Edit::getWarpSettings (clip));
+        }
 
     rebuildNow();
 }
@@ -258,7 +264,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         return;
     }
 
-    if (tree.hasType (ids::TRACK) && (property == ids::transpose || property == ids::ride || property == ids::output))
+    if (tree.hasType (ids::TRACK) && (property == ids::transpose || property == ids::ride || property == ids::output || property == ids::listenTake))
     {
         triggerAsyncUpdate(); // its clips play other rendered copies
         return;
@@ -511,7 +517,15 @@ void DawEngine::rebuild()
                 track.lanes.push_back (std::move (lane));
             }
 
-        for (const auto& clipTree : trackTree)
+        // Auditioning a take: its lane plays instead of the comp (live only: exports and
+        // Auto Mix always hear the comp).
+        auto clipSource = trackTree;
+        if (const auto listen = Edit::getListenTake (trackTree); listen >= 0 && realtime)
+            for (const auto& child : trackTree)
+                if (child.hasType (ids::TAKE) && (int) child[ids::id] == listen)
+                    clipSource = child;
+
+        for (const auto& clipTree : clipSource)
         {
             if (! clipTree.hasType (ids::CLIP) || Edit::isMidiClip (clipTree))
                 continue;
@@ -767,6 +781,10 @@ juce::String DawEngine::startRecording (const juce::File& folder)
     const auto start = position.load();
     recordStart = start;
 
+    // Loop recording: starting inside the loop with it on, playback wraps as usual and
+    // every pass becomes a take (audio only: MIDI takes run straight on).
+    loopRecording = armedAudio && ! armedMidi && loopOn.load() && start >= loopStart.load() && start < loopEnd.load();
+
     if (const auto bars = countInBars.load(); bars > 0)
     {
         countingIn = true;
@@ -905,25 +923,57 @@ Recorder::Take DawEngine::stopRecording()
         return take;
     }
 
+    const auto wasLooping = loopRecording.exchange (false);
+
     for (const auto& [input, recorded] : audioTakes)
     {
-        // Where the first sample was heard: the playhead minus the interface's round trip.
-        auto start = (double) (recorded.timelineStart - recordingLatency.load()) / sampleRate;
-        auto offset = 0.0;
-
-        if (start < 0.0)
-        {
-            offset = -start;
-            start = 0.0;
-        }
+        const auto passes = getRecordedPasses (recorded, wasLooping);
 
         for (const auto& track : edit.getTracks())
             if ((bool) track[ids::arm] && ! Edit::isMidiTrack (track) && Edit::getTrackInput (track) == input)
-                edit.addClip ((int) track[ids::id], recorded.file, start, recorded.seconds - offset, offset);
+                edit.addRecording ((int) track[ids::id], recorded.file, passes);
     }
 
     edit.getUndoManager().beginNewTransaction();
     return take;
+}
+
+std::vector<Edit::RecordedPass> DawEngine::getRecordedPasses (const Recorder::Take& recorded, bool looped) const
+{
+    // A sample recorded at playhead position p was sung to what was heard at p minus the
+    // interface's round trip, so it belongs there on the timeline.
+    const auto latency = recordingLatency.load();
+    const auto fileLength = (juce::int64) std::llround (recorded.seconds * sampleRate);
+    const auto toSeconds = [this] (juce::int64 samples) { return (double) samples / sampleRate; };
+
+    const auto pass = [&] (juce::int64 start, juce::int64 offset, juce::int64 length)
+    {
+        if (start < 0) // before the song's start: skip that part of the file
+        {
+            offset -= start;
+            length += start;
+            start = 0;
+        }
+        return Edit::RecordedPass { toSeconds (start), toSeconds (offset), toSeconds (juce::jmin (length, fileLength - offset)) };
+    };
+
+    const auto start = recorded.timelineStart;
+    const auto end = loopEnd.load(), loopLength = end - loopStart.load();
+
+    if (! looped || loopLength <= 0 || start >= end)
+        return { pass (start - latency, 0, fileLength) };
+
+    // The first pass runs from the record start to the loop end; each one after it from
+    // the loop start, one loop long, from where it continues in the file.
+    std::vector<Edit::RecordedPass> passes { pass (start - latency, 0, end - start + latency) };
+    const auto shortest = (juce::int64) std::llround (minLoopPassSeconds * sampleRate);
+
+    for (auto offset = end - start + latency; offset < fileLength; offset += loopLength)
+        if (const auto length = juce::jmin (loopLength, fileLength - offset); length >= shortest)
+            passes.push_back (pass (loopStart.load(), offset, length));
+
+    passes.erase (std::remove_if (passes.begin(), passes.end(), [] (const auto& p) { return p.length < Edit::minClipSeconds; }), passes.end());
+    return passes;
 }
 
 void DawEngine::renderClick (const TempoMap& tempo, juce::AudioBuffer<float>& output, int offset, int numChannels, int numSamples,
@@ -1429,7 +1479,7 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
         auto chunk = juce::jmin (active->blockSize, numSamples - done);
 
         // Looping: stop the chunk at the loop end, then jump back to the start.
-        const auto looping = loopOn.load() && playing.load() && ! isRecording();
+        const auto looping = loopOn.load() && playing.load() && (! isRecording() || loopRecording.load());
         const auto end = loopEnd.load();
 
         if (looping && position.load() == end)

@@ -7,6 +7,7 @@
 #include "Warp.h"
 
 #include <map>
+#include <utility>
 #include <optional>
 
 // The DAW session as a ValueTree, so every change can be undone and the whole thing
@@ -21,7 +22,8 @@
 //            kind ("midi" for MIDI tracks; audio when missing), mixRole (Auto Mix's tag:
 //            "voice", "drums"... see analysis::getRoleKey; missing when not tagged),
 //            ride (volume automation, see RidePoint; missing when none),
-//            output (the RETURN id the track plays into instead of the master; missing = master)
+//            output (the RETURN id the track plays into instead of the master; missing = master),
+//            takesShown (its take lanes are unfolded), listenTake (a TAKE id heard instead of the comp)
 //       INSERTS ...
 //       SEND  id, target (a RETURN's id), level (dB), pre (true = before the fader)
 //       INSTRUMENT  id, plugin, name, format, vendor, description, state   (MIDI tracks)
@@ -29,8 +31,11 @@
 //             transpose (semitones), warp (warp::Map as text),
 //             stretch (warp::Algorithm key; mix when missing), formant (keep formants),
 //             musical (follows the tempo map), clipTempo (the file's own tempo, BPM)
+//             take (the TAKE this piece of the comp came from; missing when none)
 //       CLIP  kind "midi", id, name, start, offset, length, mute          (MIDI clips)
 //         NOTE  id, pitch (0..127), time, length, velocity (1..127)
+//       TAKE  id, name                    (take lanes, see "Takes and comping" below)
+//         CLIP ...
 //     RETURN  id, name, colour, volume, pan, mute, solo, inGain, outGain
 //       INSERTS ...
 //
@@ -85,6 +90,7 @@ namespace ids
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
     MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight)
+    MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
 #undef MICFX_DAW_ID
 }
 
@@ -332,6 +338,55 @@ public:
     // clip's start), each with short fades. For strip silence. Returns the new clip ids.
     juce::Array<int> keepClipParts (int clipId, const std::vector<std::pair<double, double>>& parts, double fadeSeconds = 0.01);
 
+    //==============================================================================
+    // Takes and comping. An audio track's TAKEs are lanes under it holding the
+    // recordings made over the same stretch of the song (each pass of a loop recording,
+    // or recording again over a part). They don't play: the track plays its own clips,
+    // the comp, made of pieces copied from the takes (each piece's `take` says which).
+    // Comping a range from a take replaces whatever the track plays there with that
+    // take's audio. Take clips are never edited in place; the comp's pieces are ordinary
+    // clips (move, trim, fade them as any other).
+    //
+    // `listenTake` makes the track play one take instead of its comp, to audition it.
+    // It and `takesShown` are view settings: they don't go into the undo history.
+    juce::Array<juce::ValueTree> getTakes (int trackId) const;
+    juce::ValueTree getTake (int takeId) const;
+    static juce::ValueTree getOwnerTrack (const juce::ValueTree& clipOrTake); // the TRACK a clip or take is on
+
+    // A new empty take lane at the bottom (named "Take N" when no name is given).
+    juce::ValueTree addTake (int trackId, const juce::String& name = {});
+    void removeTake (int takeId);    // the comp keeps the pieces it took from it
+    void setTakeName (int takeId, const juce::String&);
+
+    // What one recording (or one loop pass) put on a track: seconds on the timeline, and
+    // where in the file it starts.
+    struct RecordedPass { double start = 0.0, offset = 0.0, length = 0.0; };
+
+    // Adds a recording to an audio track. On an empty stretch of a track without takes
+    // it's a plain clip, as before. Over audio already there (or with several loop
+    // passes, or on a track that has takes) every pass becomes a new take, what was
+    // there becomes the first take (once), and the comp plays the newest passes.
+    void addRecording (int trackId, const juce::File&, const std::vector<RecordedPass>&);
+
+    // Comps a range (seconds on the timeline) from a take: the track's clips there are
+    // cut away and the take's audio in the range copied in. Its pieces get short fades
+    // where they meet the rest of the comp.
+    static constexpr double compFadeSeconds = 0.008;
+    void compTake (int takeId, double start, double end);
+
+    // Comps from the take the stretch of the comp at `time` (the comp piece there; in a
+    // gap, the take's clip there between the comp's neighbouring pieces). Returns the
+    // range comped, or an empty range when there's nothing to take.
+    std::pair<double, double> compTakeAt (int takeId, double time);
+
+    // A copy of a comp clip (or any clip on the track) as a new take lane, e.g. to keep
+    // a part before recording over it. Returns the new take.
+    juce::ValueTree addTakeFromClip (int clipId);
+
+    void setTakesShown (int trackId, bool);
+    void setListenTake (int trackId, int takeIdOrNone); // -1: the comp
+    static int getListenTake (const juce::ValueTree& track);
+
     // The nearest grid line on the tempo map, `beats` apart (1 = quarter notes,
     // 4 = bars in 4/4, 0.5 = eighths).
     double snapToGrid (double seconds, double beats) const;
@@ -369,6 +424,9 @@ private:
     // A musical clip placed by beats: its file's start at anchorBeat, its window from
     // startBeat to endBeat.
     void placeByBeats (juce::ValueTree& clip, const TempoMap&, double anchorBeat, double startBeat, double endBeat);
+    // Cuts the comp (a track's own audio clips) away between two times, leaving half a
+    // comp fade either side for the piece that goes in to crossfade with.
+    void cutComp (juce::ValueTree track, double start, double end);
     void renumber (juce::ValueTree&); // fresh ids for a copied tree and everything in it
     juce::ValueTree findById (const juce::Identifier& type, int id) const;
     juce::ValueTree getTrackOrMaster (int trackId) const { return getChannel (trackId); }
