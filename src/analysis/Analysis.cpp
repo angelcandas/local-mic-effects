@@ -1,6 +1,9 @@
 #include "Analysis.h"
 
 #include "daw/DawEngine.h"
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include "daw/Edit.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -523,8 +526,9 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress)
         if (child.hasType (daw::ids::TRACK) && includeTracks)
             tracks.add (child);
 
-    const auto steps = (double) (tracks.size() + (includeMix ? 1 : 0));
-
+    // One render per track (and one for the mix), each on its own offline engine, as
+    // fast as the computer goes: they run side by side on the CPU's cores.
+    std::vector<juce::ValueTree> sessions;
     for (int t = 0; t < tracks.size(); ++t)
     {
         // This track alone (so other tracks' inserts don't add latency compensation),
@@ -560,19 +564,62 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress)
             }
         }
 
-        auto profile = render (session, progress, t / steps, (t + 1) / steps, result.cancelled);
-        if (result.cancelled)
-            return result;
-
-        result.tracks.emplace_back (id, std::move (profile));
+        sessions.push_back (session);
     }
-
     if (includeMix)
+        sessions.push_back (snapshot.createCopy());
+
+    const auto jobs = sessions.size();
+    std::vector<Profile> profiles (jobs);
+    std::vector<std::atomic<double>> done (jobs);
+    for (auto& d : done) d = 0.0;
+    std::atomic<bool> cancelled { false };
+    std::atomic<size_t> next { 0 };
+    std::mutex reporting;
+
+    const auto report = [&] (size_t job, double fraction)
     {
-        auto profile = render (snapshot, progress, tracks.size() / steps, 1.0, result.cancelled);
-        if (! result.cancelled)
-            result.mix = std::move (profile);
+        done[job] = fraction;
+        if (! progress)
+            return ! cancelled.load();
+
+        const std::scoped_lock lock (reporting); // the caller's callback, one thread at a time
+        double sum = 0.0;
+        for (const auto& d : done) sum += d.load();
+        if (! progress (sum / (double) juce::jmax ((size_t) 1, jobs)))
+            cancelled = true;
+        return ! cancelled.load();
+    };
+
+    const auto work = [&]
+    {
+        for (size_t job; (job = next++) < jobs && ! cancelled.load();)
+        {
+            bool stopped = false;
+            profiles[job] = render (sessions[job], [&report, job] (double p) { return report (job, p); }, 0.0, 1.0, stopped);
+            if (stopped)
+                cancelled = true;
+        }
+    };
+
+    const auto threads = (size_t) juce::jlimit (1, maxThreads, juce::jmin ((int) jobs, (int) std::thread::hardware_concurrency() - 1));
+    std::vector<std::thread> pool;
+    for (size_t i = 1; i < threads; ++i)
+        pool.emplace_back (work);
+    work();
+    for (auto& thread : pool)
+        thread.join();
+
+    if (cancelled.load())
+    {
+        result.cancelled = true;
+        return result;
     }
+
+    for (int t = 0; t < tracks.size(); ++t)
+        result.tracks.emplace_back ((int) tracks[t][daw::ids::id], std::move (profiles[(size_t) t]));
+    if (includeMix)
+        result.mix = std::move (profiles.back());
 
     return result;
 }

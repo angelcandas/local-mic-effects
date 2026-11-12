@@ -172,8 +172,10 @@ public:
     // Message thread: takes a snapshot of the session.
     SessionAnalyser (daw::Edit&, Point, bool includeMix, double sampleRate = 48000.0, bool includeTracks = true);
 
-    // Any thread.
+    // Any thread. The renders run side by side, up to maxThreads at once (offline,
+    // faster than real time); `progress` is called from them one at a time.
     Result run (Progress = {});
+    static constexpr int maxThreads = 8;
 
 private:
     Profile render (const juce::ValueTree& session, const Progress&, double from, double to, bool& cancelled);

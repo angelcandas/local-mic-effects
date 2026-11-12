@@ -1149,6 +1149,45 @@ namespace
         folder.deleteRecursively();
     }
 
+    // Auto Mix listens offline: every track renders on its own engine, side by side, far
+    // faster than playing the song.
+    void testAnalysisSpeed()
+    {
+        std::cout << "\nAuto Mix analysis speed\n";
+        const auto folder = juce::File::createTempFile ("micfx-speed");
+        folder.createDirectory();
+        const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav");
+        writeWav (voiceFile, makeSungLine (30.0), sampleRate);
+        writeWav (backingFile, makeBacking (30.0), sampleRate);
+
+        daw::Edit edit;
+        std::vector<int> ids;
+        for (int t = 0; t < 6; ++t)
+        {
+            const auto id = (int) edit.addTrack ("Track " + juce::String (t + 1))[daw::ids::id];
+            edit.addClip (id, t % 2 == 0 ? voiceFile : backingFile, 0.0, 30.0);
+            ids.push_back (id);
+        }
+
+        const auto started = juce::Time::getMillisecondCounterHiRes();
+        double lastProgress = 0.0;
+        bool monotonic = true;
+        const auto result = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, true)
+                                .run ([&] (double p) { monotonic = monotonic && p >= lastProgress - 1.0e-9; lastProgress = p; return true; });
+        const auto seconds = (juce::Time::getMillisecondCounterHiRes() - started) / 1000.0;
+
+        bool inOrder = result.tracks.size() == ids.size() && result.mix.has_value();
+        for (size_t t = 0; inOrder && t < ids.size(); ++t)
+            inOrder = result.tracks[t].first == ids[t] && result.tracks[t].second.getNumFrames() >= 299
+                   && std::abs (result.tracks[t].second.integratedLufs - result.tracks[t % 2].second.integratedLufs) < 0.01f;
+        check (inOrder, "6 tracks and the mix, in track order, the same results side by side");
+        check (monotonic && std::abs (lastProgress - 1.0) < 1.0e-6, "progress only goes up, to 100%");
+        std::cout << "        6 tracks x 30 s + mix in " << juce::String (seconds, 2) << " s ("
+                  << juce::String (7.0 * 30.0 / juce::jmax (0.001, seconds), 0) << "x real time per track, "
+                  << (int) std::thread::hardware_concurrency() << " cores, this build)\n";
+        folder.deleteRecursively();
+    }
+
     // Volume automation: the Edit's ride, the engine playing it, and Auto Mix writing
     // a vocal ride and a dip on the backing while the voice sings.
     void testAutoMixRides()
@@ -4527,6 +4566,7 @@ int main()
     testAutoMixEffects();
     testAutoMixRoles();
     testAutoMixRides();
+    testAnalysisSpeed();
     testLatency();
     testSmoothing();
     testStems();
