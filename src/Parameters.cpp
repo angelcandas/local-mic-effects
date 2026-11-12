@@ -241,4 +241,9 @@ Parameters::Parameters (Layout& l)
 
     toggle (l, "loudOn", "Loudness Meter On");
     number (l, "loudTarget", "Loudness Target", -24.0f, -6.0f, 0.5f, -14.0f, "LUFS");
+
+    // The compressor's timing and makeup, added later still (same reason).
+    number (l, "compAttack", "Comp Attack", 0.5f, 100.0f, 0.1f, 10.0f, "ms", 10.0f);
+    number (l, "compRelease", "Comp Release", 10.0f, 1000.0f, 1.0f, 120.0f, "ms", 120.0f);
+    decibels (l, "compMakeup", "Comp Makeup", 0.0f, 24.0f, 0.0f);
 }

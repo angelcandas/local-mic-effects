@@ -1576,6 +1576,26 @@ namespace
                "the voice and the guitar send to the shared reverb, the bass stays dry, no reverb inserts, the room is set");
         check (sends.count (guitar) > 0 && sends[guitar] < sends[voice], "the guitar sends less than the voice (further back)");
 
+        // Compressor timing by role: the voice fast, the bass slow.
+        float voiceAttack = 0.0f, bassAttack = 0.0f;
+        for (const auto& move : plan.moves)
+            if (move.insert == fx::ModuleType::compressor && move.values.count ("compAttack") > 0)
+                (move.trackId == voice ? voiceAttack : move.trackId == bass ? bassAttack : voiceAttack) = move.values.at ("compAttack");
+        check (juce::approximatelyEqual (voiceAttack, 8.0f) && juce::approximatelyEqual (bassAttack, 20.0f),
+               "compressor timing: voice attack 8 ms, bass 20 ms");
+        {
+            fx::modules::Compressor compressor;
+            compressor.findValue ("compMakeup")->store (6.0f);
+            compressor.findValue ("compThreshold")->store (0.0f);
+            compressor.prepare ({ 48000.0, 512, 2 });
+            juce::AudioBuffer<float> buffer (2, 512);
+            buffer.clear();
+            for (int i = 0; i < 512; ++i) buffer.setSample (0, i, 0.1f), buffer.setSample (1, i, 0.1f);
+            juce::dsp::AudioBlock<float> block (buffer);
+            compressor.process (fx::Module::Context (block));
+            check (std::abs (buffer.getSample (0, 511) / 0.1f - 2.0f) < 0.05f, "compressor makeup: +6 dB doubles the level");
+        }
+
         analysis::applyMix (edit, plan);
         const auto sent = daw::Edit::getSend (edit.getTrack (voice), reverb);
         check (sent.isValid() && std::abs ((float) sent[daw::ids::level] - sends[voice]) < 0.01f,

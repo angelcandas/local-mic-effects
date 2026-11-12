@@ -188,6 +188,23 @@ namespace
         return powerToDb (after) - powerToDb (before);
     }
 
+    // The compressor's timing by what it's on: fast enough to hold a voice's phrases,
+    // slow enough on drums to let the hits through, slow on a bass so it doesn't distort.
+    void setCompressorTiming (MixMove& move, std::optional<Role> role)
+    {
+        if (move.values.empty())
+            return;
+        float attack = 8.0f, release = 120.0f;
+        juce::String why = "catches the start of each phrase, lets go between words";
+        if (role == Role::drums)        { attack = 25.0f; release = 100.0f; why = "lets each hit's attack through, then holds the ring"; }
+        else if (role == Role::bass)    { attack = 20.0f; release = 200.0f; why = "slow enough not to distort the low notes"; }
+        else if (role.has_value())      { attack = 15.0f; release = 150.0f; why = "keeps the pick or key attack, evens the notes out"; }
+        move.values["compAttack"] = attack;
+        move.values["compRelease"] = release;
+        move.values["compMakeup"] = 0.0f; // the level is set by the fader
+        move.reasons.add ("Attack " + juce::String (attack, 0) + " ms, release " + juce::String (release, 0) + " ms: " + why);
+    }
+
     // How long a voice takes to die away by 20 dB after its notes stop (median, seconds),
     // or nothing when there are too few clear note ends to tell. A close, dry recording
     // stops within a hop; one made in a room, or with reverb already on it, rings on.
@@ -642,6 +659,7 @@ namespace
         {
             plan.compressor.trackId = trackId;
             compChange = planCompressor (plan.compressor, voice, eqChange, false, plan.peakChange);
+            setCompressorTiming (plan.compressor, std::nullopt);
         }
 
         // Character the style asks for: saturation (warmth or grit, mixed in), and air from
@@ -1006,6 +1024,7 @@ namespace
                 compressor.trackId = id;
                 double peakChange = 0.0;
                 planCompressor (compressor, profile, eqChange, true, peakChange, shape.compSpread, shape.alwaysComp);
+                setCompressorTiming (compressor, role);
                 if (! compressor.values.empty())
                     plan.moves.push_back (compressor);
             }
@@ -1670,6 +1689,7 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             compressor.trackId = id;
             double peakChange = 0.0;
             const auto compChange = planCompressor (compressor, profile, eqChange, true, peakChange, shape.compSpread, shape.alwaysComp);
+            setCompressorTiming (compressor, role);
             if (! compressor.values.empty())
             {
                 plan.moves.push_back (compressor);
@@ -1728,6 +1748,7 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             MixMove compressor;
             compressor.trackId = focus;
             focusInstrumentChange += planCompressor (compressor, profile, eqChange, true, focusInstrumentPeakChange, shape.compSpread, shape.alwaysComp);
+            setCompressorTiming (compressor, focusRole);
             if (! compressor.values.empty())
                 plan.moves.push_back (compressor);
         }

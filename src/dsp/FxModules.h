@@ -206,14 +206,12 @@ public:
     Value& on        = addSwitch ("compOn", true);
     Value& threshold = addValue ("compThreshold", -18.0f);
     Value& ratio     = addValue ("compRatio", 3.0f);
+    Value& attack    = addValue ("compAttack", 10.0f);  // ms
+    Value& release   = addValue ("compRelease", 120.0f); // ms
+    Value& makeup    = addValue ("compMakeup", 0.0f);    // dB
 
 private:
-    void prepareModule (const juce::dsp::ProcessSpec& spec) override
-    {
-        compressor.prepare (spec);
-        compressor.setAttack (10.0f);
-        compressor.setRelease (120.0f);
-    }
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override { compressor.prepare (spec); }
 
     void resetModule() override { compressor.reset(); }
 
@@ -221,11 +219,20 @@ private:
     {
         compressor.setThreshold (get (threshold));
         compressor.setRatio (get (ratio));
+        compressor.setAttack (juce::jmax (0.1f, get (attack)));
+        compressor.setRelease (juce::jmax (1.0f, get (release)));
+        makeupGain = juce::Decibels::decibelsToGain (get (makeup));
     }
 
-    void render (const Context& c) noexcept override { compressor.process (c); }
+    void render (const Context& c) noexcept override
+    {
+        compressor.process (c);
+        if (makeupGain != 1.0f)
+            c.getOutputBlock().multiplyBy (makeupGain);
+    }
 
     juce::dsp::Compressor<float> compressor;
+    float makeupGain = 1.0f;
 };
 
 class DeEsser final : public Module
