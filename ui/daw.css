@@ -1032,7 +1032,8 @@ body.is-daw .chip--live { display: none; }
 .clip-tool-row { display: flex; gap: 5px; }
 .clip-tool-row > * { flex: 1 1 0; min-width: 0; height: 26px; padding: 0 6px; font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .daw .clip-tool-row select.strip-threshold { width: auto; height: 26px; padding-left: 8px; font-size: 11px; }
-.clip-tool-row:nth-child(2) > * { flex-basis: auto; } /* four buttons: size to their labels */
+.inspector .clip-panel:not(.is-empty) { width: 250px; }
+.clip-tool-row:first-child > * { flex-basis: auto; } /* four buttons: size to their labels */
 .fit-button { height: 24px; padding: 0 8px; font-size: 11px; }
 
 /* ---------- Tracks and mixer extras ---------- */
@@ -1449,7 +1450,49 @@ body.library-dragging * { cursor: grabbing !important; }
 .warp-marker.is-dragging { border-left-style: dashed; }
 .hitpoint { position: absolute; top: 14px; bottom: 0; z-index: 1; width: 0; border-left: 1px solid rgba(255, 255, 255, 0.55); pointer-events: none; }
 .clip.is-warped .clip-name::after { content: "  \21C4"; opacity: 0.7; }
-.daw-arrange[data-tool="warp"] .clip, [data-tool="warp"] .clip { cursor: ew-resize; }
+
+/* The clip editor: an audio clip's waveform for pitch and warping (rhythm.js). */
+.inspector .clip-editor {
+  flex: 1 0 560px;
+  align-self: stretch;
+  gap: 12px;
+  min-width: 560px;
+  padding: 8px 10px 10px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: linear-gradient(180deg, var(--panel-raised), var(--panel));
+}
+.clip-editor .knob { --cat: var(--accent-2); }
+.clip-editor-side { display: flex; flex: none; flex-direction: column; gap: 6px; width: 180px; min-height: 0; overflow-y: auto; }
+.clip-editor-side .rhythm-algorithm-row { margin-top: 0; }
+.rhythm-key-info, .rhythm-algorithm-info { margin: 0; line-height: 1.35; }
+.clip-editor-main { display: flex; flex: 1; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; }
+.clip-editor-bar { display: flex; flex: none; align-items: center; gap: 6px; }
+.clip-editor-bar > .tool { height: 26px; padding: 0 10px; font-size: 11px; }
+.clip-editor-bar .rhythm-check { white-space: nowrap; }
+.clip-editor-bar [hidden] { display: none; }
+.clip-editor-bar .tempo { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
+.clip-editor-bar .rhythm-clip-tempo { width: 64px; }
+.clip-editor-bar .rhythm-clip-tempo:disabled { opacity: 0.45; }
+.clip-editor-status { margin-left: auto; color: var(--muted); font-size: 11px; }
+.clip-editor-status.is-busy { color: var(--accent-2); }
+.clip-editor-wave {
+  position: relative;
+  flex: 1;
+  min-height: 80px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  cursor: ew-resize;
+  touch-action: none;
+}
+.clip-editor-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.clip-editor-overlay { position: absolute; inset: 0; pointer-events: none; }
+.clip-editor-overlay .warp-marker { border-left-width: 2px; }
+.clip-editor-hint { flex: none; margin: 0; }
+.rhythm-grid-row { margin-top: 0; }
+.rhythm-grid-row .dropdown { flex: 1 1 0; min-width: 0; }
 
 /* ---------- Floating keyboard piano ---------- */
 

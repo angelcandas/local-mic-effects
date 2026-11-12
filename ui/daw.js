@@ -11,7 +11,7 @@ import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
 import { decorateAiPanels } from "./aiviews.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
-import { createRhythmPanel, drawHitpoints, drawWarpMarkers, savedQuantizeArgs, startWarpDrag } from "./rhythm.js";
+import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
@@ -1569,8 +1569,7 @@ class DawScreen {
     this.tools = html("div", "segmented tools");
     for (const [tool, text, title] of [["select", "Select", "Select tool: move, trim and fade clips (V)"],
                                        ["cut", "Cut", "Cut tool: click a clip to split it there (B)"],
-                                       ["gain", "Gain", "Gain tool: drag a clip up or down to change its gain (G)"],
-                                       ["warp", "Warp", "Warp tool: drag inside a clip to stretch its timing; double-click a marker to remove it (W)"]]) {
+                                       ["gain", "Gain", "Gain tool: drag a clip up or down to change its gain (G)"]]) {
       const b = iconButton("", tool, title, () => this.setTool(tool));
       b.dataset.tool = tool;
       this.tools.append(b);
@@ -2019,9 +2018,7 @@ class DawScreen {
   }
 
   setTool(tool) {
-    const hitpoints = (tool === "warp") !== (this.tool === "warp"); // the warp tool shows note starts
     this.tool = tool;
-    if (hitpoints && this.session) this.renderArrange(true);
     this.arrange.dataset.tool = tool;
     this.cutGuide.hidden = true;
     this.renderTransport();
@@ -2777,7 +2774,8 @@ class DawScreen {
     element.classList.toggle("is-missing", clip.missing);
     element.classList.toggle("is-muted", Boolean(clip.mute));
     element.classList.toggle("is-midi", Boolean(clip.midi));
-    if (clip.midi) element.addEventListener("dblclick", () => { this.select(track.id, clip.id); this.setDockTab("track"); this.setDock(true); this.pianoRoll?.element.focus(); });
+    // Double-click: the clip's editor on the Track tab (notes, or pitch and timing).
+    element.addEventListener("dblclick", () => { this.select(track.id, clip.id); this.openClipEditor(); });
     element.title = clip.midi ? `${clip.name} (${clip.notes.length} notes)\nDouble-click to edit the notes · Drag to move · Edges to trim` : clip.missing ? `Missing file: ${clip.file}` : `${clip.name}\nDrag to move · Edges to trim · Corners to fade · S splits at the playhead`;
 
     const place = (start, length) => {
@@ -2822,7 +2820,6 @@ class DawScreen {
 
     if (!kept) this.drawWaveform(canvas);
     if (!clip.midi) drawWarpMarkers(element, clip, this.zoom);
-    if (!clip.midi && this.tool === "warp") drawHitpoints(element, clip, this.zoom, daw);
     element.classList.toggle("is-warped", Boolean(clip.warp?.length) || Math.abs(clip.transpose || 0) > 1e-4);
 
     element.addEventListener("contextmenu", (event) => {
@@ -2841,11 +2838,6 @@ class DawScreen {
         return this.toggleClipInSelection(track, clip);
       }
       this.select(track.id, clip.id, false);
-
-      if (this.tool === "warp" && !clip.midi) {
-        startWarpDrag(this, event, clip, element, daw);
-        return;
-      }
 
       if (this.tool === "cut") {
         const box = this.inner.getBoundingClientRect();
@@ -3616,6 +3608,15 @@ class DawScreen {
     } catch { /* not kept */ }
   }
 
+  // Shows the selected clip's editor: the piano roll, or the audio clip's pitch and timing.
+  openClipEditor() {
+    const found = this.findClip(this.selectedClip);
+    if (!found) return toast("Select a clip first.");
+    this.setDockTab("track");
+    this.setDock(true);
+    if (found.clip.midi) this.pianoRoll?.element.focus();
+  }
+
   // Picks the bottom panel's tab: "effects", "track" or "mixer".
   setDockTab(tab, save = true) {
     if (tab === this.dockTab) return;
@@ -3827,21 +3828,31 @@ class DawScreen {
       this.inspectorKey = key;
       this.inspector.replaceChildren();
       this.clipPanel?.dispose?.();
-      this.clipPanel = this.rhythmPanel = null;
+      this.clipEditor?.dispose?.();
+      this.clipPanel = this.rhythmPanel = this.clipEditor = null;
       this.rack = null;
       this.chainGains = null;
       if (onTrackTab) {
+        // An audio clip: its card, then its editor (waveform, pitch, warping), then the
+        // track's Pitch & time. A MIDI clip: the piano roll.
+        const shared = { daw, peaks: (args) => nativeDaw("peaks", args), ValueKnob, button, toast: (...a) => toast(...a) };
         this.clipPanel = !found ? null : found.clip.midi ? this.createPianoRoll(found.clip, found.track) : this.createClipPanel(found.clip);
         this.inspector.append(this.clipPanel?.element ?? this.createNoClipPanel(owner));
+        if (found && !found.clip.midi) {
+          this.clipEditor = createClipEditor(this, found.track, found.clip, shared);
+          this.clipEditor.element.style.setProperty("--wave", trackColour(found.track, session.tracks.indexOf(found.track)));
+          this.inspector.append(this.clipEditor.element);
+        }
         this.rhythmPanel = owner && owner.id !== 0 && !owner.isReturn && owner.kind !== "midi" // audio quantize/warp only
-          ? createRhythmPanel(this, owner, found?.clip ?? null, { daw, ValueKnob, button, toast: (...a) => toast(...a) }) : null;
+          ? createRhythmPanel(this, owner, shared) : null;
         if (this.rhythmPanel) this.inspector.append(this.rhythmPanel.element);
       } else if (owner) {
         this.inspector.append(this.createTrackPanel(owner));
       }
     }
 
-    if (this.rhythmPanel && owner) this.rhythmPanel.update(owner, found?.clip ?? null);
+    if (this.rhythmPanel && owner) this.rhythmPanel.update(owner);
+    if (this.clipEditor && found) this.clipEditor.update(found.track, found.clip);
 
     if (found && this.clipPanel) this.clipPanel.update(found.clip, found.track);
     if (owner) this.rack?.update(owner);
@@ -3862,7 +3873,7 @@ class DawScreen {
       owner?.id === 0 ? "The master has no clips. Select a clip on a track to edit it here."
       : owner?.isReturn ? "A return track has no clips: tracks send to it. Select a clip on a track to edit it here."
       : owner?.kind === "midi" ? "Select a MIDI clip to edit its notes here, or double-click the lane for a new one."
-      : "Select a clip to change its gain and fades, split, loop or strip silence."));
+      : "Select a clip to change its gain and fades, and to edit its pitch and timing. Double-click a clip to open it here."));
     return element;
   }
 
@@ -3909,18 +3920,16 @@ class DawScreen {
 
     const muteButton = button("toggle", "Mute", "Silence this clip without deleting it (Shift+M)", () => this.run("muteClip"));
 
-    // All clip controls sit in one compact column: name, knobs, then three rows of buttons.
+    // The clip card stays small: name, knobs and the everyday edits. Loop, zoom, takes and
+    // the audio processes are on the clip's right-click menu (and their shortcuts).
     const toolRow = (...items) => { const r = html("div", "clip-tool-row"); r.append(...items); return r; };
     const tools = html("div", "clip-tools");
     tools.append(
-      toolRow(button("tool", "Split", "Split at the playhead (Ctrl+E)", () => this.splitSelected()),
+      toolRow(muteButton,
+              button("tool", "Split", "Split at the playhead (Ctrl+E)", () => this.splitSelected()),
               button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
               button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected())),
-      toolRow(muteButton,
-              button("tool", "Loop clip", "Loop the clip's range (Ctrl+L)", () => this.run("loopClip")),
-              button("tool", "Zoom to clip", "Fit the clip in the view (Z)", () => this.run("zoomClip"))),
-      ...(clip.midi ? [] : [toolRow(button("tool", "Keep as a take", "Copy this clip into a new take lane, so you can record over it and still pick parts of it", () => daw("takes", { action: "fromClip", clip: id })))]),
-      html("p", "clip-tools-hint", "Normalise, Strip silence and Split into stems change the audio itself: they are in the Audio menu and on the clip's right-click menu."));
+      html("p", "clip-tools-hint", "More on the clip's right-click menu."));
     element.append(head, row, tools);
 
     return { element, update: (c) => {
@@ -4839,7 +4848,7 @@ class DawScreen {
                ["Ctrl+A", "Select every clip"], [", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
-               ["V / B / G / W", "Select, cut, gain and warp tools"], ["Shift+M", "Mute / unmute the selected clip"],
+               ["V / B / G", "Select, cut and gain tools"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Ctrl+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
     ["File", [["Ctrl+N", "New project"], ["Ctrl+O", "Open a project"], ["Ctrl+S", "Save (Shift: save as)"],
               ["Ctrl+I", "Import audio"], ["Ctrl+Shift+R / Ctrl+B", "Export (bounce)"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"]]],
@@ -5246,6 +5255,8 @@ class DawScreen {
       item("Loop the clip", () => this.run("loopClip"), { shortcut: "Ctrl+L" });
       item("Zoom to the clip", () => this.run("zoomClip"), { shortcut: "Z" });
       if (audio) {
+        item("Edit pitch and timing", () => this.openClipEditor(), { shortcut: "W", hint: "The clip's waveform on the Track tab: transpose it, drag notes in time" });
+        item("Keep as a take", () => daw("takes", { action: "fromClip", clip: clip.id }), { hint: "Copy this clip into a new take lane, so you can record over it and still pick parts of it" });
         heading("Audio");
         for (const [label, command, hint] of AUDIO_PROCESSES)
           item(label, () => this.run(command), { hint, indent: true });
@@ -5537,7 +5548,7 @@ class DawScreen {
     else if (key === "v") { handled(); this.setTool("select"); }
     else if (key === "b") { handled(); this.setTool("cut"); }
     else if (key === "g") { handled(); this.setTool("gain"); }
-    else if (key === "w") { handled(); this.setTool("warp"); }
+    else if (key === "w") { handled(); this.openClipEditor(); }
     else if (key === "e") command("toggleDock");
   }
 }

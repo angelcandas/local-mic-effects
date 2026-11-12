@@ -5439,6 +5439,24 @@ namespace
         edit.setClipTranspose (clip, -5.0);
         out = play();
         check (std::abs (measureFrequency (out, 0.3, 1.7) - 440.0) < 2.0, "clip and track transposes add up");
+
+        // Dragging a transpose knob asks for a new copy at every step: renders nobody wants
+        // any more are dropped, so the last one isn't queued behind them.
+        {
+            auto& pool = engine.getAudioPool();
+            daw::warp::Settings first, second;
+            first.semitones = 3.0;
+            second.semitones = 4.0;
+            const auto firstAsked = pool.get (file, first) == nullptr;
+            const auto secondAsked = pool.get (file, second) == nullptr;
+            pool.releaseUnusedWarps ({ daw::AudioPool::getWarpKey (file, second) });
+            for (int i = 0; i < 1000 && pool.isLoading(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+            check (firstAsked && secondAsked && pool.get (file, second) != nullptr, "the copy still wanted arrives");
+            check (pool.get (file, first) == nullptr, "a render dropped for newer settings isn't kept (it starts again if asked for)");
+            for (int i = 0; i < 1000 && pool.isLoading(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+        }
         check (file.getSize() == before, "the recording itself is never changed");
 
         edit.setClipWarp (clip, Map ({ { 0.0, 0.0 }, { 0.5, 1.0 } }));

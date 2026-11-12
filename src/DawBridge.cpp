@@ -309,6 +309,7 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
 
 DawBridge::~DawBridge()
 {
+    *alive = false;
     edit.getState().removeListener (this);
     processor.getPluginHost().onScanFinished = nullptr;
     instrumentWindows.clear();
@@ -2551,10 +2552,26 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     // Note starts in a clip (args.id), in its rendered copy's time: [[time, strength], ...].
     if (command == "hitpoints")
     {
-        juce::Array<juce::var> list;
-        for (const auto& onset : daw::rhythm::findHitpoints (edit, engine.getAudioPool(), id, juce::jlimit (0.0f, 1.0f, arg (args, "sensitivity", 0.5f))))
-            list.add (juce::Array<juce::var> { onset.time, onset.strength });
-        complete (object ({ { "ok", true }, { "hits", list } }));
+        // Analysed off the message thread: a long take takes a moment, and the page waits.
+        auto find = daw::rhythm::prepareHitpoints (edit, engine.getAudioPool(), id, juce::jlimit (0.0f, 1.0f, arg (args, "sensitivity", 0.5f)));
+        if (! find)
+        {
+            complete (object ({ { "ok", true }, { "hits", juce::Array<juce::var>() } }));
+            return;
+        }
+        juce::Thread::launch ([find = std::move (find), complete, weak = std::weak_ptr<bool> (alive)]
+        {
+            auto hits = std::make_shared<std::vector<analysis::rhythm::Onset>> (find());
+            juce::MessageManager::callAsync ([hits, complete, weak]
+            {
+                if (auto flag = weak.lock(); flag == nullptr || ! *flag)
+                    return;
+                juce::Array<juce::var> list;
+                for (const auto& onset : *hits)
+                    list.add (juce::Array<juce::var> { onset.time, onset.strength });
+                complete (object ({ { "ok", true }, { "hits", list } }));
+            });
+        });
         return;
     }
 

@@ -24,6 +24,9 @@ void AudioPool::setSampleRate (double newRate)
     warps.clear();
     warpOrder.clear();
     warpsPending.clear(); // decodes still running are discarded when they finish (rate mismatch)
+    for (auto& [key, flag] : warpJobs)
+        flag->store (true);
+    warpJobs.clear();
 }
 
 AudioPool::Audio AudioPool::get (const juce::File& file)
@@ -87,22 +90,29 @@ AudioPool::Audio AudioPool::get (const juce::File& file, const warp::Settings& s
         return {}; // the decode's onLoaded brings us back here
 
     warpsPending.insert (key);
+    const auto cancel = std::make_shared<std::atomic<bool>> (false);
+    warpJobs[key] = cancel;
     const auto rate = sampleRate;
 
-    loader.addJob ([this, source, settings, key, rate, weak = std::weak_ptr<bool> (alive)]
+    loader.addJob ([this, source, settings, key, rate, cancel, weak = std::weak_ptr<bool> (alive)]
     {
-        auto rendered = std::make_shared<juce::AudioBuffer<float>> (warp::render (*source, rate, settings, [weak]
+        const auto keepGoing = [weak, cancel]
         {
             auto flag = weak.lock();
-            return flag != nullptr && *flag;
-        }));
+            return flag != nullptr && *flag && ! cancel->load();
+        };
+        auto rendered = std::make_shared<juce::AudioBuffer<float>> (keepGoing() ? warp::render (*source, rate, settings, keepGoing)
+                                                                                : juce::AudioBuffer<float>());
 
-        juce::MessageManager::callAsync ([this, key, rate, rendered, weak]
+        juce::MessageManager::callAsync ([this, key, rate, rendered, cancel, weak]
         {
             if (auto flag = weak.lock(); flag == nullptr || ! *flag)
                 return;
+            if (cancel->load())
+                return; // dropped by releaseUnusedWarps (and maybe asked for again since)
 
             warpsPending.erase (key);
+            warpJobs.erase (key);
             if (! juce::exactlyEqual (rate, sampleRate))
                 return;
 
@@ -178,32 +188,42 @@ AudioPool::Audio AudioPool::getLinked (const juce::File& file, const warp::Setti
 
     // One render makes every file's copy: all their keys are pending until it lands.
     juce::StringArray keys;
+    const auto cancel = std::make_shared<std::atomic<bool>> (false);
     for (const auto& path : settings.linked)
     {
         keys.add (getWarpKey (juce::File (path), settings));
         warpsPending.insert (keys.strings.getLast());
+        warpJobs[keys.strings.getLast()] = cancel;
     }
 
     const auto rate = sampleRate;
-    loader.addJob ([this, sources, settings, keys, rate, weak = std::weak_ptr<bool> (alive)]
+    loader.addJob ([this, sources, settings, keys, rate, cancel, weak = std::weak_ptr<bool> (alive)]
     {
+        const auto keepGoing = [weak, cancel]
+        {
+            auto flag = weak.lock();
+            return flag != nullptr && *flag && ! cancel->load();
+        };
         std::vector<const juce::AudioBuffer<float>*> pointers;
         for (const auto& source : sources)
             pointers.push_back (source.get());
 
-        auto parts = std::make_shared<std::vector<juce::AudioBuffer<float>>> (warp::renderLinked (pointers, rate, settings, [weak]
-        {
-            auto flag = weak.lock();
-            return flag != nullptr && *flag;
-        }));
+        auto parts = std::make_shared<std::vector<juce::AudioBuffer<float>>>();
+        if (keepGoing())
+            *parts = warp::renderLinked (pointers, rate, settings, keepGoing);
 
-        juce::MessageManager::callAsync ([this, keys, rate, parts, sources, weak]
+        juce::MessageManager::callAsync ([this, keys, rate, parts, sources, cancel, weak]
         {
             if (auto flag = weak.lock(); flag == nullptr || ! *flag)
                 return;
+            if (cancel->load())
+                return; // dropped by releaseUnusedWarps
 
             for (const auto& k : keys)
+            {
                 warpsPending.erase (k);
+                warpJobs.erase (k);
+            }
             if (! juce::exactlyEqual (rate, sampleRate))
                 return;
 
@@ -220,6 +240,33 @@ AudioPool::Audio AudioPool::getLinked (const juce::File& file, const warp::Setti
 
 void AudioPool::releaseUnusedWarps (const std::set<juce::String>& keysInUse)
 {
+    // Renders nobody waits for any more: the same file is now wanted with other settings
+    // (a transpose knob dragged on, a marker moved again). Only for files in use, so a
+    // copy asked for elsewhere (a take lane's waveform) keeps rendering.
+    std::set<juce::String> filesInUse;
+    for (const auto& key : keysInUse)
+        filesInUse.insert (key.upToLastOccurrenceOf ("#", false, false));
+
+    std::set<CancelFlag> stale;
+    for (const auto& [key, flag] : warpJobs)
+        if (keysInUse.count (key) == 0 && filesInUse.count (key.upToLastOccurrenceOf ("#", false, false)) > 0)
+            stale.insert (flag);
+
+    // A linked render makes several files' copies: they all go together.
+    for (auto it = warpJobs.begin(); it != warpJobs.end();)
+    {
+        if (stale.count (it->second) > 0)
+        {
+            it->second->store (true);
+            warpsPending.erase (it->first);
+            it = warpJobs.erase (it);
+        }
+        else
+        {
+            ++it;
+        }
+    }
+
     std::vector<juce::String> unused;
     for (const auto& key : warpOrder)
         if (keysInUse.count (key) == 0)
