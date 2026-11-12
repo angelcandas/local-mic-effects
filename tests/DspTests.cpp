@@ -27,6 +27,8 @@
 #include "daw/PluginHost.h"
 #include "daw/Project.h"
 #include "daw/Warp.h"
+#include "instruments/InstrumentEditor.h"
+#include "instruments/Registry.h"
 #include "daw/Quantize.h"
 #include "analysis/Beats.h"
 #include "DeviceFavourites.h"
@@ -3821,14 +3823,15 @@ namespace
         folder.createDirectory();
 
         const auto builtins = daw::instruments::getBuiltins();
-        check (builtins.size() >= 5 && builtins[0].id == "builtin:keys" && daw::instruments::findBuiltin ("builtin:pad").has_value(),
+        check (builtins.size() >= 5 && builtins[0].id == "builtin:grand" && builtins[1].id == "builtin:nova" && daw::instruments::findBuiltin ("builtin:pad").has_value(),
                "built-in instruments are listed (" + juce::String (builtins.size()) + ")");
 
         daw::Edit edit;
         daw::DawEngine engine (edit);
         engine.prepare (sampleRate, blockSize);
 
-        const auto keys = (int) edit.addMidiTrack ("Keys", daw::instruments::getDefault())[daw::ids::id];
+        check (daw::instruments::getDefault().id == "builtin:grand", "a new MIDI track starts on the Grand piano");
+        const auto keys = (int) edit.addMidiTrack ("Keys", *daw::instruments::findBuiltin ("builtin:keys"))[daw::ids::id];
         check (daw::Edit::isMidiTrack (edit.getTrack (keys)) && edit.getInstrument (keys)[daw::ids::plugin].toString() == "builtin:keys",
                "a MIDI track has an instrument");
 
@@ -6741,9 +6744,211 @@ static void testStemPipeline()
 }
 #endif
 
+namespace
+{
+    //==============================================================================
+    // The MicFX instruments (src/instruments): every preset plays, the pedal holds, the
+    // state comes back, the windows build. With MICFX_INSTRUMENT_DEMO=<folder> it also
+    // writes a short demo of every preset (WAV) and a picture of every window (PNG).
+    std::array<std::vector<float>, 2> playInstrument (juce::AudioProcessor& instrument, const std::vector<juce::MidiMessage>& events,
+                                                      double seconds)
+    {
+        const auto total = (int) (seconds * sampleRate);
+        std::array<std::vector<float>, 2> out { std::vector<float> ((size_t) total), std::vector<float> ((size_t) total) };
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        for (int start = 0; start < total; start += blockSize)
+        {
+            const auto n = std::min (blockSize, total - start);
+            juce::MidiBuffer midi;
+            for (const auto& e : events)
+            {
+                const auto at = (int) std::round (e.getTimeStamp() * sampleRate);
+                if (at >= start && at < start + n)
+                    midi.addEvent (e, at - start);
+            }
+            juce::AudioBuffer<float> view (buffer.getArrayOfWritePointers(), 2, n);
+            view.clear();
+            instrument.processBlock (view, midi);
+            for (int ch = 0; ch < 2; ++ch)
+                std::copy (view.getReadPointer (ch), view.getReadPointer (ch) + n, out[(size_t) ch].begin() + start);
+        }
+        return out;
+    }
+
+    juce::MidiMessage at (juce::MidiMessage m, double seconds) { m.setTimeStamp (seconds); return m; }
+
+    std::vector<juce::MidiMessage> chord (std::initializer_list<int> notes, double from, double to, float velocity = 0.8f)
+    {
+        std::vector<juce::MidiMessage> events;
+        for (auto n : notes)
+        {
+            events.push_back (at (juce::MidiMessage::noteOn (1, n, velocity), from));
+            events.push_back (at (juce::MidiMessage::noteOff (1, n), to));
+        }
+        return events;
+    }
+
+    // A little phrase in the instrument's register, for listening to the presets.
+    std::vector<juce::MidiMessage> demoPhrase (const micfx::inst::Spec& spec)
+    {
+        std::vector<juce::MidiMessage> events;
+        const auto add = [&] (std::vector<juce::MidiMessage> more) { events.insert (events.end(), more.begin(), more.end()); };
+        const auto low = spec.key == "nova" ? 48 : 48;
+        add (chord ({ low, low + 7, low + 16, low + 19 }, 0.0, 1.6, 0.75f));
+        add (chord ({ low + 5, low + 12, low + 17, low + 21 }, 1.7, 3.2, 0.6f));
+        const int melody[] = { 72, 74, 76, 79, 76, 74, 72, 67 };
+        for (int i = 0; i < 8; ++i)
+            add (chord ({ melody[i] }, 3.4 + 0.22 * i, 3.4 + 0.22 * i + 0.2, 0.55f + 0.05f * (float) (i % 3)));
+        add (chord ({ low - 12, low, low + 7, low + 16 }, 5.3, 6.5, 0.9f));
+        return events;
+    }
+
+    void testInstruments()
+    {
+        std::cout << "\nInstruments (Grand, Nova, ...)\n";
+
+        const auto demoFolder = juce::SystemStats::getEnvironmentVariable ("MICFX_INSTRUMENT_DEMO", {});
+        const auto specs = micfx::inst::getAllSpecs();
+        check (specs.size() >= 2 && micfx::inst::findSpec ("grand") != nullptr && micfx::inst::findSpec ("nova") != nullptr,
+               "the instruments are listed (" + juce::String ((int) specs.size()) + ")");
+
+        for (const auto* spec : specs)
+        {
+            auto created = micfx::inst::createInstrument (spec->key);
+            auto& instrument = dynamic_cast<micfx::inst::InstrumentProcessor&> (*created);
+            instrument.setRateAndBufferSizeDetails (sampleRate, blockSize);
+            instrument.prepareToPlay (sampleRate, blockSize);
+
+            // Every preset: sound, in pitch range, without clipping, silent after the release.
+            int sounding = 0, clean = 0, quietAfter = 0;
+            juce::String problems;
+            for (int p = 0; p < instrument.getNumPrograms(); ++p)
+            {
+                instrument.setCurrentProgram (p);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (5); // what the app's message loop does
+                instrument.reset();
+                const auto out = playInstrument (instrument, chord ({ 48, 60, 64, 67, 72 }, 0.05, 1.0), 6.0);
+                const auto loud = rms (out[0], (size_t) (0.1 * sampleRate), (size_t) (0.9 * sampleRate));
+                auto peak = 0.0f;
+                auto finite = true;
+                for (const auto& ch : out)
+                    for (auto x : ch)
+                    {
+                        peak = std::max (peak, std::abs (x));
+                        finite = finite && std::isfinite (x);
+                    }
+                const auto tail = rms (out[0], (size_t) (5.5 * sampleRate), (size_t) (6.0 * sampleRate));
+                sounding += loud > 0.01f ? 1 : 0;
+                clean += finite && peak < 1.0f ? 1 : 0;
+                quietAfter += tail < 1.0e-3f ? 1 : 0;
+                if (loud <= 0.01f || ! finite || peak >= 1.0f || tail >= 1.0e-3f)
+                    problems << " " << instrument.getProgramName (p) << " (rms " << juce::String (loud, 3) << ", peak "
+                             << juce::String (peak, 2) << ", tail " << juce::String (tail, 5) << ")";
+
+                if (demoFolder.isNotEmpty())
+                {
+                    const auto demo = playInstrument (instrument, demoPhrase (*spec), 8.5);
+                    const auto file = juce::File (demoFolder).getChildFile (spec->name + " - " + instrument.getProgramName (p) + ".wav");
+                    file.deleteFile();
+                    juce::WavAudioFormat wav;
+                    std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
+                    if (auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions().withSampleRate (sampleRate)
+                                                                                                    .withNumChannels (2).withBitsPerSample (16)))
+                    {
+                        const float* channels[] = { demo[0].data(), demo[1].data() };
+                        writer->writeFromFloatArrays (channels, 2, (int) demo[0].size());
+                    }
+                }
+            }
+            const auto presets = instrument.getNumPrograms();
+            check (sounding == presets && clean == presets && quietAfter == presets,
+                   spec->name + ": all " + juce::String (presets) + " presets play cleanly and end" + problems);
+
+            // In tune.
+            instrument.setCurrentProgram (0);
+            instrument.reset();
+            const auto a4 = playInstrument (instrument, chord ({ 69 }, 0.0, 1.0), 1.0);
+            const auto f = estimateFrequency (a4[0], (size_t) (0.2 * sampleRate), (size_t) (0.6 * sampleRate));
+            check (std::abs (f - 440.0) < 4.0, spec->name + " plays A4 at 440 Hz (" + juce::String (f, 1) + ")");
+
+            // The sustain pedal holds notes after their keys are up.
+            instrument.reset();
+            auto events = chord ({ 60 }, 0.0, 0.2);
+            events.push_back (at (juce::MidiMessage::controllerEvent (1, 64, 127), 0.1));
+            events.push_back (at (juce::MidiMessage::controllerEvent (1, 64, 0), 1.0));
+            const auto pedal = playInstrument (instrument, events, 3.0);
+            const auto held = rms (pedal[0], (size_t) (0.7 * sampleRate), (size_t) (0.9 * sampleRate));
+            const auto after = rms (pedal[0], (size_t) (2.6 * sampleRate), (size_t) (3.0 * sampleRate));
+            check (held > 0.003f && after < held * 0.1f, spec->name + ": the pedal holds the note until it's lifted ("
+                                                         + juce::String (held, 4) + " / " + juce::String (after, 5) + ")");
+
+            // Settings come back.
+            instrument.setCurrentProgram (1);
+            auto* firstParam = instrument.getState().getParameter (spec->params.front().id);
+            firstParam->setValueNotifyingHost (0.3f);
+            juce::MemoryBlock saved;
+            instrument.getStateInformation (saved);
+            auto again = micfx::inst::createInstrument (spec->key);
+            again->setStateInformation (saved.getData(), (int) saved.getSize());
+            auto& restored = dynamic_cast<micfx::inst::InstrumentProcessor&> (*again);
+            check (std::abs (restored.getState().getParameter (spec->params.front().id)->getValue() - firstParam->getValue()) < 1.0e-4f
+                       && restored.getCurrentProgram() == 1,
+                   spec->name + ": its settings and preset come back from its saved state");
+
+            // Its window.
+            {
+                std::unique_ptr<juce::AudioProcessorEditor> editor (instrument.createEditor());
+                check (editor != nullptr && editor->getWidth() >= 800 && editor->getHeight() >= 300,
+                       spec->name + " has a window (" + juce::String (editor->getWidth()) + "x" + juce::String (editor->getHeight()) + ")");
+                if (demoFolder.isNotEmpty())
+                {
+                    instrument.setCurrentProgram (0);
+                    playInstrument (instrument, chord ({ 57, 60, 64 }, 0.0, 1.0), 0.5); // something for the scope
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+                    const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 2.0f);
+                    const auto file = juce::File (demoFolder).getChildFile (spec->name + ".png");
+                    file.deleteFile();
+                    juce::FileOutputStream stream (file);
+                    juce::PNGImageFormat().writeImageToStream (image, stream);
+                }
+                instrument.editorBeingDeleted (editor.get());
+            }
+
+            // How much CPU an eight-note chord takes (Debug builds are much slower).
+            instrument.setCurrentProgram (0);
+            instrument.reset();
+            const auto started = juce::Time::getMillisecondCounterHiRes();
+            playInstrument (instrument, chord ({ 48, 52, 55, 60, 64, 67, 71, 72 }, 0.0, 1.5), 2.0);
+            const auto load = (juce::Time::getMillisecondCounterHiRes() - started) / 2000.0 * 100.0;
+            std::cout << "        " << spec->name << ": 8-note chord uses " << juce::String (load, 1) << "% of one core\n";
+        }
+
+        // Old projects: the first built-in sounds open on the new instruments.
+        {
+            juce::ValueTree tree (daw::ids::INSTRUMENT);
+            tree.setProperty (daw::ids::plugin, "builtin:pad", nullptr);
+            juce::String error;
+            const auto pad = daw::instruments::create (tree, sampleRate, blockSize, false, error);
+            auto* nova = dynamic_cast<micfx::inst::InstrumentProcessor*> (pad.get());
+            check (nova != nullptr && nova->getSpec().key == "nova" && nova->getPresetName() == "Warm Pad"
+                       && daw::instruments::hasWindow ("builtin:pad") && daw::instruments::hasWindow ("builtin:grand")
+                       && ! daw::instruments::hasWindow ("builtin:keys"),
+                   "a project's \"builtin:pad\" opens on Nova's Warm Pad, with a window");
+        }
+    }
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juce;
+
+    // MICFX_TEST_ONLY=instruments runs just those (quicker while working on them).
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "instruments")
+    {
+        testInstruments();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
 
     testPitchDetector();
     testPitchShift();
@@ -6760,6 +6965,7 @@ int main()
     testTakes();
     testStereoInputs();
     testMidiTracks();
+    testInstruments();
     testPluginHosting();
     testProjects();
     testExport();
