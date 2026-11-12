@@ -135,7 +135,10 @@ namespace
     // instrument (so single plucks and hits don't count as swings), the level of each
     // hop for a voice (phrase to phrase). Leaves `move` empty when it's steady enough.
     // Returns the change to its loudness; adds the change to its peak to `peakChange`.
-    double planCompressor (MixMove& move, const Profile& profile, double eqChange, bool instrument, double& peakChange)
+    // `minSpread` is the swing it takes (dB, 10th to 90th percentile); `always` plans a
+    // gentle one even under it (a bass, so the low end stays even).
+    double planCompressor (MixMove& move, const Profile& profile, double eqChange, bool instrument, double& peakChange,
+                           float minSpread = -1.0f, bool always = false)
     {
         std::vector<float> levels;
         const auto& source = instrument ? profile.momentaryLufs : profile.rmsDb;
@@ -143,8 +146,11 @@ namespace
             if (profile.active[i] && source[i] > -150.0f)
                 levels.push_back (source[i] + (float) eqChange);
 
+        if (minSpread < 0.0f)
+            minSpread = instrument ? 8.0f : 6.0f;
+
         const auto spread = percentile (levels, 0.9) - percentile (levels, 0.1);
-        if (levels.empty() || spread < (instrument ? 8.0f : 6.0f))
+        if (levels.empty() || (spread < minSpread && ! always))
             return 0.0;
 
         const auto ratio = instrument ? (spread > 12.0f ? 3.0f : 2.0f) : (spread > 14.0f ? 4.0f : spread > 10.0f ? 3.0f : 2.0f);
@@ -162,8 +168,9 @@ namespace
         move.insert = fx::ModuleType::compressor;
         move.values = { { "compOn", 1.0f }, { "compThreshold", threshold }, { "compRatio", ratio } };
         move.reasons.add ("Compressor " + juce::String (ratio, 0) + ":1 from " + juce::String (threshold, 0) + " dB: "
-                          + (instrument ? "its level swings " : "your level swings ") + formatDb (spread)
-                          + (instrument ? "" : " between phrases"));
+                          + (spread < minSpread ? "keeps it even (it swings " + formatDb (spread) + ")"
+                                                : (instrument ? "its level swings " : "your level swings ") + formatDb (spread)
+                                                      + (instrument ? "" : " between phrases")));
 
         // Its effect on loudness: each frame above the threshold comes down.
         double before = 0.0, after = 0.0;
@@ -248,7 +255,7 @@ namespace
     };
 
     VoicePlan planVoice (int trackId, const Profile& voice, const MixTargets& targets, const MixOptions& options, juce::StringArray& notes,
-                         const juce::String& name)
+                         const juce::String& name, bool background = false)
     {
         VoicePlan plan;
         plan.eq.trackId = plan.compressor.trackId = plan.deEsser.trackId = plan.reverb.trackId = trackId;
@@ -295,9 +302,12 @@ namespace
         // Low cut under the lowest notes.
         const auto lowestNote = voice.getPitchedFraction() > 0.3 ? voice.getPitchPercentile (0.05) : 0.0f;
         eq.lowCutOn = true;
-        eq.lowCutHz = roundTo (lowestNote > 0.0f ? juce::jlimit (50.0f, 160.0f, lowestNote * 0.75f) : 80.0f, 1.0);
+        // Background vocals are cut higher: their low end only muddies the lead's.
+        eq.lowCutHz = background ? roundTo (lowestNote > 0.0f ? juce::jlimit (100.0f, 220.0f, lowestNote * 0.9f) : 150.0f, 1.0)
+                                 : roundTo (lowestNote > 0.0f ? juce::jlimit (50.0f, 160.0f, lowestNote * 0.75f) : 80.0f, 1.0);
         reasons.add ("Low cut at " + formatHz (eq.lowCutHz)
-                     + (lowestNote > 0.0f ? ", under your lowest note (" + formatHz (lowestNote) + ")" : ": rumble and handling noise"));
+                     + (background ? ": background vocals leave the low end to the lead"
+                        : lowestNote > 0.0f ? ", under your lowest note (" + formatHz (lowestNote) + ")" : ": rumble and handling noise"));
 
         // Boom: a low shelf when 80-160 Hz is well above the target.
         {
@@ -387,8 +397,9 @@ namespace
                 if (getBandCentre (b) >= 5000.0 && getBandCentre (b) <= 10000.0)
                     sum += deviation[(size_t) b] + eqDb[(size_t) b], ++count;
 
+            // Stacked S's add up, so background vocals get one sooner.
             const auto excess = count > 0 ? sum / count : 0.0;
-            if (excess > 3.0)
+            if (excess > (background ? 1.5 : 3.0))
             {
                 const auto band = findExtreme (deviation, 5000.0, 10000.0, true);
                 std::vector<float> levels;
@@ -402,7 +413,7 @@ namespace
                         levels.push_back ((float) powerToDb (p));
                     }
 
-                const auto threshold = juce::jlimit (-60.0f, 0.0f, roundTo (percentile (levels, 0.75), 1.0));
+                const auto threshold = juce::jlimit (-60.0f, 0.0f, roundTo (percentile (levels, background ? 0.6 : 0.75), 1.0));
                 plan.deEsser.values = { { "deessOn", 1.0f }, { "deessThreshold", threshold },
                                         { "deessFreq", roundTo (juce::jlimit (3000.0, 10000.0, getBandCentre (band)), 10.0) } };
                 plan.deEsser.reasons.add ("De-esser from " + juce::String (threshold, 0) + " dB at " + formatHz (getBandCentre (band))
@@ -430,13 +441,17 @@ namespace
                 notes.add (name + " already sounds roomy (it rings on " + juce::String (*ring, 1) + " s after each note): no reverb added.");
             else
             {
+                // Background vocals sit further back: more reverb, a bigger room.
+                const auto mix = background ? roundTo (juce::jmin (40.0f, targets.reverbMix * 1.5f), 1.0) : targets.reverbMix;
+                const auto size = background ? juce::jmin (90.0f, targets.reverbSize + 10.0f) : targets.reverbSize;
                 plan.reverb.insert = fx::ModuleType::reverb;
                 plan.reverb.atEnd = true;
-                plan.reverb.values = { { "reverbOn", 1.0f }, { "reverbMix", targets.reverbMix }, { "reverbSize", targets.reverbSize },
+                plan.reverb.values = { { "reverbOn", 1.0f }, { "reverbMix", mix }, { "reverbSize", size },
                                        { "reverbDamping", 55.0f }, { "reverbWidth", 100.0f } };
-                plan.reverb.reasons.add ("Reverb " + juce::String (targets.reverbMix, 0) + "%, "
-                                         + (targets.reverbSize >= 60.0f ? "large" : targets.reverbSize >= 45.0f ? "medium" : "small")
-                                         + " room: the recording is dry and gives the voice some space");
+                plan.reverb.reasons.add ("Reverb " + juce::String (mix, 0) + "%, "
+                                         + (size >= 60.0f ? "large" : size >= 45.0f ? "medium" : "small")
+                                         + (background ? " room: puts the background vocals behind the lead"
+                                                       : " room: the recording is dry and gives the voice some space"));
             }
         }
 
@@ -452,12 +467,12 @@ MixTargets getTargets (MixStyle style)
     switch (style)
     {
         // Coaching keeps the voice dry, so every detail of it can be heard.
-        case MixStyle::pop:      return { 1.5f, 2.0f, 0.0f, -14.0f, 12.0f, 45.0f };
-        case MixStyle::ballad:   return { 2.5f, 0.0f, 1.5f, -14.0f, 20.0f, 65.0f };
-        case MixStyle::rock:     return { 0.0f, 1.0f, -1.0f, -14.0f, 9.0f, 35.0f };
-        case MixStyle::coaching: return { 4.0f, 1.5f, 0.0f, -14.0f, 0.0f, 50.0f };
+        case MixStyle::pop:      return { 1.5f, 2.0f, 0.0f, -14.0f, 12.0f, 45.0f, 6.0f };
+        case MixStyle::ballad:   return { 2.5f, 0.0f, 1.5f, -14.0f, 20.0f, 65.0f, 7.0f };
+        case MixStyle::rock:     return { 0.0f, 1.0f, -1.0f, -14.0f, 9.0f, 35.0f, 5.0f };
+        case MixStyle::coaching: return { 4.0f, 1.5f, 0.0f, -14.0f, 0.0f, 50.0f, 9.0f };
     }
-    return { 1.5f, 0.0f, 0.0f, -14.0f, 12.0f, 45.0f };
+    return { 1.5f, 0.0f, 0.0f, -14.0f, 12.0f, 45.0f, 6.0f };
 }
 
 juce::String getStyleName (MixStyle style)
@@ -472,26 +487,144 @@ juce::String getStyleName (MixStyle style)
     return {};
 }
 
+const char* getRoleKey (Role role)
+{
+    switch (role)
+    {
+        case Role::voice:        return "voice";
+        case Role::backingVocal: return "background";
+        case Role::backing:      return "instrumental";
+        case Role::guitar:       return "guitar";
+        case Role::piano:        return "piano";
+        case Role::bass:         return "bass";
+        case Role::drums:        return "drums";
+        case Role::instrument:   return "instrument";
+        case Role::other:        return "other";
+    }
+    return "other";
+}
+
+Role getRoleFromKey (const juce::String& key)
+{
+    if (key == "backing")
+        return Role::backing; // the key before background vocals had one of their own
+    for (auto role : allRoles)
+        if (key == getRoleKey (role))
+            return role;
+    return Role::other;
+}
+
+juce::String getRoleName (Role role)
+{
+    switch (role)
+    {
+        case Role::voice:        return "Voice";
+        case Role::backingVocal: return "Background vocals";
+        case Role::backing:      return "Instrumental";
+        case Role::guitar:       return "Guitar";
+        case Role::piano:        return "Piano / keys";
+        case Role::bass:         return "Bass";
+        case Role::drums:        return "Drums";
+        case Role::instrument:   return "Other instrument";
+        case Role::other:        return "Leave as is";
+    }
+    return {};
+}
+
+bool isInstrument (Role role) noexcept
+{
+    return role == Role::guitar || role == Role::piano || role == Role::bass || role == Role::drums || role == Role::instrument;
+}
+
+std::optional<Role> guessRoleFromName (const juce::String& trackName)
+{
+    // Whole words where a short one would match inside others ("bgv", "keys"), parts of
+    // words elsewhere. Background vocals before voice, so "Backing vocals" isn't the lead.
+    const auto name = trackName.toLowerCase().replaceCharacters ("_-.()[]", "       ");
+    juce::StringArray words;
+    words.addTokens (name, " ", "");
+    words.removeEmptyStrings();
+
+    const auto hasWord = [&] (std::initializer_list<const char*> list)
+    {
+        for (auto word : list)
+            if (words.contains (word))
+                return true;
+        return false;
+    };
+    const auto hasPart = [&] (std::initializer_list<const char*> list)
+    {
+        for (auto part : list)
+            if (name.contains (part))
+                return true;
+        return false;
+    };
+
+    const auto vocal = hasPart ({ "vocal", "voice", "vox", "voz", "sing", "cant" }) || hasWord ({ "vo", "vx" });
+    if (hasPart ({ "harmon", "choir", "background", "bgv", "bvs", "bckvoc", "segunda", "coro", "adlib", "ad lib" })
+        || hasWord ({ "bv", "bvox", "bg", "backs" })
+        || (vocal && hasPart ({ "back", "bkg", "fondo", "dbl", "double", "chorus" })))
+        return Role::backingVocal;
+    if (vocal || ((hasPart ({ "lead", "take", "mic" }) || hasWord ({ "rap", "mc" })) && ! hasPart ({ "synth", "guitar", "gtr" })))
+        return Role::voice;
+
+    // A stem from the splitter is called "<song> - Drums", "<song> - Other"...
+    if (hasPart ({ "drum", "bateria", "batería", "kick", "snare", "hihat", "perc", "overhead", "cymbal", "808", "bombo", "caja" })
+        || hasWord ({ "kd", "sn", "oh", "hh", "hat", "hats", "tom", "toms", "loop" }))
+        return Role::drums;
+    if (hasPart ({ "bass", "bajo" }) || hasWord ({ "sub" }))
+        return Role::bass;
+    if (hasPart ({ "guitar", "gtr", "guitarra", "acoustic", "strat", "uke", "ukulele", "banjo", "mandolin", "requinto" }) || hasWord ({ "gt" }))
+        return Role::guitar;
+    if (hasPart ({ "piano", "keys", "keyboard", "rhodes", "wurli", "organ", "organo", "órgano", "teclado", "epiano", "clav" }) || hasWord ({ "ep", "key", "pno" }))
+        return Role::piano;
+    if (hasWord ({ "other", "otros", "others" }))
+        return Role::instrument; // the splitter's "everything else" stem
+    if (hasPart ({ "backing", "music", "beat", "instrumental", "karaoke", "pista", "song", "mix", "band", "playback" }))
+        return Role::backing;
+    if (hasPart ({ "synth", "string", "pad", "violin", "cello", "viola", "sax", "trumpet", "brass", "horn", "flute", "flauta", "lead synth",
+                   "arp", "pluck", "fx", "accordion", "acordeon", "harp", "marimba", "bells", "trombon", "orchestra", "other", "otros" }))
+        return Role::instrument;
+    return {};
+}
+
 Role guessRole (const juce::String& trackName, const Profile& profile, double songSeconds)
 {
-    const auto name = trackName.toLowerCase();
-    for (auto word : { "vocal", "voice", "vox", "voz", "lead", "take", "sing", "mic", "cant" })
-        if (name.contains (word))
-            return Role::voice;
-    for (auto word : { "backing", "music", "beat", "instrumental", "karaoke", "pista", "song", "mix", "band" })
-        if (name.contains (word))
-            return Role::backing;
+    const auto byName = guessRoleFromName (trackName);
+    if (byName == Role::voice || byName == Role::backingVocal || byName == Role::backing)
+        return *byName;
 
     const auto active = profile.getActiveSeconds();
     if (active <= 0.0)
         return Role::other;
+    if (byName.has_value())
+        return *byName;
 
-    for (auto word : { "guitar", "gtr", "guitarra", "piano", "keys", "synth", "bass", "bajo", "drum", "bateria", "kick", "snare",
-                       "perc", "string", "pad", "organ", "uke", "violin", "cello", "sax", "trumpet", "brass", "horn" })
-        if (name.contains (word))
-            return Role::instrument;
+    // Drums are short unpitched hits (the level jumps from hop to hop); a bass has nearly
+    // all of its energy under 250 Hz and next to nothing up top.
+    const auto spectrum = profile.getAverageSpectrum();
+    double total = 0.0, low = 0.0, high = 0.0;
+    for (int b = 0; b < numBands; ++b)
+    {
+        const auto p = dbToPower (spectrum[(size_t) b]);
+        total += p;
+        if (getBandCentre (b) <= 250.0) low += p;
+        if (getBandCentre (b) >= 5000.0) high += p;
+    }
 
-    if (profile.getPitchedFraction() > 0.6)
+    double jumps = 0.0;
+    int count = 0;
+    for (size_t i = 1; i < profile.rmsDb.size(); ++i)
+        if (profile.active[i] && profile.active[i - 1])
+            jumps += std::abs (juce::jmax (-80.0f, profile.rmsDb[i]) - juce::jmax (-80.0f, profile.rmsDb[i - 1])), ++count;
+    const auto meanJump = count > 0 ? jumps / count : 0.0;
+
+    const auto pitched = profile.getPitchedFraction();
+    if (pitched < 0.25 && meanJump > 4.0)
+        return Role::drums;
+    if (total > 0.0 && low / total > 0.85 && high / total < 0.01)
+        return Role::bass;
+    if (pitched > 0.6)
         return Role::voice;
     return active > 0.5 * songSeconds ? Role::backing : Role::instrument;
 }
@@ -507,14 +640,16 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
     const auto volumeOf = [&] (int id) { auto it = currentVolumes.find (id); return it != currentVolumes.end() ? it->second : 0.0f; };
     const auto roleOf = [&] (int id) { auto it = roles.find (id); return it != roles.end() ? it->second : Role::other; };
 
-    std::vector<int> voices, backings, instruments;
+    std::vector<int> voices, backgroundVocals, backings, instruments;
     for (const auto& [id, profile] : analysis.tracks)
     {
         if (profile.getActiveSeconds() <= 0.0)
             continue;
-        if (roleOf (id) == Role::voice)      voices.push_back (id);
-        if (roleOf (id) == Role::backing)    backings.push_back (id);
-        if (roleOf (id) == Role::instrument) instruments.push_back (id);
+        const auto role = roleOf (id);
+        if (role == Role::voice)        voices.push_back (id);
+        if (role == Role::backingVocal) backgroundVocals.push_back (id);
+        if (role == Role::backing)      backings.push_back (id);
+        if (isInstrument (role))        instruments.push_back (id);
     }
 
     if (voices.empty())
@@ -536,6 +671,9 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
     for (auto id : voices)
         voicePlans[id] = planVoice (id, *findProfile (analysis, id), targets, options, plan.notes,
                                     options.trackNames.count (id) > 0 ? options.trackNames.at (id) : "The voice");
+    for (auto id : backgroundVocals)
+        voicePlans[id] = planVoice (id, *findProfile (analysis, id), targets, options, plan.notes,
+                                    options.trackNames.count (id) > 0 ? options.trackNames.at (id) : "The background vocals", true);
 
     // The lead is the voice that sings the most; the others are balanced like it.
     const auto lead = *std::max_element (voices.begin(), voices.end(), [&] (int a, int b)
@@ -554,7 +692,16 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
     for (auto& [id, change] : backingChange)
     {
         const auto& profile = *findProfile (analysis, id);
-        const auto instrument = roleOf (id) == Role::instrument;
+        const auto role = roleOf (id);
+        const auto instrument = isInstrument (role);
+
+        // Per instrument: where its low cut may go, how deep a dip for the words, and
+        // when it gets a compressor.
+        struct { double minCut, maxCut, maskCap; float compSpread; bool alwaysComp; } shape { 40.0, 120.0, 3.0, 8.0f, false };
+        if (role == Role::drums)       shape = { 30.0, 30.0, 2.0, 7.0f, false };  // the kick reaches low: rumble only
+        else if (role == Role::bass)   shape = { 30.0, 30.0, 0.0, 6.0f, true };   // hardly covers the words: no dip
+        else if (role == Role::guitar) shape = { 80.0, 150.0, 3.5, 8.0f, false }; // leaves the low end to the bass
+        else if (role == Role::piano)  shape = { 40.0, 100.0, 3.0, 9.0f, false };
 
         MixMove eqMove;
         eqMove.trackId = id;
@@ -574,12 +721,18 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
                 if (spectrum[(size_t) b] > loudest - 24.0f)
                     lowest = b;
 
-            const auto cutHz = lowest >= 0 ? juce::jmin (120.0, 0.5 * getBandCentre (lowest)) : 0.0;
-            if (cutHz >= 40.0)
+            auto cutHz = lowest >= 0 ? juce::jmin (shape.maxCut, 0.5 * getBandCentre (lowest)) : 0.0;
+            if (role == Role::guitar || role == Role::drums || role == Role::bass)
+                cutHz = juce::jlimit (shape.minCut, shape.maxCut, cutHz);
+
+            if (cutHz >= shape.minCut)
             {
                 eq.lowCutOn = true;
                 eq.lowCutHz = roundTo (cutHz, 1.0);
-                eqMove.reasons.add ("Low cut at " + formatHz (eq.lowCutHz) + ", under its lowest notes: less rumble under the song");
+                eqMove.reasons.add ("Low cut at " + formatHz (eq.lowCutHz)
+                                    + (role == Role::drums || role == Role::bass ? ": rumble under the low end only"
+                                       : role == Role::guitar ? ": leaves the low end to the bass and kick"
+                                                              : ", under its lowest notes: less rumble under the song"));
             }
         }
 
@@ -589,7 +742,7 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
             if (masking.worstBand >= 0)
             {
                 const auto difference = masking.backingOverVoiceDb[(size_t) masking.worstBand];
-                const auto cut = juce::jlimit (0.0, instrument ? 3.0 : 4.0, 0.5 * (difference + 6.0));
+                const auto cut = juce::jlimit (0.0, instrument ? shape.maskCap : 4.0, 0.5 * (difference + 6.0));
 
                 if (cut >= 1.0)
                 {
@@ -620,7 +773,7 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
             MixMove compressor;
             compressor.trackId = id;
             double peakChange = 0.0;
-            const auto compChange = planCompressor (compressor, profile, eqChange, true, peakChange);
+            const auto compChange = planCompressor (compressor, profile, eqChange, true, peakChange, shape.compSpread, shape.alwaysComp);
             if (! compressor.values.empty())
             {
                 plan.moves.push_back (compressor);
@@ -633,9 +786,8 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
         finalLoudness[id] += eqChange;
     }
 
-    for (auto id : voices)
+    for (const auto& [id, vp] : voicePlans)
     {
-        auto& vp = voicePlans[id];
         for (auto* move : { &vp.eq, &vp.compressor, &vp.deEsser, &vp.reverb })
             if (! move->values.empty())
                 plan.moves.push_back (*move);
@@ -680,6 +832,37 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
 
         if (id == lead)
             plan.voiceOverBackingLu = backingLoudness > -150.0 ? (float) (voiceLoudness + volume - backingLoudness) : 0.0f;
+    }
+
+    // Background vocals: the style's LU under the lead, each while it sings.
+    {
+        const auto& leadPlan = voicePlans[lead];
+        const auto leadVolume = [&]
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == lead && ! move.insert.has_value())
+                    return (double) move.values.at ("volume");
+            return (double) volumeOf (lead);
+        }();
+        const auto leadLoudness = leadProfile.getLoudnessOver() + leadPlan.loudnessChange + leadVolume;
+
+        for (auto id : backgroundVocals)
+        {
+            const auto& profile = *findProfile (analysis, id);
+            const auto& vp = voicePlans[id];
+            const auto loudness = profile.getLoudnessOver() + vp.loudnessChange; // at unity
+            const auto volume = roundTo (juce::jlimit (-30.0, 12.0, leadLoudness - targets.backingVocalUnderLeadLu - loudness), 0.1);
+
+            MixMove move;
+            move.trackId = id;
+            move.values = { { "volume", volume } };
+            move.reasons.add ("Volume " + juce::String (volume, 1) + " dB, so the background vocals sit "
+                              + juce::String (targets.backingVocalUnderLeadLu, 1) + " LU under the lead (" + getStyleName (style) + ")");
+            plan.moves.push_back (move);
+
+            finalLoudness[id] = profile.integratedLufs + vp.loudnessChange + volume;
+            finalPeak[id] = profile.peakDb + vp.peakChange + volume;
+        }
     }
 
     // Master: towards the loudness target, without clipping (peaks add up at worst).

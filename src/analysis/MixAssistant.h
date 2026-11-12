@@ -11,13 +11,20 @@ namespace daw { class Edit; }
 // using the effects the app already has. Everything it proposes is ordinary track
 // state (volumes and insert values), so you can see it, tweak it and undo it.
 //
+// Every track has a role, tagged by you before Auto Mix listens (or guessed from its
+// name and sound): what it is decides what it gets.
+//
 //   Voice:      parametric EQ (low cut from the lowest sung note, a cut where it's muddy
 //               or boxy, a cut where it's harsh or a lift where it lacks presence, air),
 //               compressor from how much the level swings, de-esser if the S's stick out,
 //               reverb at the end of the chain when the recording is dry and the style
 //               wants space.
-//   Instrument: parametric EQ (low cut under its lowest notes, a dip where it covers the
-//               words), compressor when its level swings a lot.
+//   Background vocals: like a voice, but a higher low cut, readier de-esser, more reverb,
+//               and a level a style's number of LU under the lead.
+//   Instruments (guitar, piano, bass, drums, other): parametric EQ (low cut under their
+//               lowest notes, set per instrument: none for bass and kick, high for a
+//               guitar; a dip where they cover the words), compressor when their level
+//               swings a lot (always a gentle one on a bass).
 //   Backing:    a parametric EQ dip where it covers the words most.
 //   Balance:    the voice's volume so it sits a style's number of LU over everything else.
 //   Master:  volume towards a loudness target, kept below clipping.
@@ -25,7 +32,20 @@ namespace daw { class Edit; }
 // Plain computation: plan() runs anywhere; apply() on the message thread.
 namespace analysis
 {
-enum class Role { voice, backing, instrument, other };
+// voice: the lead (or a sung part); backingVocal: background vocals / harmonies;
+// backing: a full instrumental (karaoke track, the band on one track); instrument: any
+// other instrument; other: left as it is.
+enum class Role { voice, backingVocal, backing, guitar, piano, bass, drums, instrument, other };
+
+inline constexpr Role allRoles[] = { Role::voice, Role::backingVocal, Role::backing, Role::guitar, Role::piano,
+                                     Role::bass, Role::drums, Role::instrument, Role::other };
+
+const char* getRoleKey (Role);              // "voice", "background", "instrumental", "guitar"... (project files, UI)
+Role getRoleFromKey (const juce::String&);  // other when unknown
+juce::String getRoleName (Role);            // "Voice", "Background vocals"...
+
+// The roles played by one instrument (guitar, piano, bass, drums, other instrument).
+bool isInstrument (Role) noexcept;
 
 enum class MixStyle { pop, ballad, rock, coaching };
 
@@ -37,6 +57,7 @@ struct MixTargets
     float masterLufs = -14.0f; // integrated loudness of the mix
     float reverbMix = 0.0f;    // % of reverb on a dry voice (0: none)
     float reverbSize = 50.0f;  // % room size
+    float backingVocalUnderLeadLu = 6.0f; // background vocals sit this far under the lead
 };
 
 // Which effects Auto Mix may add. Volumes are always planned.
@@ -55,9 +76,14 @@ struct MixOptions
 MixTargets getTargets (MixStyle);
 juce::String getStyleName (MixStyle);
 
-// A guess from the name and the sound: voice when the name says so or the track is
-// mostly pitched; instrument when the name says so (guitar, keys...); backing when it
-// plays most of the song; otherwise instrument, or other when it's silent.
+// A guess from the track's name alone ("Lead vocal", "Kick", "Bajo"...), or nothing
+// when the name says nothing (Track 3). This is the tag the panel starts with, before
+// anything has been listened to.
+std::optional<Role> guessRoleFromName (const juce::String& trackName);
+
+// A guess from the name, then the sound: voice when mostly pitched; drums when short
+// unpitched hits; bass when nearly all of it is under 250 Hz; backing when it plays
+// most of the song; otherwise instrument, or other when it's silent.
 Role guessRole (const juce::String& trackName, const Profile&, double songSeconds);
 
 //==============================================================================

@@ -96,6 +96,7 @@ private:
     void replanAutoMix();
     void readAutoMixEffects (const juce::var& effects);
     juce::var describeAutoMix() const;
+    juce::var describeAutoMixTags() const;
 
     // Song key (src/analysis/Key.h): detection runs on a background thread.
     juce::var handleKey (const juce::var& args);

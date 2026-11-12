@@ -132,18 +132,6 @@ struct DawBridge::KeyJob
 
 namespace
 {
-    const char* roleKey (analysis::Role role)
-    {
-        return role == analysis::Role::voice ? "voice" : role == analysis::Role::backing ? "backing"
-             : role == analysis::Role::instrument ? "instrument" : "other";
-    }
-
-    analysis::Role roleFromKey (const juce::String& key)
-    {
-        return key == "voice" ? analysis::Role::voice : key == "backing" ? analysis::Role::backing
-             : key == "instrument" ? analysis::Role::instrument : analysis::Role::other;
-    }
-
     const char* styleKey (analysis::MixStyle style)
     {
         switch (style)
@@ -620,7 +608,7 @@ void DawBridge::tick()
             }
             else
             {
-                // New analysis: guess the roles of tracks we haven't seen, keep the user's picks.
+                // New analysis: the tracks' tags, and a guess from the sound for the rest.
                 autoMixAnalysis = std::move (job->result);
                 std::map<int, analysis::Role> roles;
                 const auto songSeconds = autoMixAnalysis->tracks.empty() ? 0.0
@@ -628,9 +616,9 @@ void DawBridge::tick()
 
                 for (const auto& [id, profile] : autoMixAnalysis->tracks)
                 {
-                    const auto known = autoMixRoles.find (id);
-                    roles[id] = known != autoMixRoles.end() ? known->second
-                                                            : analysis::guessRole (edit.getTrack (id)[ids::name].toString(), profile, songSeconds);
+                    const auto track = edit.getTrack (id);
+                    roles[id] = track.hasProperty (ids::mixRole) ? analysis::getRoleFromKey (track[ids::mixRole].toString())
+                                                                 : analysis::guessRole (track[ids::name].toString(), profile, songSeconds);
                 }
 
                 autoMixRoles = roles;
@@ -1161,6 +1149,27 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("reverb", autoMixOptions.reverb);
 }
 
+// Every track's tag before Auto Mix listens: the one you picked (tagged), or the guess
+// from its name ("" when the name says nothing, and the sound decides).
+juce::var DawBridge::describeAutoMixTags() const
+{
+    juce::Array<juce::var> tracks, roles;
+    for (const auto& track : edit.getTracks())
+    {
+        const auto tagged = track.hasProperty (ids::mixRole);
+        const auto guess = analysis::guessRoleFromName (track[ids::name].toString());
+        const auto role = tagged ? juce::String (analysis::getRoleKey (analysis::getRoleFromKey (track[ids::mixRole].toString())))
+                        : guess.has_value() ? juce::String (analysis::getRoleKey (*guess)) : juce::String();
+        tracks.add (object ({ { "id", (int) track[ids::id] }, { "name", track[ids::name].toString() }, { "role", role },
+                              { "tagged", tagged }, { "midi", daw::Edit::isMidiTrack (track) } }));
+    }
+
+    for (auto role : analysis::allRoles)
+        roles.add (object ({ { "key", analysis::getRoleKey (role) }, { "name", analysis::getRoleName (role) } }));
+
+    return object ({ { "ok", true }, { "tracks", tracks }, { "roles", roles } });
+}
+
 juce::var DawBridge::describeAutoMix() const
 {
     const auto nameOf = [this] (int trackId)
@@ -1177,7 +1186,7 @@ juce::var DawBridge::describeAutoMix() const
                 continue;
 
             const auto role = autoMixRoles.count (id) > 0 ? autoMixRoles.at (id) : analysis::Role::other;
-            tracks.add (object ({ { "id", id }, { "name", nameOf (id) }, { "role", roleKey (role) },
+            tracks.add (object ({ { "id", id }, { "name", nameOf (id) }, { "role", analysis::getRoleKey (role) },
                                   { "lufs", profile.integratedLufs }, { "active", profile.getActiveSeconds() } }));
         }
 
@@ -1300,13 +1309,15 @@ void DawBridge::finishKeyDetection()
             continue;
 
         const auto known = autoMixRoles.find (id);
-        const auto role = known != autoMixRoles.end() ? known->second
+        const auto role = track.hasProperty (ids::mixRole) ? analysis::getRoleFromKey (track[ids::mixRole].toString())
+                        : known != autoMixRoles.end() ? known->second
                                                       : analysis::guessRole (track[ids::name].toString(), profile, songSeconds);
+        const auto isVoice = role == analysis::Role::voice || role == analysis::Role::backingVocal;
         const auto sum = profile.getChromaSum();
         const auto weight = std::accumulate (sum.begin(), sum.end(), 0.0);
 
         analysis::addChroma (everything, sum);
-        if (role != analysis::Role::voice)
+        if (! isVoice)
         {
             analysis::addChroma (instruments, sum);
             instrumentWeight += weight;
@@ -1314,7 +1325,7 @@ void DawBridge::finishKeyDetection()
 
         described.add (object ({ { "id", id }, { "name", track[ids::name].toString() },
                                  { "key", weight > 0.0 ? analysis::estimateKey (sum).getName() : juce::String() },
-                                 { "voice", role == analysis::Role::voice } }));
+                                 { "voice", isVoice } }));
     }
 
     const auto useInstruments = instrumentWeight > 0.0;
@@ -1392,7 +1403,10 @@ int DawBridge::setAutotunesToKey()
 // The "autoMix" command; args.action is one of:
 //   analyse {style, effects}  listen to every track (background); "dawAutoMix" brings the plan
 //   reference           pick a song and plan a master match to it (background)
-//   replan {style, effects, roles: {trackId: "voice" | "backing" | "instrument" | "other"}}
+//   tags                which role each track has before listening (describeAutoMixTags)
+//   tag {track, role}   tag a track: a role key (analysis::getRoleKey), or "auto" to guess
+//                       from its name and sound again. Saved with the project.
+//   replan {style, effects, roles: {trackId: role key}}  (also saved as the tracks' tags)
 //                       effects: {eq, compressor, deEsser, reverb}, the effects it may add
 //   apply {amount, replace}  write the plan as one undo step ("Auto Mix"); with replace,
 //                       first undo the Auto Mix just applied (to change the amount)
@@ -1445,13 +1459,44 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
             autoMixStyle = styleFromKey (args["style"].toString());
         readAutoMixEffects (args["effects"]);
 
+        // A role picked here is also the track's tag, for next time.
         if (auto* roles = args["roles"].getDynamicObject())
             for (const auto& property : roles->getProperties())
-                autoMixRoles[property.name.toString().getIntValue()] = roleFromKey (property.value.toString());
+            {
+                const auto trackId = property.name.toString().getIntValue();
+                autoMixRoles[trackId] = analysis::getRoleFromKey (property.value.toString());
+                if (auto track = edit.getTrack (trackId); track.isValid())
+                    track.setProperty (ids::mixRole, analysis::getRoleKey (autoMixRoles[trackId]), nullptr);
+            }
 
         autoMixReference = false;
         replanAutoMix();
         return describeAutoMix();
+    }
+
+    if (action == "tags")
+        return describeAutoMixTags();
+
+    if (action == "tag")
+    {
+        auto track = edit.getTrack (arg (args, "track", -1));
+        if (! track.isValid())
+            return error ("That track is gone.");
+
+        // "auto" forgets the tag: Auto Mix guesses again from the name and the sound.
+        const auto key = args["role"].toString();
+        if (key == "auto" || key.isEmpty())
+        {
+            track.removeProperty (ids::mixRole, nullptr);
+            autoMixRoles.erase ((int) track[ids::id]);
+        }
+        else
+        {
+            const auto role = analysis::getRoleFromKey (key);
+            track.setProperty (ids::mixRole, analysis::getRoleKey (role), nullptr);
+            autoMixRoles[(int) track[ids::id]] = role;
+        }
+        return describeAutoMixTags();
     }
 
     if (action == "apply")

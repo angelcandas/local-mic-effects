@@ -785,7 +785,8 @@ body.is-daw .chip--live { display: none; }
 .automix-intro { margin: 0 0 10px; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .automix-roles { display: grid; gap: 6px; margin-top: 10px; }
 .automix-roles:empty { display: none; }
-.automix-role { display: grid; grid-template-columns: 1fr 120px; align-items: center; gap: 8px; }
+.automix-roles-head { color: var(--muted); font-size: 12px; }
+.automix-role { display: grid; grid-template-columns: 1fr 150px; align-items: center; gap: 8px; }
 .automix-role span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .automix-role small { color: var(--faint); font-family: var(--mono); font-size: 10.5px; margin-left: 6px; }
 .automix-plan { display: grid; gap: 8px; margin-top: 12px; }
