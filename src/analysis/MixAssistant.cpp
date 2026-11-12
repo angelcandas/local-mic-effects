@@ -682,6 +682,46 @@ namespace
                                  { "delayMix", targets.echoMix }, { "delayPingPong", 1.0f } };
             plan.echo.reasons.add ("Echo " + juce::String (targets.echoMix, 0) + "%, " + juce::String (ms, 0) + " ms (" + note + " at "
                                    + juce::String (options.tempo, 0) + " BPM), ping-pong: depth that moves with the song");
+
+            // Throws: at the end of each phrase (a second or more of singing, then at least
+            // 0.6 s of quiet), the echo's mix rises over the last word and holds through the
+            // gap, then comes back down as the next line starts.
+            if (options.throws)
+            {
+                const auto base = targets.echoMix;
+                const auto thrown = juce::jlimit (base, 60.0f, juce::jmax (35.0f, base * 3.0f));
+                std::vector<std::pair<double, float>> points { { 0.0, base } };
+                int throws = 0;
+                const auto n = voice.active.size();
+                size_t i = 0;
+                while (i < n)
+                {
+                    if (! voice.active[i]) { ++i; continue; }
+                    auto end = i;
+                    while (end < n && voice.active[end]) ++end;
+                    auto gapEnd = end;
+                    while (gapEnd < n && ! voice.active[gapEnd]) ++gapEnd;
+                    const auto sung = (end - i) * Profile::hopSeconds, gap = (gapEnd - end) * Profile::hopSeconds;
+                    if (sung >= 1.0 && gap >= 0.6)
+                    {
+                        const auto t = end * Profile::hopSeconds;
+                        const auto back = gapEnd < n ? juce::jmax (t + 0.4, gapEnd * Profile::hopSeconds - 0.1) : t + 1.5;
+                        points.push_back ({ juce::jmax (points.back().first + 0.01, t - 0.4), base });
+                        points.push_back ({ t - 0.2, thrown });
+                        points.push_back ({ back - 0.2, thrown });
+                        points.push_back ({ back, base });
+                        ++throws;
+                    }
+                    i = gapEnd;
+                }
+
+                if (throws > 0)
+                {
+                    plan.echo.automation["delayMix"] = points;
+                    plan.echo.reasons.add ("Echo throws: the mix up to " + juce::String (thrown, 0) + "% on the last word of "
+                                           + juce::String (throws) + (throws == 1 ? " phrase" : " phrases") + ", so the echo fills the gap after it");
+                }
+            }
         }
 
         // Background vocals spread wider than the lead, which stays in the middle.
@@ -2228,6 +2268,15 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
         }
 
         const auto id = (int) insert[daw::ids::id];
+        for (const auto& [valueId, points] : move.automation)
+        {
+            // Mixes (the only values automated) scale from dry, like the knob's own value below.
+            std::vector<daw::Edit::AutomationPoint> scaled;
+            for (const auto& [time, value] : points)
+                scaled.push_back ({ time, value * amount });
+            edit.setInsertAutomation (id, valueId, scaled);
+        }
+
         for (const auto& [valueId, value] : move.values)
         {
             auto scaled = value;

@@ -1556,6 +1556,8 @@ body.is-daw .app-project { color: var(--text); font-weight: 600; }
 .lane-ride-wrap { position: absolute; inset: 4px 0 auto 0; height: var(--clip); pointer-events: none; z-index: 2; }
 .lane-ride { position: absolute; left: 0; top: 0; height: 100%; overflow: visible; }
 .lane-ride polyline { fill: none; stroke: #ffd166; stroke-width: 1.5; vector-effect: non-scaling-stroke; }
+.lane-automation polyline { stroke: #b388ff; }
+.lane-ride-label.lane-automation-label { left: auto; right: 4px; color: #b388ff; }
 .lane-ride-zero { stroke: rgba(255, 209, 102, 0.25); stroke-width: 1; stroke-dasharray: 3 4; vector-effect: non-scaling-stroke; }
 .lane-ride-label { position: absolute; left: 4px; bottom: 2px; padding: 0 4px; border-radius: 4px; white-space: nowrap;
   background: rgba(0, 0, 0, 0.55); color: #ffd166; font-family: var(--mono); font-size: 10px; pointer-events: auto; }

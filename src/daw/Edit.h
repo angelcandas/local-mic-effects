@@ -6,6 +6,7 @@
 #include "TempoMap.h"
 #include "Warp.h"
 
+#include <map>
 #include <optional>
 
 // The DAW session as a ValueTree, so every change can be undone and the whole thing
@@ -73,7 +74,7 @@ namespace ids
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
-    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (ride)
+    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges)
@@ -252,6 +253,18 @@ public:
     void setVolumeRide (int trackId, const std::vector<RidePoint>&);
     static std::vector<RidePoint> getVolumeRide (const juce::ValueTree& track);
     static float getRideDbAt (const std::vector<RidePoint>&, double time);
+
+    // Effect automation: an insert value over time (an echo's mix rising at the end of a
+    // phrase...), while playing and in exports. Straight lines between the points, held
+    // before the first and after the last; when playback stops the value goes back to
+    // the insert's own. Stored on the INSERT as "valueId=time:value;...|valueId=...".
+    // An empty list removes that value's lane. One undo step.
+    struct AutomationPoint { double time = 0.0; float value = 0.0f; };
+    using Automation = std::map<juce::String, std::vector<AutomationPoint>>; // by value ID
+    void setInsertAutomation (int insertId, const juce::String& valueId, const std::vector<AutomationPoint>&);
+    static Automation getInsertAutomation (const juce::ValueTree& insert);
+    static float getAutomationValueAt (const std::vector<AutomationPoint>&, double time);
+    void clearTrackAutomation (int trackId); // every insert's automation on the track
     void setClipWarp (int clipId, const warp::Map&);
     static warp::Map getClipWarp (const juce::ValueTree& clip);
 
