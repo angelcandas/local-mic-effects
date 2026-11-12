@@ -67,7 +67,10 @@ set(MICFX_INSTRUMENT_SOURCES
     src/instruments/Grand.cpp
     src/instruments/Nova.cpp
     src/instruments/Tines.cpp
-    src/instruments/Drawbar.cpp)
+    src/instruments/Drawbar.cpp
+    src/instruments/Pluck.cpp
+    src/instruments/Mallets.cpp
+    src/instruments/Beat.cpp)
 
 set(MICFX_DSP_SOURCES
     ${MICFX_INSTRUMENT_SOURCES}
@@ -252,6 +255,9 @@ if(MICFX_BUILD_INSTRUMENT_PLUGINS)
     micfx_add_instrument_plugin(nova Nova Mnov Synth)
     micfx_add_instrument_plugin(tines Tines Mtin Piano)
     micfx_add_instrument_plugin(drawbar Drawbar Mdrb Organ)
+    micfx_add_instrument_plugin(pluck Pluck Mplk Synth)
+    micfx_add_instrument_plugin(mallets Mallets Mmlt Synth)
+    micfx_add_instrument_plugin(beat Beat Mbea Drum)
 endif()
 
 # Headless test runner for the DSP: pitch accuracy, autotune, every preset, CPU load.

@@ -9,6 +9,9 @@ const Spec& getGrandSpec();
 const Spec& getNovaSpec();
 const Spec& getTinesSpec();
 const Spec& getDrawbarSpec();
+const Spec& getPluckSpec();
+const Spec& getMalletsSpec();
+const Spec& getBeatSpec();
 
 // In the order the library lists them.
 std::vector<const Spec*> getAllSpecs();

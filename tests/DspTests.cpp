@@ -6907,6 +6907,25 @@ namespace
     {
         std::vector<juce::MidiMessage> events;
         const auto add = [&] (std::vector<juce::MidiMessage> more) { events.insert (events.end(), more.begin(), more.end()); };
+        if (spec.category == "Drums")
+        {
+            // Two bars of a beat at 100 bpm, then a fill and a crash.
+            const auto step = 60.0 / 100.0 / 4.0;
+            for (int bar = 0; bar < 2; ++bar)
+                for (int i = 0; i < 16; ++i)
+                {
+                    const auto t = (bar * 16 + i) * step;
+                    if (i == 0 || i == 8 || i == 10) add (chord ({ 36 }, t, t + 0.1, 0.9f));
+                    if (i == 4 || i == 12) add (chord ({ 38 }, t, t + 0.1, 0.85f));
+                    add (chord ({ i == 14 ? 46 : 42 }, t, t + 0.1, i % 4 == 0 ? 0.7f : 0.45f));
+                }
+            const auto fill = 32 * step;
+            const int toms[] = { 50, 48, 47, 45, 43, 41, 41, 38 };
+            for (int i = 0; i < 8; ++i)
+                add (chord ({ toms[i] }, fill + i * step, fill + i * step + 0.1, 0.8f));
+            add (chord ({ 36, 49 }, fill + 8 * step, fill + 8 * step + 0.1, 1.0f));
+            return events;
+        }
         const auto low = spec.key == "nova" ? 48 : 48;
         add (chord ({ low, low + 7, low + 16, low + 19 }, 0.0, 1.6, 0.75f));
         add (chord ({ low + 5, low + 12, low + 17, low + 21 }, 1.7, 3.2, 0.6f));
@@ -6941,7 +6960,9 @@ namespace
                 instrument.setCurrentProgram (p);
                 juce::MessageManager::getInstance()->runDispatchLoopUntil (5); // what the app's message loop does
                 instrument.reset();
-                const auto out = playInstrument (instrument, chord ({ 48, 60, 64, 67, 72 }, 0.05, 1.0), 6.0);
+                const auto drums = spec->category == "Drums";
+                const auto out = playInstrument (instrument, drums ? chord ({ 36, 38, 42, 45, 49 }, 0.05, 1.0)
+                                                                   : chord ({ 48, 60, 64, 67, 72 }, 0.05, 1.0), 6.0);
                 const auto loud = rms (out[0], (size_t) (0.1 * sampleRate), (size_t) (0.9 * sampleRate));
                 auto peak = 0.0f;
                 auto finite = true;
@@ -6978,6 +6999,29 @@ namespace
             check (sounding == presets && clean == presets && quietAfter == presets,
                    spec->name + ": all " + juce::String (presets) + " presets play cleanly and end" + problems);
 
+            if (spec->category == "Drums")
+            {
+                // A kit: the drums are on their General MIDI notes, an open hat is choked by a closed one.
+                instrument.setCurrentProgram (0);
+                instrument.reset();
+                auto hats = chord ({ 46 }, 0.0, 0.1);
+                const auto open = playInstrument (instrument, hats, 1.0);
+                instrument.reset();
+                hats.push_back (at (juce::MidiMessage::noteOn (1, 42, 0.3f), 0.2));
+                const auto choked = playInstrument (instrument, hats, 1.0);
+                const auto ringing = rms (open[0], (size_t) (0.28 * sampleRate), (size_t) (0.4 * sampleRate));
+                const auto stopped = rms (choked[0], (size_t) (0.28 * sampleRate), (size_t) (0.4 * sampleRate));
+                instrument.reset();
+                auto closedOnly = chord ({ 42 }, 0.2, 0.3, 0.3f);
+                const auto closedAlone = rms (playInstrument (instrument, closedOnly, 1.0)[0], (size_t) (0.28 * sampleRate), (size_t) (0.4 * sampleRate));
+                instrument.reset();
+                const auto unmapped = playInstrument (instrument, chord ({ 100 }, 0.0, 0.5), 0.5);
+                check (ringing > 1.0e-3f && stopped < closedAlone * 1.2f + ringing * 0.05f && rms (unmapped[0], 0, unmapped[0].size()) == 0.0f,
+                       spec->name + ": a closed hat chokes the open one, and notes outside the kit are silent (" + juce::String (ringing, 4)
+                           + " / " + juce::String (stopped, 5) + ")");
+            }
+            else
+            {
             // In tune (the organ on a registration without its sub-octave 16' bar).
             instrument.setCurrentProgram (0);
             if (spec->key == "drawbar")
@@ -6997,6 +7041,7 @@ namespace
             const auto after = rms (pedal[0], (size_t) (2.6 * sampleRate), (size_t) (3.0 * sampleRate));
             check (held > 0.003f && after < held * 0.1f, spec->name + ": the pedal holds the note until it's lifted ("
                                                          + juce::String (held, 4) + " / " + juce::String (after, 5) + ")");
+            }
 
             // Settings come back.
             instrument.setCurrentProgram (1);
