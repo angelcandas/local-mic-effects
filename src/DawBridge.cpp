@@ -1086,6 +1086,53 @@ juce::var DawBridge::addStemTracks (const juce::ValueTree& clip, int trackId,
     return object ({ { "ok", true }, { "error", juce::String() }, { "tracks", added } });
 }
 
+juce::var DawBridge::addLoopTracks (const std::vector<LoopLayer>& layers, double loopSeconds, int repeats, double bpm, int beatsPerBar)
+{
+    if (layers.empty() || loopSeconds <= 0.0)
+        return error ("There's no loop to send.");
+
+    for (const auto& layer : layers)
+        if (! layer.file.existsAsFile())
+            return error ("A loop file is missing: " + layer.file.getFullPathName());
+
+    auto& undo = edit.getUndoManager();
+    undo.beginNewTransaction ("Add loop tracks");
+
+    // Bars line up with the loop when it was recorded to a tempo.
+    if (bpm > 0.0)
+    {
+        edit.setTempo (bpm);
+        edit.setBeatsPerBar (juce::jlimit (2, 12, beatsPerBar));
+    }
+
+    repeats = juce::jlimit (1, 64, repeats);
+    juce::Array<juce::var> added;
+    int number = 1;
+
+    for (const auto& layer : layers)
+    {
+        const auto source = project.isOpen() ? project.importAudio (layer.file) : layer.file;
+        if (! source.existsAsFile())
+            return error ("Couldn't copy " + layer.file.getFileName() + " into the project's Audio folder.");
+
+        const auto id = (int) edit.addTrack ("Loop " + juce::String (number++))[ids::id];
+
+        for (int pass = 0; pass < repeats; ++pass)
+        {
+            const auto clip = edit.addClip (id, source, pass * loopSeconds, loopSeconds);
+            if (clip.isValid() && std::abs (layer.gainDecibels) > 0.01f)
+                edit.setClipGain ((int) clip[ids::id], layer.gainDecibels);
+        }
+
+        if (layer.muted)
+            edit.setTrackMute (id, true);
+        added.add (id);
+    }
+
+    sessionChanged = true;
+    return object ({ { "ok", true }, { "error", juce::String() }, { "tracks", added } });
+}
+
 juce::var DawBridge::handleStems (const juce::var& args)
 {
     const auto action = args["action"].toString();

@@ -2416,6 +2416,290 @@ namespace
         folder.deleteRecursively();
     }
     //==========================================================================
+    void testLooper()
+    {
+        std::cout << "\nLive looper\n";
+
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+        juce::int64 clock = 0; // keeps every sine continuous across calls
+
+        // Runs `seconds` through the looper with a sine (0 Hz = silence) on its input;
+        // returns the left output (input + loop).
+        const auto run = [&] (Looper& looper, double seconds, double frequency, float level = 0.4f)
+        {
+            std::vector<float> out;
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            const auto blocks = (int) std::llround (seconds * sampleRate / blockSize);
+            for (int b = 0; b < blocks; ++b)
+            {
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    const auto value = frequency > 0.0 ? level * (float) std::sin (twoPi * frequency * (double) (clock + i) / sampleRate) : 0.0f;
+                    buffer.setSample (0, i, value);
+                    buffer.setSample (1, i, value);
+                }
+                clock += blockSize;
+                looper.process (buffer, buffer, 2, blockSize);
+                out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+            }
+            return out;
+        };
+        const auto press = [&] (Looper& looper, Looper::Command command)
+        {
+            looper.send (command);
+            juce::AudioBuffer<float> silence (2, 1);
+            silence.clear();
+            looper.process (silence, silence, 2, 1); // handled at the start of the next block
+        };
+        using Command = Looper::Command;
+        using State = Looper::State;
+
+        // Free loop: the first layer sets the length.
+        {
+            Looper looper;
+            looper.prepare (sampleRate);
+            check (looper.getState() == State::empty && looper.getOverview (0, 16).isEmpty(), "starts empty");
+
+            press (looper, Command::main);
+            run (looper, 1.0, 300.0);
+            check (looper.getState() == State::recording && std::abs ((double) looper.getPosition() / sampleRate - 1.0) < 0.01,
+                   "main records the first layer");
+            press (looper, Command::main);
+            const auto length = looper.getLength();
+            check (looper.getState() == State::playing && std::abs ((double) length / sampleRate - 1.0) < 0.01,
+                   "main again closes it: a free loop of what was recorded (" + juce::String ((double) length / sampleRate, 3) + " s)");
+
+            const auto played = run (looper, 2.0, 0.0);
+            check (std::abs (rms (played, 2000, played.size() - 2000) - 0.4f / std::sqrt (2.0f)) < 0.02f, "plays the layer back at its level");
+            check (std::abs (centsBetween (measurePitch (played), 300.0f)) < 5.0f, "at the pitch it was sung");
+
+            float jump = 0.0f;
+            for (size_t i = 1; i < played.size(); ++i)
+                jump = juce::jmax (jump, std::abs (played[i] - played[i - 1]));
+            check (jump < 0.03f, "the seam where it wraps doesn't click (largest step " + juce::String (jump, 4) + ")");
+
+            // An overdub on top, for one whole pass.
+            press (looper, Command::main);
+            check (looper.getState() == State::overdubbing && looper.getNumLayers() == 2, "main while playing overdubs a second layer");
+            run (looper, (double) length / sampleRate + 0.05, 450.0, 0.3f);
+            press (looper, Command::main);
+            run (looper, 0.05, 0.0);
+            check (looper.getState() == State::playing && looper.getNumLayers() == 2, "main again ends the overdub (after a short fade)");
+
+            const auto both = run (looper, 1.0, 0.0);
+            const auto expected = std::sqrt (0.4f * 0.4f / 2.0f + 0.3f * 0.3f / 2.0f);
+            check (std::abs (rms (both, 4000, both.size() - 4000) - expected) < 0.03f,
+                   "both layers play together (rms " + juce::String (rms (both, 4000, both.size() - 4000), 3) + ")");
+
+            looper.setLayerMuted (1, true);
+            run (looper, 0.1, 0.0);
+            const auto muted = run (looper, 0.5, 0.0);
+            check (std::abs (rms (muted, 0, muted.size()) - 0.4f / std::sqrt (2.0f)) < 0.02f, "muting a layer leaves the others");
+            looper.setLayerMuted (1, false);
+
+            press (looper, Command::undo);
+            check (looper.getNumLayers() == 1 && looper.getNumRedoLayers() == 1, "undo takes off the top layer");
+            press (looper, Command::undo);
+            check (looper.getNumLayers() == 1, "undo never removes the first layer (clear does)");
+            press (looper, Command::redo);
+            check (looper.getNumLayers() == 2 && looper.getNumRedoLayers() == 0, "redo puts it back");
+
+            for (int i = 0; i < 3; ++i)
+            {
+                press (looper, Command::main);
+                run (looper, 0.3, 200.0 + 100.0 * i, 0.1f);
+                press (looper, Command::main);
+                run (looper, 0.02, 0.0);
+            }
+            check (looper.getNumLayers() == Looper::maxLayers, "stacks up to four layers");
+            press (looper, Command::main);
+            check (looper.getState() == State::playing && looper.getNumLayers() == Looper::maxLayers, "a fifth overdub is refused");
+
+            // A partial overdub (0.3 s of the 1 s loop) leaves the rest of its layer silent.
+            juce::AudioBuffer<float> layer;
+            check (looper.copyLayer (3, layer) && layer.getNumSamples() == (int) length, "a layer copies out at the loop's length");
+            int covered = 0;
+            for (int i = 0; i < layer.getNumSamples(); ++i)
+                covered += std::abs (layer.getSample (0, i)) > 1e-6f ? 1 : 0;
+            check (std::abs ((double) covered / sampleRate - 0.3) < 0.03,
+                   "a short overdub covers only where it was sung (" + juce::String ((double) covered / sampleRate, 2) + " s)");
+            check (looper.getOverview (0, 32).size() == 32 && looper.getOverview (0, 32)[10] > 0.3f, "the overview shows the first layer's level");
+
+            // An undone layer is dropped by a new overdub.
+            press (looper, Command::undo);
+            press (looper, Command::main);
+            run (looper, 0.1, 0.0);
+            press (looper, Command::main);
+            check (looper.getNumRedoLayers() == 0 && looper.getNumLayers() == Looper::maxLayers, "a new overdub replaces the undone layer");
+
+            // Undo while overdubbing drops that layer.
+            press (looper, Command::undo);
+            press (looper, Command::main);
+            check (looper.getState() == State::overdubbing, "overdubbing again");
+            press (looper, Command::undo);
+            check (looper.getState() == State::playing && looper.getNumLayers() == Looper::maxLayers - 1 && looper.getNumRedoLayers() == 0,
+                   "undo while overdubbing drops the layer being recorded");
+
+            press (looper, Command::stop);
+            const auto stopped = run (looper, 0.2, 0.0);
+            check (looper.getState() == State::stopped && rms (stopped, 0, stopped.size()) < 1e-6f, "stop silences the loop");
+            press (looper, Command::play);
+            check (looper.getState() == State::playing && looper.getPosition() <= 1, "play starts it again from the top");
+            const auto again = run (looper, 0.2, 0.0);
+            check (rms (again, 2000, again.size()) > 0.1f, "and it is heard");
+
+            press (looper, Command::clear);
+            check (looper.getState() == State::empty && looper.getNumLayers() == 0 && looper.getLength() == 0, "clear empties the looper");
+        }
+
+        // Tempo-locked loops snap to whole bars.
+        {
+            Looper looper;
+            looper.prepare (sampleRate);
+            looper.setTempo (120.0, 4); // a bar is 2 s
+            looper.setTempoLocked (true);
+            const auto bar = looper.getBarLength();
+            check (bar == (juce::int64) (2.0 * sampleRate), "a bar at 120 BPM in 4/4 is 2 s");
+
+            press (looper, Command::main);
+            run (looper, 1.8, 300.0);
+            press (looper, Command::main);
+            check (looper.getState() == State::closing && looper.getClosingTarget() == bar, "pressed early: it keeps recording to the bar line");
+            run (looper, 0.3, 300.0);
+            check (looper.getState() == State::playing && looper.getLength() == bar, "then plays a one-bar loop");
+            check (std::abs ((double) looper.getPosition() / sampleRate - 0.1) < 0.01, "without losing the beat");
+
+            press (looper, Command::clear);
+            press (looper, Command::main);
+            run (looper, 4.3, 300.0);
+            press (looper, Command::main);
+            check (looper.getState() == State::playing && looper.getLength() == 2 * bar
+                       && std::abs ((double) looper.getPosition() / sampleRate - 0.3) < 0.01,
+                   "pressed late: two bars, playing on 0.3 s into the loop");
+
+            press (looper, Command::clear);
+            press (looper, Command::main);
+            run (looper, 0.9, 300.0);
+            press (looper, Command::stop);
+            check (looper.getState() == State::stopped && looper.getLength() == bar, "stop while recording pads the loop to the bar");
+        }
+
+        // Slips and limits.
+        {
+            Looper looper;
+            looper.prepare (sampleRate);
+            press (looper, Command::main);
+            run (looper, 0.1, 300.0);
+            press (looper, Command::main);
+            check (looper.getState() == State::empty, "a loop shorter than a quarter second is thrown away");
+
+            press (looper, Command::main);
+            run (looper, 0.5, 300.0);
+            press (looper, Command::undo);
+            check (looper.getState() == State::empty, "undo while recording the first layer cancels it");
+
+            press (looper, Command::main);
+            run (looper, Looper::maxSeconds + 0.5, 300.0);
+            check (looper.getState() == State::playing && looper.getLength() == (juce::int64) (Looper::maxSeconds * sampleRate),
+                   "the first layer closes itself at the longest loop");
+
+            looper.prepare (44100.0);
+            check (looper.getState() == State::empty, "a new sample rate clears the loop");
+        }
+
+        // In the processor: the loop of the processed voice plays under the live mic.
+        {
+            PluginProcessor processor;
+            processor.prepareToPlay (sampleRate, blockSize);
+            auto& looper = processor.getLooper();
+            looper.send (Command::main);
+
+            const auto voice = makeVoice (220.0f, 1.0);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            juce::MidiBuffer midi;
+            for (size_t start = 0; start + blockSize <= voice.size(); start += blockSize)
+            {
+                buffer.clear();
+                buffer.copyFrom (0, 0, voice.data() + start, blockSize);
+                processor.processBlock (buffer, midi);
+            }
+            looper.send (Command::main);
+            const auto played = playSilence (processor, (int) (1.0 * sampleRate) / blockSize);
+            check (looper.getState() == State::playing && rms (played, 4000, played.size() - 4000) > 0.05f
+                       && std::abs (centsBetween (measurePitch (played), 220.0f)) < 10.0f,
+                   "the processor plays the looped voice with the mic silent");
+
+            // Keep it: WAV files, then tracks in the DAW project.
+            looper.send (Command::main); // a second layer, half a pass long
+            for (size_t start = 0; start + blockSize <= voice.size() / 2; start += blockSize)
+            {
+                buffer.clear();
+                buffer.copyFrom (0, 0, voice.data() + start, blockSize);
+                processor.processBlock (buffer, midi);
+            }
+            looper.send (Command::main);
+            playSilence (processor, 4);
+            looper.setLayerMuted (1, true);
+            looper.setLayerGain (0, 0.5f);
+
+            const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-loops", {});
+            juce::String error;
+            const auto files = looper.saveLayers (folder, "Loop test", error);
+            double fileRate = 0.0;
+            const auto first = files.size() == 2 ? readWav (files[0], fileRate) : juce::AudioBuffer<float>();
+            check (error.isEmpty() && files.size() == 2 && first.getNumChannels() == 2 && first.getNumSamples() == (int) looper.getLength()
+                       && fileRate == sampleRate && files[1].getFileName() == "Loop test - layer 2.wav",
+                   "Save writes each layer as a stereo WAV one loop long");
+
+            juce::PropertiesFile::Options options;
+            options.applicationName = "MicFXTests";
+            juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+            DawBridge::availableForTesting = true;
+            DawBridge bridge (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+            auto& edit = processor.getDawEdit();
+            const auto tracksBefore = edit.getTracks().size();
+
+            std::vector<DawBridge::LoopLayer> layers;
+            for (int i = 0; i < files.size(); ++i)
+                layers.push_back ({ files[i], juce::Decibels::gainToDecibels (looper.getLayerGain (i)), looper.isLayerMuted (i) });
+            const auto loopSeconds = (double) looper.getLength() / sampleRate;
+            const auto added = bridge.addLoopTracks (layers, loopSeconds, 4, 96.0, 3);
+            const auto tracks = edit.getTracks();
+
+            auto clipsOk = tracks.size() == tracksBefore + 2;
+            for (int t = tracksBefore; clipsOk && t < tracks.size(); ++t)
+            {
+                const auto clips = tracks[t];
+                int count = 0;
+                for (const auto& child : clips)
+                    if (child.hasType (daw::ids::CLIP))
+                    {
+                        clipsOk = clipsOk && std::abs ((double) child[daw::ids::start] - count * loopSeconds) < 1e-6
+                                  && std::abs ((double) child[daw::ids::length] - loopSeconds) < 1e-6;
+                        ++count;
+                    }
+                clipsOk = clipsOk && count == 4;
+            }
+            check ((bool) added["ok"] && clipsOk && tracks[tracksBefore][daw::ids::name].toString() == "Loop 1",
+                   "Send to DAW: a track per layer, the loop repeated from the start");
+            check (std::abs (edit.getTempo() - 96.0) < 1e-6 && edit.getBeatsPerBar() == 3, "with the loop's tempo and bar");
+            check ((bool) tracks[tracksBefore + 1][daw::ids::mute] && ! (bool) tracks[tracksBefore][daw::ids::mute],
+                   "a muted layer arrives muted");
+            edit.getUndoManager().undo();
+            check (edit.getTracks().size() == tracksBefore && std::abs (edit.getTempo() - 120.0) < 1e-6, "one undo takes it all back");
+            check (! (bool) bridge.addLoopTracks ({}, 1.0, 4, 0.0, 4)["ok"], "nothing to send is an error, not empty tracks");
+
+            DawBridge::availableForTesting = false;
+            folder.deleteRecursively();
+
+            looper.send (Command::clear);
+            playSilence (processor, (int) (3.0 * sampleRate) / blockSize); // the effects' tails ring out
+            const auto silent = playSilence (processor, 40);
+            check (rms (silent, 0, silent.size()) < 1e-3f, "silent again after clear (rms " + juce::String (rms (silent, 0, silent.size()), 5) + ")");
+            check (looper.saveLayers (folder, "x", error).isEmpty() && error.isNotEmpty(), "nothing to save once cleared");
+        }
+    }
+    //==========================================================================
     // Renders `seconds` of the engine in device-sized blocks; returns {left, right}.
     std::array<std::vector<float>, 2> render (daw::DawEngine& engine, double seconds)
     {
@@ -7313,6 +7597,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=looper: just the Live looper.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "looper")
+    {
+        testLooper();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=notes: just the note pitch editor.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "notes")
     {
@@ -7329,6 +7621,7 @@ int main()
     testParametricEq();
     testRecorder();
     testMultitrack();
+    testLooper();
     testDawEngine();
     testReturns();
     testGroups();

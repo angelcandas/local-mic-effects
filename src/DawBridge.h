@@ -70,6 +70,12 @@ public:
     // lined up with the clip, and mutes the clip. One undo step. -> { ok, error, tracks }
     juce::var addStemTracks (const juce::ValueTree& clip, int trackId, const std::array<juce::File, stems::numStems>&);
 
+    // Puts loop layers (files in layer order, with their level in dB and mute) on new tracks
+    // "Loop 1"..., each repeated `repeats` times from the start of the song. With bpm > 0,
+    // sets the project's tempo and beats per bar first. One undo step. -> { ok, error, tracks }
+    struct LoopLayer { juce::File file; float gainDecibels = 0.0f; bool muted = false; };
+    juce::var addLoopTracks (const std::vector<LoopLayer>&, double loopSeconds, int repeats, double bpm, int beatsPerBar);
+
     // The tests run outside the standalone app; this lets them switch DAW mode on.
     static inline bool availableForTesting = false;
 
