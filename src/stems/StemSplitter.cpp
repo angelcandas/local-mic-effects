@@ -320,6 +320,21 @@ juce::String Model::download (const juce::File& destination, const Progress& pro
     return {};
 }
 
+juce::File GpuModel::getDefaultFile()
+{
+    return Model::getDefaultFile().getSiblingFile (GpuModel::fileName);
+}
+
+#if ! MICFX_HAS_COREML
+bool GpuModel::isBuiltIn() { return false; }
+
+Separator GpuModel::load (const juce::File&, juce::String& error)
+{
+    error = "The GPU model runs through Core ML, which this build doesn't have.";
+    return nullptr;
+}
+#endif
+
 #if ! MICFX_HAS_DEMUCS
 bool Model::isBuiltIn() { return false; }
 

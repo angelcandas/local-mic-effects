@@ -2361,7 +2361,7 @@ class DawScreen {
       }
       this.setStemsStatus(event.state === "downloading" ? `Downloading the separation model… ${percent}`
                         : event.state === "loading" ? "Loading the separation model…"
-                        : `Separating… ${percent}${left}`);
+                        : `Separating${event.gpu ? " on the GPU" : ""}… ${percent}${left}`);
       return;
     }
 
@@ -2370,7 +2370,7 @@ class DawScreen {
       panel.hidden = true;
       this.stems.splitStart = null;
       const took = event.seconds ? ` (separating took ${spokenDuration(event.seconds)})` : "";
-      toast(`Added ${event.tracks?.length ?? 0} stem tracks and muted the original clip${took}. Ctrl+Z undoes it.`);
+      toast(`Added ${event.tracks?.length ?? 0} stem tracks and muted the original clip${took}${event.gpu ? ", on the GPU" : ""}. Ctrl+Z undoes it.${event.note ? ` ${event.note}` : ""}`);
     } else if (event.state === "cancelled") {
       this.setStemsStatus("Cancelled.");
     } else if (event.state === "error") {

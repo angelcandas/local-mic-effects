@@ -60,6 +60,27 @@ struct Model
 };
 
 //==============================================================================
+// The same network on the GPU. On a Mac, Core ML runs the Demucs network (everything between
+// the spectrogram and the final mask) on the GPU. The converted model isn't downloaded:
+// scripts/export_htdemucs_coreml.py makes it once, on the Mac, into the Models folder.
+// Without it, or where Core ML isn't there, the CPU model above is used.
+struct GpuModel
+{
+    static constexpr const char* fileName = "htdemucs-core.mlpackage";
+
+    // True when this build can run Core ML (macOS builds with the stem splitter).
+    static bool isBuiltIn();
+
+    // ~/Library/Application Support/MicFX/Models/htdemucs-core.mlpackage
+    static juce::File getDefaultFile();
+
+    // A separator that runs the converted model on the GPU; null with `error` set if it
+    // can't (the model is missing or doesn't load or run). Loading compiles the model the
+    // first time and warms the GPU up with one prediction, which can take a minute.
+    static Separator load (const juce::File& file, juce::String& error);
+};
+
+//==============================================================================
 struct Settings
 {
     int threads = 0;            // 0: up to 4, one per physical core
