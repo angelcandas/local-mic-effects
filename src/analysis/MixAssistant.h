@@ -51,10 +51,13 @@ juce::String getRoleName (Role);            // "Voice", "Background vocals"...
 // The roles played by one instrument (guitar, piano, pad, synth, bass, drums, other instrument).
 bool isInstrument (Role) noexcept;
 
-enum class MixStyle { pop, ballad, rock, coaching, hipHop, rnb, acoustic, electronic, jazz, lofi };
+// speech: talking (a podcast, a voice-over, a lesson) over a music bed: the voice clear and
+// dry well over the music, which ducks while you talk; -16 LUFS, the podcast level.
+enum class MixStyle { pop, ballad, rock, coaching, hipHop, rnb, acoustic, electronic, jazz, lofi, speech };
 
 inline constexpr MixStyle allStyles[] = { MixStyle::pop, MixStyle::ballad, MixStyle::rock, MixStyle::coaching, MixStyle::hipHop,
-                                          MixStyle::rnb, MixStyle::acoustic, MixStyle::electronic, MixStyle::jazz, MixStyle::lofi };
+                                          MixStyle::rnb, MixStyle::acoustic, MixStyle::electronic, MixStyle::jazz, MixStyle::lofi,
+                                          MixStyle::speech };
 
 struct MixTargets
 {

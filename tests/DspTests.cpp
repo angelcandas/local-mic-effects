@@ -1371,6 +1371,25 @@ namespace
         check (analysis::getModeFromKey (analysis::getModeKey (analysis::MixMode::clean)) == analysis::MixMode::clean
                    && analysis::getModeFromKey ("nonsense") == analysis::MixMode::mix,
                "mode keys round-trip");
+
+        // Speech / podcast: the voice dry and well over a music bed that ducks under it.
+        {
+            const auto speech = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::speech);
+            bool character = false;
+            float duck = 0.0f, master = 0.0f;
+            for (const auto& move : speech.moves)
+            {
+                character = character || move.insert == fx::ModuleType::reverb || move.insert == fx::ModuleType::echo
+                         || move.insert == fx::ModuleType::saturation || move.insert == fx::ModuleType::exciter;
+                if (move.trackId == backing && ! move.ride.empty())
+                    for (const auto& point : move.ride) duck = juce::jmin (duck, point.second);
+                if (move.trackId == daw::Edit::masterId)
+                    master = 1.0f;
+            }
+            check (! character && std::abs (speech.voiceOverBackingLu - 10.0f) < 1.0f && duck <= -5.9f && master > 0.0f,
+                   "speech: no reverb, echo or colour; the voice " + juce::String (speech.voiceOverBackingLu, 1)
+                       + " LU over the music, which ducks " + juce::String (-duck, 1) + " dB while you talk");
+        }
     }
 
     void testAutoMixSynths()

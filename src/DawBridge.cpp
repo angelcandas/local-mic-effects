@@ -149,6 +149,7 @@ namespace
             case analysis::MixStyle::electronic: return "electronic";
             case analysis::MixStyle::jazz:       return "jazz";
             case analysis::MixStyle::lofi:       return "lofi";
+            case analysis::MixStyle::speech:     return "speech";
         }
         return "pop";
     }
