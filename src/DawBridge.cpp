@@ -390,7 +390,7 @@ juce::var DawBridge::describeSession()
             const auto audio = engine.getAudioPool().get (file, warpSettings);
 
             juce::Array<juce::var> markers;
-            for (const auto& m : daw::Edit::getClipWarp (clip).getMarkers())
+            for (const auto& m : daw::Edit::getShownWarp (clip))
                 markers.add (juce::Array<juce::var> { m.source, m.target });
 
             // Typed explicitly: the page does arithmetic on these, and text ("0.0") breaks it.
@@ -401,6 +401,7 @@ juce::var DawBridge::describeSession()
                                  { "mute", (bool) clip.getProperty (ids::mute, false) },
                                  { "transpose", number (clip, ids::transpose) }, { "warp", markers },
                                  { "stretch", daw::warp::getAlgorithmKey (warpSettings.algorithm) }, { "formant", warpSettings.formant },
+                                 { "musical", daw::Edit::isMusical (clip) }, { "clipTempo", daw::Edit::getClipTempo (clip) },
                                  // The audio the clip plays (its file, or a rendered copy): the page keys waveforms on it.
                                  { "audioKey", warpSettings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, warpSettings) },
                                  { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
@@ -2015,6 +2016,22 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         if (args.hasProperty ("transpose")) edit.setClipTranspose (id, args["transpose"]);
         if (args.hasProperty ("stretch")) edit.setClipStretch (id, daw::warp::algorithmFromKey (args["stretch"].toString()));
         if (args.hasProperty ("formant")) edit.setClipFormant (id, args["formant"]);
+        if (args.hasProperty ("musical") || args.hasProperty ("clipTempo"))
+        {
+            const auto clip = edit.getClip (id);
+            auto on = args.hasProperty ("musical") ? (bool) args["musical"] : daw::Edit::isMusical (clip);
+            auto bpm = arg (args, "clipTempo", 0.0);
+
+            // Switching on with no tempo given: the clip's own tempo, found from its audio
+            // the first time (or the project tempo there, when no steady beat shows).
+            if (on && bpm <= 0.0 && ! clip.hasProperty (ids::clipTempo))
+                if (const auto audio = engine.getAudioPool().loadNow (juce::File (clip[ids::file].toString())); audio != nullptr)
+                    if (const auto found = analysis::rhythm::detectTempo (*audio, engine.getAudioPool().getSampleRate(), edit.getBeatsPerBar());
+                        found.bpm > 0.0 && found.confidence >= 0.2)
+                        bpm = std::round (found.bpm * 100.0) / 100.0;
+
+            edit.setClipMusical (id, on, bpm);
+        }
         ok();
         return;
     }
@@ -2159,9 +2176,26 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         options.strength = juce::jlimit (0.0, 1.0, arg (args, "strength", 1.0));
         options.catchRange = juce::jlimit (0.0, 0.5, arg (args, "catch", 0.5));
         options.sensitivity = juce::jlimit (0.0f, 1.0f, arg (args, "sensitivity", 0.5f));
+        options.iterative = arg (args, "iterative", false);
 
         const auto result = daw::rhythm::quantizeClips (edit, engine.getAudioPool(), clips, grid, options);
+
+        // Slicing: cut at the notes and move the pieces, with no stretching.
+        if (arg (args, "slice", false))
+            for (auto clip : clips)
+                edit.setClipStretch (clip, daw::warp::Algorithm::slice);
+
         complete (object ({ { "ok", true }, { "onsets", result.onsets }, { "moved", result.moved } }));
+        return;
+    }
+
+    // Note starts in a clip (args.id), in its rendered copy's time: [[time, strength], ...].
+    if (command == "hitpoints")
+    {
+        juce::Array<juce::var> list;
+        for (const auto& onset : daw::rhythm::findHitpoints (edit, engine.getAudioPool(), id, juce::jlimit (0.0f, 1.0f, arg (args, "sensitivity", 0.5f))))
+            list.add (juce::Array<juce::var> { onset.time, onset.strength });
+        complete (object ({ { "ok", true }, { "hits", list } }));
         return;
     }
 
@@ -2184,7 +2218,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                 if (pair.isArray() && pair.size() == 2)
                     markers.push_back ({ (double) pair[0], (double) pair[1] });
 
-        edit.setClipWarp (id, daw::warp::Map (std::move (markers)));
+        edit.setEffectiveWarp (id, daw::warp::Map (std::move (markers)));
         ok();
         return;
     }

@@ -128,6 +128,7 @@ Result quantizeClips (Edit& edit, AudioPool& pool, const juce::Array<int>& clipI
     {
         juce::File file;
         warp::Map map;
+        warp::Map base; // the clip's timing before any free warp: its musical bend, or the identity
         double timelineOffset = 0.0; // clip start minus clip offset: rendered time -> timeline
         juce::Array<int> clips;
         std::vector<std::pair<double, double>> windows; // in file time
@@ -141,13 +142,14 @@ Result quantizeClips (Edit& edit, AudioPool& pool, const juce::Array<int>& clipI
         if (! clip.isValid())
             continue;
 
-        const auto map = Edit::getClipWarp (clip);
+        const auto map = Edit::getEffectiveWarp (clip);
         const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
         const auto key = clip[ids::file].toString() + "|" + map.toString() + "|" + juce::String (start - offset, 4);
 
         auto& group = groups[key];
         group.file = juce::File (clip[ids::file].toString());
         group.map = map;
+        group.base = Edit::getMusicalMap (clip);
         group.timelineOffset = start - offset;
         group.clips.add (id);
         group.windows.emplace_back (map.toSource (offset), map.toSource (offset + length));
@@ -176,9 +178,10 @@ Result quantizeClips (Edit& edit, AudioPool& pool, const juce::Array<int>& clipI
         const auto from = group.windows.front().first, to = std::max_element (group.windows.begin(), group.windows.end(),
                                                                                 [] (auto& a, auto& b) { return a.second < b.second; })->second;
 
-        // The unwarped audio, slid so the first window starts where it plays now.
-        const auto slide = group.map.toTarget (from) - from;
-        const auto natural = [&] (double s) { return s + slide; };
+        // The unwarped audio (only bent onto the tempo, for a musical clip), slid so the first
+        // window starts where it plays now.
+        const auto slide = group.map.toTarget (from) - group.base.toTarget (from);
+        const auto natural = [&] (double s) { return options.iterative ? group.map.toTarget (s) : group.base.toTarget (s) + slide; };
         const auto inWindow = [&] (double s)
         {
             return std::any_of (group.windows.begin(), group.windows.end(), [s] (auto& w) { return s >= w.first && s < w.second; });
@@ -189,7 +192,8 @@ Result quantizeClips (Edit& edit, AudioPool& pool, const juce::Array<int>& clipI
         {
             if (! markers.empty())
             {
-                const auto ds = s - markers.back().source, dt = target - markers.back().target;
+                // At most twice as fast or slow as the audio plays unwarped.
+                const auto ds = natural (s) - natural (markers.back().source), dt = target - markers.back().target;
                 if (ds <= 0.0 || dt <= 0.0 || dt / ds > 2.0 || ds / dt > 2.0)
                     return false;
             }
@@ -243,9 +247,28 @@ Result quantizeClips (Edit& edit, AudioPool& pool, const juce::Array<int>& clipI
         }
 
         for (auto id : group.clips)
-            edit.setClipWarp (id, warp::Map (markers));
+            edit.setEffectiveWarp (id, warp::Map (markers));
     }
 
     return result;
+}
+
+std::vector<analysis::rhythm::Onset> findHitpoints (const Edit& edit, AudioPool& pool, int clipId, float sensitivity)
+{
+    const auto clip = edit.getClip (clipId);
+    if (! clip.isValid() || Edit::isMidiClip (clip))
+        return {};
+
+    const auto source = pool.loadNow (juce::File (clip[ids::file].toString()));
+    if (source == nullptr)
+        return {};
+
+    const auto map = Edit::getEffectiveWarp (clip);
+    const auto offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+    auto onsets = analysis::rhythm::findOnsets (*source, pool.getSampleRate(), juce::jmax (0.0, map.toSource (offset)),
+                                                map.toSource (offset + length), sensitivity);
+    for (auto& onset : onsets)
+        onset.time = map.toTarget (onset.time);
+    return onsets;
 }
 }

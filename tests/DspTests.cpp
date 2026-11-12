@@ -3511,6 +3511,12 @@ namespace
                    "the session shows them, and the clip plays another rendered copy");
             run ("undo");
             check (lastSession()["tracks"][0]["clips"][0]["stretch"].toString() == "mix", "and they undo");
+            check (ok (run ("setClip", args ({ { "id", clipId }, { "musical", true }, { "clipTempo", 100.0 } }))),
+                   "setClip switches musical mode on with the clip's tempo");
+            const auto musical = lastSession()["tracks"][0]["clips"][0];
+            check ((bool) musical["musical"] && std::abs ((double) musical["clipTempo"] - 100.0) < 1e-9 && musical["warp"].size() == 2,
+                   "the session shows musical mode, the clip tempo and the free warp's markers");
+            run ("undo");
             run ("undo"); run ("undo"); run ("undo");
             check (! edit.getClip (clipId).hasProperty (daw::ids::warp), "and each undoes");
         }
@@ -4190,6 +4196,101 @@ namespace
                                   + juce::String (worst * 1000.0, 2) + " ms off)");
     }
 
+    void testMusicalMode()
+    {
+        std::cout << "\nMusical mode (clips follow the tempo track)\n";
+
+        // A 120 BPM loop: a hit on every beat for 8 beats (4 s).
+        juce::AudioBuffer<float> loop (1, (int) (4.0 * sampleRate));
+        loop.clear();
+        for (int beat = 0; beat < 8; ++beat)
+            for (int i = 0; i < (int) (0.05 * sampleRate); ++i)
+                loop.setSample (0, (int) (beat * 0.5 * sampleRate) + i, 0.8f * (float) std::exp (-i / (0.008 * sampleRate)) * (float) std::sin (0.3 * i));
+
+        const auto folder = juce::File::createTempFile ("micfx-musical");
+        folder.createDirectory();
+        const auto file = folder.getChildFile ("loop.wav");
+        writeWav (file, loop, sampleRate);
+
+        daw::Edit edit;
+        daw::AudioPool pool;
+        pool.setSampleRate (sampleRate);
+        edit.setTempo (135.0);
+        const auto track = (int) edit.addTrack ("Drums")[daw::ids::id];
+        const auto barAt135 = 4 * 60.0 / 135.0;
+        const auto clipId = (int) edit.addClip (track, file, barAt135, 4.0)[daw::ids::id];
+
+        // Hits found in the clip's rendered copy, on the timeline.
+        const auto hitsOnTimeline = [&]
+        {
+            const auto clip = edit.getClip (clipId);
+            const auto audio = pool.loadNow (file, daw::Edit::getWarpSettings (clip));
+            const auto timelineOffset = (double) clip[daw::ids::start] - (double) clip[daw::ids::offset];
+            std::vector<double> hits;
+            const auto onsets = analysis::rhythm::findOnsets (*audio, sampleRate);
+            for (const auto& o : onsets)
+                hits.push_back (o.time + timelineOffset);
+            return hits;
+        };
+        const auto worstOff = [&] (const std::vector<double>& hits, const daw::TempoMap& tempo, double firstBeat)
+        {
+            // Each hit against the nearest of the clip's 8 beats (the very first hit, at the
+            // file's start, may not count as an onset).
+            double worst = hits.size() >= 7 ? 0.0 : 1.0;
+            for (auto hit : hits)
+            {
+                auto nearest = 1.0e9;
+                for (int n = 0; n < 8; ++n)
+                    nearest = std::min (nearest, std::abs (hit - tempo.toSeconds (firstBeat + n)));
+                worst = std::max (worst, nearest);
+            }
+            return worst;
+        };
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.setClipMusical (clipId, true, 120.0);
+        auto clip = edit.getClip (clipId);
+        auto hits = hitsOnTimeline();
+        check (daw::Edit::isMusical (clip) && std::abs ((double) clip[daw::ids::length] - 8 * 60.0 / 135.0) < 1e-6
+                   && std::abs ((double) clip[daw::ids::start] - barAt135) < 1e-9,
+               "a 120 BPM loop in musical mode at 135 BPM stays on bar 2 and lasts 8 beats ("
+                   + juce::String ((double) clip[daw::ids::length], 3) + " s)");
+        check (worstOff (hits, edit.getTempoMap(), 4.0) < 0.006,
+               "its hits land on the 135 BPM beats (" + juce::String ((int) hits.size()) + " hits, worst "
+                   + juce::String (worstOff (hits, edit.getTempoMap(), 4.0) * 1000.0, 1) + " ms)");
+
+        // The tempo changes: the clip keeps its bars and beats, a plain clip keeps its seconds.
+        const auto plain = (int) edit.addClip (track, file, 20.0, 4.0)[daw::ids::id];
+        edit.getUndoManager().beginNewTransaction();
+        edit.setTempo (100.0);
+        clip = edit.getClip (clipId);
+        hits = hitsOnTimeline();
+        check (std::abs ((double) clip[daw::ids::start] - 4 * 0.6) < 1e-9 && std::abs ((double) clip[daw::ids::length] - 8 * 0.6) < 1e-6
+                   && std::abs ((double) edit.getClip (plain)[daw::ids::start] - 20.0) < 1e-12,
+               "at 100 BPM it starts on bar 2 again and lasts 8 beats; a plain clip doesn't move");
+        check (worstOff (hits, edit.getTempoMap(), 4.0) < 0.006, "and its hits follow");
+
+        // A ramp from 100 to 160 over the clip: the hits follow the curve.
+        edit.getUndoManager().beginNewTransaction();
+        edit.setTempoMap (daw::TempoMap ({ { 0.0, 100.0, false }, { 4.0, 100.0, false }, { 12.0, 160.0, true } }));
+        hits = hitsOnTimeline();
+        check (worstOff (hits, edit.getTempoMap(), 4.0) < 0.008,
+               "through a ramp from 100 to 160 BPM every hit stays on its beat (worst "
+                   + juce::String (worstOff (hits, edit.getTempoMap(), 4.0) * 1000.0, 1) + " ms)");
+
+        edit.getUndoManager().undo();
+        edit.getUndoManager().undo();
+        check (std::abs ((double) edit.getClip (clipId)[daw::ids::length] - 8 * 60.0 / 135.0) < 1e-6, "tempo changes undo with the clip");
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.setClipMusical (clipId, false);
+        clip = edit.getClip (clipId);
+        check (! daw::Edit::isMusical (clip) && std::abs ((double) clip[daw::ids::length] - 4.0) < 1e-6 && daw::Edit::getWarpSettings (clip).isNeutral(),
+               "switching musical mode off plays the file as recorded again");
+
+        folder.deleteRecursively();
+    }
+
     void testWarp()
     {
         std::cout << "\nTime warp and transpose (clips stay dry)\n";
@@ -4539,6 +4640,46 @@ namespace
         after = onTimeline();
         check (after.size() == 6 && std::abs (after[0] - 1.515) < 0.004 && std::abs (after[1] - 1.985) < 0.004,
                "50% strength moves them halfway, from the unwarped take (" + juce::String (after[0], 3) + ", " + juce::String (after[1], 3) + ")");
+
+        // Iterative: another 50% pass starts from where the hits play now.
+        auto again = half;
+        again.iterative = true;
+        daw::rhythm::quantizeClips (edit, pool, { clip }, beatGrid, again);
+        after = onTimeline();
+        check (after.size() == 6 && std::abs (after[0] - 1.5075) < 0.004 && std::abs (after[1] - 1.9925) < 0.004,
+               "iterative 50% closes half of what's left (" + juce::String (after[0], 4) + ", " + juce::String (after[1], 4) + ")");
+
+        // Hitpoints: the note starts the warp tool shows, in the clip's rendered time.
+        {
+            const auto shown = daw::rhythm::findHitpoints (edit, pool, clip);
+            const auto c = edit.getClip (clip);
+            const auto toTimeline = (double) c[daw::ids::start] - (double) c[daw::ids::offset];
+            auto match = shown.size() == 6;
+            for (size_t i = 0; match && i < shown.size(); ++i)
+                match = std::abs (shown[i].time + toTimeline - after[i]) < 0.004;
+            check (match, "hitpoints are the clip's note starts where they play (" + juce::String ((int) shown.size()) + ")");
+        }
+
+        // Slice quantize: the hits move whole, not stretched.
+        {
+            edit.setClipWarp (clip, {});
+            edit.setClipStretch (clip, daw::warp::Algorithm::slice);
+            daw::rhythm::quantizeClips (edit, pool, { clip }, beatGrid, {});
+            const auto c = edit.getClip (clip);
+            const auto sliced = pool.loadNow (takeFile, daw::Edit::getWarpSettings (c));
+            const auto original = pool.loadNow (takeFile);
+            const auto toTimeline = (double) c[daw::ids::start] - (double) c[daw::ids::offset];
+            // The third hit (1.52 s into the take) moves 20 ms earlier.
+            const auto from = (int) std::lround ((1.52 + 0.003) * sampleRate), to = from + (int) (0.025 * sampleRate);
+            const auto shift = (int) std::lround ((1.5 - 1.52) * sampleRate) - (int) std::lround ((toTimeline - 1.0) * sampleRate);
+            double error = 0.0;
+            for (int i = from; i < to; ++i)
+                error = std::max (error, (double) std::abs (sliced->getSample (0, i + shift) - original->getSample (0, i)));
+            after = onTimeline();
+            check (after.size() == 6 && std::abs (after[2] - 2.5) < 0.004 && error < 1.0e-5,
+                   "slice quantize moves each hit whole, sample for sample (worst " + juce::String (error, 6) + ")");
+            edit.setClipStretch (clip, daw::warp::Algorithm::mix);
+        }
 
         // Split pieces of one take share one warp (and one rendered copy).
         edit.setClipWarp (clip, {});
@@ -5403,6 +5544,7 @@ int main()
     testDawMode();
     testClipTools();
     testTempoMap();
+    testMusicalMode();
     testWarp();
     testRhythm();
     testTrackTools();
