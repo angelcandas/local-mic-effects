@@ -2849,6 +2849,38 @@ namespace
         return out;
     }
 
+    // The library preview plays on top of the output, once, and stops on request.
+    void testPreview()
+    {
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        engine.rebuildNow();
+
+        juce::AudioBuffer<float> sound (1, (int) (0.25 * sampleRate));
+        for (int i = 0; i < sound.getNumSamples(); ++i)
+            sound.setSample (0, i, 0.5f);
+
+        engine.startPreview (std::move (sound), 1.0f);
+        check (engine.isPreviewing(), "a preview starts");
+        auto out = render (engine, 0.1);
+        check (std::abs (out[0][100] - 0.5f) < 1.0e-4f && std::abs (out[1][100] - 0.5f) < 1.0e-4f, "a mono preview plays on both channels");
+        out = render (engine, 0.3);
+        check (std::abs (out[0].back()) < 1.0e-6f && ! engine.isPreviewing(), "a preview plays once, then stops by itself");
+
+        juce::AudioBuffer<float> again (2, (int) sampleRate);
+        again.clear();
+        again.applyGain (0.0f);
+        for (int i = 0; i < again.getNumSamples(); ++i)
+            again.setSample (1, i, 0.25f);
+        engine.startPreview (std::move (again), 0.5f);
+        out = render (engine, 0.05);
+        check (std::abs (out[1][50] - 0.125f) < 1.0e-4f && std::abs (out[0][50]) < 1.0e-6f, "a stereo preview keeps its sides, at its gain");
+        engine.stopPreview();
+        out = render (engine, 0.05);
+        check (std::abs (out[1].back()) < 1.0e-6f && ! engine.isPreviewing(), "stopPreview stops it");
+    }
+
     void testGroups()
     {
         std::cout << "\nGroup tracks\n";
@@ -7759,6 +7791,7 @@ int main()
     testMidiLearn();
     testDawEngine();
     testReturns();
+    testPreview();
     testGroups();
     testMastering();
     testDawRecording();
