@@ -71,6 +71,9 @@ juce::String formatValue (const ParamSpec&, float value);
 // The window: rows of sections, each a titled group of controls.
 struct Section
 {
+    Section (juce::String t, juce::StringArray p, juce::StringArray e = {}, juce::StringArray f = {})
+        : title (std::move (t)), params (std::move (p)), envelope (std::move (e)), filter (std::move (f)) {}
+
     juce::String title;
     juce::StringArray params;
     juce::StringArray envelope; // attack, decay, sustain, release ids: draws the envelope's shape

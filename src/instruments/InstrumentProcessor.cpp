@@ -50,12 +50,12 @@ juce::AudioProcessorValueTreeState::ParameterLayout InstrumentProcessor::makeLay
     {
         const juce::ParameterID id { p.id, 1 };
         if (! p.choices.isEmpty())
-            layout.add (std::make_unique<juce::AudioParameterChoice> (id, p.name, p.choices, (int) p.def));
+            layout.add (std::make_unique<juce::AudioParameterChoice> (id, juce::String::fromUTF8 (p.name), p.choices, (int) p.def));
         else if (p.toggle)
-            layout.add (std::make_unique<juce::AudioParameterBool> (id, p.name, p.def >= 0.5f));
+            layout.add (std::make_unique<juce::AudioParameterBool> (id, juce::String::fromUTF8 (p.name), p.def >= 0.5f));
         else
             layout.add (std::make_unique<juce::AudioParameterFloat> (
-                id, p.name, makeRange (p), p.def,
+                id, juce::String::fromUTF8 (p.name), makeRange (p), p.def,
                 juce::AudioParameterFloatAttributes().withStringFromValueFunction ([p] (float v, int) { return formatValue (p, v); })));
     }
     return layout;

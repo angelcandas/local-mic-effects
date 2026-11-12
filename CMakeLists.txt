@@ -65,7 +65,9 @@ set(MICFX_INSTRUMENT_SOURCES
     src/instruments/Registry.cpp
     src/instruments/Registry.h
     src/instruments/Grand.cpp
-    src/instruments/Nova.cpp)
+    src/instruments/Nova.cpp
+    src/instruments/Tines.cpp
+    src/instruments/Drawbar.cpp)
 
 set(MICFX_DSP_SOURCES
     ${MICFX_INSTRUMENT_SOURCES}
@@ -237,6 +239,8 @@ if(MICFX_BUILD_INSTRUMENT_PLUGINS)
 
     micfx_add_instrument_plugin(grand Grand Mgrd Piano)
     micfx_add_instrument_plugin(nova Nova Mnov Synth)
+    micfx_add_instrument_plugin(tines Tines Mtin Piano)
+    micfx_add_instrument_plugin(drawbar Drawbar Mdrb Organ)
 endif()
 
 # Headless test runner for the DSP: pitch accuracy, autotune, every preset, CPU load.
