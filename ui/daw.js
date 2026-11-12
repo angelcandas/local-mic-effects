@@ -50,6 +50,7 @@ async function daw(command, args = {}) {
   return result;
 }
 
+const REDUCED_MOTION = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? { matches: false };
 const isTyping = (event) => Boolean(event.target.closest?.("input:not([type=range]):not([type=checkbox]), select, textarea, [contenteditable]"));
 const trackColour = (track, index) => track.colour || TRACK_COLOURS[(track.id ?? index) % TRACK_COLOURS.length];
 
@@ -81,6 +82,14 @@ const inputChoices = (names, current) => {
   return choices;
 };
 // What "+ Return…" offers: [module key (addReturn's effect), name]. The effect starts fully wet.
+// The offline processes that change a clip's audio (the Audio menu and the clip menu).
+const AUDIO_PROCESSES = [
+  ["Normalise", "normaliseClip", "Set the clip gain so its loudest peak is −1 dB"],
+  ["Strip silence: quiet room (−55 dB)", "stripSilenceQuiet", "Split the clip into phrases and remove the silent gaps between them"],
+  ["Strip silence: normal (−45 dB)", "stripSilenceNormal", "Split the clip into phrases and remove the silent gaps between them"],
+  ["Strip silence: noisy (−35 dB)", "stripSilenceNoisy", "Split the clip into phrases and remove the silent gaps between them"],
+  ["Split into stems…", "splitStems", "Separate the song into vocals, drums, bass and other, each on its own track"],
+];
 const RETURN_EFFECTS = [["reverb", "Reverb"], ["chorus", "Chorus"], ["echo", "Echo"], ["doubler", "Doubler"],
                         ["flanger", "Flanger"], ["phaser", "Phaser"], ["none", "Empty return"]];
 const dbText = (value) => {
@@ -125,6 +134,9 @@ const ICONS = {
   tracks: '<path d="M3 6h18M3 12h18M3 18h18"/><rect x="6" y="4.5" width="6" height="3" rx="1" fill="currentColor"/><rect x="12" y="10.5" width="7" height="3" rx="1" fill="currentColor"/><rect x="5" y="16.5" width="5" height="3" rx="1" fill="currentColor"/>',
   mixer: '<path d="M6 3v18M12 3v18M18 3v18"/><rect x="4" y="13" width="4" height="3" rx="1" fill="currentColor"/><rect x="10" y="7" width="4" height="3" rx="1" fill="currentColor"/><rect x="16" y="11" width="4" height="3" rx="1" fill="currentColor"/>',
   piano: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 5v14M15 5v14M7 5v7M12 5v7M17 5v7"/>',
+  library: '<path d="M4 4h4v16H4zM10 4h4v16h-4zM15.5 5.2l3.8-1 3.4 15.6-3.8 1z"/>',
+  panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 14h18"/>',
+  more: '<circle cx="5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="19" cy="12" r="1.4" fill="currentColor"/>',
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01"/>',
 };
 
@@ -142,6 +154,70 @@ function iconButton(className, name, title, onClick) {
 
 // Thin divider between toolbar groups.
 const sep = () => html("span", "tb-sep");
+
+// A pop-up menu at a point (right-click menus, the Project menu, "more"). fill gets
+// helpers: item (label, action, { disabled, danger, checked, shortcut, hint, indent }),
+// rule (), heading (text) and the menu element itself. One menu is open at a time;
+// Escape or a click elsewhere closes it, and clicking its anchor again too.
+let openMenu = null;
+function closeMenu() {
+  if (!openMenu) return;
+  const { menu, away, anchor } = openMenu;
+  menu.remove();
+  document.removeEventListener("pointerdown", away, true);
+  document.removeEventListener("keydown", away, true);
+  anchor?.setAttribute("aria-expanded", "false");
+  openMenu = null;
+}
+let menuClosedOn = null; // the anchor whose menu a press on it just closed
+function popMenu(x, y, fill, anchor = null) {
+  if (anchor && menuClosedOn === anchor) { menuClosedOn = null; return null; }
+  closeMenu();
+  const menu = html("div", "track-menu");
+  menu.setAttribute("role", "menu");
+  const item = (label, action, { disabled = false, danger = false, checked = null, shortcut = "", hint = "", indent = false } = {}) => {
+    const b = html("button", `track-menu-item${danger ? " is-danger" : ""}${indent ? " is-indented" : ""}`);
+    b.type = "button";
+    b.setAttribute("role", checked === null ? "menuitem" : "menuitemcheckbox");
+    if (checked !== null) b.setAttribute("aria-checked", String(Boolean(checked)));
+    b.append(html("span", "track-menu-check", checked ? "✓" : ""), html("span", "track-menu-label", label));
+    if (shortcut) b.append(html("kbd", "key-chip", keyText(shortcut)));
+    if (hint) b.title = hint;
+    b.disabled = disabled;
+    b.addEventListener("click", () => { closeMenu(); action(); });
+    menu.append(b);
+    return b;
+  };
+  const rule = () => menu.append(html("div", "track-menu-rule"));
+  const heading = (text) => menu.append(html("div", "track-menu-heading", text));
+  fill({ item, rule, heading, menu });
+  // A rule at either end, or two together (from optional groups), is dropped.
+  [...menu.children].forEach((child, i, all) => {
+    if (child.classList.contains("track-menu-rule") && (i === 0 || i === all.length - 1 || all[i + 1]?.classList.contains("track-menu-rule"))) child.remove();
+  });
+  if (!menu.children.length) return null;
+
+  document.body.append(menu);
+  const box = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(x, innerWidth - box.width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, innerHeight - box.height - 4))}px`;
+  const away = (e) => {
+    if (e.type === "keydown") { if (e.key === "Escape") { e.stopPropagation(); closeMenu(); } return; }
+    if (menu.contains(e.target)) return;
+    if (anchor?.contains(e.target)) menuClosedOn = anchor;
+    closeMenu();
+    setTimeout(() => { menuClosedOn = null; }, 400);
+  };
+  openMenu = { menu, away, anchor };
+  anchor?.setAttribute("aria-expanded", "true");
+  setTimeout(() => {
+    if (openMenu?.menu !== menu) return;
+    document.addEventListener("pointerdown", away, true);
+    document.addEventListener("keydown", away, true);
+  });
+  menu.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+  return menu;
+}
 
 // Vertical drag helper: calls move(dx, dy, event) and end(moved, event).
 function drag(event, move, end = () => {}) {
@@ -481,6 +557,12 @@ class InsertRack {
 
   // From "dawStatus": live readings by insert id ({ in, out, spectrum? }, null when off).
   live(readings) {
+    // With reduced motion asked for, the effect pictures move a few times a second, not 30.
+    if (REDUCED_MOTION.matches) {
+      const now = performance.now();
+      if (now - (this.lastLive ?? 0) < 250) return;
+      this.lastLive = now;
+    }
     for (const [id, card] of this.cards) card.live(readings?.[id] ?? null);
   }
 
@@ -944,56 +1026,32 @@ class DawScreen {
   }
 
   //============================================================================ transport
+  // The toolbar: one row in three zones. Left, the song (tempo, signature, key, click);
+  // centre, the transport (larger than the rest); right, how you work (tools, snap,
+  // Auto Mix, running jobs) and the view switches. The file actions sit in the header
+  // beside the project name, and zoom and Follow in the bar under the tracks.
   buildTransport() {
     const bar = this.root.querySelector(".daw-transport");
+    const zone = (className, ...children) => {
+      const element = html("div", `tb-zone ${className}`);
+      element.append(...children);
+      return element;
+    };
 
-    const files = html("div", "daw-group");
-    files.append(
-      iconButton("tool", "new", "New project (Ctrl+N)", () => daw("new")),
-      iconButton("tool", "open", "Open a project (Ctrl+O)", () => daw("open")),
-      (this.recentWrap = html("span", "ib-select")),
-      (this.saveButton = iconButton("tool", "save", "Save the project (Ctrl+S)", () => daw("save"))),
-      iconButton("tool", "saveas", "Save as: a copy under a new name (Ctrl+Shift+S)", () => daw("saveAs")),
-      iconButton("tool", "import", "Import audio at the playhead (Ctrl+I)", () => this.importAudio()),
-      iconButton("tool", "automix", "Auto Mix: listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix()),
-      (this.exportButton = iconButton("tool is-accent", "export", "Export the mix or stems to WAV (Ctrl+Shift+R)", () => this.toggleExportPanel())));
-
-    this.recentSelect = html("select", "recent-projects");
-    this.recentWrap.innerHTML = icon("recent");
-    this.recentWrap.append(this.recentSelect);
-    this.recentWrap.title = "Open a recent project";
-    this.recentSelect.title = "Open a recent project";
-    this.recentSelect.addEventListener("change", () => {
-      const path = this.recentSelect.value;
-      this.recentSelect.value = "";
-      if (path) daw("openRecent", { path });
-    });
-
+    //---------------------------------------------------------------- header: project
     this.projectName = document.querySelector(".app-project");
+    const project = html("div", "daw-project-actions");
+    const projectMenu = button("tool project-menu-button", "Project", "New, open, recent projects, save as and import", (event) => this.openProjectMenu(event.currentTarget));
+    projectMenu.setAttribute("aria-haspopup", "menu");
+    project.append(projectMenu,
+      (this.saveButton = iconButton("tool", "save", "Save the project (Ctrl+S)", () => daw("save"))),
+      (this.exportButton = iconButton("tool is-accent", "export", "Export the mix or stems to WAV (Ctrl+Shift+R)", () => this.toggleExportPanel())),
+      html("span", "tb-sep"),
+      (this.undoButton = iconButton("tool", "undo", "Undo (Ctrl+Z)", () => daw("undo"))),
+      (this.redoButton = iconButton("tool", "redo", "Redo (Ctrl+Shift+Z)", () => daw("redo"))));
+    document.querySelector(".topbar .brand")?.append(project);
 
-    const transport = html("div", "daw-group daw-transport-buttons");
-    transport.append(
-      button("transport-button", "", "Back to the start (Enter)", () => daw("transport", { action: "stop" })),
-      (this.playButton = button("transport-button play-button", "", "Play / pause (Space)", () => this.togglePlay())),
-      (this.recordButton = button("record-button", "", "Record on the armed tracks (R)", () => this.toggleRecord())));
-    this.inputMeter = new Level(false, "input");
-    this.inputReadout = html("span", "mic-readout", "−∞");
-    const mic = html("div", "mic-meter");
-    mic.title = "Mic input level. Aim for peaks around −12 dB; red means it went over 0 dB (click to reset).";
-    mic.append(html("span", "mic-label", "Mic"), this.inputMeter.element, this.inputReadout);
-    transport.append(mic);
-    transport.children[0].innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="2" height="10" rx="0.5"/><path d="M13 3.5v9a.5.5 0 0 1-.8.4L6.3 8.4a.5.5 0 0 1 0-.8l5.9-4.5a.5.5 0 0 1 .8.4z"/></svg>`;
-    this.playButton.innerHTML = `<svg class="icon-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.8v10.4a.6.6 0 0 0 .9.5l8.2-5.2a.6.6 0 0 0 0-1L4.9 2.3a.6.6 0 0 0-.9.5z"/></svg><svg class="icon-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="0.8"/><rect x="9.5" y="2.5" width="3" height="11" rx="0.8"/></svg>`;
-    this.recordButton.innerHTML = `<span class="record-dot"></span><span class="record-label">Rec</span>`;
-    this.recordButton.setAttribute("aria-label", "Record");
-    this.playButton.setAttribute("aria-label", "Play");
-
-    const clock = (this.clock = html("div", "daw-clock"));
-    clock.title = "Click to type a bar or time to go to";
-    clock.addEventListener("click", (event) => { if (event.target === clock || !event.target.closest("input")) this.editClock(); });
-    clock.append((this.clockBars = html("span", "clock-bars", "1.1")), (this.clockTime = html("span", "clock-time", "0:00.0")));
-
-    const timing = html("div", "daw-group");
+    //---------------------------------------------------------------- left: song
     this.tempoInput = html("input", "tempo-input");
     Object.assign(this.tempoInput, { type: "number", min: 20, max: 400, step: 1, title: "Tempo (BPM)" });
     // With tempo changes, the box shows and sets the tempo at the playhead.
@@ -1008,6 +1066,19 @@ class DawScreen {
     SIGNATURES.forEach(([beats, text]) => this.signature.append(new Option(text, beats)));
     this.signature.addEventListener("change", () => daw("beatsPerBar", { beats: Number(this.signature.value) }));
 
+    this.keyButton = iconButton("tool key-button", "key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
+    this.showTempo = prefs.get("showTempo", false);
+    this.tempoButton = iconButton("toggle has-label", "tempo", "Tempo track: tempo changes and ramps over the song", () => {
+      this.showTempo = !this.showTempo;
+      prefs.set("showTempo", this.showTempo);
+      this.renderTransport();
+      this.renderArrange(true);
+    });
+    this.tempoButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Track</span>');
+    const songTempo = html("div", "tb-joined");
+    songTempo.append(tempo, tap);
+
+    // The click: one switch, and an arrow that opens its volume and the count-in.
     this.clickVolume = html("input", "click-volume");
     Object.assign(this.clickVolume, { type: "range", min: 0, max: 200, step: 1, title: "Click volume" });
     let clickFirst = true;
@@ -1016,46 +1087,62 @@ class DawScreen {
       clickFirst = false;
     });
     this.clickVolume.addEventListener("change", () => { clickFirst = true; });
-
-    this.gridSelect = html("select", "dropdown grid-size");
-    this.gridSelect.title = "Snap grid";
-    GRIDS.forEach(([value, text]) => this.gridSelect.append(new Option(text, value)));
-    this.gridSelect.addEventListener("change", () => {
-      this.grid = this.gridSelect.value === "bar" ? "bar" : Number(this.gridSelect.value);
-      prefs.set("grid", this.grid);
-    });
-
     this.countIn = html("select", "dropdown count-in");
     this.countIn.title = "Count-in before recording";
-    ["No count-in", "1 bar count-in", "2 bar count-in", "4 bar count-in"].forEach((text, i) => this.countIn.append(new Option(text, [0, 1, 2, 4][i])));
+    ["No count-in", "1 bar", "2 bars", "4 bars"].forEach((text, i) => this.countIn.append(new Option(text, [0, 1, 2, 4][i])));
     this.countIn.addEventListener("change", () => daw("countIn", { bars: Number(this.countIn.value) }));
 
-    const click = html("div", "click-group");
-    click.append((this.metronomeButton = iconButton("toggle", "click", "Click: metronome on / off (C)", () => daw("metronome", { on: !this.session?.metronome }))),
-                 this.clickVolume);
-    this.keyButton = iconButton("tool key-button", "key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
-    this.showTempo = prefs.get("showTempo", false);
-    this.tempoButton = iconButton("toggle", "tempo", "Tempo track: tempo changes and ramps over the song", () => {
-      this.showTempo = !this.showTempo;
-      prefs.set("showTempo", this.showTempo);
-      this.renderTransport();
-      this.renderArrange(true);
-    });
-    timing.append(tempo, tap, this.tempoButton, this.signature, this.keyButton, click,
-      this.countIn,
-      (this.loopButton = iconButton("toggle", "loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop())),
-      (this.snapButton = iconButton("toggle", "snap", "Snap edits to the grid (hold Alt to drag freely)", () => {
-        this.snap = !this.snap;
-        this.renderTransport();
-      })),
-      this.gridSelect,
-      (this.returnButton = iconButton("toggle", "returnstop", "Return on stop: pausing goes back to where you pressed play", () => {
-        this.returnOnStop = !this.returnOnStop;
-        prefs.set("returnOnStop", this.returnOnStop);
-        this.renderTransport();
-      })),
-      (this.followButton = iconButton("toggle", "follow", "Follow: scroll with the playhead while playing (F). Scrolling yourself switches it off.", () => this.setFollow(!this.follow))));
+    this.metronomeButton = iconButton("toggle", "click", "Click: metronome on / off (C)", () => daw("metronome", { on: !this.session?.metronome }));
+    this.clickMore = button("toggle tb-arrow", "", "Click volume and count-in", () => this.toggleClickPopover());
+    this.clickMore.innerHTML = '<span class="tb-badge"></span><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5l3 3 3-3"/></svg>';
+    this.clickMore.setAttribute("aria-haspopup", "dialog");
+    this.clickPopover = html("div", "tb-popover");
+    this.clickPopover.hidden = true;
+    const volumeRow = html("label", "tb-popover-row");
+    volumeRow.append(html("span", "", "Click volume"), this.clickVolume);
+    const countRow = html("label", "tb-popover-row");
+    countRow.append(html("span", "", "Count-in"), this.countIn);
+    this.clickPopover.append(volumeRow, countRow);
+    const click = html("div", "tb-joined click-group");
+    click.append(this.metronomeButton, this.clickMore, this.clickPopover);
 
+    const left = zone("zone-song", songTempo, this.signature, this.keyButton, this.tempoButton, click);
+
+    //---------------------------------------------------------------- centre: transport
+    const start = button("transport-button", "", "Back to the start (Enter)", () => daw("transport", { action: "stop" }));
+    this.playButton = button("transport-button play-button", "", "Play / pause (Space). Right-click: return on stop", () => this.togglePlay());
+    this.playButton.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      popMenu(event.clientX, event.clientY, ({ item }) => {
+        item("Return on stop", () => this.setReturnOnStop(!this.returnOnStop), { checked: this.returnOnStop,
+          hint: "Pausing goes back to where you pressed play" });
+      });
+    });
+    this.recordButton = button("record-button", "", "Record on the armed tracks (R)", () => this.toggleRecord());
+    start.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="2" height="10" rx="0.5"/><path d="M13 3.5v9a.5.5 0 0 1-.8.4L6.3 8.4a.5.5 0 0 1 0-.8l5.9-4.5a.5.5 0 0 1 .8.4z"/></svg>`;
+    this.playButton.innerHTML = `<svg class="icon-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.8v10.4a.6.6 0 0 0 .9.5l8.2-5.2a.6.6 0 0 0 0-1L4.9 2.3a.6.6 0 0 0-.9.5z"/></svg><svg class="icon-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="0.8"/><rect x="9.5" y="2.5" width="3" height="11" rx="0.8"/></svg><span class="return-dot" title="Return on stop is on"></span>`;
+    this.recordButton.innerHTML = `<span class="record-dot"></span><span class="record-label">Rec</span>`;
+    this.recordButton.setAttribute("aria-label", "Record");
+    this.playButton.setAttribute("aria-label", "Play");
+
+    const clock = (this.clock = html("div", "daw-clock"));
+    clock.title = "Click to type a bar or time to go to";
+    clock.addEventListener("click", (event) => { if (event.target === clock || !event.target.closest("input")) this.editClock(); });
+    clock.append((this.clockBars = html("span", "clock-bars", "1.1")), (this.clockTime = html("span", "clock-time", "0:00.0")));
+    this.loopButton = iconButton("toggle", "loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop());
+
+    // The mic meter next to Record: "am I too loud to record?"
+    this.inputMeter = new Level(false, "input");
+    this.inputReadout = html("span", "mic-readout", "−∞");
+    const mic = html("div", "mic-meter");
+    mic.title = "Mic input level. Aim for peaks around −12 dB; red means it went over 0 dB (click to reset).";
+    mic.append(html("span", "mic-label", "Mic"), this.inputMeter.element, this.inputReadout);
+
+    const buttons = html("div", "daw-transport-buttons");
+    buttons.append(start, this.playButton, this.recordButton);
+    const centre = zone("zone-transport", buttons, clock, this.loopButton, mic);
+
+    //---------------------------------------------------------------- right: tools, features, view
     this.tools = html("div", "segmented tools");
     for (const [tool, text, title] of [["select", "Select", "Select tool: move, trim and fade clips (V)"],
                                        ["cut", "Cut", "Cut tool: click a clip to split it there (B)"],
@@ -1066,28 +1153,26 @@ class DawScreen {
       this.tools.append(b);
     }
 
-    const zoom = html("div", "daw-group zoom-sliders");
-    const slider = (label, title, onInput) => {
-      const wrapper = html("label", "zoom-slider");
-      wrapper.title = title;
-      const input = html("input");
-      Object.assign(input, { type: "range", min: 0, max: 1000, step: 1 });
-      input.addEventListener("input", () => onInput(Number(input.value) / 1000));
-      wrapper.append(html("span", "", label), input);
-      zoom.append(wrapper);
-      return input;
-    };
-    // Logarithmic, so each step of the slider zooms by the same factor.
-    zoom.append(iconButton("tool fit-button", "fit", "Zoom to fit the whole song (Shift+Z)", () => this.run("zoomFit")));
-    this.zoomSlider = slider("↔", "Horizontal zoom (+ / − or Ctrl+scroll)", (p) => this.setZoom(MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, p), true));
-    this.heightSlider = slider("↕", "Track height (Shift+↑ / Shift+↓)", (p) => this.setRowHeight(MIN_ROW + (MAX_ROW - MIN_ROW) * p));
+    // Snap and its grid as one split control: they are editing behaviour, like the tools.
+    this.snapButton = iconButton("toggle", "snap", "Snap edits to the grid (hold Alt to drag freely)", () => {
+      this.snap = !this.snap;
+      this.renderTransport();
+      this.rememberView();
+    });
+    this.gridSelect = html("select", "dropdown grid-size");
+    this.gridSelect.title = "Snap grid";
+    GRIDS.forEach(([value, text]) => this.gridSelect.append(new Option(text, value)));
+    this.gridSelect.addEventListener("change", () => {
+      this.grid = this.gridSelect.value === "bar" ? "bar" : Number(this.gridSelect.value);
+      prefs.set("grid", this.grid);
+      this.rememberView();
+    });
+    const snap = html("div", "tb-joined snap-group");
+    snap.append(this.snapButton, this.gridSelect);
 
-    const right = html("div", "daw-group");
-    right.append(
-      this.tools,
-      zoom,
-      (this.undoButton = iconButton("tool", "undo", "Undo (Ctrl+Z)", () => daw("undo"))),
-      (this.redoButton = iconButton("tool", "redo", "Redo (Ctrl+Shift+Z)", () => daw("redo"))));
+    this.autoMixButton = iconButton("tool has-label automix-button", "automix", "Auto Mix: listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix());
+    this.autoMixButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Auto Mix</span>');
+    this.buildActivity();
 
     this.viewTabs = html("div", "segmented view-tabs");
     for (const view of ["arrange", "mixer"]) {
@@ -1095,10 +1180,121 @@ class DawScreen {
       tab.dataset.view = view;
       this.viewTabs.append(tab);
     }
+    this.libraryButton = iconButton("toggle", "library", "Show / hide the library (Shift+B)", () => this.library.toggle());
+    this.dockButton = iconButton("toggle", "panel", "Show / hide the bottom panel (E)", () => this.run("toggleDock"));
     this.pianoButton = iconButton("tool", "piano", "Play MIDI from the computer keyboard (M)", () => this.togglePiano());
-    right.append(this.viewTabs, this.pianoButton, iconButton("tool", "help", "Keyboard shortcuts (?)", () => this.toggleShortcuts()));
+    const help = iconButton("tool", "help", "Keyboard shortcuts (?)", () => this.toggleShortcuts());
+    this.moreButton = iconButton("tool tb-more", "more", "More", (event) => this.openMoreMenu(event.currentTarget));
+    this.moreButton.hidden = true;
 
-    bar.append(files, sep(), transport, clock, sep(), timing, sep(), right);
+    const right = zone("zone-work", this.tools, snap, this.autoMixButton, this.activity.button,
+                      html("span", "tb-sep"), this.libraryButton, this.viewTabs, this.dockButton, this.pianoButton, help, this.moreButton);
+    bar.append(left, html("span", "tb-spacer"), centre, html("span", "tb-spacer"), right);
+
+    // Under the tracks, at the right of the bar above the bottom panel: the timeline's view.
+    this.followButton = iconButton("toggle", "follow", "Follow: scroll with the playhead while playing (F). Scrolling yourself switches it off.", () => this.setFollow(!this.follow));
+    const timeline = html("div", "timeline-tools");
+    const slider = (label, title, onInput) => {
+      const wrapper = html("label", "zoom-slider");
+      wrapper.title = title;
+      const input = html("input");
+      Object.assign(input, { type: "range", min: 0, max: 1000, step: 1 });
+      input.addEventListener("input", () => onInput(Number(input.value) / 1000));
+      wrapper.append(html("span", "", label), input);
+      return [wrapper, input];
+    };
+    // Logarithmic, so each step of the slider zooms by the same factor.
+    const [zoomWrap, zoomInput] = slider("↔", "Horizontal zoom (+ / − or Ctrl+scroll)", (p) => this.setZoom(MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, p), true));
+    const [heightWrap, heightInput] = slider("↕", "Track height (Shift+↑ / Shift+↓ or Alt+scroll)", (p) => this.setRowHeight(MIN_ROW + (MAX_ROW - MIN_ROW) * p));
+    this.zoomSlider = zoomInput;
+    this.heightSlider = heightInput;
+    timeline.append(this.followButton, iconButton("tool fit-button", "fit", "Zoom to fit the whole song (Shift+Z)", () => this.run("zoomFit")), zoomWrap, heightWrap);
+    this.timelineTools = timeline;
+    const splitter = this.root.querySelector(".dock-splitter");
+    splitter.insertBefore(timeline, splitter.querySelector(".dock-toggle"));
+
+    // The controls that fold into the "more" menu as the window narrows, least used first.
+    this.foldable = [
+      { level: 2, element: help, label: "Keyboard shortcuts", run: () => this.toggleShortcuts() },
+      { level: 2, element: this.pianoButton, label: "Computer keyboard piano", run: () => this.togglePiano(), checked: () => Boolean(this.piano?.on) },
+      { level: 3, element: this.tempoButton, label: "Tempo track", run: () => this.tempoButton.click(), checked: () => this.showTempo },
+      { level: 3, element: tap, label: "Tap tempo", run: () => this.tapTempo() },
+      { level: 3, element: this.keyButton, label: "Song key…", run: () => this.toggleKeyPanel() },
+      { level: 4, element: this.libraryButton, label: "Library", run: () => this.library.toggle(), checked: () => !this.library.collapsed },
+      { level: 4, element: this.dockButton, label: "Bottom panel", run: () => this.run("toggleDock"), checked: () => !this.root.classList.contains("dock-hidden") },
+      { level: 5, element: this.autoMixButton, label: "Auto Mix…", run: () => this.toggleAutoMix() },
+    ];
+    this.foldLevel = 0;
+    // Only a change of width matters (folding changes the height when it wraps).
+    let foldedAt = -1;
+    new ResizeObserver(() => {
+      if (bar.clientWidth === foldedAt) return;
+      foldedAt = bar.clientWidth;
+      requestAnimationFrame(() => this.foldToolbar());
+    }).observe(bar);
+
+    document.addEventListener("pointerdown", (event) => {
+      if (!this.clickPopover.hidden && !click.contains(event.target)) this.toggleClickPopover(false);
+    }, true);
+  }
+
+  toggleClickPopover(show = this.clickPopover.hidden) {
+    this.clickPopover.hidden = !show;
+    this.clickMore.setAttribute("aria-expanded", String(show));
+  }
+
+  setReturnOnStop(on) {
+    this.returnOnStop = on;
+    prefs.set("returnOnStop", on);
+    this.renderTransport();
+  }
+
+  // New, Open, the recent projects, Save as and Import (Save and Export stay as buttons).
+  openProjectMenu(anchor) {
+    const box = anchor.getBoundingClientRect();
+    const s = this.session;
+    popMenu(box.left, box.bottom + 4, ({ item, rule, heading }) => {
+      item("New project", () => daw("new"), { shortcut: "Ctrl+N" });
+      item("Open…", () => daw("open"), { shortcut: "Ctrl+O" });
+      const recent = (s?.recent ?? []).filter((r) => r.path !== s.project.path);
+      if (recent.length) {
+        heading("Recent");
+        for (const r of recent.slice(0, 8)) item(r.name, () => daw("openRecent", { path: r.path }), { hint: r.path, indent: true });
+      }
+      rule();
+      item("Save", () => daw("save"), { shortcut: "Ctrl+S" });
+      item("Save as…", () => daw("saveAs"), { shortcut: "Ctrl+Shift+S" });
+      rule();
+      item("Import audio…", () => this.importAudio(), { shortcut: "Ctrl+I" });
+      item("Export…", () => this.toggleExportPanel(true), { shortcut: "Ctrl+Shift+R" });
+    }, anchor);
+  }
+
+  // Narrow windows: fold the least used controls into the "more" menu, one level at a
+  // time, until the toolbar fits on one row (level 1 drops the text labels first).
+  foldToolbar() {
+    const bar = this.root.querySelector(".daw-transport");
+    if (!bar.clientWidth) return;
+    const apply = (level) => {
+      this.foldLevel = level;
+      bar.dataset.fold = String(level);
+      for (const f of this.foldable) f.element.classList.toggle("is-folded", level >= f.level);
+      this.moreButton.hidden = !this.foldable.some((f) => level >= f.level);
+    };
+    let level = 0;
+    bar.classList.remove("is-wrapped");
+    apply(0);
+    while (bar.scrollWidth > bar.clientWidth + 1 && level < 6) apply(++level);
+    // Still too narrow: let the zones wrap onto a second row.
+    bar.classList.toggle("is-wrapped", bar.scrollWidth > bar.clientWidth + 1);
+  }
+
+  openMoreMenu(anchor) {
+    const box = anchor.getBoundingClientRect();
+    popMenu(box.right - 200, box.bottom + 4, ({ item }) => {
+      for (const f of this.foldable)
+        if (this.foldLevel >= f.level) item(f.label, f.run, { checked: f.checked?.() ?? false });
+    }, anchor);
   }
 
   renderTransport() {
@@ -1106,15 +1302,11 @@ class DawScreen {
     if (!s) return;
 
     this.saveButton.classList.toggle("is-dirty", s.project.dirty || !s.project.open);
-    const recent = (s.recent ?? []).filter((r) => r.path !== s.project.path);
-    const recentKey = JSON.stringify(recent);
-    if (recentKey !== this.recentKey) {
-      this.recentKey = recentKey;
-      this.recentSelect.replaceChildren(new Option("Recent…", ""), ...recent.map((r) => new Option(r.name, r.path)));
-      this.recentWrap.hidden = recent.length === 0;
-    }
     this.showTempoValue();
     this.countIn.value = String(s.countIn);
+    const badge = this.clickMore.querySelector(".tb-badge");
+    badge.textContent = s.countIn > 0 ? String(s.countIn) : "";
+    this.clickMore.title = `Click volume and count-in${s.countIn > 0 ? ` (count-in: ${s.countIn} bar${s.countIn > 1 ? "s" : ""})` : ""}`;
     this.signature.value = String(s.beatsPerBar ?? 4);
     const songKey = s.key?.key ?? -1;
     this.keyButton.innerHTML = icon("key") + (songKey >= 0 ? `<span class="ib-label">${NOTE_NAMES[songKey]}${s.key.minor ? "m" : ""}</span>` : "");
@@ -1123,20 +1315,82 @@ class DawScreen {
     if (document.activeElement !== this.clickVolume) this.clickVolume.value = String(Math.round((s.metronomeVolume ?? 1) * 100));
     this.gridSelect.value = String(this.grid);
     this.gridSelect.disabled = !this.snap;
-    this.returnButton.setAttribute("aria-pressed", String(this.returnOnStop));
+    this.playButton.classList.toggle("returns-on-stop", this.returnOnStop);
     this.metronomeButton.setAttribute("aria-pressed", String(s.metronome));
     this.loopButton.setAttribute("aria-pressed", String(s.loop.on));
     this.snapButton.setAttribute("aria-pressed", String(this.snap));
     this.followButton.setAttribute("aria-pressed", String(this.follow));
     this.tempoButton.setAttribute("aria-pressed", String(!!this.showTempo));
+    this.libraryButton.setAttribute("aria-pressed", String(!this.library?.collapsed));
+    this.dockButton.setAttribute("aria-pressed", String(!this.root.classList.contains("dock-hidden")));
     [...this.tools.children].forEach((b) => b.classList.toggle("is-selected", b.dataset.tool === this.tool));
     if (document.activeElement !== this.zoomSlider)
       this.zoomSlider.value = String(Math.round(1000 * Math.log(this.zoom / MIN_ZOOM) / Math.log(MAX_ZOOM / MIN_ZOOM)));
     if (document.activeElement !== this.heightSlider)
       this.heightSlider.value = String(Math.round(1000 * (this.rowHeight - MIN_ROW) / (MAX_ROW - MIN_ROW)));
+    // Named undo: the button says what Ctrl+Z will do.
+    const what = (name) => (name ? ` ${name.charAt(0).toLowerCase()}${name.slice(1)}` : "");
     this.undoButton.disabled = !s.canUndo;
     this.redoButton.disabled = !s.canRedo;
+    this.undoButton.title = s.canUndo ? `Undo${what(s.undoName)} (Ctrl+Z)` : "Nothing to undo";
+    this.redoButton.title = s.canRedo ? `Redo${what(s.redoName)} (Ctrl+Shift+Z)` : "Nothing to redo";
+    this.undoButton.setAttribute("aria-label", this.undoButton.title.replace(/ \(.*\)$/, ""));
+    this.redoButton.setAttribute("aria-label", this.redoButton.title.replace(/ \(.*\)$/, ""));
     [...this.viewTabs.children].forEach((tab) => tab.classList.toggle("is-selected", tab.dataset.view === this.view));
+    this.timelineTools.hidden = this.view !== "arrange";
+  }
+
+  //============================================================================ activity
+  // One place for the long jobs (export, stems, Auto Mix, key detection, plug-in scan):
+  // a spinner with a count at the right of the toolbar, opening a list with progress,
+  // a way back to each job's panel, and cancel.
+  buildActivity() {
+    const jobs = new Map(); // id -> { label, progress, cancel, open }
+    const element = button("tool activity-button", "", "Running jobs", () => this.toggleActivity());
+    element.innerHTML = '<span class="activity-spinner" aria-hidden="true"></span><span class="activity-count">0</span>';
+    element.hidden = true;
+    element.setAttribute("aria-haspopup", "dialog");
+    const list = html("div", "tb-popover activity-list");
+    list.hidden = true;
+    const wrap = html("div", "activity");
+    wrap.append(element, list);
+    this.activity = { jobs, button: wrap, element, list };
+    document.addEventListener("pointerdown", (event) => { if (!list.hidden && !wrap.contains(event.target)) list.hidden = true; }, true);
+  }
+
+  setJob(id, job) {
+    this.activity.jobs.set(id, { ...this.activity.jobs.get(id), ...job });
+    this.renderActivity();
+  }
+
+  endJob(id) {
+    if (this.activity.jobs.delete(id)) this.renderActivity();
+  }
+
+  toggleActivity(show = this.activity.list.hidden) {
+    this.activity.list.hidden = !show || this.activity.jobs.size === 0;
+    this.renderActivity();
+  }
+
+  renderActivity() {
+    const { jobs, element, list } = this.activity;
+    element.hidden = jobs.size === 0;
+    element.querySelector(".activity-count").textContent = String(jobs.size);
+    element.title = jobs.size ? `Running: ${[...jobs.values()].map((j) => j.label).join(", ")}` : "Running jobs";
+    if (jobs.size === 0) list.hidden = true;
+    if (list.hidden) return;
+    list.replaceChildren(...[...jobs.entries()].map(([id, job]) => {
+      const row = html("div", "activity-job");
+      const name = button("activity-name", job.label, "Show it", () => { list.hidden = true; job.open?.(); });
+      const bar = html("div", "export-bar");
+      bar.append(html("div"));
+      bar.style.setProperty("--progress", job.progress ?? 0);
+      bar.classList.toggle("is-indeterminate", job.progress == null);
+      row.append(name, bar);
+      if (job.cancel) row.append(button("mini activity-cancel", "×", `Cancel ${job.label.toLowerCase()}`, () => job.cancel()));
+      row.dataset.job = id;
+      return row;
+    }));
   }
 
   togglePlay() {
@@ -1214,6 +1468,7 @@ class DawScreen {
         this.wavesQueued = true;
         requestAnimationFrame(() => { this.wavesQueued = false; this.redrawWaves(); });
       }
+      this.rememberView();
       if (performance.now() - this.autoScrollTime < 150) return;
       if (this.status.playing && this.follow) this.setFollow(false);
     });
@@ -1272,6 +1527,7 @@ class DawScreen {
     const before = this.zoom;
     this.beginZoom();
     this.zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
+    this.rememberView();
     const visible = this.arrange.clientWidth - HEAD_WIDTH;
     const playheadX = this.status.position * before - this.arrange.scrollLeft;
     const anchor = playheadX >= 0 && playheadX <= visible ? playheadX : 0;
@@ -1292,6 +1548,7 @@ class DawScreen {
 
   setRowHeight(height) {
     this.rowHeight = Math.round(clamp(height, MIN_ROW, MAX_ROW));
+    this.rememberView();
     this.renderArrange(true);
     this.renderTransport();
   }
@@ -1299,6 +1556,7 @@ class DawScreen {
   setFollow(on) {
     this.follow = on;
     this.renderTransport();
+    this.rememberView();
     if (on) this.movePlayhead(true);
   }
 
@@ -1543,7 +1801,7 @@ class DawScreen {
     const remove = button("mini is-danger track-remove", "×", "Delete the track", async () => {
       const gone = current();
       await daw("removeTrack", { id: gone.id });
-      if (gone.clips.length > 0) toast(`Deleted "${gone.name}". Ctrl+Z brings it back.`);
+      if (gone.clips.length > 0) toast(`Deleted "${gone.name}".`, "", "undo");
     });
 
     const send = (key) => (value, first) => daw("setTrack", { id: track.id, [key]: value, continue: !first });
@@ -1765,6 +2023,13 @@ class DawScreen {
     if (!clip.midi) drawWarpMarkers(element, clip, this.zoom);
     if (!clip.midi && this.tool === "warp") drawHitpoints(element, clip, this.zoom, daw);
     element.classList.toggle("is-warped", Boolean(clip.warp?.length) || Math.abs(clip.transpose || 0) > 1e-4);
+
+    element.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.select(track.id, clip.id, false);
+      this.openClipMenu(clip, event.clientX, event.clientY);
+    });
 
     element.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
@@ -2297,7 +2562,7 @@ class DawScreen {
     if (isReturn) {
       const remove = button("mini is-danger strip-remove", "×", `Delete the ${track.name} return (its sends go too)`, async () => {
         await daw("removeReturn", { id: track.id });
-        toast(`Deleted the "${track.name}" return. Ctrl+Z brings it back.`);
+        toast(`Deleted the "${track.name}" return.`, "", "undo");
       });
       element.append(remove);
     }
@@ -2311,6 +2576,59 @@ class DawScreen {
     this.view = view;
     this.root.classList.toggle("show-mixer", view === "mixer");
     this.render();
+    this.rememberView();
+  }
+
+  //============================================================================ view state
+  // How the project was being looked at (zoom, scroll, heights, selection, panels) is
+  // kept in the project, so reopening a song puts you back where you were. Not an
+  // edit: no undo step, and it doesn't make the project unsaved on its own.
+  viewState() {
+    return {
+      zoom: this.zoom, rowHeight: this.rowHeight, left: Math.round(this.arrange.scrollLeft), top: Math.round(this.arrange.scrollTop),
+      track: this.selectedTrack, view: this.view, follow: this.follow, grid: this.grid, snap: this.snap,
+      dock: { hidden: this.root.classList.contains("dock-hidden"), height: this.dockHeight, tab: this.dockTab },
+    };
+  }
+
+  rememberView() {
+    if (!this.session || this.restoringView) return;
+    clearTimeout(this.viewTimer);
+    this.viewTimer = setTimeout(() => {
+      const text = JSON.stringify(this.viewState());
+      if (text === this.savedView) return;
+      this.savedView = text;
+      nativeDaw("viewState", { view: text });
+    }, 800);
+  }
+
+  // Before the first render of a project just opened: everything but the scroll position.
+  restoreView(text) {
+    let state = null;
+    try { state = text ? JSON.parse(text) : null; } catch { state = null; }
+    this.savedView = text || "";
+    if (!state || typeof state !== "object") return null;
+    this.restoringView = true;
+    const num = (value, fallback) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
+    this.zoom = clamp(num(state.zoom, this.zoom), MIN_ZOOM, MAX_ZOOM);
+    this.rowHeight = Math.round(clamp(num(state.rowHeight, this.rowHeight), MIN_ROW, MAX_ROW));
+    if (typeof state.follow === "boolean") this.follow = state.follow;
+    if (typeof state.snap === "boolean") this.snap = state.snap;
+    if (state.grid === "bar" || GRIDS.some(([g]) => g === state.grid)) this.grid = state.grid;
+    if (state.track === 0 || this.session.tracks.some((t) => t.id === state.track) || (this.session.returns ?? []).some((r) => r.id === state.track)) {
+      this.selectedTrack = state.track;
+      this.selectedClip = null;
+    }
+    if (state.view === "arrange" || state.view === "mixer") {
+      this.view = state.view;
+      this.root.classList.toggle("show-mixer", this.view === "mixer");
+    }
+    if (state.dock && typeof state.dock === "object") {
+      if (state.dock.tab === "effects" || state.dock.tab === "track") this.setDockTab(state.dock.tab, false);
+      this.setDock(!state.dock.hidden, clamp(num(state.dock.height, this.dockHeight), 140, 900), false);
+    }
+    this.restoringView = false;
+    return { left: num(state.left, 0), top: num(state.top, 0) };
   }
 
   //============================================================================ inspector
@@ -2380,6 +2698,7 @@ class DawScreen {
     if (this.session) this.watchInserts(show && this.chainGains ? this.chainGains.id : -1);
   }
   saveDock() {
+    this.rememberView();
     try {
       localStorage.setItem("micfx.dock", JSON.stringify({ height: this.dockHeight, hidden: this.root.classList.contains("dock-hidden"), tab: this.dockTab }));
     } catch { /* not kept */ }
@@ -2396,6 +2715,7 @@ class DawScreen {
     });
     this.inspector.dataset.tab = tab;
     if (save) this.saveDock();
+    this.rememberView();
     if (this.session) {
       this.inspectorKey = "";
       this.renderInspector();
@@ -2407,6 +2727,7 @@ class DawScreen {
     const changed = this.selectedTrack !== trackId || this.selectedClip !== clipId;
     this.selectedTrack = trackId;
     this.selectedClip = clipId;
+    if (changed) this.rememberView();
     if (changed && render) this.render();
     else if (changed) {
       this.root.querySelectorAll(".clip.is-selected, .track-row.is-selected").forEach((e) => e.classList.remove("is-selected"));
@@ -2534,11 +2855,6 @@ class DawScreen {
     row.append(gain.element, fadeIn.element, fadeOut.element);
 
     const muteButton = button("toggle", "Mute", "Silence this clip without deleting it (Shift+M)", () => this.run("muteClip"));
-    const threshold = html("select", "dropdown strip-threshold");
-    threshold.title = "What counts as silence for Strip silence";
-    [[-55, "Quiet room (−55 dB)"], [-45, "Normal (−45 dB)"], [-35, "Noisy (−35 dB)"]].forEach(([v, t]) => threshold.append(new Option(t, v)));
-    threshold.value = String(this.stripThreshold ?? -45);
-    threshold.addEventListener("change", () => { this.stripThreshold = Number(threshold.value); });
 
     // All clip controls sit in one compact column: name, knobs, then three rows of buttons.
     const toolRow = (...items) => { const r = html("div", "clip-tool-row"); r.append(...items); return r; };
@@ -2548,12 +2864,9 @@ class DawScreen {
               button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
               button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected())),
       toolRow(muteButton,
-              button("tool", "Normalise", "Set the clip gain so its loudest peak is −1 dB", () => this.run("normaliseClip")),
               button("tool", "Loop clip", "Loop the clip's range (Ctrl+L)", () => this.run("loopClip")),
               button("tool", "Zoom to clip", "Fit the clip in the view (Z)", () => this.run("zoomClip"))),
-      toolRow(button("tool", "Strip silence", "Split the clip into phrases and remove the silent gaps between them", () => this.run("stripSilence")),
-              threshold),
-      toolRow(button("tool", "Split into stems", "Separate the song into vocals, drums, bass and other, each on its own track", () => this.run("splitStems"))));
+      html("p", "clip-tools-hint", "Normalise, Strip silence and Split into stems change the audio itself: they are in the Audio menu and on the clip's right-click menu."));
     element.append(head, row, tools);
 
     return { element, update: (c) => {
@@ -2693,11 +3006,21 @@ class DawScreen {
     this.banner = this.root.querySelector(".daw-banner");
     this.toastArea = this.root.querySelector(".daw-toast");
     this.exportPanel = this.root.querySelector(".export-panel");
-    toast = (message, kind = "") => {
+    // toast (message, kind, action): action { label, run }, or "undo" for an Undo button
+    // (the message then says what Ctrl+Z would bring back).
+    toast = (message, kind = "", action = null) => {
+      if (action === "undo") action = { label: "Undo", run: () => daw("undo") };
       this.toastArea.textContent = keyText(message);
-      this.toastArea.className = `daw-toast is-visible ${kind}`;
+      this.toastArea.className = `daw-toast is-visible ${kind}${action ? " has-action" : ""}`;
+      if (action) {
+        const b = button("toast-action", action.label, "", () => {
+          this.toastArea.classList.remove("is-visible");
+          action.run();
+        });
+        this.toastArea.append(b);
+      }
       clearTimeout(this.toastTimer);
-      this.toastTimer = setTimeout(() => this.toastArea.classList.remove("is-visible"), 5000);
+      this.toastTimer = setTimeout(() => this.toastArea.classList.remove("is-visible"), action ? 8000 : 5000);
     };
 
     const panel = this.exportPanel;
@@ -2727,6 +3050,8 @@ class DawScreen {
   }
 
   onExport(progress) {
+    if (progress.done) this.endJob("export");
+    else this.setJob("export", { label: "Export", progress: progress.progress ?? 0, cancel: () => daw("cancelExport"), open: () => this.toggleExportPanel(true) });
     const panel = this.exportPanel;
     panel.hidden = false;
     panel.classList.toggle("is-running", !progress.done);
@@ -2782,6 +3107,9 @@ class DawScreen {
     const running = ["downloading", "loading", "splitting"].includes(event.state);
     this.stems.running = running;
     panel.classList.toggle("is-running", running);
+    if (running) this.setJob("stems", { label: "Split into stems", progress: event.state === "splitting" ? event.progress ?? 0 : null,
+                                        cancel: () => daw("stems", { action: "cancel" }), open: () => { panel.hidden = false; } });
+    else this.endJob("stems");
 
     if (running) {
       panel.hidden = false;
@@ -2808,7 +3136,7 @@ class DawScreen {
       panel.hidden = true;
       this.stems.splitStart = null;
       const took = event.seconds ? ` (separating took ${spokenDuration(event.seconds)})` : "";
-      toast(`Added ${event.tracks?.length ?? 0} stem tracks and muted the original clip${took}${event.gpu ? ", on the GPU" : ""}. Ctrl+Z undoes it.${event.note ? ` ${event.note}` : ""}`);
+      toast(`Added ${event.tracks?.length ?? 0} stem tracks and muted the original clip${took}${event.gpu ? ", on the GPU" : ""}.${event.note ? ` ${event.note}` : ""}`, "", "undo");
     } else if (event.state === "cancelled") {
       this.setStemsStatus("Cancelled.");
     } else if (event.state === "error") {
@@ -3012,6 +3340,9 @@ class DawScreen {
     panel.hidden = false;
     panel.classList.toggle("is-running", event.state === "analysing");
     panel.querySelector(".export-bar").style.setProperty("--progress", event.progress ?? 1);
+    if (event.state === "analysing")
+      this.setJob("key", { label: "Key detection", progress: event.progress ?? null, cancel: () => daw("key", { action: "cancel" }), open: () => this.toggleKeyPanel(true) });
+    else this.endJob("key");
 
     if (event.state === "analysing") return this.setKeyMessage("Listening…");
     if (event.state === "cancelled") return this.setKeyMessage("Cancelled.");
@@ -3098,6 +3429,9 @@ class DawScreen {
     panel.querySelector(".export-bar").style.setProperty("--progress", event.progress ?? 1);
 
     panel.classList.toggle("is-running", event.state === "analysing" || event.state === "splitting");
+    if (event.state === "analysing" || event.state === "splitting")
+      this.setJob("automix", { label: "Auto Mix", progress: event.progress ?? null, cancel: () => daw("autoMix", { action: "cancel" }), open: () => this.toggleAutoMix(true) });
+    else this.endJob("automix");
     if (event.state === "splitting")
       return this.setAutoMixResult(event.phase === 0 ? "Downloading the stem model…" : event.phase === 1 ? "Loading the stem model…" : "Splitting the song into stems…");
     if (event.state === "analysing") return this.setAutoMixResult("Listening…");
@@ -3208,11 +3542,20 @@ class DawScreen {
     const path = session.project?.path ?? "";
     const pathChanged = this.projectPath !== undefined && path !== this.projectPath;
     if (this.projectPath !== undefined && path !== this.projectPath) this.arrange.scrollTop = this.arrange.scrollLeft = 0;
+    const opened = path !== this.projectPath; // also the first session after starting
     this.projectPath = path;
+    const scroll = opened ? this.restoreView(session.view) : null;
     if (pathChanged) this.library?.refresh();
     document.dispatchEvent(new CustomEvent("daw-session", { detail: session }));
     if (this.autoMixPanel && !this.autoMixPanel.hidden && !this.autoMix?.plan) this.refreshAutoMixTags();
     if (this.active) this.render();
+    if (scroll && this.active) {
+      this.renderArrange(true);
+      this.restoringView = true;
+      this.arrange.scrollTop = scroll.top;
+      this.scrollTo(scroll.left);
+      this.restoringView = false;
+    }
     for (const [id, resolve] of this.trackWaiters) if (tracks.some((t) => t.id === id)) { this.trackWaiters.delete(id); resolve(); }
   }
 
@@ -3235,11 +3578,22 @@ class DawScreen {
     main.replaceWith(body);
     this.library = new LibraryBrowser(this, {
       call: (command, args = {}) => nativeDaw(command, args),
-      run: daw,
+      run: (command, args) => {
+        if (command === "scanPlugins") {
+          this.setJob("scan", { label: "Plug-in scan", progress: null });
+          clearTimeout(this.scanTimer);
+          this.scanTimer = setTimeout(() => this.endJob("scan"), 180000); // in case no reply comes
+        }
+        return daw(command, args);
+      },
       toast: (message, kind) => toast(message, kind),
       onEvent: (name, handler) => window.__JUCE__.backend.addEventListener(name, handler),
     });
     body.append(this.library.element, main);
+    window.__JUCE__.backend.addEventListener("dawPlugins", () => this.endJob("scan"));
+    // The toolbar's library switch follows the library however it is folded.
+    const setCollapsed = this.library.setCollapsed.bind(this.library);
+    this.library.setCollapsed = (collapsed) => { setCollapsed(collapsed); this.renderTransport(); this.rememberView(); };
   }
 
   // Adds an effect (a modules.js id) at the end of a track's (or the master's) chain.
@@ -3613,69 +3967,61 @@ class DawScreen {
 
   // Right-click menu on a track header.
   openTrackMenu(track, x, y) {
-    this.closeTrackMenu();
-    const menu = html("div", "track-menu");
-    menu.setAttribute("role", "menu");
     const tracks = this.session.tracks, index = tracks.findIndex((t) => t.id === track.id);
-    const item = (label, action, { disabled = false, danger = false, checked = false } = {}) => {
-      const b = html("button", `track-menu-item${danger ? " is-danger" : ""}`, (checked ? "✓ " : "") + label);
-      b.type = "button";
-      b.setAttribute("role", "menuitem");
-      b.disabled = disabled;
-      b.addEventListener("click", () => { this.closeTrackMenu(); action(); });
-      menu.append(b);
-    };
-    const rule = () => menu.append(html("div", "track-menu-rule"));
     const firstClip = track.clips?.[0];
-
-    item("Rename", () => this.renameTrack());
-    item("Duplicate", () => this.duplicateTrack(track.id));
-    item("Delete", () => this.deleteTrack(), { danger: true });
-    rule();
-    item("Mute", () => daw("setTrack", { id: track.id, mute: !track.mute }), { checked: track.mute });
-    item("Solo", () => daw("setTrack", { id: track.id, solo: !track.solo }), { checked: track.solo });
-    item("Arm for recording", () => daw("setTrack", { id: track.id, arm: !track.arm }), { checked: track.arm });
-    rule();
-    item("Move up", () => daw("moveTrack", { id: track.id, index: index - 1 }), { disabled: index <= 0 });
-    item("Move down", () => daw("moveTrack", { id: track.id, index: index + 1 }), { disabled: index >= tracks.length - 1 });
-    rule();
-    item("Add effect…", () => { this.select(track.id, null); this.setDockTab?.("effects"); toast("Pick an effect from Add effect, or drag one from the library."); });
-    item("Clear volume ride", () => daw("setTrack", { id: track.id, clearRide: true }), { disabled: !track.ride?.length });
-    item("Clear effect automation", () => daw("setTrack", { id: track.id, clearAutomation: true }), { disabled: !track.automation?.length });
-    item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
-    item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
-    if (track.kind !== "midi")
-      item("Split into stems…", () => this.toggleStems(true, firstClip), { disabled: !firstClip });
-    rule();
-    const colours = html("div", "colour-row track-menu-colours");
-    TRACK_COLOURS.forEach((colour) => {
-      const swatch = button("colour-swatch", "", "Track colour", () => { this.closeTrackMenu(); daw("setTrack", { id: track.id, colour }); });
-      swatch.style.background = colour;
-      colours.append(swatch);
-    });
-    menu.append(colours);
-
-    document.body.append(menu);
-    const box = menu.getBoundingClientRect();
-    menu.style.left = `${Math.max(4, Math.min(x, innerWidth - box.width - 4))}px`;
-    menu.style.top = `${Math.max(4, Math.min(y, innerHeight - box.height - 4))}px`;
-    this.trackMenu = menu;
-    const away = (e) => { if (e.type === "keydown" ? e.key === "Escape" : !menu.contains(e.target)) this.closeTrackMenu(); };
-    this.trackMenuAway = away;
-    setTimeout(() => {
-      document.addEventListener("pointerdown", away, true);
-      document.addEventListener("keydown", away, true);
+    popMenu(x, y, ({ item, rule, menu }) => {
+      item("Rename", () => this.renameTrack(), { shortcut: "Ctrl+R" });
+      item("Duplicate", () => this.duplicateTrack(track.id), { shortcut: "Ctrl+Shift+D" });
+      item("Delete", () => this.deleteTrack(), { danger: true, shortcut: "Ctrl+Delete" });
+      rule();
+      item("Mute", () => daw("setTrack", { id: track.id, mute: !track.mute }), { checked: track.mute, shortcut: "0" });
+      item("Solo", () => daw("setTrack", { id: track.id, solo: !track.solo }), { checked: track.solo, shortcut: "S" });
+      item("Arm for recording", () => daw("setTrack", { id: track.id, arm: !track.arm }), { checked: track.arm, shortcut: "A" });
+      rule();
+      item("Move up", () => daw("moveTrack", { id: track.id, index: index - 1 }), { disabled: index <= 0 });
+      item("Move down", () => daw("moveTrack", { id: track.id, index: index + 1 }), { disabled: index >= tracks.length - 1 });
+      rule();
+      item("Add effect…", () => { this.select(track.id, null); this.setDockTab?.("effects"); toast("Pick an effect from Add effect, or drag one from the library."); });
+      item("Clear volume ride", () => daw("setTrack", { id: track.id, clearRide: true }), { disabled: !track.ride?.length });
+      item("Clear effect automation", () => daw("setTrack", { id: track.id, clearAutomation: true }), { disabled: !track.automation?.length });
+      item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
+      item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
+      if (track.kind !== "midi")
+        item("Split into stems…", () => this.toggleStems(true, firstClip), { disabled: !firstClip });
+      rule();
+      const colours = html("div", "colour-row track-menu-colours");
+      TRACK_COLOURS.forEach((colour) => {
+        const swatch = button("colour-swatch", "", "Track colour", () => { closeMenu(); daw("setTrack", { id: track.id, colour }); });
+        swatch.style.background = colour;
+        colours.append(swatch);
+      });
+      menu.append(colours);
     });
   }
 
-  closeTrackMenu() {
-    this.trackMenu?.remove();
-    this.trackMenu = null;
-    if (this.trackMenuAway) {
-      document.removeEventListener("pointerdown", this.trackMenuAway, true);
-      document.removeEventListener("keydown", this.trackMenuAway, true);
-      this.trackMenuAway = null;
-    }
+  closeTrackMenu() { closeMenu(); }
+
+  // A clip's right-click menu: editing, then the Audio processes (the same as the menu
+  // bar's Audio menu, which the plug-in doesn't have).
+  openClipMenu(clip, x, y) {
+    const audio = !clip.midi;
+    popMenu(x, y, ({ item, rule, heading }) => {
+      item("Split at the playhead", () => this.splitSelected(), { shortcut: "Ctrl+E" });
+      item("Duplicate", () => this.duplicateSelected(), { shortcut: "Ctrl+D" });
+      item("Copy", () => this.copySelected(false), { shortcut: "Ctrl+C" });
+      item("Cut", () => this.copySelected(true), { shortcut: "Ctrl+X" });
+      item("Delete", () => this.deleteSelected(), { danger: true, shortcut: "Delete" });
+      rule();
+      item("Mute", () => this.run("muteClip"), { checked: Boolean(clip.mute), shortcut: "Shift+M" });
+      item("Loop the clip", () => this.run("loopClip"), { shortcut: "Ctrl+L" });
+      item("Zoom to the clip", () => this.run("zoomClip"), { shortcut: "Z" });
+      if (audio) {
+        heading("Audio");
+        for (const [label, command, hint] of AUDIO_PROCESSES)
+          item(label, () => this.run(command), { hint, indent: true });
+      }
+      if (clip.midi) item("Edit notes", () => { this.setDockTab("track"); this.setDock(true); });
+    });
   }
 
   async duplicateTrack(id = this.selectedTrack) {
@@ -3769,11 +4115,14 @@ class DawScreen {
         const result = await daw("normaliseClip", { id: clip.id });
         if (result?.ok) toast(`Clip gain set to ${dbText(result.gain)} dB (peak at −1 dB).`);
       }),
+      stripSilenceQuiet: () => { this.stripThreshold = -55; this.run("stripSilence"); },
+      stripSilenceNormal: () => { this.stripThreshold = -45; this.run("stripSilence"); },
+      stripSilenceNoisy: () => { this.stripThreshold = -35; this.run("stripSilence"); },
       stripSilence: () => this.withClip(async (clip) => {
         const result = await daw("stripSilence", { id: clip.id, threshold: this.stripThreshold ?? -45 });
         if (result?.ok) {
           this.selectedClip = null;
-          toast(`Kept ${result.clips} phrase${result.clips === 1 ? "" : "s"}. Ctrl+Z puts the clip back.`);
+          toast(`Kept ${result.clips} phrase${result.clips === 1 ? "" : "s"}.`, "", "undo");
         }
       }),
       splitStems: () => this.withClip((clip) => this.toggleStems(true, clip)),
@@ -3813,7 +4162,7 @@ class DawScreen {
     const next = tracks[index + 1] ?? tracks[index - 1];
     await daw("removeTrack", { id: track.id });
     if (next) this.select(next.id, null);
-    toast(`Deleted "${track.name}". Ctrl+Z brings it back.`);
+    toast(`Deleted "${track.name}".`, "", "undo");
   }
 
   // Q: quantize the selected clip, or the whole selected track, with the settings last

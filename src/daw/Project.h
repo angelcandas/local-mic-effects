@@ -91,7 +91,8 @@ private:
     juce::String load (const juce::File& xmlFile, const juce::File& projectFolder);
     void setFolder (const juce::File&);
 
-    void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override { dirty = true; }
+    // The view state (zoom, scroll...) is saved with the project but doesn't make it unsaved.
+    void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier& property) override { if (property != ids::viewState) dirty = true; }
     void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree&) override            { dirty = true; }
     void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree&, int) override     { dirty = true; }
     void valueTreeChildOrderChanged (juce::ValueTree&, int, int) override             { dirty = true; }
