@@ -62,17 +62,31 @@ struct Model
 //==============================================================================
 // The same network on the GPU. On a Mac, Core ML runs the Demucs network (everything between
 // the spectrogram and the final mask) on the GPU. The converted model isn't downloaded:
-// scripts/export_htdemucs_coreml.py makes it once, on the Mac, into the Models folder.
-// Without it, or where Core ML isn't there, the CPU model above is used.
+// The converted model downloads once (about 70 MB) next to the CPU one, like it. (The
+// workflow and scripts/export_htdemucs_coreml.py make it.) Without it, or where Core ML isn't
+// there, the CPU model above is used.
 struct GpuModel
 {
     static constexpr const char* fileName = "htdemucs-core.mlpackage";
+
+    // The converted network, zipped, published by the "Core ML stem model" workflow
+    // (.github/workflows/coreml-model.yml) as a release asset.
+    static constexpr const char* downloadUrl = "https://github.com/angelcandas/local-mic-effects/releases/download/stem-model-v1/htdemucs-core.mlpackage.zip";
+    static constexpr const char* sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
+    static constexpr int approxMegabytes = 70;
 
     // True when this build can run Core ML (macOS builds with the stem splitter).
     static bool isBuiltIn();
 
     // ~/Library/Application Support/MicFX/Models/htdemucs-core.mlpackage
     static juce::File getDefaultFile();
+
+    // Downloads the converted model to `destination` (the .mlpackage folder), checks it against its
+    // SHA-256 and unpacks it. Empty on success, "cancelled" if progress stopped it.
+    static juce::String download (const juce::File& destination, const Progress&);
+
+    // The unpacking half of download(): `zip` must match the checksum.
+    static juce::String install (const juce::File& zip, const juce::File& destination, const juce::String& expectedSha256 = sha256);
 
     // A separator that runs the converted model on the GPU; null with `error` set if it
     // can't (the model is missing or doesn't load or run). Loading compiles the model the

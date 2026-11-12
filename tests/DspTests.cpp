@@ -7,6 +7,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_cryptography/juce_cryptography.h>
 
 #include <set>
 #include <thread>
@@ -4440,6 +4441,37 @@ static void testStems()
            "a wrong or missing model file is refused");
     juce::String loadError;
     check (stems::Model::load (bogus, loadError) == nullptr && loadError.isNotEmpty(), "loading a wrong model fails with a message");
+
+    // The GPU model arrives as a zip of the .mlpackage folder: checked, then unpacked in place.
+    {
+        const auto packageName = juce::String (stems::GpuModel::fileName);
+        const auto source = folder.getChildFile ("gpu-source");
+        source.getChildFile (packageName).getChildFile ("Data").createDirectory();
+        source.getChildFile (packageName).getChildFile ("Manifest.json").replaceWithText ("{}");
+        source.getChildFile (packageName).getChildFile ("Data").getChildFile ("weight.bin").replaceWithText ("weights");
+
+        juce::ZipFile::Builder builder;
+        builder.addFile (source.getChildFile (packageName).getChildFile ("Manifest.json"), 9, packageName + "/Manifest.json");
+        builder.addFile (source.getChildFile (packageName).getChildFile ("Data").getChildFile ("weight.bin"), 9, packageName + "/Data/weight.bin");
+        const auto zip = folder.getChildFile ("gpu.zip");
+        {
+            juce::FileOutputStream zipOut (zip);
+            zipOut.setPosition (0);
+            zipOut.truncate();
+            builder.writeToStream (zipOut, nullptr);
+        }
+
+        const auto installed = folder.getChildFile ("gpu-models").getChildFile (packageName);
+        folder.getChildFile ("gpu-models").createDirectory();
+        check (stems::GpuModel::install (zip, installed, juce::SHA256 (zip).toHexString()).isEmpty()
+                   && installed.getChildFile ("Manifest.json").loadFileAsString() == "{}"
+                   && installed.getChildFile ("Data").getChildFile ("weight.bin").loadFileAsString() == "weights",
+               "the GPU model zip unpacks into the .mlpackage folder");
+
+        installed.deleteRecursively();
+        check (stems::GpuModel::install (zip, installed, "0000").isNotEmpty() && ! installed.exists(),
+               "a GPU model zip with the wrong checksum is refused and leaves nothing");
+    }
 
     // DawBridge: the stems land on four tracks under the song, lined up with its clip, and
     // the song's clip is muted. One undo takes it all back.

@@ -1,0 +1,46 @@
+# Converts the Demucs network to Core ML once and publishes it as a release asset, so the app
+# can download it (stems::GpuModel) and nobody has to run Python. Run it by hand: Actions ->
+# "Core ML stem model" -> Run workflow. Afterwards put the SHA-256 it prints into
+# src/stems/StemSplitter.h (GpuModel::sha256).
+name: Core ML stem model
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release tag to publish to (the app's URL names stem-model-v1)
+        default: stem-model-v1
+
+permissions:
+  contents: write
+
+jobs:
+  convert:
+    name: Convert and publish
+    runs-on: macos-14
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install the pinned conversion tools
+        run: pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops "numpy<2.3" demucs==4.0.1
+      - name: Convert the network
+        run: python scripts/export_htdemucs_coreml.py --out "$RUNNER_TEMP/model/htdemucs-core.mlpackage"
+      - name: Zip it
+        run: |
+          cd "$RUNNER_TEMP/model"
+          ditto -c -k --keepParent htdemucs-core.mlpackage htdemucs-core.mlpackage.zip
+          shasum -a 256 htdemucs-core.mlpackage.zip | tee sha256.txt
+          ls -l htdemucs-core.mlpackage.zip
+          { echo "### Core ML stem model"; echo; echo "SHA-256 of the zip, for GpuModel::sha256:"; echo; echo '```'; cat sha256.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+      - name: Publish the release asset
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: |
+          cd "$RUNNER_TEMP/model"
+          gh release view "$TAG" >/dev/null 2>&1 || gh release create "$TAG" --title "Stem model (Core ML)" \
+            --notes "The Demucs network converted to Core ML for the GPU, downloaded by MicFX on first use. Made by the Core ML stem model workflow." 
+          gh release upload "$TAG" htdemucs-core.mlpackage.zip --clobber
