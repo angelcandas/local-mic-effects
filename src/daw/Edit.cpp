@@ -403,7 +403,12 @@ void Edit::setChainGain (int trackId, bool output, float decibels)
 // Arm and monitor are recording state, not edits: not undoable.
 void Edit::setTrackArm (int trackId, bool arm)          { getTrack (trackId).setProperty (ids::arm, arm, nullptr); }
 void Edit::setTrackMonitor (int trackId, bool monitor)  { getTrack (trackId).setProperty (ids::monitor, monitor, nullptr); }
-void Edit::setTempo (double bpm)                        { state.setProperty (ids::tempo, juce::jlimit (20.0, 400.0, bpm), undoTarget); }
+void Edit::setTempo (double bpm)
+{
+    auto points = getTempoMap().getPoints();
+    points.front().bpm = bpm;
+    setTempoMap (TempoMap (std::move (points)));
+}
 
 TempoMap Edit::getTempoMap() const
 {
@@ -412,12 +417,39 @@ TempoMap Edit::getTempoMap() const
 
 void Edit::setTempoMap (const TempoMap& map)
 {
-    setTempo (map.getPoints().front().bpm);
+    const auto before = getTempoMap();
+
+    // Where each musical clip sits in bars and beats, before the tempo moves under it.
+    struct Placement { juce::ValueTree clip; double anchor, start, end; };
+    std::vector<Placement> musicalClips;
+    for (const auto& track : getTracks())
+        for (const auto& clip : track)
+            if (clip.hasType (ids::CLIP) && isMusical (clip))
+            {
+                const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+                musicalClips.push_back ({ clip, before.toBeats (start - offset), before.toBeats (start), before.toBeats (start + length) });
+            }
+
+    state.setProperty (ids::tempo, juce::jlimit (TempoMap::minBpm, TempoMap::maxBpm, map.getPoints().front().bpm), undoTarget);
 
     if (const auto changes = map.changesToString(); changes.isEmpty())
-        state.removeProperty (ids::tempoChanges, &undoManager);
+        state.removeProperty (ids::tempoChanges, undoTarget);
     else
-        state.setProperty (ids::tempoChanges, changes, &undoManager);
+        state.setProperty (ids::tempoChanges, changes, undoTarget);
+
+    const auto after = getTempoMap();
+    for (auto& placed : musicalClips)
+        placeByBeats (placed.clip, after, placed.anchor, placed.start, placed.end);
+}
+
+void Edit::placeByBeats (juce::ValueTree& clip, const TempoMap& tempo, double anchorBeat, double startBeat, double endBeat)
+{
+    const auto anchor = tempo.toSeconds (anchorBeat);
+    const auto start = juce::jmax (0.0, tempo.toSeconds (startBeat));
+    const auto end = juce::jmax (start + minClipSeconds, tempo.toSeconds (endBeat));
+    clip.setProperty (ids::start, start, undoTarget);
+    clip.setProperty (ids::offset, start - anchor, undoTarget);
+    clip.setProperty (ids::length, end - start, undoTarget);
 }
 
 void Edit::setTempoAt (double seconds, double bpm)
@@ -575,7 +607,18 @@ void Edit::moveClip (int clipId, double newStart, int toTrackId)
     if (! clip.isValid())
         return;
 
-    clip.setProperty (ids::start, juce::jmax (0.0, newStart), undoTarget);
+    if (isMusical (clip))
+    {
+        // Keep its length in beats where it lands (the tempo may differ there).
+        const auto tempo = getTempoMapFor (clip);
+        const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+        const auto shift = tempo.toBeats (juce::jmax (0.0, newStart)) - tempo.toBeats (start);
+        placeByBeats (clip, tempo, tempo.toBeats (start - offset) + shift, tempo.toBeats (start) + shift, tempo.toBeats (start + length) + shift);
+    }
+    else
+    {
+        clip.setProperty (ids::start, juce::jmax (0.0, newStart), undoTarget);
+    }
 
     if (auto target = getTrack (toTrackId); target.isValid() && target != clip.getParent())
     {
@@ -739,10 +782,127 @@ warp::Map Edit::getClipWarp (const juce::ValueTree& clip)
     return warp::Map::fromString (clip[ids::warp].toString());
 }
 
+//==============================================================================
+TempoMap Edit::getTempoMapFor (const juce::ValueTree& clip)
+{
+    const auto project = clip.getParent().getParent();
+    if (! project.hasType (ids::PROJECT))
+        return TempoMap();
+    return TempoMap::fromProject (project.getProperty (ids::tempo, 120.0), project[ids::tempoChanges].toString());
+}
+
+double Edit::getClipTempo (const juce::ValueTree& clip)
+{
+    if (const auto bpm = (double) clip.getProperty (ids::clipTempo, 0.0); bpm > 0.0)
+        return juce::jlimit (minClipTempo, maxClipTempo, bpm);
+    const auto start = (double) clip.getProperty (ids::start, 0.0);
+    return juce::jlimit (minClipTempo, maxClipTempo, getTempoMapFor (clip).getBpmAt (start));
+}
+
+warp::Map Edit::getMusicalMap (const juce::ValueTree& clip)
+{
+    if (! isMusical (clip))
+        return {};
+
+    const auto tempo = getTempoMapFor (clip);
+    const auto beatsPerSecond = getClipTempo (clip) / 60.0; // of the file's own time
+    const auto anchorSeconds = (double) clip[ids::start] - (double) clip[ids::offset];
+    const auto anchor = tempo.toBeats (anchorSeconds);
+
+    // Straight time x plays at timeline beat anchor + x * beatsPerSecond.
+    const auto rendered = [&] (double x) { return tempo.toSeconds (anchor + x * beatsPerSecond) - anchorSeconds; };
+    const auto straight = [&] (double beat) { return (beat - anchor) / beatsPerSecond; };
+
+    // Corners: far before and after (the map runs on at its last slope only through
+    // markers), every tempo point, and every half beat along ramps.
+    constexpr double far = 1.0e5;
+    std::vector<double> xs { -far, 0.0, far };
+    const auto& points = tempo.getPoints();
+    for (size_t i = 0; i < points.size(); ++i)
+    {
+        xs.push_back (straight (points[i].beat));
+        if (i > 0 && points[i].ramp)
+            for (auto b = points[i - 1].beat + 0.5; b < points[i].beat; b += 0.5)
+                xs.push_back (straight (b));
+    }
+    std::sort (xs.begin(), xs.end());
+
+    std::vector<warp::Marker> markers;
+    for (auto x : xs)
+        if (x >= -far && x <= far && (markers.empty() || x - markers.back().source > 1.0e-6))
+            markers.push_back ({ x, rendered (x) });
+
+    return warp::Map (std::move (markers));
+}
+
+warp::Map Edit::getEffectiveWarp (const juce::ValueTree& clip)
+{
+    const auto free = getClipWarp (clip);
+    return isMusical (clip) ? warp::compose (free, getMusicalMap (clip)) : free;
+}
+
+void Edit::setEffectiveWarp (int clipId, const warp::Map& map)
+{
+    const auto clip = getClip (clipId);
+    if (! clip.isValid() || ! isMusical (clip))
+    {
+        setClipWarp (clipId, map);
+        return;
+    }
+
+    const auto bend = getMusicalMap (clip);
+    std::vector<warp::Marker> free;
+    for (const auto& m : map.getMarkers())
+        free.push_back ({ m.source, bend.toSource (m.target) });
+    setClipWarp (clipId, warp::Map (std::move (free)));
+}
+
+std::vector<warp::Marker> Edit::getShownWarp (const juce::ValueTree& clip)
+{
+    auto markers = getClipWarp (clip).getMarkers();
+    if (isMusical (clip))
+    {
+        const auto bend = getMusicalMap (clip);
+        for (auto& m : markers)
+            m.target = bend.toTarget (m.target);
+    }
+    return markers;
+}
+
+void Edit::keepWindow (juce::ValueTree& clip, const warp::Map& before)
+{
+    const auto after = getEffectiveWarp (clip);
+    const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+    const auto from = before.toSource (offset), to = before.toSource (offset + length);
+    const auto newOffset = after.toTarget (from);
+    clip.setProperty (ids::offset, newOffset, undoTarget);
+    clip.setProperty (ids::start, juce::jmax (0.0, start - offset + newOffset), undoTarget);
+    clip.setProperty (ids::length, juce::jmax (minClipSeconds, after.toTarget (to) - newOffset), undoTarget);
+}
+
+void Edit::setClipMusical (int clipId, bool on, double clipTempo)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid() || isMidiClip (clip))
+        return;
+
+    const auto before = getEffectiveWarp (clip);
+    const auto bpm = clipTempo > 0.0 ? juce::jlimit (minClipTempo, maxClipTempo, clipTempo) : getClipTempo (clip);
+
+    // The free warp stays as it is: while musical it's read in the file's own time.
+    clip.setProperty (ids::clipTempo, bpm, undoTarget);
+    if (on)
+        clip.setProperty (ids::musical, true, undoTarget);
+    else
+        clip.removeProperty (ids::musical, undoTarget);
+
+    keepWindow (clip, before);
+}
+
 warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
 {
     warp::Settings settings;
-    settings.map = getClipWarp (clip);
+    settings.map = getEffectiveWarp (clip);
     settings.semitones = (double) clip.getProperty (ids::transpose, 0.0) + (double) clip.getParent().getProperty (ids::transpose, 0.0);
     settings.semitones = juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, settings.semitones);
     settings.algorithm = warp::algorithmFromKey (clip[ids::stretch].toString());

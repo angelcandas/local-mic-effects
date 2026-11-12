@@ -132,12 +132,30 @@ export function createRhythmPanel(screen, track, clip, ui) {
   };
   const strength = percent("strength", "Strength", 100, "How far onsets move towards the grid (less keeps some feel)");
   const swing = percent("swing", "Swing", 0, "Delay every second line, up to a triplet feel");
+  const sensitivity = percent("sensitivity", "Detect", 50, "How soft a note start still counts (also the warp tool's hitpoints)");
   const quantizeKnobs = html("div", "insert-controls rhythm-knobs");
-  quantizeKnobs.append(strength.element, swing.element);
+  quantizeKnobs.append(strength.element, swing.element, sensitivity.element);
+
+  const option = (key, text, title) => {
+    const label = html("label", "rhythm-check");
+    const box = html("input");
+    Object.assign(box, { type: "checkbox", checked: prefs.get(key, false) });
+    box.addEventListener("change", () => prefs.set(key, box.checked));
+    label.append(box, document.createTextNode(` ${text}`));
+    label.title = title;
+    return [label, box];
+  };
+  const [iterativeLabel, iterativeBox] = option("iterative", "Iterative",
+    "Each press moves the notes from where they are now: at 50%, two presses close three quarters of the gap");
+  const [sliceLabel, sliceBox] = option("slice", "Slice (no stretching)",
+    "Cut at the notes and move the pieces instead of stretching (best for hard drums; gaps stay silent)");
+  const quantizeOptions = html("div", "panel-actions");
+  quantizeOptions.append(iterativeLabel, sliceLabel);
 
   const quantizeArgs = () => {
     const value = steps.value === "bar" ? screen.session.beatsPerBar ?? 4 : Number(steps.value);
-    return { steps: value, strength: strength.value / 100, swing: swing.value / 100, groove: Number(grid.value) };
+    return { steps: value, strength: strength.value / 100, swing: swing.value / 100, groove: Number(grid.value),
+             sensitivity: sensitivity.value / 100, iterative: iterativeBox.checked, slice: sliceBox.checked };
   };
   const report = (result, what) => {
     if (!result?.ok) return;
@@ -170,9 +188,27 @@ export function createRhythmPanel(screen, track, clip, ui) {
       toast(`Tempo ${result.bpm.toFixed(2)} BPM from ${track.name}${moved}.${result.confidence < 0.25 ? " The beat wasn't very clear: check it with the click." : ""}`);
     }), lineUp);
 
+  // Musical mode: the clip follows the tempo track at its own tempo.
+  const musical = html("label", "rhythm-check");
+  const musicalBox = html("input");
+  musicalBox.type = "checkbox";
+  musical.append(musicalBox, document.createTextNode(" Musical mode: follow the tempo track"));
+  musical.title = "Tie the clip to bars and beats: it stretches to the project tempo and follows tempo changes, keeping its pitch";
+  const clipTempo = html("input", "tempo-input rhythm-clip-tempo");
+  Object.assign(clipTempo, { type: "number", min: 30, max: 300, step: 0.01, title: "The clip's own tempo (BPM)" });
+  const clipTempoLabel = html("label", "tempo");
+  clipTempoLabel.append(clipTempo, html("span", "", "BPM (clip)"));
+  musicalBox.addEventListener("change", () => { if (clip) daw("setClip", { id: clip.id, musical: musicalBox.checked }); });
+  clipTempo.addEventListener("change", () => {
+    if (clip && Number(clipTempo.value) > 0) daw("setClip", { id: clip.id, clipTempo: Number(clipTempo.value) });
+  });
+  const musicalRow = html("div", "panel-actions");
+  musicalRow.append(musical, clipTempoLabel);
+  const musicalInfo = html("p", "panel-caption");
+
   const warpInfo = html("p", "panel-caption rhythm-warp-info");
-  sections.append(section("quantize", "Quantize", true, grid, steps, quantizeKnobs, quantizeRow, warpInfo),
-                  section("tempo", "Tempo", true, tempoRow));
+  sections.append(section("quantize", "Quantize", true, grid, steps, quantizeKnobs, quantizeOptions, quantizeRow, warpInfo),
+                  section("tempo", "Tempo", true, tempoRow, musicalRow, musicalInfo));
 
   const update = (t, c) => {
     updateTrack(t.transpose);
@@ -188,13 +224,48 @@ export function createRhythmPanel(screen, track, clip, ui) {
                                                     : "Transpose a voice without the chipmunk or giant sound: its character stays where it was";
     formantBox.disabled = formantBox.disabled || algorithm.value === "efficient";
     if (c && updateClip) updateClip(c.transpose);
+    musicalBox.disabled = clipTempo.disabled = !c || !!c.midi;
+    musicalBox.checked = !!c?.musical;
+    if (document.activeElement !== clipTempo) clipTempo.value = c?.clipTempo ? String(Math.round(c.clipTempo * 100) / 100) : "";
+    musicalInfo.textContent = !c ? "Select a clip to put it in musical mode."
+      : c.musical ? "The clip stays on its bars and beats when the tempo changes. Set its own tempo if it was detected wrong."
+      : "Switching on finds the clip's tempo from its beat (a loop or a drum part works best).";
     const count = c?.warp?.length ?? 0;
-    warpInfo.textContent = c ? (count ? `Clip warped: ${count} markers. Warp tool (W): drag in a clip to stretch, double-click a marker to remove it.`
-                                      : "Warp tool (W): drag in a clip to stretch time between markers.")
+    warpInfo.textContent = c ? (count ? `Clip warped: ${count} markers. Warp tool (W): drag a note start (faint line) to move just that note, double-click a marker to remove it.`
+                                      : "Warp tool (W): drag a note start (faint line) to move just that note, or anywhere to stretch.")
                              : "Select a clip to transpose, quantize or warp just that clip.";
   };
   update(track, clip);
   return { element, update };
+}
+
+// Note starts found in clips, by what each clip shows and the detect setting.
+const hitCache = new Map();
+
+// Draws a clip's note starts (hitpoints) as faint lines, for the warp tool; they're asked
+// for once per clip view and kept on the element for startWarpDrag.
+export function drawHitpoints(element, clip, zoom, daw) {
+  const sensitivity = prefs.get("sensitivity", 50) / 100;
+  const key = `${clip.id}|${clip.audioKey}|${clip.offset}|${clip.length}|${sensitivity}`;
+  const draw = (hits) => {
+    element.hits = hits;
+    element.querySelectorAll(".hitpoint").forEach((h) => h.remove());
+    for (const [time, strength] of hits) {
+      const x = (time - clip.offset) * zoom;
+      if (x < 0 || x > clip.length * zoom) continue;
+      const line = html("div", "hitpoint");
+      line.style.left = `${x}px`;
+      line.style.opacity = String(0.35 + 0.65 * strength);
+      element.append(line);
+    }
+  };
+  if (hitCache.has(key)) return draw(hitCache.get(key));
+  daw("hitpoints", { id: clip.id, sensitivity }).then((result) => {
+    if (!result?.ok) return;
+    if (hitCache.size > 200) hitCache.clear();
+    hitCache.set(key, result.hits);
+    if (element.isConnected) draw(result.hits);
+  });
 }
 
 // Draws a clip's warp markers (where its audio has been pinned in time).
@@ -234,9 +305,20 @@ export function startWarpDrag(screen, event, clip, element, daw) {
       const a = clip.offset, b = clip.offset + clip.length;
       markers.push([a, a], [b, b]);
     }
-    markers.push([toSource(markers, at), at]);
+    // On a note start: grab exactly that, and pin the notes either side so only this one
+    // moves.
+    const hits = (element.hits ?? []).map(([t]) => t);
+    const hit = hits.findIndex((t) => Math.abs((t - at) * zoom) < 8);
+    const grabbed = hit >= 0 ? hits[hit] : at;
+    const pin = (t) => {
+      if (t === undefined || markers.some(([, m]) => Math.abs((m - t) * zoom) < 3)) return;
+      markers.push([toSource(markers, t), t]);
+    };
+    if (hit >= 0) { pin(hits[hit - 1]); pin(hits[hit + 1]); }
     markers.sort((x, y) => x[0] - y[0]);
-    index = markers.findIndex(([, t]) => t === at);
+    markers.push([toSource(markers, grabbed), grabbed]);
+    markers.sort((x, y) => x[0] - y[0]);
+    index = markers.findIndex(([, t]) => t === grabbed);
   }
 
   const startTarget = markers[index][1];
@@ -280,6 +362,9 @@ export function savedQuantizeArgs(session, trackId) {
     steps: steps === "bar" ? session.beatsPerBar ?? 4 : Number(steps) || 0.5,
     strength: prefs.get("strength", 100) / 100,
     swing: prefs.get("swing", 0) / 100,
+    sensitivity: prefs.get("sensitivity", 50) / 100,
+    iterative: prefs.get("iterative", false),
+    slice: prefs.get("slice", false),
     groove,
   };
 }

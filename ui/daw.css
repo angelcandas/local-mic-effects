@@ -457,6 +457,8 @@ body.is-daw .chip--live { display: none; }
 .clip-wave { opacity: 0.85; }
 .clip-fades path { fill: rgba(8, 10, 14, 0.55); stroke: var(--text); stroke-width: 1; vector-effect: non-scaling-stroke; }
 
+.clip-musical { margin-right: 4px; color: var(--accent-2); font-weight: 700; }
+
 .clip-name {
   position: absolute;
   top: 2px;
@@ -1448,6 +1450,7 @@ body.library-dragging * { cursor: grabbing !important; }
 }
 .warp-marker::before { content: ""; position: absolute; top: 0; left: -4px; border: 4px solid transparent; border-top-color: var(--accent-2); }
 .warp-marker.is-dragging { border-left-style: dashed; }
+.hitpoint { position: absolute; top: 14px; bottom: 0; z-index: 1; width: 0; border-left: 1px solid rgba(255, 255, 255, 0.55); pointer-events: none; }
 .clip.is-warped .clip-name::after { content: "  \21C4"; opacity: 0.7; }
 .daw-arrange[data-tool="warp"] .clip, [data-tool="warp"] .clip { cursor: ew-resize; }
 

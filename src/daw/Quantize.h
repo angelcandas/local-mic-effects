@@ -31,7 +31,16 @@ struct Options
     double strength = 1.0;     // 0..1: how far onsets move towards the grid
     double catchRange = 0.5;   // only onsets within this share of a grid step move (0..0.5)
     float sensitivity = 0.5f;  // 0..1: higher finds softer onsets
+
+    // Iterative: start from where the notes play now (after earlier quantizing), so each
+    // pass closes `strength` of the distance that's left. Off, every pass starts from the
+    // audio as played before any free warp.
+    bool iterative = false;
 };
+
+// Note starts (hitpoints) in what a clip shows, as times in its rendered copy, strongest
+// first is not implied: in time order. Sensitivity 0..1.
+std::vector<analysis::rhythm::Onset> findHitpoints (const Edit&, AudioPool&, int clipId, float sensitivity = 0.5f);
 
 struct Result
 {
@@ -42,7 +51,8 @@ struct Result
 // Warps the clips so their onsets land on `grid` (timeline seconds, sorted). Clips that
 // play one stretch of the same take together (split or strip-silenced pieces) share one
 // warp, so they stay in time with each other and render once. Quantizing again starts
-// from the unwarped audio, so a new strength or grid replaces the old result. The caller
+// from the unwarped audio, so a new strength or grid replaces the old result (unless
+// options.iterative). The caller
 // opens the undo transaction.
 Result quantizeClips (Edit&, AudioPool&, const juce::Array<int>& clipIds, const std::vector<double>& grid, const Options&);
 

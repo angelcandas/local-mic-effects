@@ -128,6 +128,27 @@ Algorithm algorithmFromKey (const juce::String& key)
     return Algorithm::mix;
 }
 
+Map compose (const Map& inner, const Map& outer)
+{
+    if (outer.isIdentity() && outer.getMarkers().empty())
+        return inner;
+
+    // Corners of either map, in file time.
+    std::vector<double> corners;
+    for (const auto& m : inner.getMarkers())
+        corners.push_back (m.source);
+    for (const auto& m : outer.getMarkers())
+        corners.push_back (inner.toSource (m.source));
+    std::sort (corners.begin(), corners.end());
+
+    std::vector<Marker> markers;
+    for (auto s : corners)
+        if (markers.empty() || s - markers.back().source > 1.0e-6)
+            markers.push_back ({ s, outer.toTarget (inner.toTarget (s)) });
+
+    return Map (std::move (markers));
+}
+
 juce::String Settings::getKey() const
 {
     // Mix without formants keeps the key it had before there were algorithms.

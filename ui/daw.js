@@ -9,7 +9,7 @@ import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
-import { createRhythmPanel, drawWarpMarkers, savedQuantizeArgs, startWarpDrag } from "./rhythm.js";
+import { createRhythmPanel, drawHitpoints, drawWarpMarkers, savedQuantizeArgs, startWarpDrag } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
@@ -1266,7 +1266,9 @@ class DawScreen {
   }
 
   setTool(tool) {
+    const hitpoints = (tool === "warp") !== (this.tool === "warp"); // the warp tool shows note starts
     this.tool = tool;
+    if (hitpoints && this.session) this.renderArrange(true);
     this.arrange.dataset.tool = tool;
     this.cutGuide.hidden = true;
     this.renderTransport();
@@ -1614,6 +1616,12 @@ class DawScreen {
       kept.style.width = `${kept.cssWidth * scale}px`;
     }
     const label = html("span", "clip-name", clip.missing ? `⚠ ${clip.name}` : clip.mute ? `🔇 ${clip.name}` : clip.name);
+    if (clip.musical) {
+      // Musical mode: tied to bars and beats, follows the tempo track.
+      const note = html("span", "clip-musical", "♩");
+      note.title = `Musical mode: plays at ${Math.round(clip.clipTempo * 100) / 100} BPM, following the tempo track`;
+      label.prepend(note);
+    }
     if (clip.gain && Math.abs(clip.gain) > 0.05) label.textContent += `  ${dbText(clip.gain)} dB`;
     const fades = svg("svg", { class: "clip-fades", preserveAspectRatio: "none" });
     const fadeIn = svg("path"), fadeOut = svg("path");
@@ -1632,6 +1640,7 @@ class DawScreen {
 
     if (!kept) this.drawWaveform(canvas);
     if (!clip.midi) drawWarpMarkers(element, clip, this.zoom);
+    if (!clip.midi && this.tool === "warp") drawHitpoints(element, clip, this.zoom, daw);
     element.classList.toggle("is-warped", Boolean(clip.warp?.length) || Math.abs(clip.transpose || 0) > 1e-4);
 
     element.addEventListener("pointerdown", (event) => {

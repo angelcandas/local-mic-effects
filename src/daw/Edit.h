@@ -26,7 +26,8 @@
 //       INSTRUMENT  id, plugin, name, format, vendor, description, state   (MIDI tracks)
 //       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute,
 //             transpose (semitones), warp (warp::Map as text),
-//             stretch (warp::Algorithm key; mix when missing), formant (keep formants)
+//             stretch (warp::Algorithm key; mix when missing), formant (keep formants),
+//             musical (follows the tempo map), clipTempo (the file's own tempo, BPM)
 //       CLIP  kind "midi", id, name, start, offset, length, mute          (MIDI clips)
 //         NOTE  id, pitch (0..127), time, length, velocity (1..127)
 //     RETURN  id, name, colour, volume, pan, mute, solo, inGain, outGain
@@ -44,6 +45,11 @@
 // the plugin's own settings, base64. A MIDI clip is a window onto its notes, like an
 // audio clip onto its file: note times are seconds from the start of the clip's
 // content, and `offset` says where the clip starts within it.
+//
+// A clip in musical mode is tied to bars and beats: its file plays at `clipTempo` bent
+// onto the project's tempo map, so it follows tempo changes and ramps. Its `warp` is then
+// the free warp in the file's own time, laid under that (see getEffectiveWarp). When the
+// tempo map changes, musical clips keep their bars and beats (start, window and length).
 //
 // A clip with a warp map or a transpose (its own plus its track's) plays a rendered copy
 // of its file (see Warp.h); its offset and length are then measured in that copy. The
@@ -76,7 +82,7 @@ namespace ids
     MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (ride)
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns)
-    MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges)
+    MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo)
 #undef MICFX_DAW_ID
 }
 
@@ -255,6 +261,30 @@ public:
     void setClipWarp (int clipId, const warp::Map&);
     static warp::Map getClipWarp (const juce::ValueTree& clip);
 
+    // Musical mode. Switching it or changing the clip's tempo keeps the clip's start and
+    // the stretch of the file it shows (the window follows the new timing). clipTempo <= 0
+    // keeps the tempo it has (or the project tempo at the clip, the first time).
+    static constexpr double minClipTempo = 30.0, maxClipTempo = 300.0;
+    void setClipMusical (int clipId, bool on, double clipTempo = 0.0);
+    static bool isMusical (const juce::ValueTree& clip) { return (bool) clip.getProperty (ids::musical, false); }
+    static double getClipTempo (const juce::ValueTree& clip);
+
+    // The tempo map of the project a clip belongs to.
+    static TempoMap getTempoMapFor (const juce::ValueTree& clip);
+
+    // A musical clip's bend: its file's own time (straight, at clipTempo) to its rendered
+    // copy's time, through the tempo map. The identity for other clips.
+    static warp::Map getMusicalMap (const juce::ValueTree& clip);
+
+    // The whole map from file time to rendered time: the free warp, then the musical bend.
+    // Quantize and the warp tool work on this; setting it on a musical clip keeps the
+    // bend and stores the rest as the free warp.
+    static warp::Map getEffectiveWarp (const juce::ValueTree& clip);
+    void setEffectiveWarp (int clipId, const warp::Map&);
+
+    // The free warp's markers with their targets in rendered time, for the warp tool.
+    static std::vector<warp::Marker> getShownWarp (const juce::ValueTree& clip);
+
     // What the clip's rendered copy needs: its warp map and its transpose plus its track's.
     static warp::Settings getWarpSettings (const juce::ValueTree& clip);
 
@@ -287,6 +317,14 @@ public:
 
 private:
     int takeNextId();
+
+    // Moves and resizes a clip so its window shows the same stretch of the file after its
+    // effective map changes from `before`, keeping where the file's start sits.
+    void keepWindow (juce::ValueTree& clip, const warp::Map& before);
+
+    // A musical clip placed by beats: its file's start at anchorBeat, its window from
+    // startBeat to endBeat.
+    void placeByBeats (juce::ValueTree& clip, const TempoMap&, double anchorBeat, double startBeat, double endBeat);
     void renumber (juce::ValueTree&); // fresh ids for a copied tree and everything in it
     juce::ValueTree findById (const juce::Identifier& type, int id) const;
     juce::ValueTree getTrackOrMaster (int trackId) const { return getChannel (trackId); }

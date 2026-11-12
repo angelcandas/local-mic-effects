@@ -80,6 +80,10 @@ juce::String getAlgorithmKey (Algorithm);
 Algorithm algorithmFromKey (const juce::String&);
 juce::StringArray getAlgorithmKeys();
 
+// The map that does `inner` then `outer`: a moment of the file goes through inner, and
+// where it lands goes through outer. Exact for these piecewise-linear maps.
+Map compose (const Map& inner, const Map& outer);
+
 // Everything that shapes a clip's rendered copy.
 struct Settings
 {
