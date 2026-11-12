@@ -22,7 +22,8 @@
 //       INSERTS ...
 //       INSTRUMENT  id, plugin, name, format, vendor, description, state   (MIDI tracks)
 //       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute,
-//             transpose (semitones), warp (warp::Map as text)
+//             transpose (semitones), warp (warp::Map as text),
+//             stretch (warp::Algorithm key; mix when missing), formant (keep formants)
 //       CLIP  kind "midi", id, name, start, offset, length, mute          (MIDI clips)
 //         NOTE  id, pitch (0..127), time, length, velocity (1..127)
 //
@@ -60,6 +61,7 @@ namespace ids
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
     MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (ride)
+    MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant)
 #undef MICFX_DAW_ID
 }
 
@@ -184,6 +186,11 @@ public:
     // -24..24. A clip's warp map says where each moment of its file plays (see Warp.h);
     // setting one keeps the clip's window where it is, so the audio moves under it.
     void setClipTranspose (int clipId, double semitones);
+
+    // How the clip is stretched and transposed (see warp::Algorithm), and whether a
+    // transpose keeps the voice's formants.
+    void setClipStretch (int clipId, warp::Algorithm);
+    void setClipFormant (int clipId, bool);
     void setTrackTranspose (int trackId, double semitones);
 
     //==============================================================================

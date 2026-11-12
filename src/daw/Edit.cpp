@@ -439,6 +439,28 @@ void Edit::setClipTranspose (int clipId, double semitones)
         clip.setProperty (ids::transpose, juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, semitones), &undoManager);
 }
 
+void Edit::setClipStretch (int clipId, warp::Algorithm algorithm)
+{
+    if (auto clip = getClip (clipId); clip.isValid())
+    {
+        if (algorithm == warp::Algorithm::mix)
+            clip.removeProperty (ids::stretch, &undoManager);
+        else
+            clip.setProperty (ids::stretch, warp::getAlgorithmKey (algorithm), &undoManager);
+    }
+}
+
+void Edit::setClipFormant (int clipId, bool keep)
+{
+    if (auto clip = getClip (clipId); clip.isValid())
+    {
+        if (keep)
+            clip.setProperty (ids::formant, true, &undoManager);
+        else
+            clip.removeProperty (ids::formant, &undoManager);
+    }
+}
+
 void Edit::setTrackTranspose (int trackId, double semitones)
 {
     if (auto track = getTrack (trackId); track.isValid())
@@ -521,6 +543,8 @@ warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
     settings.map = getClipWarp (clip);
     settings.semitones = (double) clip.getProperty (ids::transpose, 0.0) + (double) clip.getParent().getProperty (ids::transpose, 0.0);
     settings.semitones = juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, settings.semitones);
+    settings.algorithm = warp::algorithmFromKey (clip[ids::stretch].toString());
+    settings.formant = (bool) clip.getProperty (ids::formant, false);
     return settings;
 }
 
