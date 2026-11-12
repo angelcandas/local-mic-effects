@@ -3076,3 +3076,15 @@ bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, 
 
     return false;
 }
+
+juce::String DawBridge::getUndoName() const
+{
+    auto& undo = edit.getUndoManager();
+    return undo.canUndo() ? undo.getUndoDescription() : juce::String();
+}
+
+juce::String DawBridge::getRedoName() const
+{
+    auto& undo = edit.getUndoManager();
+    return undo.canRedo() ? undo.getRedoDescription() : juce::String();
+}
