@@ -1021,6 +1021,11 @@ MixTargets getTargets (MixStyle style)
             t.voiceSaturationDb = 8.0f; t.bassSaturationDb = 5.0f; t.echoMix = 10.0f; t.echoBeats = 0.5f; t.echoFeedback = 30.0f;
             t.widthAmount = 90.0f; t.rideRangeDb = 3.0f; t.duckDb = 1.0f;
             break;
+        case MixStyle::speech: // every word clear, the music a bed under it that dips while you talk
+            t = { 10.0f, 2.0f, 1.0f, -16.0f, 0.0f, 30.0f, 6.0f };
+            t.rideRangeDb = 6.0f; t.duckDb = 6.0f;
+            t.voiceLufs = -18.0f; t.instrumentalLufs = -26.0f;
+            break;
     }
     t.style = style;
     return t;
@@ -1040,6 +1045,7 @@ juce::String getStyleName (MixStyle style)
         case MixStyle::electronic: return "Electronic";
         case MixStyle::jazz:       return "Jazz";
         case MixStyle::lofi:       return "Lo-fi";
+        case MixStyle::speech:     return "Speech / podcast";
     }
     return {};
 }
