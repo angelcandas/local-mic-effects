@@ -723,7 +723,7 @@ body.is-daw .chip--live { display: none; }
 .insert.is-wide { width: 330px; }
 .insert::before { content: ""; position: absolute; inset: 0 0 auto; height: 2px; background: linear-gradient(90deg, var(--cat), transparent 80%); }
 .insert.is-off .insert-body { opacity: 0.45; }
-.insert-controls[hidden] { display: none; }
+.insert-controls[hidden], .insert-controls > [hidden] { display: none; }
 .insert-head { display: flex; align-items: center; gap: 5px; }
 .insert-head.is-draggable { cursor: grab; touch-action: none; user-select: none; }
 .is-reordering .insert { transition: transform 0.12s ease; }

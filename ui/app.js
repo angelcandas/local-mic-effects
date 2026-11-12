@@ -1,7 +1,7 @@
 // MicFX web UI. Runs inside the JUCE WebView; every control is bound to a processor
 // parameter through the relays created in src/PluginEditor.cpp (relay name = parameter ID).
 import * as Juce from "./juce/index.js";
-import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, SCALES } from "./modules.js";
+import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, SCALES, isControlShown } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
@@ -374,6 +374,39 @@ class Tuner {
 }
 
 //==============================================================================
+// The harmonizer: the chord it follows (Chords mode) and the note each voice sings.
+class ChordReadout {
+  constructor() {
+    this.element = html("div", "chord-readout");
+    this.chord = html("div", "chord", "—");
+    this.voices = html("div", "voices");
+    this.detail = html("div", "detail", "");
+    this.element.append(this.chord, this.voices, this.detail);
+    this.signature = "";
+  }
+
+  update(chord, voices) {
+    const mode = Juce.getComboBoxState("harmonyMode").getChoiceIndex();
+    const following = mode === 2;
+    const sung = (voices ?? []).filter((note) => note >= 0);
+    const signature = `${mode}|${chord}|${sung.join(",")}`;
+    if (signature === this.signature) return;
+    this.signature = signature;
+
+    this.element.classList.toggle("is-following", following);
+    this.element.classList.toggle("is-active", sung.length > 0);
+    this.chord.textContent = following ? (chord || "—") : mode === 1 ? "Key" : "Intervals";
+
+    this.voices.replaceChildren(...sung.map((note) => html("span", "voice", noteName(note))));
+
+    const source = Juce.getComboBoxState("harmonySource").getChoiceIndex();
+    this.detail.textContent = !following ? (sung.length ? "" : "Sing to hear the voices")
+      : chord ? (sung.length ? "Voices on the chord's notes" : "Sing to hear the voices")
+      : ["Load and play a backing track", "Play chords into input 2", "Play chords on a MIDI keyboard"][source] ?? "";
+  }
+}
+
+//==============================================================================
 // Decorative decay envelope that follows the reverb's size, damping and mix.
 class ReverbGraphic {
   constructor(card) {
@@ -711,8 +744,20 @@ class Rack {
     header.append(reset, powerButton);
 
     const controls = html("div", "controls");
-    for (const control of module.controls)
-      controls.append(this.buildControl(control, card));
+    const conditional = []; // [control, element]: shown only for some values of other controls
+    for (const control of module.controls) {
+      const element = this.buildControl(control, card);
+      controls.append(element);
+      if (control.when) conditional.push([control, element]);
+    }
+    if (conditional.length) {
+      const refresh = () => conditional.forEach(([control, element]) => {
+        element.hidden = !isControlShown(control, (param) => this.getParameter(param));
+      });
+      for (const param of new Set(conditional.flatMap(([control]) => Object.keys(control.when))))
+        Juce.getComboBoxState(param).valueChangedEvent.addListener(refresh);
+      refresh();
+    }
 
     card.append(header, html("p", "desc", module.description));
 
@@ -870,6 +915,7 @@ class Rack {
       case "choice": return new Choice(control.param, control.label, this.onUserChange).element;
       case "toggle": return new Pill(control.param, control.label, this.onUserChange).element;
       case "tuner": return (this.tuner = new Tuner()).element;
+      case "chord": return (this.chordReadout = new ChordReadout()).element;
       case "keys": return (this.keyPicker = new KeyPicker(control.param, control.scaleParam, this.onUserChange)).element;
       case "reverb-graphic": {
         const graphic = new ReverbGraphic(card);
@@ -1283,6 +1329,7 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   if (micCheck) micCheck.peak = Math.max(micCheck.peak, status.input);
   meters.output.push(status.output);
   rack.tuner?.update(status.note, status.target);
+  rack.chordReadout?.update(status.chord, status.voices);
   if (!document.hidden) rack.live(status.fx);
   rack.keyPicker?.setTarget(status.target);
   presetBar.syncFromHost(status.preset);

@@ -80,6 +80,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/Analysis.h
     src/analysis/Key.cpp
     src/analysis/Key.h
+    src/analysis/Chords.cpp
+    src/analysis/Chords.h
     src/analysis/MixAssistant.cpp
     src/analysis/MixAssistant.h
     src/analysis/Beats.cpp

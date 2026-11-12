@@ -117,6 +117,7 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     loopInput.setSize (2, juce::jmax (samplesPerBlock, 4096));
     loopInput.clear();
     dawEngine.prepare (sampleRate, samplesPerBlock);
+    chordFollower.prepare (sampleRate);
     mixGuardGain = 1.0f;
     mixGuardRelease = 1.0f - std::exp (-1.0f / (0.1f * (float) sampleRate)); // ~100 ms
     // Room for blocks a bit larger than announced; hosts occasionally send them.
@@ -187,6 +188,9 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             dryInput.clear(); // oversized block: the dry file gets silence rather than garbage
     }
 
+    updateDspParameters();
+    followChords (buffer, numIn, numSamples, midi); // before the mic is copied over the other inputs
+
     // A mono mic feeds every output channel so stereo effects have signal on both sides.
     // The app has the interface's every input: Live mode uses the first, as a mono mic.
     if (numIn == 1 || (numIn > 1 && juce::JUCEApplicationBase::isStandaloneApp()))
@@ -195,8 +199,6 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     else
         for (auto ch = numIn; ch < numOut; ++ch)
             buffer.clear (ch, 0, numSamples);
-
-    updateDspParameters();
 
     auto block = juce::dsp::AudioBlock<float> (buffer).getSubsetChannelBlock (0, (size_t) numOut);
     const fx::Context context (block);
@@ -259,6 +261,58 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         buffer.clear();
 
     updatePeak (outputPeak, buffer.getMagnitude (0, numSamples));
+}
+
+void PluginProcessor::followChords (const juce::AudioBuffer<float>& buffer, int numIn, int numSamples,
+                                    const juce::MidiBuffer& midi) noexcept
+{
+    // The keys down, kept up to date even while nothing follows them.
+    for (const auto metadata : midi)
+    {
+        const auto message = metadata.getMessage();
+        if (message.isNoteOn())
+            heldKeys.set ((size_t) message.getNoteNumber());
+        else if (message.isNoteOff())
+            heldKeys.reset ((size_t) message.getNoteNumber());
+        else if (message.isAllNotesOff() || message.isAllSoundOff())
+            heldKeys.reset();
+    }
+
+    if (! pitchModule.isFollowingChords())
+        return;
+
+    using Pitch = fx::modules::Pitch;
+
+    // The autotune key, when it's a major or minor one, as a hint for the chords.
+    const auto scale = juce::roundToInt (pitchModule.tuneScale.load (std::memory_order_relaxed));
+    const auto key = juce::roundToInt (pitchModule.tuneKey.load (std::memory_order_relaxed));
+    chordFollower.setKeyMask (scale == 1 || scale == 2 ? analysis::getKeyMask (key, scale == 2) : 0);
+
+    if (heldKeys.any() || pitchModule.getHarmonySource() == Pitch::midiKeys)
+    {
+        // Held keys decide; released, the last chord they made stays.
+        chordFollower.setHeldNotes (heldKeys);
+    }
+    else if (pitchModule.getHarmonySource() == Pitch::instrumentInput)
+    {
+        // The second input (a guitar or keyboard on input 2 of the interface).
+        if (numIn > 1)
+            chordFollower.pushAudio (buffer.getReadPointer (1), numSamples);
+    }
+    else if (const auto chord = multitrack.getBackingChord (multitrack.getPosition()); chord.isValid())
+    {
+        chordFollower.setChord (chord);
+    }
+
+    pitchModule.setChord (chordFollower.getChord());
+}
+
+analysis::Chord PluginProcessor::getHarmonyChord() const noexcept
+{
+    if (dawMode.load())
+        return dawEngine.getHarmonyChord();
+
+    return analysis::Chord::unpack (pitchModule.getEngine().harmonyChord.load (std::memory_order_relaxed));
 }
 
 void PluginProcessor::applyPeakGuard (juce::AudioBuffer<float>& buffer, int numChannels, int numSamples) noexcept

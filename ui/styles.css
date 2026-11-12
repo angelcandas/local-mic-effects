@@ -571,6 +571,41 @@ select.dropdown {
 .tuner.is-active .scale { opacity: 1; }
 .tuner.is-active .needle { opacity: 1; }
 
+/* ---------- Harmonizer ---------- */
+
+.chord-readout {
+  flex: 1 1 100%;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  grid-template-rows: auto auto;
+  align-items: center;
+  gap: 2px 14px;
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: #0d1016;
+}
+
+.chord-readout .chord {
+  grid-row: span 2;
+  min-width: 64px;
+  font: 700 26px/1 var(--mono);
+  letter-spacing: -0.5px;
+  color: var(--muted);
+}
+
+.chord-readout:not(.is-following) .chord { font-size: 13px; text-transform: uppercase; letter-spacing: 0.6px; }
+.chord-readout.is-following .chord { color: var(--text); }
+.chord-readout .voices { display: flex; flex-wrap: wrap; gap: 6px; min-height: 20px; }
+.chord-readout .voice {
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--cat) 22%, transparent);
+  color: var(--text);
+  font: 600 11px var(--mono);
+}
+.chord-readout .detail { color: var(--muted); font: 600 11px var(--mono); min-height: 14px; }
+.controls > [hidden] { display: none; }
+
 .keys-picker {
   flex: 1 1 220px;
   display: flex;

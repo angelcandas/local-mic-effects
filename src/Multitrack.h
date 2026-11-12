@@ -3,6 +3,8 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_events/juce_events.h>
 
+#include "analysis/Chords.h"
+
 // A small multi-track player for singing along: a backing track plus the takes you
 // record, laid out on one timeline and mixed into the output while the transport plays.
 //
@@ -22,6 +24,7 @@ public:
         juce::AudioBuffer<float> audio; // at the session sample rate
         juce::int64 start = 0;          // timeline position of the first sample (may be negative)
         juce::Array<float> peaks;       // max |sample| per peakSeconds, for drawing waveforms
+        std::vector<analysis::ChordSegment> chords; // backing tracks: the song's chords (track samples)
 
         std::atomic<float> gain { 1.0f };
         std::atomic<bool> muted { false };
@@ -64,6 +67,10 @@ public:
     // Audio thread. Adds every unmuted track under the playhead into `buffer` and
     // advances the playhead. Returns the timeline position of the block's first sample.
     juce::int64 process (juce::AudioBuffer<float>& buffer, int numChannels, int numSamples) noexcept;
+
+    // Audio thread. The backing track's chord at a timeline position (found when the
+    // track loaded), or none: no backing track, outside it, or the list is being swapped.
+    analysis::Chord getBackingChord (juce::int64 timelinePosition) noexcept;
 
     std::function<void()> onTracksChanged;
     std::function<void (const juce::String&)> onError;

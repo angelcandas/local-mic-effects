@@ -13,7 +13,7 @@ Builds as a **standalone app**, plus **AU** and **VST3** plugins from the same c
 | Category | Effects |
 | --- | --- |
 | Clean-up | High-pass · **Denoise** · Noise Gate · EQ · **Parametric EQ** · Compressor · De-esser |
-| Pitch | **Autotune** · Pitch Shift (with formant) · Harmonizer (2 voices) |
+| Pitch | **Autotune** · Pitch Shift (with formant) · Harmonizer (up to 4 voices, follows the song's chords) |
 | Character | Exciter · Saturation · Radio · Bitcrusher · Robot · Filter · Auto-wah |
 | Modulation | Tremolo · Vibrato · Chorus · Flanger · Phaser |
 | Space | Doubler · Echo (ping-pong) · Reverb · Stereo Width |
@@ -43,6 +43,33 @@ They also appear as programs in DAWs.
 
 The Pitch Shift and Harmonizer use the same engine, so they're tuned too when Autotune is on.
 Chromatic works for any song. Pick the song's key and scale for a tighter, more musical tune.
+
+### Harmonizer
+
+Up to four extra voices, picked in one of three ways (**Mode**):
+
+- **Intervals**: a fixed number of semitones from your voice (+4 = a major third).
+- **Scale**: the interval as steps of the Autotune key and scale, so a "third" is major or minor as
+  the key needs.
+- **Chords**: notes of the chord that is playing now. **Style** puts the voices on the next chord
+  notes above you, below you, alternating, or the chord's bass note under you with the others above.
+
+Where the chords come from (**Chords from**, Live mode):
+
+- **Backing track**: when you load a backing track, MicFX works out its chords (the same chroma
+  analysis as key detection, plus a best path that doesn't let drum hits split a chord). The voices
+  then change exactly when the song does.
+- **Instrument input**: a guitar or keyboard on input 2 of the audio interface, followed as you play
+  (about 0.1 to 0.3 s to settle on a new chord).
+- **MIDI keys**: the chord you hold on a MIDI keyboard (one key alone plays the key's triad on it), kept
+  after you let go. Held keys also win over the backing track or input 2 while they're down.
+
+In DAW mode a harmonizer insert listens to the tracks without pitch inserts (read slightly ahead) and
+to the MIDI being played; held MIDI keys win while they're down.
+
+**Humanize** gives each voice its own small delay and pitch drift so they sound like separate singers,
+**Spread** places them across the stereo field, and **Formant** makes the voices sound bigger or smaller
+than you.
 
 ### Denoise
 
