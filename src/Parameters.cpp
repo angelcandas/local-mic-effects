@@ -195,9 +195,9 @@ Parameters::Parameters (Layout& l)
 {
     // Every effect's own input and output gain ("compressorInGain"...), after the rest
     // so hosts keep the parameter order they already had.
-    for (int i = 0; i < fx::numModuleTypes; ++i)
+    const auto moduleGains = [&l] (fx::ModuleType type)
     {
-        const juce::String key (fx::getModuleKey ((fx::ModuleType) i));
+        const juce::String key (fx::getModuleKey (type));
         juce::String name;
         for (auto c : key)
             name << (juce::CharacterFunctions::isUpperCase (c) ? juce::String (" ") : juce::String()) << juce::String::charToString (c);
@@ -205,7 +205,12 @@ Parameters::Parameters (Layout& l)
 
         decibels (l, key + "InGain", name + " In Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
         decibels (l, key + "OutGain", name + " Out Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
-    }
+    };
+
+    // (The denoiser came later: its gains are at the end with its other parameters.)
+    for (int i = 0; i < fx::numModuleTypes; ++i)
+        if ((fx::ModuleType) i != fx::ModuleType::denoise)
+            moduleGains ((fx::ModuleType) i);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
     // they already had (their In/Out gains are in the loop above).
@@ -257,4 +262,13 @@ Parameters::Parameters (Layout& l)
     number (l, "deqQ", "Dynamic EQ Q", 0.3f, 10.0f, 0.01f, 2.0f, "", 2.0f);
     decibels (l, "deqThreshold", "Dynamic EQ Threshold", -70.0f, 0.0f, -30.0f);
     decibels (l, "deqRange", "Dynamic EQ Range", 0.0f, 18.0f, 6.0f);
+
+    // The spectral denoiser (SpectralDenoiser.h), after those. It runs right
+    // after the high-pass in the chain.
+    toggle (l, "denoiseOn", "Denoise On");
+    number (l, "denoiseReduction", "Denoise Reduction", 0.0f, 40.0f, 0.1f, 12.0f, "dB");
+    decibels (l, "denoiseThreshold", "Denoise Threshold", -10.0f, 10.0f, 0.0f);
+    toggle (l, "denoiseAdaptive", "Denoise Adaptive", true);
+    toggle (l, "denoiseLearn", "Denoise Learn");
+    moduleGains (fx::ModuleType::denoise);
 }

@@ -8,7 +8,7 @@ const std::vector<Preset>& getPresets()
             { "reverbMix", 12 }, { "reverbSize", 35 } } },
 
         { "Podcast", "Clean", {
-            { "hpfFreq", 90 }, { "gateThreshold", -50 },
+            { "hpfFreq", 90 }, { "denoiseOn", 1 }, { "denoiseReduction", 15 }, { "gateThreshold", -50 },
             { "eqOn", 1 }, { "eqLow", 2 }, { "eqMidFreq", 3000 }, { "eqMidGain", 2.5f }, { "eqHigh", 1.5f },
             { "compThreshold", -22 }, { "compRatio", 4 },
             { "deessOn", 1 }, { "deessThreshold", -32 },
@@ -23,7 +23,7 @@ const std::vector<Preset>& getPresets()
             { "reverbOn", 0 }, { "outputGain", 3 } } },
 
         { "Streamer", "Clean", {
-            { "hpfFreq", 100 }, { "gateThreshold", -48 },
+            { "hpfFreq", 100 }, { "denoiseOn", 1 }, { "denoiseReduction", 12 }, { "gateThreshold", -48 },
             { "eqOn", 1 }, { "eqLow", 1 }, { "eqMidFreq", 3500 }, { "eqMidGain", 3 }, { "eqHigh", 2 },
             { "compThreshold", -20 }, { "compRatio", 4 },
             { "deessOn", 1 }, { "exciterOn", 1 }, { "exciterAmount", 20 },

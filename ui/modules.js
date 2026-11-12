@@ -20,6 +20,11 @@ export const MODULES = [
     description: "Cuts rumble and handling noise",
     controls: [knob("hpfFreq", "Cutoff")] },
 
+  { id: "denoise", name: "Denoise", category: "cleanup", power: "denoiseOn", wide: true,
+    description: "Takes hiss, hum and room noise out band by band, even under your voice. Adds 11 ms",
+    controls: [knob("denoiseReduction", "Reduction"), bipolar("denoiseThreshold", "Threshold"),
+               toggle("denoiseAdaptive", "Adaptive"), toggle("denoiseLearn", "Learn noise")] },
+
   { id: "gate", name: "Noise Gate", category: "cleanup", power: "gateOn",
     description: "Mutes background noise between words",
     controls: [knob("gateThreshold", "Threshold")] },
@@ -165,7 +170,7 @@ export const MODULES = [
 // effect pictures (fxviews.js). The pitch module holds three entries (autotune, pitch shift,
 // harmonizer).
 export const MODULE_KEYS = {
-  hpf: "highPass", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq", peq: "paraEq",
+  hpf: "highPass", denoise: "denoise", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq", peq: "paraEq",
   comp: "compressor", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
   crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", tremolo: "tremolo",
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
