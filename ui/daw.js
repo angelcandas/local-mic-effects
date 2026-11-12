@@ -9,13 +9,16 @@ import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
+import { decorateAiPanels } from "./aiviews.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createRhythmPanel, drawHitpoints, drawWarpMarkers, savedQuantizeArgs, startWarpDrag } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
 
-const HEAD_WIDTH = 210;           // track header column, px (matches daw.css)
+const HEAD_WIDTH = 244;           // track header column, px, by default (--head in daw.css); resizable
+const MIN_HEAD = 170, MAX_HEAD = 420;
+const FOLDED_ROW = 28;             // a folded track's height, px
 const MIN_ROW = 44, MAX_ROW = 200; // track height range, px (vertical zoom)
 const MIN_ZOOM = 4, MAX_ZOOM = 2000; // pixels per second
 const METER_FLOOR_DB = -60;
@@ -51,6 +54,8 @@ async function daw(command, args = {}) {
   return result;
 }
 
+const REDUCED_MOTION = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? { matches: false };
+const monitorMode = (track) => track.monitorMode ?? (track.monitor ? "in" : "off");
 const isTyping = (event) => Boolean(event.target.closest?.("input:not([type=range]):not([type=checkbox]), select, textarea, [contenteditable]"));
 const trackColour = (track, index) => track.colour || TRACK_COLOURS[(track.id ?? index) % TRACK_COLOURS.length];
 
@@ -82,6 +87,14 @@ const inputChoices = (names, current) => {
   return choices;
 };
 // What "+ Return…" offers: [module key (addReturn's effect), name]. The effect starts fully wet.
+// The offline processes that change a clip's audio (the Audio menu and the clip menu).
+const AUDIO_PROCESSES = [
+  ["Normalise", "normaliseClip", "Set the clip gain so its loudest peak is −1 dB"],
+  ["Strip silence: quiet room (−55 dB)", "stripSilenceQuiet", "Split the clip into phrases and remove the silent gaps between them"],
+  ["Strip silence: normal (−45 dB)", "stripSilenceNormal", "Split the clip into phrases and remove the silent gaps between them"],
+  ["Strip silence: noisy (−35 dB)", "stripSilenceNoisy", "Split the clip into phrases and remove the silent gaps between them"],
+  ["Split into stems…", "splitStems", "Separate the song into vocals, drums, bass and other, each on its own track"],
+];
 const RETURN_EFFECTS = [["reverb", "Reverb"], ["chorus", "Chorus"], ["echo", "Echo"], ["doubler", "Doubler"],
                         ["flanger", "Flanger"], ["phaser", "Phaser"], ["none", "Empty return"]];
 const dbText = (value) => {
@@ -126,6 +139,9 @@ const ICONS = {
   tracks: '<path d="M3 6h18M3 12h18M3 18h18"/><rect x="6" y="4.5" width="6" height="3" rx="1" fill="currentColor"/><rect x="12" y="10.5" width="7" height="3" rx="1" fill="currentColor"/><rect x="5" y="16.5" width="5" height="3" rx="1" fill="currentColor"/>',
   mixer: '<path d="M6 3v18M12 3v18M18 3v18"/><rect x="4" y="13" width="4" height="3" rx="1" fill="currentColor"/><rect x="10" y="7" width="4" height="3" rx="1" fill="currentColor"/><rect x="16" y="11" width="4" height="3" rx="1" fill="currentColor"/>',
   piano: '<rect x="3" y="5" width="18" height="14" rx="2"/><path d="M9 5v14M15 5v14M7 5v7M12 5v7M17 5v7"/>',
+  library: '<path d="M4 4h4v16H4zM10 4h4v16h-4zM15.5 5.2l3.8-1 3.4 15.6-3.8 1z"/>',
+  panel: '<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M3 14h18"/>',
+  more: '<circle cx="5" cy="12" r="1.4" fill="currentColor"/><circle cx="12" cy="12" r="1.4" fill="currentColor"/><circle cx="19" cy="12" r="1.4" fill="currentColor"/>',
   help: '<circle cx="12" cy="12" r="9"/><path d="M9.5 9.5a2.5 2.5 0 1 1 3.5 2.3c-.7.4-1 .9-1 1.7M12 17h.01"/>',
 };
 
@@ -143,6 +159,70 @@ function iconButton(className, name, title, onClick) {
 
 // Thin divider between toolbar groups.
 const sep = () => html("span", "tb-sep");
+
+// A pop-up menu at a point (right-click menus, the Project menu, "more"). fill gets
+// helpers: item (label, action, { disabled, danger, checked, shortcut, hint, indent }),
+// rule (), heading (text) and the menu element itself. One menu is open at a time;
+// Escape or a click elsewhere closes it, and clicking its anchor again too.
+let openMenu = null;
+function closeMenu() {
+  if (!openMenu) return;
+  const { menu, away, anchor } = openMenu;
+  menu.remove();
+  document.removeEventListener("pointerdown", away, true);
+  document.removeEventListener("keydown", away, true);
+  anchor?.setAttribute("aria-expanded", "false");
+  openMenu = null;
+}
+let menuClosedOn = null; // the anchor whose menu a press on it just closed
+function popMenu(x, y, fill, anchor = null) {
+  if (anchor && menuClosedOn === anchor) { menuClosedOn = null; return null; }
+  closeMenu();
+  const menu = html("div", "track-menu");
+  menu.setAttribute("role", "menu");
+  const item = (label, action, { disabled = false, danger = false, checked = null, shortcut = "", hint = "", indent = false } = {}) => {
+    const b = html("button", `track-menu-item${danger ? " is-danger" : ""}${indent ? " is-indented" : ""}`);
+    b.type = "button";
+    b.setAttribute("role", checked === null ? "menuitem" : "menuitemcheckbox");
+    if (checked !== null) b.setAttribute("aria-checked", String(Boolean(checked)));
+    b.append(html("span", "track-menu-check", checked ? "✓" : ""), html("span", "track-menu-label", label));
+    if (shortcut) b.append(html("kbd", "key-chip", keyText(shortcut)));
+    if (hint) b.title = hint;
+    b.disabled = disabled;
+    b.addEventListener("click", () => { closeMenu(); action(); });
+    menu.append(b);
+    return b;
+  };
+  const rule = () => menu.append(html("div", "track-menu-rule"));
+  const heading = (text) => menu.append(html("div", "track-menu-heading", text));
+  fill({ item, rule, heading, menu });
+  // A rule at either end, or two together (from optional groups), is dropped.
+  [...menu.children].forEach((child, i, all) => {
+    if (child.classList.contains("track-menu-rule") && (i === 0 || i === all.length - 1 || all[i + 1]?.classList.contains("track-menu-rule"))) child.remove();
+  });
+  if (!menu.children.length) return null;
+
+  document.body.append(menu);
+  const box = menu.getBoundingClientRect();
+  menu.style.left = `${Math.max(4, Math.min(x, innerWidth - box.width - 4))}px`;
+  menu.style.top = `${Math.max(4, Math.min(y, innerHeight - box.height - 4))}px`;
+  const away = (e) => {
+    if (e.type === "keydown") { if (e.key === "Escape") { e.stopPropagation(); closeMenu(); } return; }
+    if (menu.contains(e.target)) return;
+    if (anchor?.contains(e.target)) menuClosedOn = anchor;
+    closeMenu();
+    setTimeout(() => { menuClosedOn = null; }, 400);
+  };
+  openMenu = { menu, away, anchor };
+  anchor?.setAttribute("aria-expanded", "true");
+  setTimeout(() => {
+    if (openMenu?.menu !== menu) return;
+    document.addEventListener("pointerdown", away, true);
+    document.addEventListener("keydown", away, true);
+  });
+  menu.querySelector("button:not(:disabled)")?.focus({ preventScroll: true });
+  return menu;
+}
 
 // Vertical drag helper: calls move(dx, dy, event) and end(moved, event).
 function drag(event, move, end = () => {}) {
@@ -184,9 +264,79 @@ function spokenDuration(seconds) {
   return total < 60 ? `${total} s` : `${Math.floor(total / 60)} min ${total % 60} s`;
 }
 
+//==============================================================================
+// Control precision helpers (knobs, faders, sliders, send boxes).
+
+// Scroll-wheel safety: a control takes the wheel only once the mouse has rested on it
+// for 300 ms, or while it has focus, so scrolling a panel past it changes nothing.
+function wheelReady(element) {
+  let since = 0;
+  element.addEventListener("pointerenter", () => { since = performance.now(); });
+  element.addEventListener("pointerleave", () => { since = 0; });
+  return () => document.activeElement === element || (since > 0 && performance.now() - since >= 300);
+}
+
+// Joins quick changes to one control (wheel ticks, arrow keys) into one undo step: it
+// says "first" only when the last change was over half a second ago.
+function stepper() {
+  let last = 0;
+  return () => {
+    const now = performance.now(), first = now - last > 500;
+    last = now;
+    return first;
+  };
+}
+
+// The number in typed text ("2.5 dB", "−3", "120ms"), or NaN.
+function parseNumber(text) {
+  const match = String(text).replace(/[−–]/g, "-").replace(",", ".").match(/-?\d*\.?\d+/);
+  return match ? Number(match[0]) : NaN;
+}
+
+// Pan typed as "30L", "30 R", "C", "-30" or "0.3".
+function parsePan(text) {
+  const t = String(text).trim().toUpperCase();
+  if (t === "C" || t === "CENTER" || t === "CENTRE") return 0;
+  const n = parseNumber(t);
+  if (Number.isNaN(n)) return NaN;
+  const amount = Math.abs(n) > 1 ? n / 100 : n;
+  return clamp(t.endsWith("L") ? -Math.abs(amount) : t.endsWith("R") ? Math.abs(amount) : amount, -1, 1);
+}
+
+// A send level typed: "off", "-inf" or a number of dB.
+const parseSend = (text) => (/off|inf|∞/i.test(String(text)) ? -100 : parseNumber(text));
+
+// Type a value in place: a small box over `anchor` with the current text selected.
+// Enter or leaving it commits, Escape cancels. onCommit gets the text.
+function typeValue(anchor, text, onCommit) {
+  if (anchor.querySelector(":scope > .value-entry")) return;
+  const input = html("input", "value-entry");
+  Object.assign(input, { value: text, spellcheck: false });
+  input.setAttribute("aria-label", "Type a value");
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    const value = input.value;
+    input.remove();
+    if (commit) onCommit(value);
+    (anchor.closest("[tabindex]") ?? anchor).focus?.({ preventScroll: true });
+  };
+  input.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") finish(true);
+    else if (event.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+  for (const type of ["pointerdown", "dblclick", "click", "wheel"]) input.addEventListener(type, (event) => event.stopPropagation());
+  anchor.append(input);
+  input.focus();
+  input.select();
+}
+
 class ValueKnob {
-  constructor({ label, min, max, skew = 1, step = 0, unit = "", value, defaultValue, bipolar = false, format, onChange }) {
-    Object.assign(this, { min, max, skew, step, unit, bipolar, onChange, format });
+  constructor({ label, min, max, skew = 1, step = 0, unit = "", value, defaultValue, bipolar = false, format, parse = parseNumber, onChange }) {
+    Object.assign(this, { min, max, skew, step, unit, bipolar, onChange, format, parse });
     this.defaultValue = defaultValue ?? value;
     this.value = value;
     this.dragging = false;
@@ -203,9 +353,15 @@ class ValueKnob {
     this.element.tabIndex = 0;
     this.element.setAttribute("role", "slider");
     this.element.setAttribute("aria-label", label);
-    this.element.title = "Drag or scroll · Shift for fine control · Double-click to reset";
+    this.element.title = "Drag or scroll · Shift for fine control · Double-click to reset · Double-click the value (or Enter) to type it";
+    const wheelOk = wheelReady(this.element), joined = stepper();
 
+    this.readout.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      this.typeValue();
+    });
     this.element.addEventListener("pointerdown", (event) => {
+      if (event.target.closest(".value-entry")) return;
       this.element.focus();
       let start = this.normalised, first = true;
       this.dragging = true;
@@ -215,19 +371,32 @@ class ValueKnob {
       }, () => { this.dragging = false; });
     });
     this.element.addEventListener("wheel", (event) => {
+      if (!wheelOk()) return; // let the panel scroll
       event.preventDefault();
-      this.set(this.fromNormalised(clamp(this.normalised - event.deltaY * (event.shiftKey ? 0.0004 : 0.002))), true);
+      this.set(this.fromNormalised(clamp(this.normalised - event.deltaY * (event.shiftKey ? 0.0004 : 0.002))), joined());
     }, { passive: false });
     this.element.addEventListener("keydown", (event) => {
-      const step = event.shiftKey ? 0.002 : 0.02;
-      const delta = { ArrowUp: step, ArrowRight: step, ArrowDown: -step, ArrowLeft: -step }[event.key];
+      if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        return this.typeValue();
+      }
+      const size = event.shiftKey ? 0.002 : 0.02;
+      const delta = { ArrowUp: size, ArrowRight: size, ArrowDown: -size, ArrowLeft: -size }[event.key];
       if (delta === undefined) return;
       event.preventDefault();
       event.stopPropagation();
-      this.set(this.fromNormalised(clamp(this.normalised + delta)), true);
+      this.set(this.fromNormalised(clamp(this.normalised + delta)), joined());
     });
     this.element.addEventListener("dblclick", () => this.set(this.defaultValue, true));
     this.render();
+  }
+
+  typeValue() {
+    typeValue(this.readout, this.readout.textContent, (text) => {
+      const value = this.parse(text);
+      if (Number.isFinite(value)) this.set(clamp(value, this.min, this.max), true);
+    });
   }
 
   get normalised() {
@@ -278,7 +447,8 @@ class Fader {
     this.element.tabIndex = 0;
     this.element.setAttribute("role", "slider");
     this.element.setAttribute("aria-label", "Volume");
-    this.element.title = "Drag to set the volume · Double-click for 0 dB";
+    this.element.title = "Drag to set the volume · Double-click for 0 dB · Enter to type a value";
+    const wheelOk = wheelReady(this.element), step = stepper();
     this.thumb = html("div", "fader-thumb");
     this.element.append(html("div", "fader-track"), this.thumb);
 
@@ -293,9 +463,27 @@ class Fader {
     });
     this.element.addEventListener("dblclick", () => this.set(0, true));
     this.element.addEventListener("wheel", (event) => {
+      if (!wheelOk()) return;
       event.preventDefault();
-      this.set(Fader.toDecibels(clamp(Fader.toPosition(this.value) - event.deltaY * 0.001)), true);
+      this.set(Fader.toDecibels(clamp(Fader.toPosition(this.value) - event.deltaY * 0.001)), step());
     }, { passive: false });
+    this.element.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        typeValue(this.element, dbText(this.value), (text) => {
+          const db = /inf/i.test(text) ? FADER_MIN_DB : parseNumber(text);
+          if (Number.isFinite(db)) this.set(clamp(db, FADER_MIN_DB, FADER_MAX_DB), true);
+        });
+        return;
+      }
+      const size = event.shiftKey ? 0.004 : 0.03;
+      const delta = { ArrowUp: size, ArrowRight: size, ArrowDown: -size, ArrowLeft: -size }[event.key];
+      if (delta === undefined) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.set(Fader.toDecibels(clamp(Fader.toPosition(this.value) + delta)), step());
+    });
     this.render();
   }
 
@@ -381,11 +569,12 @@ class StereoLevel {
 // A small horizontal slider for the track headers (volume, pan). Click or drag to
 // set, double-click to reset. onChange (value, first) like the knobs.
 class HSlider {
-  constructor({ value, defaultValue, toPosition, fromPosition, format, title, bipolar = false, onChange }) {
-    Object.assign(this, { value, defaultValue, toPosition, fromPosition, format, bipolar, onChange });
+  constructor({ value, defaultValue, toPosition, fromPosition, format, parse = parseNumber, title, bipolar = false, onChange }) {
+    Object.assign(this, { value, defaultValue, toPosition, fromPosition, format, parse, bipolar, onChange });
     this.dragging = false;
     this.element = html("div", bipolar ? "hslider is-bipolar" : "hslider");
-    this.element.title = `${title} · Drag to change · Shift for fine · Double-click to reset`;
+    this.element.title = `${title} · Drag to change · Shift for fine · Double-click to type · Ctrl+click to reset`;
+    const wheelOk = wheelReady(this.element), step = stepper();
     this.element.setAttribute("role", "slider");
     this.element.setAttribute("aria-label", title);
     this.element.tabIndex = 0;
@@ -395,6 +584,11 @@ class HSlider {
 
     this.element.addEventListener("pointerdown", (event) => {
       event.stopPropagation();
+      if (event.button !== 0 || event.target.closest(".value-entry")) return;
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        return this.set(this.defaultValue, true);
+      }
       const box = this.element.getBoundingClientRect();
       const start = this.toPosition(this.value);
       let first = true;
@@ -404,17 +598,44 @@ class HSlider {
         first = false;
       }, (moved, e) => {
         this.dragging = false;
-        if (!moved) this.set(this.fromPosition(clamp((e.clientX - box.left) / box.width)), true);
+        if (!moved) {
+          // A click sets the value there; remembered briefly in case it starts a double-click.
+          if (this.beforeClick === undefined) this.beforeClick = this.value;
+          clearTimeout(this.clickTimer);
+          this.clickTimer = setTimeout(() => { this.beforeClick = undefined; }, 400);
+          this.set(this.fromPosition(clamp((e.clientX - box.left) / box.width)), true);
+        }
       });
     });
-    this.element.addEventListener("dblclick", () => this.set(this.defaultValue, true));
+    // A click sets the value where it lands, so the double-click's first click moved it:
+    // put it back before typing.
+    this.element.addEventListener("dblclick", () => {
+      if (this.beforeClick !== undefined) this.set(this.beforeClick, false);
+      this.typeValue();
+    });
+    this.element.addEventListener("wheel", (event) => {
+      if (!wheelOk()) return;
+      event.preventDefault();
+      const delta = (event.deltaX || -event.deltaY) * (event.shiftKey ? 0.0001 : 0.0005);
+      this.set(this.fromPosition(clamp(this.toPosition(this.value) + delta)), step());
+    }, { passive: false });
     this.element.addEventListener("keydown", (event) => {
-      const step = event.shiftKey ? 0.005 : 0.03;
-      const delta = { ArrowRight: step, ArrowUp: step, ArrowLeft: -step, ArrowDown: -step }[event.key];
+      if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        return this.typeValue();
+      }
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        event.stopPropagation();
+        return this.set(this.defaultValue, true);
+      }
+      const size = event.shiftKey ? 0.005 : 0.03;
+      const delta = { ArrowRight: size, ArrowUp: size, ArrowLeft: -size, ArrowDown: -size }[event.key];
       if (delta === undefined) return;
       event.preventDefault();
       event.stopPropagation();
-      this.set(this.fromPosition(clamp(this.toPosition(this.value) + delta)), true);
+      this.set(this.fromPosition(clamp(this.toPosition(this.value) + delta)), step());
     });
     this.render();
   }
@@ -424,6 +645,14 @@ class HSlider {
     this.value = value;
     this.render();
     this.onChange(value, first);
+  }
+
+  typeValue() {
+    typeValue(this.element, this.text.textContent, (text) => {
+      const value = this.parse(text);
+      const ends = [this.fromPosition(0), this.fromPosition(1)];
+      if (Number.isFinite(value)) this.set(clamp(value, Math.min(...ends), Math.max(...ends)), true);
+    });
   }
 
   update(value) {
@@ -444,6 +673,92 @@ class HSlider {
     }
     this.text.textContent = this.format(this.value);
     this.element.setAttribute("aria-valuetext", this.text.textContent);
+  }
+}
+
+//==============================================================================
+// A send level in a small box: the return's letter and the level. Drag up or down (Shift
+// for fine), wheel after resting on it, arrow keys, double-click to type ("off", "-12"),
+// Ctrl+click or Delete for off. onChange (dB, first): -100 is off.
+class SendBox {
+  static MIN = -60;
+  static MAX = 6;
+  static toPosition(db) { return db <= SendBox.MIN + 0.5 ? 0 : Math.pow(clamp((db - SendBox.MIN) / (SendBox.MAX - SendBox.MIN)), 2.2); }
+  static toDecibels(position) {
+    if (position <= 0.001) return -100;
+    const db = SendBox.MIN + (SendBox.MAX - SendBox.MIN) * Math.pow(clamp(position), 1 / 2.2);
+    return Math.abs(db) < 0.3 ? 0 : Math.round(db * 10) / 10;
+  }
+
+  constructor({ letter, name, colour, value, onChange }) {
+    Object.assign(this, { onChange, value });
+    this.dragging = false;
+    this.element = html("div", "send-box");
+    this.element.style.setProperty("--send-color", colour);
+    this.element.tabIndex = 0;
+    this.element.setAttribute("role", "slider");
+    this.element.setAttribute("aria-label", `Send to ${name}`);
+    this.element.title = `Send to ${letter} · ${name}\nDrag up or down · Double-click to type · Ctrl+click: off`;
+    this.text = html("span", "send-box-value");
+    this.element.append(html("span", "send-box-letter", letter), this.text);
+    const wheelOk = wheelReady(this.element), step = stepper();
+
+    this.element.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+      if (event.button !== 0 || event.target.closest(".value-entry")) return;
+      this.element.focus();
+      if (event.ctrlKey || event.metaKey) { event.preventDefault(); return this.set(-100, true); }
+      const start = SendBox.toPosition(this.value);
+      let first = true;
+      this.dragging = true;
+      drag(event, (dx, dy, e) => {
+        this.set(SendBox.toDecibels(clamp(start + (dx - dy) / (e.shiftKey ? 600 : 150))), first);
+        first = false;
+      }, () => { this.dragging = false; });
+    });
+    this.element.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      typeValue(this.element, this.value <= -59.5 ? "off" : String(this.value), (text) => {
+        const db = parseSend(text);
+        if (Number.isFinite(db)) this.set(db <= SendBox.MIN ? -100 : clamp(db, SendBox.MIN, SendBox.MAX), true);
+      });
+    });
+    this.element.addEventListener("wheel", (event) => {
+      if (!wheelOk()) return;
+      event.preventDefault();
+      this.set(SendBox.toDecibels(clamp(SendBox.toPosition(this.value) - event.deltaY * (event.shiftKey ? 0.0004 : 0.002))), step());
+    }, { passive: false });
+    this.element.addEventListener("keydown", (event) => {
+      if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); event.stopPropagation(); return this.set(-100, true); }
+      const size = event.shiftKey ? 0.004 : 0.03;
+      const delta = { ArrowUp: size, ArrowRight: size, ArrowDown: -size, ArrowLeft: -size }[event.key];
+      if (delta === undefined) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.set(SendBox.toDecibels(clamp(SendBox.toPosition(this.value) + delta)), step());
+    });
+    this.render();
+  }
+
+  set(db, first) {
+    if (db === this.value) return;
+    this.value = db;
+    this.render();
+    this.onChange(db, first);
+  }
+
+  update(db) {
+    if (this.dragging || db === this.value) return;
+    this.value = db;
+    this.render();
+  }
+
+  render() {
+    const on = this.value > -59.5;
+    this.text.textContent = on ? sendText(this.value) : "off";
+    this.element.classList.toggle("is-on", on);
+    this.element.style.setProperty("--level", SendBox.toPosition(this.value));
+    this.element.setAttribute("aria-valuetext", on ? `${dbText(this.value)} dB` : "off");
   }
 }
 
@@ -482,6 +797,12 @@ class InsertRack {
 
   // From "dawStatus": live readings by insert id ({ in, out, spectrum? }, null when off).
   live(readings) {
+    // With reduced motion asked for, the effect pictures move a few times a second, not 30.
+    if (REDUCED_MOTION.matches) {
+      const now = performance.now();
+      if (now - (this.lastLive ?? 0) < 250) return;
+      this.lastLive = now;
+    }
     for (const [id, card] of this.cards) card.live(readings?.[id] ?? null);
   }
 
@@ -735,7 +1056,13 @@ class DawScreen {
     this.session = null;
     this.status = { position: 0, length: 0, playing: false, recording: false, tracks: {} };
     this.zoom = 20;            // pixels per second (horizontal zoom)
-    this.rowHeight = 84;       // track height, px (vertical zoom)
+    this.rowHeight = 84;       // track height, px (vertical zoom): tracks without their own
+    this.trackHeights = new Map(); // track id -> its own height, px (dragged at its bottom edge)
+    this.folded = new Set();   // track ids folded to one line
+    this.headWidth = HEAD_WIDTH; // the track header column, px (dragged at its right edge)
+    this.showRouting = false;  // header sections, per project (view state)
+    this.showSends = false;
+    this.pinnedFolded = false; // the return and master rows folded to one line each
     this.follow = true;        // scroll the view with the playhead while playing
     this.tool = "select";      // "select" | "cut" | "gain"
     this.clipboard = null;     // a copied clip
@@ -767,6 +1094,7 @@ class DawScreen {
     this.buildStems();
     this.buildLibrary();
     this.buildKeyPanel();
+    decorateAiPanels(this.root);
 
     this.takes = new TakeLanes(this, { daw, toast: (...args) => toast(...args) });
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
@@ -908,7 +1236,7 @@ class DawScreen {
         drag(event, (dx, dy, e) => {
           time = this.snapTime(marker.time + dx / this.zoom, e);
           flag.style.left = `${time * this.zoom}px`;
-          line.style.left = `${HEAD_WIDTH + time * this.zoom}px`;
+          line.style.left = `${this.headWidth + time * this.zoom}px`;
         }, (moved) => {
           if (moved) daw("setMarker", { id: marker.id, time });
           else this.seek(marker.time);
@@ -939,63 +1267,39 @@ class DawScreen {
         input.select();
       });
       const line = html("div", "marker-line");
-      line.style.left = `${HEAD_WIDTH + marker.time * this.zoom}px`;
+      line.style.left = `${this.headWidth + marker.time * this.zoom}px`;
       this.ruler.append(flag);
       this.inner.append(line);
     }
   }
 
   //============================================================================ transport
+  // The toolbar: one row in three zones. Left, the song (tempo, signature, key, click);
+  // centre, the transport (larger than the rest); right, how you work (tools, snap,
+  // Auto Mix, running jobs) and the view switches. The file actions sit in the header
+  // beside the project name, and zoom and Follow in the bar under the tracks.
   buildTransport() {
     const bar = this.root.querySelector(".daw-transport");
+    const zone = (className, ...children) => {
+      const element = html("div", `tb-zone ${className}`);
+      element.append(...children);
+      return element;
+    };
 
-    const files = html("div", "daw-group");
-    files.append(
-      iconButton("tool", "new", "New project (Ctrl+N)", () => daw("new")),
-      iconButton("tool", "open", "Open a project (Ctrl+O)", () => daw("open")),
-      (this.recentWrap = html("span", "ib-select")),
-      (this.saveButton = iconButton("tool", "save", "Save the project (Ctrl+S)", () => daw("save"))),
-      iconButton("tool", "saveas", "Save as: a copy under a new name (Ctrl+Shift+S)", () => daw("saveAs")),
-      iconButton("tool", "import", "Import audio at the playhead (Ctrl+I)", () => this.importAudio()),
-      iconButton("tool", "automix", "Auto Mix: listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix()),
-      (this.exportButton = iconButton("tool is-accent", "export", "Export the mix or stems to WAV (Ctrl+Shift+R)", () => this.toggleExportPanel())));
-
-    this.recentSelect = html("select", "recent-projects");
-    this.recentWrap.innerHTML = icon("recent");
-    this.recentWrap.append(this.recentSelect);
-    this.recentWrap.title = "Open a recent project";
-    this.recentSelect.title = "Open a recent project";
-    this.recentSelect.addEventListener("change", () => {
-      const path = this.recentSelect.value;
-      this.recentSelect.value = "";
-      if (path) daw("openRecent", { path });
-    });
-
+    //---------------------------------------------------------------- header: project
     this.projectName = document.querySelector(".app-project");
+    const project = html("div", "daw-project-actions");
+    const projectMenu = button("tool project-menu-button", "Project", "New, open, recent projects, save as and import", (event) => this.openProjectMenu(event.currentTarget));
+    projectMenu.setAttribute("aria-haspopup", "menu");
+    project.append(projectMenu,
+      (this.saveButton = iconButton("tool", "save", "Save the project (Ctrl+S)", () => daw("save"))),
+      (this.exportButton = iconButton("tool is-accent", "export", "Export the mix or stems to WAV (Ctrl+Shift+R)", () => this.toggleExportPanel())),
+      html("span", "tb-sep"),
+      (this.undoButton = iconButton("tool", "undo", "Undo (Ctrl+Z)", () => daw("undo"))),
+      (this.redoButton = iconButton("tool", "redo", "Redo (Ctrl+Shift+Z)", () => daw("redo"))));
+    document.querySelector(".topbar .brand")?.append(project);
 
-    const transport = html("div", "daw-group daw-transport-buttons");
-    transport.append(
-      button("transport-button", "", "Back to the start (Enter)", () => daw("transport", { action: "stop" })),
-      (this.playButton = button("transport-button play-button", "", "Play / pause (Space)", () => this.togglePlay())),
-      (this.recordButton = button("record-button", "", "Record on the armed tracks (R)", () => this.toggleRecord())));
-    this.inputMeter = new Level(false, "input");
-    this.inputReadout = html("span", "mic-readout", "−∞");
-    const mic = html("div", "mic-meter");
-    mic.title = "Mic input level. Aim for peaks around −12 dB; red means it went over 0 dB (click to reset).";
-    mic.append(html("span", "mic-label", "Mic"), this.inputMeter.element, this.inputReadout);
-    transport.append(mic);
-    transport.children[0].innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="2" height="10" rx="0.5"/><path d="M13 3.5v9a.5.5 0 0 1-.8.4L6.3 8.4a.5.5 0 0 1 0-.8l5.9-4.5a.5.5 0 0 1 .8.4z"/></svg>`;
-    this.playButton.innerHTML = `<svg class="icon-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.8v10.4a.6.6 0 0 0 .9.5l8.2-5.2a.6.6 0 0 0 0-1L4.9 2.3a.6.6 0 0 0-.9.5z"/></svg><svg class="icon-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="0.8"/><rect x="9.5" y="2.5" width="3" height="11" rx="0.8"/></svg>`;
-    this.recordButton.innerHTML = `<span class="record-dot"></span><span class="record-label">Rec</span>`;
-    this.recordButton.setAttribute("aria-label", "Record");
-    this.playButton.setAttribute("aria-label", "Play");
-
-    const clock = (this.clock = html("div", "daw-clock"));
-    clock.title = "Click to type a bar or time to go to";
-    clock.addEventListener("click", (event) => { if (event.target === clock || !event.target.closest("input")) this.editClock(); });
-    clock.append((this.clockBars = html("span", "clock-bars", "1.1")), (this.clockTime = html("span", "clock-time", "0:00.0")));
-
-    const timing = html("div", "daw-group");
+    //---------------------------------------------------------------- left: song
     this.tempoInput = html("input", "tempo-input");
     Object.assign(this.tempoInput, { type: "number", min: 20, max: 400, step: 1, title: "Tempo (BPM)" });
     // With tempo changes, the box shows and sets the tempo at the playhead.
@@ -1010,6 +1314,19 @@ class DawScreen {
     SIGNATURES.forEach(([beats, text]) => this.signature.append(new Option(text, beats)));
     this.signature.addEventListener("change", () => daw("beatsPerBar", { beats: Number(this.signature.value) }));
 
+    this.keyButton = iconButton("tool key-button", "key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
+    this.showTempo = prefs.get("showTempo", false);
+    this.tempoButton = iconButton("toggle has-label", "tempo", "Tempo track: tempo changes and ramps over the song", () => {
+      this.showTempo = !this.showTempo;
+      prefs.set("showTempo", this.showTempo);
+      this.renderTransport();
+      this.renderArrange(true);
+    });
+    this.tempoButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Track</span>');
+    const songTempo = html("div", "tb-joined");
+    songTempo.append(tempo, tap);
+
+    // The click: one switch, and an arrow that opens its volume and the count-in.
     this.clickVolume = html("input", "click-volume");
     Object.assign(this.clickVolume, { type: "range", min: 0, max: 200, step: 1, title: "Click volume" });
     let clickFirst = true;
@@ -1018,46 +1335,62 @@ class DawScreen {
       clickFirst = false;
     });
     this.clickVolume.addEventListener("change", () => { clickFirst = true; });
-
-    this.gridSelect = html("select", "dropdown grid-size");
-    this.gridSelect.title = "Snap grid";
-    GRIDS.forEach(([value, text]) => this.gridSelect.append(new Option(text, value)));
-    this.gridSelect.addEventListener("change", () => {
-      this.grid = this.gridSelect.value === "bar" ? "bar" : Number(this.gridSelect.value);
-      prefs.set("grid", this.grid);
-    });
-
     this.countIn = html("select", "dropdown count-in");
     this.countIn.title = "Count-in before recording";
-    ["No count-in", "1 bar count-in", "2 bar count-in", "4 bar count-in"].forEach((text, i) => this.countIn.append(new Option(text, [0, 1, 2, 4][i])));
+    ["No count-in", "1 bar", "2 bars", "4 bars"].forEach((text, i) => this.countIn.append(new Option(text, [0, 1, 2, 4][i])));
     this.countIn.addEventListener("change", () => daw("countIn", { bars: Number(this.countIn.value) }));
 
-    const click = html("div", "click-group");
-    click.append((this.metronomeButton = iconButton("toggle", "click", "Click: metronome on / off (C)", () => daw("metronome", { on: !this.session?.metronome }))),
-                 this.clickVolume);
-    this.keyButton = iconButton("tool key-button", "key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
-    this.showTempo = prefs.get("showTempo", false);
-    this.tempoButton = iconButton("toggle", "tempo", "Tempo track: tempo changes and ramps over the song", () => {
-      this.showTempo = !this.showTempo;
-      prefs.set("showTempo", this.showTempo);
-      this.renderTransport();
-      this.renderArrange(true);
-    });
-    timing.append(tempo, tap, this.tempoButton, this.signature, this.keyButton, click,
-      this.countIn,
-      (this.loopButton = iconButton("toggle", "loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop())),
-      (this.snapButton = iconButton("toggle", "snap", "Snap edits to the grid (hold Alt to drag freely)", () => {
-        this.snap = !this.snap;
-        this.renderTransport();
-      })),
-      this.gridSelect,
-      (this.returnButton = iconButton("toggle", "returnstop", "Return on stop: pausing goes back to where you pressed play", () => {
-        this.returnOnStop = !this.returnOnStop;
-        prefs.set("returnOnStop", this.returnOnStop);
-        this.renderTransport();
-      })),
-      (this.followButton = iconButton("toggle", "follow", "Follow: scroll with the playhead while playing (F). Scrolling yourself switches it off.", () => this.setFollow(!this.follow))));
+    this.metronomeButton = iconButton("toggle", "click", "Click: metronome on / off (C)", () => daw("metronome", { on: !this.session?.metronome }));
+    this.clickMore = button("toggle tb-arrow", "", "Click volume and count-in", () => this.toggleClickPopover());
+    this.clickMore.innerHTML = '<span class="tb-badge"></span><svg viewBox="0 0 10 10" aria-hidden="true"><path d="M2 3.5l3 3 3-3"/></svg>';
+    this.clickMore.setAttribute("aria-haspopup", "dialog");
+    this.clickPopover = html("div", "tb-popover");
+    this.clickPopover.hidden = true;
+    const volumeRow = html("label", "tb-popover-row");
+    volumeRow.append(html("span", "", "Click volume"), this.clickVolume);
+    const countRow = html("label", "tb-popover-row");
+    countRow.append(html("span", "", "Count-in"), this.countIn);
+    this.clickPopover.append(volumeRow, countRow);
+    const click = html("div", "tb-joined click-group");
+    click.append(this.metronomeButton, this.clickMore, this.clickPopover);
 
+    const left = zone("zone-song", songTempo, this.signature, this.keyButton, this.tempoButton, click);
+
+    //---------------------------------------------------------------- centre: transport
+    const start = button("transport-button", "", "Back to the start (Enter)", () => daw("transport", { action: "stop" }));
+    this.playButton = button("transport-button play-button", "", "Play / pause (Space). Right-click: return on stop", () => this.togglePlay());
+    this.playButton.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      popMenu(event.clientX, event.clientY, ({ item }) => {
+        item("Return on stop", () => this.setReturnOnStop(!this.returnOnStop), { checked: this.returnOnStop,
+          hint: "Pausing goes back to where you pressed play" });
+      });
+    });
+    this.recordButton = button("record-button", "", "Record on the armed tracks (R)", () => this.toggleRecord());
+    start.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="2" height="10" rx="0.5"/><path d="M13 3.5v9a.5.5 0 0 1-.8.4L6.3 8.4a.5.5 0 0 1 0-.8l5.9-4.5a.5.5 0 0 1 .8.4z"/></svg>`;
+    this.playButton.innerHTML = `<svg class="icon-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.8v10.4a.6.6 0 0 0 .9.5l8.2-5.2a.6.6 0 0 0 0-1L4.9 2.3a.6.6 0 0 0-.9.5z"/></svg><svg class="icon-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="0.8"/><rect x="9.5" y="2.5" width="3" height="11" rx="0.8"/></svg><span class="return-dot" title="Return on stop is on"></span>`;
+    this.recordButton.innerHTML = `<span class="record-dot"></span><span class="record-label">Rec</span>`;
+    this.recordButton.setAttribute("aria-label", "Record");
+    this.playButton.setAttribute("aria-label", "Play");
+
+    const clock = (this.clock = html("div", "daw-clock"));
+    clock.title = "Click to type a bar or time to go to";
+    clock.addEventListener("click", (event) => { if (event.target === clock || !event.target.closest("input")) this.editClock(); });
+    clock.append((this.clockBars = html("span", "clock-bars", "1.1")), (this.clockTime = html("span", "clock-time", "0:00.0")));
+    this.loopButton = iconButton("toggle", "loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop());
+
+    // The mic meter next to Record: "am I too loud to record?"
+    this.inputMeter = new Level(false, "input");
+    this.inputReadout = html("span", "mic-readout", "−∞");
+    const mic = html("div", "mic-meter");
+    mic.title = "Mic input level. Aim for peaks around −12 dB; red means it went over 0 dB (click to reset).";
+    mic.append(html("span", "mic-label", "Mic"), this.inputMeter.element, this.inputReadout);
+
+    const buttons = html("div", "daw-transport-buttons");
+    buttons.append(start, this.playButton, this.recordButton);
+    const centre = zone("zone-transport", buttons, clock, this.loopButton, mic);
+
+    //---------------------------------------------------------------- right: tools, features, view
     this.tools = html("div", "segmented tools");
     for (const [tool, text, title] of [["select", "Select", "Select tool: move, trim and fade clips (V)"],
                                        ["cut", "Cut", "Cut tool: click a clip to split it there (B)"],
@@ -1068,28 +1401,26 @@ class DawScreen {
       this.tools.append(b);
     }
 
-    const zoom = html("div", "daw-group zoom-sliders");
-    const slider = (label, title, onInput) => {
-      const wrapper = html("label", "zoom-slider");
-      wrapper.title = title;
-      const input = html("input");
-      Object.assign(input, { type: "range", min: 0, max: 1000, step: 1 });
-      input.addEventListener("input", () => onInput(Number(input.value) / 1000));
-      wrapper.append(html("span", "", label), input);
-      zoom.append(wrapper);
-      return input;
-    };
-    // Logarithmic, so each step of the slider zooms by the same factor.
-    zoom.append(iconButton("tool fit-button", "fit", "Zoom to fit the whole song (Shift+Z)", () => this.run("zoomFit")));
-    this.zoomSlider = slider("↔", "Horizontal zoom (+ / − or Ctrl+scroll)", (p) => this.setZoom(MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, p), true));
-    this.heightSlider = slider("↕", "Track height (Shift+↑ / Shift+↓)", (p) => this.setRowHeight(MIN_ROW + (MAX_ROW - MIN_ROW) * p));
+    // Snap and its grid as one split control: they are editing behaviour, like the tools.
+    this.snapButton = iconButton("toggle", "snap", "Snap edits to the grid (hold Alt to drag freely)", () => {
+      this.snap = !this.snap;
+      this.renderTransport();
+      this.rememberView();
+    });
+    this.gridSelect = html("select", "dropdown grid-size");
+    this.gridSelect.title = "Snap grid";
+    GRIDS.forEach(([value, text]) => this.gridSelect.append(new Option(text, value)));
+    this.gridSelect.addEventListener("change", () => {
+      this.grid = this.gridSelect.value === "bar" ? "bar" : Number(this.gridSelect.value);
+      prefs.set("grid", this.grid);
+      this.rememberView();
+    });
+    const snap = html("div", "tb-joined snap-group");
+    snap.append(this.snapButton, this.gridSelect);
 
-    const right = html("div", "daw-group");
-    right.append(
-      this.tools,
-      zoom,
-      (this.undoButton = iconButton("tool", "undo", "Undo (Ctrl+Z)", () => daw("undo"))),
-      (this.redoButton = iconButton("tool", "redo", "Redo (Ctrl+Shift+Z)", () => daw("redo"))));
+    this.autoMixButton = iconButton("tool has-label automix-button", "automix", "Auto Mix: listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix());
+    this.autoMixButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Auto Mix</span>');
+    this.buildActivity();
 
     this.viewTabs = html("div", "segmented view-tabs");
     for (const view of ["arrange", "mixer"]) {
@@ -1097,10 +1428,121 @@ class DawScreen {
       tab.dataset.view = view;
       this.viewTabs.append(tab);
     }
+    this.libraryButton = iconButton("toggle", "library", "Show / hide the library (Shift+B)", () => this.library.toggle());
+    this.dockButton = iconButton("toggle", "panel", "Show / hide the bottom panel (E)", () => this.run("toggleDock"));
     this.pianoButton = iconButton("tool", "piano", "Play MIDI from the computer keyboard (M)", () => this.togglePiano());
-    right.append(this.viewTabs, this.pianoButton, iconButton("tool", "help", "Keyboard shortcuts (?)", () => this.toggleShortcuts()));
+    const help = iconButton("tool", "help", "Keyboard shortcuts (?)", () => this.toggleShortcuts());
+    this.moreButton = iconButton("tool tb-more", "more", "More", (event) => this.openMoreMenu(event.currentTarget));
+    this.moreButton.hidden = true;
 
-    bar.append(files, sep(), transport, clock, sep(), timing, sep(), right);
+    const right = zone("zone-work", this.tools, snap, this.autoMixButton, this.activity.button,
+                      html("span", "tb-sep"), this.libraryButton, this.viewTabs, this.dockButton, this.pianoButton, help, this.moreButton);
+    bar.append(left, html("span", "tb-spacer"), centre, html("span", "tb-spacer"), right);
+
+    // Under the tracks, at the right of the bar above the bottom panel: the timeline's view.
+    this.followButton = iconButton("toggle", "follow", "Follow: scroll with the playhead while playing (F). Scrolling yourself switches it off.", () => this.setFollow(!this.follow));
+    const timeline = html("div", "timeline-tools");
+    const slider = (label, title, onInput) => {
+      const wrapper = html("label", "zoom-slider");
+      wrapper.title = title;
+      const input = html("input");
+      Object.assign(input, { type: "range", min: 0, max: 1000, step: 1 });
+      input.addEventListener("input", () => onInput(Number(input.value) / 1000));
+      wrapper.append(html("span", "", label), input);
+      return [wrapper, input];
+    };
+    // Logarithmic, so each step of the slider zooms by the same factor.
+    const [zoomWrap, zoomInput] = slider("↔", "Horizontal zoom (+ / − or Ctrl+scroll)", (p) => this.setZoom(MIN_ZOOM * Math.pow(MAX_ZOOM / MIN_ZOOM, p), true));
+    const [heightWrap, heightInput] = slider("↕", "Track height (Shift+↑ / Shift+↓ or Alt+scroll)", (p) => this.setRowHeight(MIN_ROW + (MAX_ROW - MIN_ROW) * p));
+    this.zoomSlider = zoomInput;
+    this.heightSlider = heightInput;
+    timeline.append(this.followButton, iconButton("tool fit-button", "fit", "Zoom to fit the whole song (Shift+Z)", () => this.run("zoomFit")), zoomWrap, heightWrap);
+    this.timelineTools = timeline;
+    const splitter = this.root.querySelector(".dock-splitter");
+    splitter.insertBefore(timeline, splitter.querySelector(".dock-toggle"));
+
+    // The controls that fold into the "more" menu as the window narrows, least used first.
+    this.foldable = [
+      { level: 2, element: help, label: "Keyboard shortcuts", run: () => this.toggleShortcuts() },
+      { level: 2, element: this.pianoButton, label: "Computer keyboard piano", run: () => this.togglePiano(), checked: () => Boolean(this.piano?.on) },
+      { level: 3, element: this.tempoButton, label: "Tempo track", run: () => this.tempoButton.click(), checked: () => this.showTempo },
+      { level: 3, element: tap, label: "Tap tempo", run: () => this.tapTempo() },
+      { level: 3, element: this.keyButton, label: "Song key…", run: () => this.toggleKeyPanel() },
+      { level: 4, element: this.libraryButton, label: "Library", run: () => this.library.toggle(), checked: () => !this.library.collapsed },
+      { level: 4, element: this.dockButton, label: "Bottom panel", run: () => this.run("toggleDock"), checked: () => !this.root.classList.contains("dock-hidden") },
+      { level: 5, element: this.autoMixButton, label: "Auto Mix…", run: () => this.toggleAutoMix() },
+    ];
+    this.foldLevel = 0;
+    // Only a change of width matters (folding changes the height when it wraps).
+    let foldedAt = -1;
+    new ResizeObserver(() => {
+      if (bar.clientWidth === foldedAt) return;
+      foldedAt = bar.clientWidth;
+      requestAnimationFrame(() => this.foldToolbar());
+    }).observe(bar);
+
+    document.addEventListener("pointerdown", (event) => {
+      if (!this.clickPopover.hidden && !click.contains(event.target)) this.toggleClickPopover(false);
+    }, true);
+  }
+
+  toggleClickPopover(show = this.clickPopover.hidden) {
+    this.clickPopover.hidden = !show;
+    this.clickMore.setAttribute("aria-expanded", String(show));
+  }
+
+  setReturnOnStop(on) {
+    this.returnOnStop = on;
+    prefs.set("returnOnStop", on);
+    this.renderTransport();
+  }
+
+  // New, Open, the recent projects, Save as and Import (Save and Export stay as buttons).
+  openProjectMenu(anchor) {
+    const box = anchor.getBoundingClientRect();
+    const s = this.session;
+    popMenu(box.left, box.bottom + 4, ({ item, rule, heading }) => {
+      item("New project", () => daw("new"), { shortcut: "Ctrl+N" });
+      item("Open…", () => daw("open"), { shortcut: "Ctrl+O" });
+      const recent = (s?.recent ?? []).filter((r) => r.path !== s.project.path);
+      if (recent.length) {
+        heading("Recent");
+        for (const r of recent.slice(0, 8)) item(r.name, () => daw("openRecent", { path: r.path }), { hint: r.path, indent: true });
+      }
+      rule();
+      item("Save", () => daw("save"), { shortcut: "Ctrl+S" });
+      item("Save as…", () => daw("saveAs"), { shortcut: "Ctrl+Shift+S" });
+      rule();
+      item("Import audio…", () => this.importAudio(), { shortcut: "Ctrl+I" });
+      item("Export…", () => this.toggleExportPanel(true), { shortcut: "Ctrl+Shift+R" });
+    }, anchor);
+  }
+
+  // Narrow windows: fold the least used controls into the "more" menu, one level at a
+  // time, until the toolbar fits on one row (level 1 drops the text labels first).
+  foldToolbar() {
+    const bar = this.root.querySelector(".daw-transport");
+    if (!bar.clientWidth) return;
+    const apply = (level) => {
+      this.foldLevel = level;
+      bar.dataset.fold = String(level);
+      for (const f of this.foldable) f.element.classList.toggle("is-folded", level >= f.level);
+      this.moreButton.hidden = !this.foldable.some((f) => level >= f.level);
+    };
+    let level = 0;
+    bar.classList.remove("is-wrapped");
+    apply(0);
+    while (bar.scrollWidth > bar.clientWidth + 1 && level < 6) apply(++level);
+    // Still too narrow: let the zones wrap onto a second row.
+    bar.classList.toggle("is-wrapped", bar.scrollWidth > bar.clientWidth + 1);
+  }
+
+  openMoreMenu(anchor) {
+    const box = anchor.getBoundingClientRect();
+    popMenu(box.right - 200, box.bottom + 4, ({ item }) => {
+      for (const f of this.foldable)
+        if (this.foldLevel >= f.level) item(f.label, f.run, { checked: f.checked?.() ?? false });
+    }, anchor);
   }
 
   renderTransport() {
@@ -1108,15 +1550,11 @@ class DawScreen {
     if (!s) return;
 
     this.saveButton.classList.toggle("is-dirty", s.project.dirty || !s.project.open);
-    const recent = (s.recent ?? []).filter((r) => r.path !== s.project.path);
-    const recentKey = JSON.stringify(recent);
-    if (recentKey !== this.recentKey) {
-      this.recentKey = recentKey;
-      this.recentSelect.replaceChildren(new Option("Recent…", ""), ...recent.map((r) => new Option(r.name, r.path)));
-      this.recentWrap.hidden = recent.length === 0;
-    }
     this.showTempoValue();
     this.countIn.value = String(s.countIn);
+    const badge = this.clickMore.querySelector(".tb-badge");
+    badge.textContent = s.countIn > 0 ? String(s.countIn) : "";
+    this.clickMore.title = `Click volume and count-in${s.countIn > 0 ? ` (count-in: ${s.countIn} bar${s.countIn > 1 ? "s" : ""})` : ""}`;
     this.signature.value = String(s.beatsPerBar ?? 4);
     const songKey = s.key?.key ?? -1;
     this.keyButton.innerHTML = icon("key") + (songKey >= 0 ? `<span class="ib-label">${NOTE_NAMES[songKey]}${s.key.minor ? "m" : ""}</span>` : "");
@@ -1125,20 +1563,82 @@ class DawScreen {
     if (document.activeElement !== this.clickVolume) this.clickVolume.value = String(Math.round((s.metronomeVolume ?? 1) * 100));
     this.gridSelect.value = String(this.grid);
     this.gridSelect.disabled = !this.snap;
-    this.returnButton.setAttribute("aria-pressed", String(this.returnOnStop));
+    this.playButton.classList.toggle("returns-on-stop", this.returnOnStop);
     this.metronomeButton.setAttribute("aria-pressed", String(s.metronome));
     this.loopButton.setAttribute("aria-pressed", String(s.loop.on));
     this.snapButton.setAttribute("aria-pressed", String(this.snap));
     this.followButton.setAttribute("aria-pressed", String(this.follow));
     this.tempoButton.setAttribute("aria-pressed", String(!!this.showTempo));
+    this.libraryButton.setAttribute("aria-pressed", String(!this.library?.collapsed));
+    this.dockButton.setAttribute("aria-pressed", String(!this.root.classList.contains("dock-hidden")));
     [...this.tools.children].forEach((b) => b.classList.toggle("is-selected", b.dataset.tool === this.tool));
     if (document.activeElement !== this.zoomSlider)
       this.zoomSlider.value = String(Math.round(1000 * Math.log(this.zoom / MIN_ZOOM) / Math.log(MAX_ZOOM / MIN_ZOOM)));
     if (document.activeElement !== this.heightSlider)
       this.heightSlider.value = String(Math.round(1000 * (this.rowHeight - MIN_ROW) / (MAX_ROW - MIN_ROW)));
+    // Named undo: the button says what Ctrl+Z will do.
+    const what = (name) => (name ? ` ${name.charAt(0).toLowerCase()}${name.slice(1)}` : "");
     this.undoButton.disabled = !s.canUndo;
     this.redoButton.disabled = !s.canRedo;
+    this.undoButton.title = s.canUndo ? `Undo${what(s.undoName)} (Ctrl+Z)` : "Nothing to undo";
+    this.redoButton.title = s.canRedo ? `Redo${what(s.redoName)} (Ctrl+Shift+Z)` : "Nothing to redo";
+    this.undoButton.setAttribute("aria-label", this.undoButton.title.replace(/ \(.*\)$/, ""));
+    this.redoButton.setAttribute("aria-label", this.redoButton.title.replace(/ \(.*\)$/, ""));
     [...this.viewTabs.children].forEach((tab) => tab.classList.toggle("is-selected", tab.dataset.view === this.view));
+    this.timelineTools.hidden = this.view !== "arrange";
+  }
+
+  //============================================================================ activity
+  // One place for the long jobs (export, stems, Auto Mix, key detection, plug-in scan):
+  // a spinner with a count at the right of the toolbar, opening a list with progress,
+  // a way back to each job's panel, and cancel.
+  buildActivity() {
+    const jobs = new Map(); // id -> { label, progress, cancel, open }
+    const element = button("tool activity-button", "", "Running jobs", () => this.toggleActivity());
+    element.innerHTML = '<span class="activity-spinner" aria-hidden="true"></span><span class="activity-count">0</span>';
+    element.hidden = true;
+    element.setAttribute("aria-haspopup", "dialog");
+    const list = html("div", "tb-popover activity-list");
+    list.hidden = true;
+    const wrap = html("div", "activity");
+    wrap.append(element, list);
+    this.activity = { jobs, button: wrap, element, list };
+    document.addEventListener("pointerdown", (event) => { if (!list.hidden && !wrap.contains(event.target)) list.hidden = true; }, true);
+  }
+
+  setJob(id, job) {
+    this.activity.jobs.set(id, { ...this.activity.jobs.get(id), ...job });
+    this.renderActivity();
+  }
+
+  endJob(id) {
+    if (this.activity.jobs.delete(id)) this.renderActivity();
+  }
+
+  toggleActivity(show = this.activity.list.hidden) {
+    this.activity.list.hidden = !show || this.activity.jobs.size === 0;
+    this.renderActivity();
+  }
+
+  renderActivity() {
+    const { jobs, element, list } = this.activity;
+    element.hidden = jobs.size === 0;
+    element.querySelector(".activity-count").textContent = String(jobs.size);
+    element.title = jobs.size ? `Running: ${[...jobs.values()].map((j) => j.label).join(", ")}` : "Running jobs";
+    if (jobs.size === 0) list.hidden = true;
+    if (list.hidden) return;
+    list.replaceChildren(...[...jobs.entries()].map(([id, job]) => {
+      const row = html("div", "activity-job");
+      const name = button("activity-name", job.label, "Show it", () => { list.hidden = true; job.open?.(); });
+      const bar = html("div", "export-bar");
+      bar.append(html("div"));
+      bar.style.setProperty("--progress", job.progress ?? 0);
+      bar.classList.toggle("is-indeterminate", job.progress == null);
+      row.append(name, bar);
+      if (job.cancel) row.append(button("mini activity-cancel", "×", `Cancel ${job.label.toLowerCase()}`, () => job.cancel()));
+      row.dataset.job = id;
+      return row;
+    }));
   }
 
   togglePlay() {
@@ -1178,9 +1678,31 @@ class DawScreen {
     const rulerRow = html("div", "ruler-row");
     const corner = html("div", "corner");
     this.clearButton = button("tool clear-mute-solo", "Clear M/S", "Turn every mute and solo off", () => this.run("clearMuteSolo"));
+    // Which header sections every track shows (kept per project), and the column's width.
+    const section = (text, title, key) => {
+      const b = button("toggle head-switch", text, title, () => {
+        this[key] = !this[key];
+        b.setAttribute("aria-pressed", String(this[key]));
+        this.rememberView();
+        this.renderArrange();
+      });
+      b.dataset.key = key;
+      return b;
+    };
+    this.headSwitches = [section("I/O", "Routing: show each track's input, monitoring and output", "showRouting"),
+                         section("Sends", "Sends: show each track's send levels to the returns", "showSends")];
+    const resizer = html("div", "head-resizer");
+    resizer.title = "Drag to widen or narrow the track headers · Double-click: default width";
+    resizer.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.stopPropagation();
+      const start = this.headWidth;
+      drag(event, (dx) => this.setHeadWidth(start + dx), () => this.rememberView());
+    });
+    resizer.addEventListener("dblclick", () => { this.setHeadWidth(HEAD_WIDTH); this.rememberView(); });
     corner.append(button("tool", "+ Track", "Add an audio track (Ctrl+T)", () => this.addTrack()),
                   button("tool", "+ MIDI", "Add a MIDI track with a built-in synth (Ctrl+Shift+T). Pick another instrument in the library.", () => this.addMidiTrack()),
-                  this.clearButton);
+                  this.clearButton, html("span", "corner-gap"), ...this.headSwitches, resizer);
     this.ruler = html("div", "ruler");
     this.ruler.title = "Click to move the playhead · Drag to mark a loop";
     this.loopBand = html("div", "loop-band");
@@ -1198,8 +1720,11 @@ class DawScreen {
     this.tempoRow.hidden = true;
 
     this.rows = html("div", "track-rows");
+    // The returns and the master, pinned to the bottom of the view (sticky).
+    this.pinned = html("div", "pinned-rows");
     this.returnRows = html("div", "return-rows");
-    this.masterRow = html("div", "track-row master-row");
+    this.masterRow = html("div", "master-slot");
+    this.pinned.append(this.returnRows, this.masterRow);
     this.loopShade = html("div", "loop-shade");
     this.playhead = html("div", "daw-playhead");
     this.emptyHint = html("div", "arrange-empty");
@@ -1207,7 +1732,7 @@ class DawScreen {
 
     this.cutGuide = html("div", "cut-guide");
     this.cutGuide.hidden = true;
-    this.inner.append(rulerRow, this.tempoRow, this.rows, this.returnRows, this.masterRow, this.loopShade, this.playhead, this.cutGuide);
+    this.inner.append(rulerRow, this.tempoRow, this.rows, this.pinned, this.loopShade, this.playhead, this.cutGuide);
 
     // Scrolling by hand while playing switches Follow off, so you can look around
     // (and edit) elsewhere while the song keeps playing.
@@ -1216,6 +1741,7 @@ class DawScreen {
         this.wavesQueued = true;
         requestAnimationFrame(() => { this.wavesQueued = false; this.redrawWaves(); });
       }
+      this.rememberView();
       if (performance.now() - this.autoScrollTime < 150) return;
       if (this.status.playing && this.follow) this.setFollow(false);
     });
@@ -1245,7 +1771,7 @@ class DawScreen {
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       const box = this.arrange.getBoundingClientRect();
-      const anchor = event.clientX - box.left - HEAD_WIDTH;
+      const anchor = event.clientX - box.left - this.headWidth;
       const seconds = (this.arrange.scrollLeft + anchor) / this.zoom;
       this.beginZoom();
       this.zoom = clamp(this.zoom * Math.exp(-event.deltaY * 0.002), MIN_ZOOM, MAX_ZOOM);
@@ -1260,9 +1786,9 @@ class DawScreen {
       this.cutGuide.hidden = !clip;
       if (!clip) return;
       const box = this.inner.getBoundingClientRect();
-      const time = this.snapTime((event.clientX - box.left - HEAD_WIDTH) / this.zoom, event);
+      const time = this.snapTime((event.clientX - box.left - this.headWidth) / this.zoom, event);
       const clipBox = clip.getBoundingClientRect();
-      this.cutGuide.style.left = `${HEAD_WIDTH + time * this.zoom}px`;
+      this.cutGuide.style.left = `${this.headWidth + time * this.zoom}px`;
       this.cutGuide.style.top = `${clipBox.top - box.top}px`;
       this.cutGuide.style.height = `${clipBox.height}px`;
     });
@@ -1274,7 +1800,8 @@ class DawScreen {
     const before = this.zoom;
     this.beginZoom();
     this.zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
-    const visible = this.arrange.clientWidth - HEAD_WIDTH;
+    this.rememberView();
+    const visible = this.arrange.clientWidth - this.headWidth;
     const playheadX = this.status.position * before - this.arrange.scrollLeft;
     const anchor = playheadX >= 0 && playheadX <= visible ? playheadX : 0;
     const seconds = (this.arrange.scrollLeft + anchor) / before;
@@ -1292,8 +1819,15 @@ class DawScreen {
     this.zoomTimer = setTimeout(() => { this.zooming = false; this.redrawWaves(); }, 160);
   }
 
+  setHeadWidth(width) {
+    this.headWidth = Math.round(clamp(width, MIN_HEAD, MAX_HEAD));
+    this.root.style.setProperty("--head", `${this.headWidth}px`);
+    this.renderArrange();
+  }
+
   setRowHeight(height) {
     this.rowHeight = Math.round(clamp(height, MIN_ROW, MAX_ROW));
+    this.rememberView();
     this.renderArrange(true);
     this.renderTransport();
   }
@@ -1301,6 +1835,7 @@ class DawScreen {
   setFollow(on) {
     this.follow = on;
     this.renderTransport();
+    this.rememberView();
     if (on) this.movePlayhead(true);
   }
 
@@ -1323,7 +1858,7 @@ class DawScreen {
     let end = this.status.length || 0;
     for (const track of this.session?.tracks ?? [])
       for (const clip of track.clips) end = Math.max(end, clip.start + clip.length);
-    const visible = Math.max(0, this.arrange.clientWidth - HEAD_WIDTH) / this.zoom;
+    const visible = Math.max(0, this.arrange.clientWidth - this.headWidth) / this.zoom;
     return Math.max(end + 30, this.status.position + 10, visible, 60);
   }
 
@@ -1372,7 +1907,7 @@ class DawScreen {
     if (box.top < arrange.top + 30 || box.bottom > arrange.bottom) row.scrollIntoView({ block: "nearest" });
     if (reveal.start !== undefined) {
       const x = reveal.start * this.zoom, left = this.arrange.scrollLeft;
-      if (x < left || x > left + this.arrange.clientWidth - HEAD_WIDTH - 40) this.scrollTo(x - 40);
+      if (x < left || x > left + this.arrange.clientWidth - this.headWidth - 40) this.scrollTo(x - 40);
     }
   }
 
@@ -1386,15 +1921,16 @@ class DawScreen {
       (session.returns ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
       session.master.volume, session.master.inserts.length, session.tempo, session.tempoMap, this.showTempo, session.loop, session.beatsPerBar, session.markers,
       this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight, this.takes.version,
+      this.headWidth, [...this.trackHeights], [...this.folded],
+      this.showRouting, this.showSends, this.pinnedFolded, session.master.pan,
     ]);
     if (!force && signature === this.arrangeSignature) return this.movePlayhead();
     this.arrangeSignature = signature;
 
-    this.inner.style.width = `${HEAD_WIDTH + width}px`;
+    this.inner.style.width = `${this.headWidth + width}px`;
     this.root.style.setProperty("--row", `${this.rowHeight}px`);
+    this.root.style.setProperty("--head", `${this.headWidth}px`);
     this.root.style.setProperty("--clip", `${this.rowHeight - 8}px`);
-    this.inner.classList.toggle("rows-medium", this.rowHeight < 76);
-    this.inner.classList.toggle("rows-small", this.rowHeight < 58);
     this.inner.style.setProperty("--bar", `${this.bar * this.zoom}px`);
     this.inner.style.setProperty("--beat", `${this.beat * this.zoom}px`);
     this.inner.classList.toggle("dense", this.beat * this.zoom < 8);
@@ -1417,8 +1953,7 @@ class DawScreen {
       for (const canvas of this.rows.querySelectorAll("canvas.clip-wave"))
         if (canvas.clip && canvas.drawn) this.oldWaves.set(canvas.clip.id, canvas);
     this.updateTrackRows(force);
-    this.renderReturnRows();
-    this.renderMasterRow();
+    this.renderPinnedRows(force);
     this.emptyHint.hidden = session.tracks.some((track) => track.clips.length > 0);
     this.clearButton.hidden = ![...session.tracks, ...(session.returns ?? [])].some((track) => track.mute || track.solo);
     this.scrollTo(scroll);
@@ -1433,7 +1968,8 @@ class DawScreen {
   // input, kind...). A view change (zoom, height, tempo, tool) or `force` rebuilds all.
   updateTrackRows(force) {
     const session = this.session;
-    const viewKey = JSON.stringify([this.zoom, this.rowHeight, session.tempo, session.tempoMap, session.beatsPerBar, this.snap, this.tool, session.inputs]);
+    const viewKey = JSON.stringify([this.zoom, this.rowHeight, session.tempo, session.tempoMap, session.beatsPerBar, this.snap, this.tool, session.inputs,
+                                     this.showRouting, this.showSends, (session.returns ?? []).map((b) => [b.id, b.name, b.colour])]);
     const rebuild = force || viewKey !== this.rowsViewKey;
     this.rowsViewKey = viewKey;
     const existing = new Map(rebuild ? [] : [...this.rows.querySelectorAll(":scope > .track-row")].map((row) => [row.dataset.track, row]));
@@ -1489,31 +2025,60 @@ class DawScreen {
       element.style.width = `${(loop.end - loop.start) * this.zoom}px`;
     }
     this.loopBand.style.left = `${loop.start * this.zoom}px`;
-    this.loopShade.style.left = `${HEAD_WIDTH + loop.start * this.zoom}px`;
+    this.loopShade.style.left = `${this.headWidth + loop.start * this.zoom}px`;
+  }
+
+  // A track's height on screen: folded, its own (dragged), or the global height.
+  trackHeight(id) {
+    if (this.folded.has(id)) return FOLDED_ROW;
+    return this.trackHeights.get(id) ?? this.rowHeight;
   }
 
   // Everything a track row draws apart from what update() can change in place: when
-  // this differs, the row is built again. Volume, pan, the switches, the name and the
-  // selection are left out, so moving a fader or selecting a track keeps the row (and
-  // its focus, hover and the control under the mouse).
+  // this differs, the row is built again. Volume, pan, the switches, the monitor mode,
+  // the name, sends, output and the selection are left out, so moving a fader or a send
+  // or selecting a track keeps the row (and its focus, hover and the control under the
+  // mouse).
   trackRowKey(track) {
-    const { volume, pan, mute, solo, arm, monitor, name, inserts, ...rest } = track;
+    const { volume, pan, mute, solo, arm, monitor, monitorMode, name, inserts, sends, output, ...rest } = track;
     const links = track.link ? this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name) : null;
-    return JSON.stringify([rest, inserts.length, links]); // the colour comes from the id, not the index
+    // The colour comes from the id, not the index.
+    return JSON.stringify([rest, inserts.length, links, this.trackHeight(track.id), this.folded.has(track.id)]);
   }
 
+  // Which header lines fit a row of this height, in order: name, mix, routing, sends.
+  headerLines(height, kind = "audio") {
+    const fit = Math.max(1, 1 + Math.floor((height - 10 - 22) / 25));
+    const lines = ["name"];
+    if (fit >= 2) lines.push("mix");
+    if (this.showRouting && lines.length < fit) lines.push("routing");
+    if (this.showSends && (this.session.returns ?? []).length && lines.length < fit) lines.push("sends");
+    if (kind === "midi" && !lines.includes("routing") && lines.length < fit) lines.push("routing"); // the instrument
+    return lines;
+  }
+
+  // A track's header: its name, then the mix (M, S, arm, monitor, volume, pan), then the
+  // routing (input or instrument, output) and the sends when their switches are on and
+  // the row is tall enough; a stereo meter down the right edge.
   createTrackRow(track, index) {
     const row = html("div", "track-row");
     row.dataset.track = track.id;
     row.track = track; // the latest session's copy, see update below
-    row.style.setProperty("--track-color", trackColour(track, index));
+    const colour = trackColour(track, index);
+    row.style.setProperty("--track-color", colour);
+    const height = this.trackHeight(track.id);
+    row.style.setProperty("--row", `${height}px`);
+    row.style.setProperty("--clip", `${height - 8}px`);
+    const folded = this.folded.has(track.id);
+    row.classList.toggle("is-folded", folded);
     const current = () => row.track;
+    const isMidi = track.kind === "midi";
+    row.classList.toggle("is-midi", isMidi);
 
     const head = html("div", "track-head");
     head.addEventListener("pointerdown", (event) => {
-      if (!event.target.closest("button, input, .hslider")) this.select(track.id, null);
+      if (!event.target.closest("button, input, select, .hslider, .send-box")) this.select(track.id, null);
     });
-
     head.addEventListener("contextmenu", (event) => {
       if (event.target.closest("input")) return;
       event.preventDefault();
@@ -1521,11 +2086,25 @@ class DawScreen {
       this.openTrackMenu(current(), event.clientX, event.clientY);
     });
 
+    // Name line: fold, name, link, effects.
+    const fold = button("th-fold", folded ? "▸" : "▾", folded ? "Unfold the track" : "Fold the track to one line", () => this.toggleFold(track.id));
     const name = html("input", "track-name");
     Object.assign(name, { value: track.name, spellcheck: false, title: "Rename the track" });
     name.addEventListener("change", () => daw("setTrack", { id: track.id, name: name.value.trim() || current().name }));
     name.addEventListener("keydown", (event) => { if (event.key === "Enter") name.blur(); });
+    const nameLine = html("div", "th-line th-name");
+    nameLine.append(fold, name);
+    if (track.link) {
+      // Linked tracks warp as one (Pitch & time → Linked tracks).
+      const others = this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name);
+      const chain = html("span", "track-link", `⛓${track.link}`);
+      chain.title = `Linked with ${others.join(", ") || "no other track"}: warping and quantizing apply to all of them, in phase`;
+      nameLine.append(chain);
+    }
+    const fx = button("fx-count", track.inserts.length ? `${track.inserts.length} fx` : "+ fx", "Effects on this track", () => this.select(track.id, null, true, !track.inserts.length));
+    nameLine.append(fx);
 
+    // Mix line: M, S, arm, monitor, volume, pan.
     const toggles = html("div", "track-toggles");
     const switches = {};
     const toggle = (key, text, title) => {
@@ -1533,48 +2112,36 @@ class DawScreen {
       switches[key] = b;
       return b;
     };
-    const isMidi = track.kind === "midi";
-    row.classList.toggle("is-midi", isMidi);
-    toggles.append(toggle("mute", "M", "Mute"), toggle("solo", "S", "Solo (Alt+click: solo only this track)"),
-                   toggle("arm", "●", isMidi ? "Arm to record from your MIDI keyboard (you hear it while armed)" : "Arm for recording"),
-                   toggle("monitor", "In", isMidi ? "Play this track's instrument from your MIDI keyboard" : `Hear the input (${inputText(track.input, this.session.inputs)}) through this track's effects`));
+    toggles.append(toggle("mute", "M", "Mute (0)"), toggle("solo", "S", "Solo (S) · Alt+click: solo only this track"),
+                   toggle("arm", "●", isMidi ? "Arm to record from your MIDI keyboard (you hear it while armed)" : "Arm for recording (A)"));
+    const monitor = isMidi
+      ? toggle("monitor", "In", "Play this track's instrument from your MIDI keyboard")
+      : button("tt tt-monitor", "Off", "", () => {
+          const next = { off: "in", in: "auto", auto: "off" }[monitorMode(current())];
+          daw("setTrack", { id: track.id, monitorMode: next });
+        });
+    toggles.append(monitor);
     const takesToggle = this.takes.createToggle(track);
     if (takesToggle) toggles.append(takesToggle);
     row.classList.toggle("has-takes", Boolean(takesToggle && track.takesShown));
-    if (track.link) {
-      // Linked tracks warp as one (Pitch & time → Linked tracks).
-      const others = this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name);
-      const chain = html("span", "track-link", `⛓${track.link}`);
-      chain.title = `Linked with ${others.join(", ") || "no other track"}: warping and quantizing apply to all of them, in phase`;
-      toggles.append(chain);
-    }
-
-    const meter = new Level(false, track.id);
-    row.meter = meter;
-
-    const fx = button("fx-count", track.inserts.length ? `${track.inserts.length} fx` : "+ fx", "Effects on this track", () => this.select(track.id, null));
-    const remove = button("mini is-danger track-remove", "×", "Delete the track", async () => {
-      const gone = current();
-      await daw("removeTrack", { id: gone.id });
-      if (gone.clips.length > 0) toast(`Deleted "${gone.name}". Ctrl+Z brings it back.`);
-    });
 
     const send = (key) => (value, first) => daw("setTrack", { id: track.id, [key]: value, continue: !first });
     const volume = new HSlider({ value: track.volume, defaultValue: 0, toPosition: Fader.toPosition, fromPosition: Fader.toDecibels,
+                                 parse: (t) => (/inf/i.test(t) ? FADER_MIN_DB : parseNumber(t)),
                                  format: (v) => `${dbText(v)} dB`, title: "Volume", onChange: send("volume") });
     const pan = new HSlider({ value: track.pan, defaultValue: 0, toPosition: (v) => (v + 1) / 2,
                               fromPosition: (p) => (Math.abs(p - 0.5) < 0.01 ? 0 : Math.round((p * 2 - 1) * 100) / 100),
-                              format: panText, title: "Pan", bipolar: true, onChange: send("pan") });
+                              parse: parsePan, format: panText, title: "Pan", bipolar: true, onChange: send("pan") });
     pan.element.classList.add("is-pan");
-    const top = html("div", "track-head-top");
-    const duplicate = button("mini track-duplicate", "⧉", "Duplicate the track with its clips and effects (Ctrl+Shift+D)", () => this.duplicateTrack(track.id));
-    top.append(html("span", "track-swatch"), name, duplicate, remove);
-    const bottom = html("div", "track-head-bottom");
-    bottom.append(toggles, fx);
-    let chip = null;
+    const mixLine = html("div", "th-line th-mix");
+    mixLine.append(toggles, volume.element, pan.element);
+
+    // Routing line: where the sound comes from (input, or the instrument) and where it goes.
+    const routingLine = html("div", "th-line th-routing");
+    let input = null;
     if (isMidi) {
       const instrument = track.instrument ?? {};
-      chip = button("instrument-chip", `${instrument.error ? "⚠ " : "♫ "}${instrument.name || "Instrument"}`,
+      const chip = button("instrument-chip", `${instrument.error ? "⚠ " : "♫ "}${instrument.name || "Instrument"}`,
         instrument.error ? instrument.error
           : instrument.hasWindow ? `${instrument.name}: open its window` : `${instrument.name} (built-in). Drag another instrument here from the library to swap it.`,
         () => {
@@ -1584,10 +2151,33 @@ class DawScreen {
           else toast("Double-click the lane to add a MIDI clip; pick another instrument in the library or the piano roll.");
         });
       chip.classList.toggle("has-error", Boolean(instrument.error));
+      routingLine.append(chip);
+    } else {
+      input = this.createInputPicker(track);
+      routingLine.append(input.element);
     }
-    const mix = html("div", "track-head-mix");
-    mix.append(volume.element, pan.element);
-    head.append(top, ...(chip ? [chip] : []), bottom, mix, meter.element);
+    const output = this.createOutputPicker(track);
+    routingLine.append(html("span", "th-arrow", "→"), output.element);
+
+    // Sends line: one box per return.
+    const sendsLine = html("div", "th-line th-sends");
+    const sendBoxes = new Map();
+    (this.session.returns ?? []).forEach((bus, i) => {
+      const box = new SendBox({ letter: returnLetter(i), name: bus.name, colour: returnColour(bus, i), value: -100,
+        onChange: (db, first) => daw("setSend", { id: track.id, target: bus.id, level: db, continue: !first }) });
+      sendBoxes.set(bus.id, box);
+      sendsLine.append(box.element);
+    });
+
+    const lines = { name: nameLine, mix: mixLine, routing: routingLine, sends: sendsLine };
+    const body = html("div", "track-head-body");
+    body.append(...this.headerLines(height, track.kind).map((key) => lines[key]));
+
+    const meter = new StereoLevel(track.id);
+    meter.element.classList.add("head-meter");
+    row.meter = meter;
+
+    head.append(html("span", "track-swatch"), body, meter.element, this.createHeightHandle(row, track.id));
 
     // Clicking a lane selects the track; it only moves the playhead while stopped, so
     // you can click around while a take plays back. (The ruler always moves it.)
@@ -1611,7 +2201,7 @@ class DawScreen {
       });
     }
 
-    for (const clip of track.clips) lane.append(this.createClip(clip, track));
+    for (const clip of track.clips) lane.append(this.createClip(clip, track, height));
     if (track.ride?.length) lane.append(this.createRide(track.ride));
     for (const automation of track.automation ?? []) lane.append(this.createAutomation(automation));
 
@@ -1624,9 +2214,23 @@ class DawScreen {
       row.classList.toggle("is-muted", Boolean(latest.mute));
       row.classList.toggle("is-armed", Boolean(latest.arm));
       for (const [key, b] of Object.entries(switches)) b.setAttribute("aria-pressed", String(Boolean(latest[key])));
+      if (!isMidi) {
+        const mode = monitorMode(latest);
+        monitor.textContent = { in: "In", auto: "Auto", off: "Off" }[mode];
+        monitor.dataset.mode = mode;
+        monitor.setAttribute("aria-pressed", String(mode !== "off"));
+        monitor.title = `Monitor: ${{ in: "In: always hear the input", auto: "Auto: hear the input while the track is armed", off: "Off: don't hear the input" }[mode]}`
+          + ` (${inputText(latest.input, this.session.inputs)}, through this track's effects). Click: In → Auto → Off.`;
+      }
       if (document.activeElement !== name) name.value = latest.name;
       volume.update(latest.volume);
       pan.update(latest.pan);
+      input?.update(latest);
+      output.update(latest);
+      for (const [target, box] of sendBoxes) {
+        const s = (latest.sends ?? []).find((x) => x.target === target);
+        box.update(s ? s.level : -100);
+      }
       for (const clip of lane.querySelectorAll(":scope > .clip"))
         clip.classList.toggle("is-selected", String(this.selectedClip) === clip.dataset.clip);
     };
@@ -1634,7 +2238,60 @@ class DawScreen {
     return row;
   }
 
+  // Where a track plays: the master, or into a return (a group bus).
+  createOutputPicker(track) {
+    const returns = this.session.returns ?? [];
+    const element = html("select", "dropdown track-output");
+    element.title = "Output: where this track plays, the master or into a return (a group bus)";
+    element.append(new Option("Master", "0"));
+    returns.forEach((bus, index) => element.append(new Option(`${returnLetter(index)} · ${bus.name}`, String(bus.id))));
+    element.addEventListener("change", () => daw("setOutput", { id: track.id, output: Number(element.value) }));
+    const update = (t) => { if (document.activeElement !== element) element.value = String(t.output ?? 0); };
+    update(track);
+    return { element, update };
+  }
 
+  // The bottom edge of a track's header: drag to set that track's height, double-click
+  // to give it the global height back.
+  createHeightHandle(row, id) {
+    const handle = html("div", "th-resize");
+    handle.title = "Drag to change this track's height · Double-click: back to the global height";
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.stopPropagation();
+      const start = this.trackHeight(id);
+      let height = start;
+      this.dragging = true;
+      drag(event, (dx, dy) => {
+        height = Math.round(clamp(start + dy, MIN_ROW, MAX_ROW));
+        row.style.setProperty("--row", `${height}px`);
+        row.style.setProperty("--clip", `${height - 8}px`);
+      }, (moved) => {
+        this.dragging = false;
+        if (moved) {
+          this.folded.delete(id);
+          this.trackHeights.set(id, height);
+          this.rememberView();
+        }
+        this.flushSession();
+      });
+    });
+    handle.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      this.trackHeights.delete(id);
+      this.folded.delete(id);
+      this.rememberView();
+      this.renderArrange();
+    });
+    return handle;
+  }
+
+  toggleFold(id) {
+    if (this.folded.has(id)) this.folded.delete(id);
+    else this.folded.add(id);
+    this.rememberView();
+    this.renderArrange();
+  }
 
   // A track's volume ride (automation), drawn over its clips: the middle is 0 dB, the
   // top and bottom ±12 dB. It holds its last value after the last point.
@@ -1678,54 +2335,99 @@ class DawScreen {
     return wrap;
   }
 
-  // Return tracks under the tracks: no clips, just their name, level and effects.
-  renderReturnRows() {
-    const returns = this.session.returns ?? [];
-    this.returnRows.replaceChildren(...returns.map((bus, index) => {
-      const row = html("div", "track-row master-row return-row");
-      row.dataset.track = bus.id;
-      row.style.setProperty("--track-color", returnColour(bus, index));
-      const head = html("div", "track-head");
-      head.addEventListener("pointerdown", (event) => { if (!event.target.closest("button")) this.select(bus.id, null); });
-      const meter = new Level(false, bus.id);
-      this.meters.set(bus.id, meter);
-      const top = html("div", "track-head-top");
-      top.append(html("span", "track-swatch return-letter", returnLetter(index)), html("span", "track-name is-static", bus.name),
-                 html("span", "master-volume", `${dbText(bus.volume)} dB`));
+  // The return and master rows, pinned under the tracks so they never scroll away: name,
+  // M and S (returns), effects, volume, pan and a stereo meter. "+ Return" after them;
+  // double-clicking a name folds or unfolds them all. Updated in place like the tracks.
+  renderPinnedRows(force) {
+    const session = this.session;
+    const returns = session.returns ?? [];
+    const key = JSON.stringify([force ? Math.random() : 0, this.pinnedFolded, returns.map((b) => [b.id, b.name, b.colour, b.inserts.length]),
+                                session.master.inserts.length]);
+    if (key !== this.pinnedKey) {
+      this.pinnedKey = key;
+      this.busRows = [...returns.map((bus, index) => this.createBusRow(bus, index, "return")), this.createBusRow(session.master, 0, "master")];
+      const add = html("div", "pinned-add");
+      const pick = html("select", "dropdown add-return");
+      pick.title = "Add a return track: a shared effect every track can send to";
+      pick.append(new Option("+ Return", ""));
+      for (const [effect, name] of RETURN_EFFECTS) pick.append(new Option(name, effect));
+      pick.addEventListener("change", () => {
+        const effect = pick.value;
+        pick.value = "";
+        if (effect !== "") this.addReturn(effect === "none" ? "" : effect);
+      });
+      add.append(pick);
+      this.returnRows.replaceChildren(...this.busRows.slice(0, -1), add);
+      this.masterRow.replaceChildren(this.busRows.at(-1));
+      this.pinned.classList.toggle("is-folded", this.pinnedFolded);
+    }
+    returns.forEach((bus, i) => this.busRows[i].update(bus));
+    this.busRows.at(-1).update(session.master);
+    for (const row of this.busRows) this.meters.set(row.busId, row.meter);
+  }
+
+  createBusRow(bus, index, kind) {
+    const isMaster = kind === "master";
+    const id = isMaster ? 0 : bus.id;
+    const row = html("div", `track-row bus-row ${isMaster ? "master-row" : "return-row"}`);
+    row.dataset.track = id;
+    row.busId = id;
+    if (!isMaster) row.style.setProperty("--track-color", returnColour(bus, index));
+    const head = html("div", "track-head");
+    head.addEventListener("pointerdown", (event) => { if (!event.target.closest("button, .hslider, select")) this.select(id, null); });
+    const nameText = isMaster ? "Master" : bus.name;
+    const name = html("span", "track-name is-static", nameText);
+    name.title = `${isMaster ? "All tracks sum here" : `Return ${returnLetter(index)}: tracks send to it`} · Double-click to fold or unfold the returns and master`;
+    name.addEventListener("dblclick", () => {
+      this.pinnedFolded = !this.pinnedFolded;
+      this.rememberView();
+      this.renderArrange();
+    });
+    const nameLine = html("div", "th-line th-name");
+    nameLine.append(isMaster ? html("span", "bus-tag", "Main") : html("span", "return-letter", returnLetter(index)), name);
+    const switches = {};
+    if (!isMaster) {
       const toggles = html("div", "track-toggles");
       for (const [key, text, title] of [["mute", "M", "Mute this return"], ["solo", "S", "Solo this return"]]) {
-        const b = button(`tt tt-${key}`, text, title, (event) => this.toggleTrackKey(bus, key, !bus[key], event));
-        b.setAttribute("aria-pressed", String(Boolean(bus[key])));
+        const b = button(`tt tt-${key}`, text, title, (event) => this.toggleTrackKey(row.bus, key, !row.bus[key], event));
+        switches[key] = b;
         toggles.append(b);
       }
-      const fx = button("fx-count", bus.inserts.length ? `${bus.inserts.length} fx` : "+ fx", "Effects on this return", () => this.select(bus.id, null));
-      const bottom = html("div", "track-head-bottom");
-      bottom.append(html("span", "track-caption", "Return"), toggles, fx);
-      head.append(top, bottom, meter.element);
-      row.classList.toggle("is-selected", this.selectedTrack === bus.id);
-      row.append(head, html("div", "lane"));
-      return row;
-    }));
+      nameLine.append(toggles);
+    }
+
+    const send = (key) => (value, first) => daw(isMaster ? "setMaster" : "setTrack", { ...(isMaster ? {} : { id }), [key]: value, continue: !first });
+    const volume = new HSlider({ value: bus.volume, defaultValue: 0, toPosition: Fader.toPosition, fromPosition: Fader.toDecibels,
+                                 parse: (t) => (/inf/i.test(t) ? FADER_MIN_DB : parseNumber(t)),
+                                 format: (v) => `${dbText(v)} dB`, title: isMaster ? "Master volume" : "Return volume", onChange: send("volume") });
+    const pan = new HSlider({ value: bus.pan ?? 0, defaultValue: 0, toPosition: (v) => (v + 1) / 2,
+                              fromPosition: (p) => (Math.abs(p - 0.5) < 0.01 ? 0 : Math.round((p * 2 - 1) * 100) / 100),
+                              parse: parsePan, format: panText, title: isMaster ? "Master balance" : "Pan", bipolar: true, onChange: send("pan") });
+    pan.element.classList.add("is-pan");
+    if (!this.pinnedFolded) nameLine.append(volume.element, pan.element);
+    nameLine.title = `${bus.inserts.length} effect${bus.inserts.length === 1 ? "" : "s"}: click to show ${bus.inserts.length ? "them" : "the effects panel"}`;
+
+    const body = html("div", "track-head-body");
+    body.append(nameLine);
+    const meter = new StereoLevel(id);
+    meter.element.classList.add("head-meter");
+    row.meter = meter;
+    head.append(html("span", "track-swatch"), body, meter.element);
+    row.append(head, html("div", "lane"));
+
+    row.update = (latest) => {
+      row.bus = latest;
+      row.classList.toggle("is-selected", this.selectedTrack === id);
+      row.classList.toggle("is-muted", Boolean(latest.mute));
+      for (const [key, b] of Object.entries(switches)) b.setAttribute("aria-pressed", String(Boolean(latest[key])));
+      volume.update(latest.volume);
+      pan.update(latest.pan ?? 0);
+    };
+    row.update(bus);
+    return row;
   }
 
-  renderMasterRow() {
-    const master = this.session.master;
-    const head = html("div", "track-head");
-    head.addEventListener("pointerdown", () => this.select(0, null));
-    const meter = new Level(false, 0);
-    this.meters.set(0, meter);
-    const top = html("div", "track-head-top");
-    top.append(html("span", "track-swatch"), html("span", "track-name is-static", "Master"),
-               html("span", "master-volume", `${dbText(master.volume)} dB`));
-    const fx = button("fx-count", master.inserts.length ? `${master.inserts.length} fx` : "+ fx", "Effects on the master bus", () => this.select(0, null));
-    const bottom = html("div", "track-head-bottom");
-    bottom.append(html("span", "track-caption", "All tracks sum here"), fx);
-    head.append(top, bottom, meter.element);
-    this.masterRow.classList.toggle("is-selected", this.selectedTrack === 0);
-    this.masterRow.replaceChildren(head, html("div", "lane"));
-  }
-
-  createClip(clip, track) {
+  createClip(clip, track, height = this.trackHeight(track.id)) {
     const element = html("div", "clip");
     element.dataset.clip = clip.id;
     element.classList.toggle("is-selected", this.selectedClip === clip.id);
@@ -1746,6 +2448,7 @@ class DawScreen {
     const canvas = kept ?? html("canvas", "clip-wave");
     canvas.dataset.color = trackColour(track, this.session.tracks.indexOf(track));
     canvas.clip = clip;
+    canvas.laneHeight = height - 8; // the track's own height (tracks can differ)
     if (kept) {
       const scale = this.zoom / (kept.zoomAt || this.zoom);
       kept.style.left = `${kept.cssLeft * scale}px`;
@@ -1779,6 +2482,13 @@ class DawScreen {
     if (!clip.midi && this.tool === "warp") drawHitpoints(element, clip, this.zoom, daw);
     element.classList.toggle("is-warped", Boolean(clip.warp?.length) || Math.abs(clip.transpose || 0) > 1e-4);
 
+    element.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      this.select(track.id, clip.id, false);
+      this.openClipMenu(clip, event.clientX, event.clientY);
+    });
+
     element.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       event.stopPropagation();
@@ -1791,7 +2501,7 @@ class DawScreen {
 
       if (this.tool === "cut") {
         const box = this.inner.getBoundingClientRect();
-        const time = this.snapTime((event.clientX - box.left - HEAD_WIDTH) / this.zoom, event);
+        const time = this.snapTime((event.clientX - box.left - this.headWidth) / this.zoom, event);
         if (time > clip.start + 0.01 && time < clip.start + clip.length - 0.01) daw("split", { id: clip.id, time });
         return;
       }
@@ -1887,7 +2597,7 @@ class DawScreen {
     if (this.zooming && canvas.drawn) return; // keep the stretched picture until zooming stops
 
     const zoom = this.zoom;
-    const view = Math.max(1, this.arrange.clientWidth - HEAD_WIDTH) / zoom;
+    const view = Math.max(1, this.arrange.clientWidth - this.headWidth) / zoom;
     const left = this.arrange.scrollLeft / zoom;
     const s0 = Math.max(clip.start, left - view / 2);
     const s1 = Math.min(clip.start + clip.length, left + view * 1.5);
@@ -1961,7 +2671,7 @@ class DawScreen {
     const ratio = window.devicePixelRatio || 1;
     const cssWidth = Math.min(Math.max(2, clip.length * zoom), 16000 / ratio);
     const width = Math.max(1, Math.round(cssWidth * ratio));
-    const height = Math.max(1, Math.round((this.rowHeight - 8) * ratio));
+    const height = Math.max(1, Math.round((canvas.laneHeight ?? this.rowHeight - 8) * ratio));
     const visible = clip.notes.filter((n) => n.time < clip.offset + clip.length && n.time + n.length > clip.offset);
     const key = ["midi", cssWidth, width, height, clip.offset, canvas.dataset.color, visible.map((n) => `${n.pitch}:${n.time}:${n.length}`).join(",")].join();
     if (canvas.drawn === key) return;
@@ -2034,13 +2744,13 @@ class DawScreen {
 
   movePlayhead(force = false) {
     if (!this.tempoMap.steady) this.showTempoValue();
-    const x = HEAD_WIDTH + Math.max(0, this.status.position) * this.zoom;
+    const x = this.headWidth + Math.max(0, this.status.position) * this.zoom;
     this.playhead.style.transform = `translateX(${x}px)`;
 
     // With Follow on, page along with the playhead while playing.
     if ((this.status.playing || force) && this.follow && !this.dragging && this.view === "arrange") {
       const left = this.arrange.scrollLeft, visible = this.arrange.clientWidth;
-      if (x > left + visible - 40 || x < left + HEAD_WIDTH) this.scrollTo(x - HEAD_WIDTH - 40);
+      if (x > left + visible - 40 || x < left + this.headWidth) this.scrollTo(x - this.headWidth - 40);
     }
   }
 
@@ -2070,7 +2780,7 @@ class DawScreen {
       const canvas = region.firstChild;
       const ratio = window.devicePixelRatio || 1;
       const width = Math.max(1, Math.round(Math.min(length * this.zoom, 16000 / ratio) * ratio));
-      const height = Math.max(1, Math.round((this.rowHeight - 8) * ratio));
+      const height = Math.max(1, Math.round(((row.offsetHeight || this.rowHeight) - 9) * ratio));
       if (canvas.width !== width) canvas.width = width;
       if (canvas.height !== height) canvas.height = height;
       const context = canvas.getContext("2d");
@@ -2312,7 +3022,7 @@ class DawScreen {
     if (isReturn) {
       const remove = button("mini is-danger strip-remove", "×", `Delete the ${track.name} return (its sends go too)`, async () => {
         await daw("removeReturn", { id: track.id });
-        toast(`Deleted the "${track.name}" return. Ctrl+Z brings it back.`);
+        toast(`Deleted the "${track.name}" return.`, "", "undo");
       });
       element.append(remove);
     }
@@ -2326,6 +3036,74 @@ class DawScreen {
     this.view = view;
     this.root.classList.toggle("show-mixer", view === "mixer");
     this.render();
+    this.rememberView();
+  }
+
+  //============================================================================ view state
+  // How the project was being looked at (zoom, scroll, heights, selection, panels) is
+  // kept in the project, so reopening a song puts you back where you were. Not an
+  // edit: no undo step, and it doesn't make the project unsaved on its own.
+  viewState() {
+    return {
+      zoom: this.zoom, rowHeight: this.rowHeight, left: Math.round(this.arrange.scrollLeft), top: Math.round(this.arrange.scrollTop),
+      track: this.selectedTrack, view: this.view, follow: this.follow, grid: this.grid, snap: this.snap,
+      dock: { hidden: this.root.classList.contains("dock-hidden"), height: this.dockHeight, tab: this.dockTab },
+      head: this.headWidth, heights: Object.fromEntries(this.trackHeights), folded: [...this.folded],
+      routing: this.showRouting, sends: this.showSends, pinnedFolded: this.pinnedFolded,
+    };
+  }
+
+  rememberView() {
+    if (!this.session || this.restoringView) return;
+    clearTimeout(this.viewTimer);
+    this.viewTimer = setTimeout(() => {
+      const text = JSON.stringify(this.viewState());
+      if (text === this.savedView) return;
+      this.savedView = text;
+      nativeDaw("viewState", { view: text });
+    }, 800);
+  }
+
+  // Before the first render of a project just opened: everything but the scroll position.
+  restoreView(text) {
+    let state = null;
+    try { state = text ? JSON.parse(text) : null; } catch { state = null; }
+    this.savedView = text || "";
+    // Another project: its own heights, folds and sections (none saved: the defaults).
+    this.trackHeights = new Map();
+    this.folded = new Set();
+    this.showRouting = this.showSends = this.pinnedFolded = false;
+    this.headSwitches.forEach((b) => b.setAttribute("aria-pressed", "false"));
+    if (!state || typeof state !== "object") return null;
+    this.restoringView = true;
+    const num = (value, fallback) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
+    this.zoom = clamp(num(state.zoom, this.zoom), MIN_ZOOM, MAX_ZOOM);
+    this.rowHeight = Math.round(clamp(num(state.rowHeight, this.rowHeight), MIN_ROW, MAX_ROW));
+    if (typeof state.follow === "boolean") this.follow = state.follow;
+    if (typeof state.snap === "boolean") this.snap = state.snap;
+    if (state.grid === "bar" || GRIDS.some(([g]) => g === state.grid)) this.grid = state.grid;
+    if (state.track === 0 || this.session.tracks.some((t) => t.id === state.track) || (this.session.returns ?? []).some((r) => r.id === state.track)) {
+      this.selectedTrack = state.track;
+      this.selectedClip = null;
+    }
+    this.headWidth = Math.round(clamp(num(state.head, HEAD_WIDTH), MIN_HEAD, MAX_HEAD));
+    this.trackHeights = new Map(Object.entries(state.heights && typeof state.heights === "object" ? state.heights : {})
+      .map(([id, h]) => [Number(id), Math.round(clamp(num(h, this.rowHeight), MIN_ROW, MAX_ROW))]));
+    this.folded = new Set(Array.isArray(state.folded) ? state.folded.map(Number) : []);
+    this.showRouting = Boolean(state.routing);
+    this.showSends = Boolean(state.sends);
+    this.pinnedFolded = Boolean(state.pinnedFolded);
+    this.headSwitches.forEach((b) => b.setAttribute("aria-pressed", String(this[b.dataset.key])));
+    if (state.view === "arrange" || state.view === "mixer") {
+      this.view = state.view;
+      this.root.classList.toggle("show-mixer", this.view === "mixer");
+    }
+    if (state.dock && typeof state.dock === "object") {
+      if (state.dock.tab === "effects" || state.dock.tab === "track") this.setDockTab(state.dock.tab, false);
+      this.setDock(!state.dock.hidden, clamp(num(state.dock.height, this.dockHeight), 140, 900), false);
+    }
+    this.restoringView = false;
+    return { left: num(state.left, 0), top: num(state.top, 0) };
   }
 
   //============================================================================ inspector
@@ -2395,6 +3173,7 @@ class DawScreen {
     if (this.session) this.watchInserts(show && this.chainGains ? this.chainGains.id : -1);
   }
   saveDock() {
+    this.rememberView();
     try {
       localStorage.setItem("micfx.dock", JSON.stringify({ height: this.dockHeight, hidden: this.root.classList.contains("dock-hidden"), tab: this.dockTab }));
     } catch { /* not kept */ }
@@ -2411,6 +3190,7 @@ class DawScreen {
     });
     this.inspector.dataset.tab = tab;
     if (save) this.saveDock();
+    this.rememberView();
     if (this.session) {
       this.inspectorKey = "";
       this.renderInspector();
@@ -2422,6 +3202,7 @@ class DawScreen {
     const changed = this.selectedTrack !== trackId || this.selectedClip !== clipId;
     this.selectedTrack = trackId;
     this.selectedClip = clipId;
+    if (changed) this.rememberView();
     if (changed && render) this.render();
     else if (changed) {
       this.root.querySelectorAll(".clip.is-selected, .track-row.is-selected").forEach((e) => e.classList.remove("is-selected"));
@@ -2549,11 +3330,6 @@ class DawScreen {
     row.append(gain.element, fadeIn.element, fadeOut.element);
 
     const muteButton = button("toggle", "Mute", "Silence this clip without deleting it (Shift+M)", () => this.run("muteClip"));
-    const threshold = html("select", "dropdown strip-threshold");
-    threshold.title = "What counts as silence for Strip silence";
-    [[-55, "Quiet room (−55 dB)"], [-45, "Normal (−45 dB)"], [-35, "Noisy (−35 dB)"]].forEach(([v, t]) => threshold.append(new Option(t, v)));
-    threshold.value = String(this.stripThreshold ?? -45);
-    threshold.addEventListener("change", () => { this.stripThreshold = Number(threshold.value); });
 
     // All clip controls sit in one compact column: name, knobs, then three rows of buttons.
     const toolRow = (...items) => { const r = html("div", "clip-tool-row"); r.append(...items); return r; };
@@ -2563,13 +3339,10 @@ class DawScreen {
               button("tool", "Duplicate", "Copy after itself (Ctrl+D)", () => this.duplicateSelected()),
               button("tool is-danger", "Delete", "Delete the clip (Delete)", () => this.deleteSelected())),
       toolRow(muteButton,
-              button("tool", "Normalise", "Set the clip gain so its loudest peak is −1 dB", () => this.run("normaliseClip")),
               button("tool", "Loop clip", "Loop the clip's range (Ctrl+L)", () => this.run("loopClip")),
               button("tool", "Zoom to clip", "Fit the clip in the view (Z)", () => this.run("zoomClip"))),
-      toolRow(button("tool", "Strip silence", "Split the clip into phrases and remove the silent gaps between them", () => this.run("stripSilence")),
-              threshold),
-      toolRow(button("tool", "Split into stems", "Separate the song into vocals, drums, bass and other, each on its own track", () => this.run("splitStems")),
-              ...(clip.midi ? [] : [button("tool", "Keep as a take", "Copy this clip into a new take lane, so you can record over it and still pick parts of it", () => daw("takes", { action: "fromClip", clip: id }))])));
+      ...(clip.midi ? [] : [toolRow(button("tool", "Keep as a take", "Copy this clip into a new take lane, so you can record over it and still pick parts of it", () => daw("takes", { action: "fromClip", clip: id })))]),
+      html("p", "clip-tools-hint", "Normalise, Strip silence and Split into stems change the audio itself: they are in the Audio menu and on the clip's right-click menu."));
     element.append(head, row, tools);
 
     return { element, update: (c) => {
@@ -2709,11 +3482,21 @@ class DawScreen {
     this.banner = this.root.querySelector(".daw-banner");
     this.toastArea = this.root.querySelector(".daw-toast");
     this.exportPanel = this.root.querySelector(".export-panel");
-    toast = (message, kind = "") => {
+    // toast (message, kind, action): action { label, run }, or "undo" for an Undo button
+    // (the message then says what Ctrl+Z would bring back).
+    toast = (message, kind = "", action = null) => {
+      if (action === "undo") action = { label: "Undo", run: () => daw("undo") };
       this.toastArea.textContent = keyText(message);
-      this.toastArea.className = `daw-toast is-visible ${kind}`;
+      this.toastArea.className = `daw-toast is-visible ${kind}${action ? " has-action" : ""}`;
+      if (action) {
+        const b = button("toast-action", action.label, "", () => {
+          this.toastArea.classList.remove("is-visible");
+          action.run();
+        });
+        this.toastArea.append(b);
+      }
       clearTimeout(this.toastTimer);
-      this.toastTimer = setTimeout(() => this.toastArea.classList.remove("is-visible"), 5000);
+      this.toastTimer = setTimeout(() => this.toastArea.classList.remove("is-visible"), action ? 8000 : 5000);
     };
 
     const panel = this.exportPanel;
@@ -2743,6 +3526,8 @@ class DawScreen {
   }
 
   onExport(progress) {
+    if (progress.done) this.endJob("export");
+    else this.setJob("export", { label: "Export", progress: progress.progress ?? 0, cancel: () => daw("cancelExport"), open: () => this.toggleExportPanel(true) });
     const panel = this.exportPanel;
     panel.hidden = false;
     panel.classList.toggle("is-running", !progress.done);
@@ -2798,6 +3583,9 @@ class DawScreen {
     const running = ["downloading", "loading", "splitting"].includes(event.state);
     this.stems.running = running;
     panel.classList.toggle("is-running", running);
+    if (running) this.setJob("stems", { label: "Split into stems", progress: event.state === "splitting" ? event.progress ?? 0 : null,
+                                        cancel: () => daw("stems", { action: "cancel" }), open: () => { panel.hidden = false; } });
+    else this.endJob("stems");
 
     if (running) {
       panel.hidden = false;
@@ -2824,7 +3612,7 @@ class DawScreen {
       panel.hidden = true;
       this.stems.splitStart = null;
       const took = event.seconds ? ` (separating took ${spokenDuration(event.seconds)})` : "";
-      toast(`Added ${event.tracks?.length ?? 0} stem tracks and muted the original clip${took}${event.gpu ? ", on the GPU" : ""}. Ctrl+Z undoes it.${event.note ? ` ${event.note}` : ""}`);
+      toast(`Added ${event.tracks?.length ?? 0} stem tracks and muted the original clip${took}${event.gpu ? ", on the GPU" : ""}.${event.note ? ` ${event.note}` : ""}`, "", "undo");
     } else if (event.state === "cancelled") {
       this.setStemsStatus("Cancelled.");
     } else if (event.state === "error") {
@@ -2906,12 +3694,33 @@ class DawScreen {
   }
 
   toggleAutoMix(show = this.autoMixPanel.hidden) {
+    const wasOpen = !this.autoMixPanel.hidden;
     this.autoMixPanel.hidden = !show;
+    // Closing ends the run: opened again, it starts clean from the tracks as they are now.
+    if (!show && wasOpen) this.resetAutoMix();
     if (show) {
       this.toggleExportPanel(false);
       this.renderAutoMixMode();
       if (!this.autoMix.plan) this.refreshAutoMixTags(true);
     }
+  }
+
+  // Forgets the last run (its plan, roles, results and amount, and its mode and track),
+  // unless it's still listening. The style and the effects it may add are kept.
+  resetAutoMix() {
+    const panel = this.autoMixPanel;
+    if (panel.classList.contains("is-running")) return;
+    this.autoMix = { plan: null, applied: false, after: true };
+    panel.querySelector("[name=mode]").value = "mix";
+    panel.querySelector("[name=focus]").value = "0";
+    panel.querySelector("[name=masterLufs]").value = "-14";
+    const slider = panel.querySelector("[name=amount]");
+    slider.value = "100";
+    panel.querySelector(".automix-amount-value").textContent = "100%";
+    panel.querySelector(".automix-plan").replaceChildren();
+    panel.querySelector(".automix-roles").replaceChildren();
+    this.setAutoMixResult("");
+    this.renderAutoMixControls();
   }
 
   // The mode's own line, and the track it works on (fit and clean only), listed from the session.
@@ -3034,6 +3843,9 @@ class DawScreen {
     panel.hidden = false;
     panel.classList.toggle("is-running", event.state === "analysing");
     panel.querySelector(".export-bar").style.setProperty("--progress", event.progress ?? 1);
+    if (event.state === "analysing")
+      this.setJob("key", { label: "Key detection", progress: event.progress ?? null, cancel: () => daw("key", { action: "cancel" }), open: () => this.toggleKeyPanel(true) });
+    else this.endJob("key");
 
     if (event.state === "analysing") return this.setKeyMessage("Listening…");
     if (event.state === "cancelled") return this.setKeyMessage("Cancelled.");
@@ -3120,6 +3932,9 @@ class DawScreen {
     panel.querySelector(".export-bar").style.setProperty("--progress", event.progress ?? 1);
 
     panel.classList.toggle("is-running", event.state === "analysing" || event.state === "splitting");
+    if (event.state === "analysing" || event.state === "splitting")
+      this.setJob("automix", { label: "Auto Mix", progress: event.progress ?? null, cancel: () => daw("autoMix", { action: "cancel" }), open: () => this.toggleAutoMix(true) });
+    else this.endJob("automix");
     if (event.state === "splitting")
       return this.setAutoMixResult(event.phase === 0 ? "Downloading the stem model…" : event.phase === 1 ? "Loading the stem model…" : "Splitting the song into stems…");
     if (event.state === "analysing") return this.setAutoMixResult("Listening…");
@@ -3230,11 +4045,20 @@ class DawScreen {
     const path = session.project?.path ?? "";
     const pathChanged = this.projectPath !== undefined && path !== this.projectPath;
     if (this.projectPath !== undefined && path !== this.projectPath) this.arrange.scrollTop = this.arrange.scrollLeft = 0;
+    const opened = path !== this.projectPath; // also the first session after starting
     this.projectPath = path;
+    const scroll = opened ? this.restoreView(session.view) : null;
     if (pathChanged) this.library?.refresh();
     document.dispatchEvent(new CustomEvent("daw-session", { detail: session }));
     if (this.autoMixPanel && !this.autoMixPanel.hidden && !this.autoMix?.plan) this.refreshAutoMixTags();
     if (this.active) this.render();
+    if (scroll && this.active) {
+      this.renderArrange(true);
+      this.restoringView = true;
+      this.arrange.scrollTop = scroll.top;
+      this.scrollTo(scroll.left);
+      this.restoringView = false;
+    }
     for (const [id, resolve] of this.trackWaiters) if (tracks.some((t) => t.id === id)) { this.trackWaiters.delete(id); resolve(); }
   }
 
@@ -3257,11 +4081,22 @@ class DawScreen {
     main.replaceWith(body);
     this.library = new LibraryBrowser(this, {
       call: (command, args = {}) => nativeDaw(command, args),
-      run: daw,
+      run: (command, args) => {
+        if (command === "scanPlugins") {
+          this.setJob("scan", { label: "Plug-in scan", progress: null });
+          clearTimeout(this.scanTimer);
+          this.scanTimer = setTimeout(() => this.endJob("scan"), 180000); // in case no reply comes
+        }
+        return daw(command, args);
+      },
       toast: (message, kind) => toast(message, kind),
       onEvent: (name, handler) => window.__JUCE__.backend.addEventListener(name, handler),
     });
     body.append(this.library.element, main);
+    window.__JUCE__.backend.addEventListener("dawPlugins", () => this.endJob("scan"));
+    // The toolbar's library switch follows the library however it is folded.
+    const setCollapsed = this.library.setCollapsed.bind(this.library);
+    this.library.setCollapsed = (collapsed) => { setCollapsed(collapsed); this.renderTransport(); this.rememberView(); };
   }
 
   // Adds an effect (a modules.js id) at the end of a track's (or the master's) chain.
@@ -3322,7 +4157,7 @@ class DawScreen {
     this.clockTime.textContent = formatDuration(status.position);
     this.loading = status.loading;
 
-    const neededWidth = HEAD_WIDTH + this.timelineSeconds() * this.zoom;
+    const neededWidth = this.headWidth + this.timelineSeconds() * this.zoom;
     if ((lengthChanged || neededWidth > this.inner.offsetWidth + 1) && !this.dragging) this.renderArrange();
     else this.movePlayhead();
     if (status.recording || this.rows.querySelector(".rec-region")) this.updateRecording();
@@ -3331,7 +4166,8 @@ class DawScreen {
 
   tickMeters(elapsed) {
     const level = (id) => (id === 0 ? this.status.master : this.status.tracks?.[id]);
-    for (const [id, meter] of this.meters) meter.push(level(id), elapsed);
+    const stereo = (id) => this.status.stereo?.[id] ?? [level(id), level(id)];
+    for (const [id, meter] of this.meters) meter.push(meter instanceof StereoLevel ? stereo(id) : level(id), elapsed);
     this.inputMeter.push(this.status.input, elapsed);
     if (this.status.input !== undefined) {
       this.inputPeak = Math.max(this.status.input, (this.inputPeak ?? -100) - elapsed * 0.01);
@@ -3344,7 +4180,6 @@ class DawScreen {
       this.chainGains.output.meter.push(chain?.out, elapsed);
       this.status.chains = undefined;
     }
-    const stereo = (id) => this.status.stereo?.[id] ?? [level(id), level(id)];
     if (this.view === "mixer") for (const [id, strip] of this.strips) strip.meter.push(stereo(id), elapsed);
     this.status.master = undefined;
     if (this.status.tracks) this.status.tracks = {};
@@ -3364,7 +4199,8 @@ class DawScreen {
     ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["Ctrl+Shift+T", "New MIDI track"], ["Ctrl+Shift+D", "Duplicate the selected track"],
                 ["Ctrl+R", "Rename the selected track"], ["Ctrl+Delete", "Delete the selected track"],
                 ["0", "Mute the selected track"], ["S", "Solo the selected track"], ["Alt+click S", "Solo only that track"],
-                ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track"],
+                ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track (In / Off; the header button also has Auto)"],
+                ["Double-click a value / Enter", "Type a value (volume, pan, sends, knobs)"], ["Ctrl+click a slider", "Reset it"],
                 ["Q / Ctrl+U", "Quantize the selected clip (or track), with the Pitch & time settings"]]],
     ["Computer keyboard piano", [["M", "Turn the computer keyboard into a MIDI keyboard on / off (toolbar piano button)"],
                                  ["A S D F G H J K", "White keys, C to C (; adds one more)"], ["W E T Y U O P", "Black keys"],
@@ -3443,7 +4279,7 @@ class DawScreen {
     const next = index < 0 ? clips[step > 0 ? 0 : clips.length - 1] : clips[clamp(index + step, 0, clips.length - 1)];
     this.select(track.id, next.id);
     const x = next.start * this.zoom, left = this.arrange.scrollLeft;
-    if (x < left || x > left + this.arrange.clientWidth - HEAD_WIDTH - 40) this.scrollTo(x - 40);
+    if (x < left || x > left + this.arrange.clientWidth - this.headWidth - 40) this.scrollTo(x - 40);
   }
 
   //============================================================================ computer keyboard as MIDI
@@ -3644,69 +4480,61 @@ class DawScreen {
 
   // Right-click menu on a track header.
   openTrackMenu(track, x, y) {
-    this.closeTrackMenu();
-    const menu = html("div", "track-menu");
-    menu.setAttribute("role", "menu");
     const tracks = this.session.tracks, index = tracks.findIndex((t) => t.id === track.id);
-    const item = (label, action, { disabled = false, danger = false, checked = false } = {}) => {
-      const b = html("button", `track-menu-item${danger ? " is-danger" : ""}`, (checked ? "✓ " : "") + label);
-      b.type = "button";
-      b.setAttribute("role", "menuitem");
-      b.disabled = disabled;
-      b.addEventListener("click", () => { this.closeTrackMenu(); action(); });
-      menu.append(b);
-    };
-    const rule = () => menu.append(html("div", "track-menu-rule"));
     const firstClip = track.clips?.[0];
-
-    item("Rename", () => this.renameTrack());
-    item("Duplicate", () => this.duplicateTrack(track.id));
-    item("Delete", () => this.deleteTrack(), { danger: true });
-    rule();
-    item("Mute", () => daw("setTrack", { id: track.id, mute: !track.mute }), { checked: track.mute });
-    item("Solo", () => daw("setTrack", { id: track.id, solo: !track.solo }), { checked: track.solo });
-    item("Arm for recording", () => daw("setTrack", { id: track.id, arm: !track.arm }), { checked: track.arm });
-    rule();
-    item("Move up", () => daw("moveTrack", { id: track.id, index: index - 1 }), { disabled: index <= 0 });
-    item("Move down", () => daw("moveTrack", { id: track.id, index: index + 1 }), { disabled: index >= tracks.length - 1 });
-    rule();
-    item("Add effect…", () => { this.select(track.id, null); this.setDockTab?.("effects"); toast("Pick an effect from Add effect, or drag one from the library."); });
-    item("Clear volume ride", () => daw("setTrack", { id: track.id, clearRide: true }), { disabled: !track.ride?.length });
-    item("Clear effect automation", () => daw("setTrack", { id: track.id, clearAutomation: true }), { disabled: !track.automation?.length });
-    item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
-    item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
-    if (track.kind !== "midi")
-      item("Split into stems…", () => this.toggleStems(true, firstClip), { disabled: !firstClip });
-    rule();
-    const colours = html("div", "colour-row track-menu-colours");
-    TRACK_COLOURS.forEach((colour) => {
-      const swatch = button("colour-swatch", "", "Track colour", () => { this.closeTrackMenu(); daw("setTrack", { id: track.id, colour }); });
-      swatch.style.background = colour;
-      colours.append(swatch);
-    });
-    menu.append(colours);
-
-    document.body.append(menu);
-    const box = menu.getBoundingClientRect();
-    menu.style.left = `${Math.max(4, Math.min(x, innerWidth - box.width - 4))}px`;
-    menu.style.top = `${Math.max(4, Math.min(y, innerHeight - box.height - 4))}px`;
-    this.trackMenu = menu;
-    const away = (e) => { if (e.type === "keydown" ? e.key === "Escape" : !menu.contains(e.target)) this.closeTrackMenu(); };
-    this.trackMenuAway = away;
-    setTimeout(() => {
-      document.addEventListener("pointerdown", away, true);
-      document.addEventListener("keydown", away, true);
+    popMenu(x, y, ({ item, rule, menu }) => {
+      item("Rename", () => this.renameTrack(), { shortcut: "Ctrl+R" });
+      item("Duplicate", () => this.duplicateTrack(track.id), { shortcut: "Ctrl+Shift+D" });
+      item("Delete", () => this.deleteTrack(), { danger: true, shortcut: "Ctrl+Delete" });
+      rule();
+      item("Mute", () => daw("setTrack", { id: track.id, mute: !track.mute }), { checked: track.mute, shortcut: "0" });
+      item("Solo", () => daw("setTrack", { id: track.id, solo: !track.solo }), { checked: track.solo, shortcut: "S" });
+      item("Arm for recording", () => daw("setTrack", { id: track.id, arm: !track.arm }), { checked: track.arm, shortcut: "A" });
+      rule();
+      item("Move up", () => daw("moveTrack", { id: track.id, index: index - 1 }), { disabled: index <= 0 });
+      item("Move down", () => daw("moveTrack", { id: track.id, index: index + 1 }), { disabled: index >= tracks.length - 1 });
+      rule();
+      item("Add effect…", () => { this.select(track.id, null); this.setDockTab?.("effects"); toast("Pick an effect from Add effect, or drag one from the library."); });
+      item("Clear volume ride", () => daw("setTrack", { id: track.id, clearRide: true }), { disabled: !track.ride?.length });
+      item("Clear effect automation", () => daw("setTrack", { id: track.id, clearAutomation: true }), { disabled: !track.automation?.length });
+      item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
+      item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
+      if (track.kind !== "midi")
+        item("Split into stems…", () => this.toggleStems(true, firstClip), { disabled: !firstClip });
+      rule();
+      const colours = html("div", "colour-row track-menu-colours");
+      TRACK_COLOURS.forEach((colour) => {
+        const swatch = button("colour-swatch", "", "Track colour", () => { closeMenu(); daw("setTrack", { id: track.id, colour }); });
+        swatch.style.background = colour;
+        colours.append(swatch);
+      });
+      menu.append(colours);
     });
   }
 
-  closeTrackMenu() {
-    this.trackMenu?.remove();
-    this.trackMenu = null;
-    if (this.trackMenuAway) {
-      document.removeEventListener("pointerdown", this.trackMenuAway, true);
-      document.removeEventListener("keydown", this.trackMenuAway, true);
-      this.trackMenuAway = null;
-    }
+  closeTrackMenu() { closeMenu(); }
+
+  // A clip's right-click menu: editing, then the Audio processes (the same as the menu
+  // bar's Audio menu, which the plug-in doesn't have).
+  openClipMenu(clip, x, y) {
+    const audio = !clip.midi;
+    popMenu(x, y, ({ item, rule, heading }) => {
+      item("Split at the playhead", () => this.splitSelected(), { shortcut: "Ctrl+E" });
+      item("Duplicate", () => this.duplicateSelected(), { shortcut: "Ctrl+D" });
+      item("Copy", () => this.copySelected(false), { shortcut: "Ctrl+C" });
+      item("Cut", () => this.copySelected(true), { shortcut: "Ctrl+X" });
+      item("Delete", () => this.deleteSelected(), { danger: true, shortcut: "Delete" });
+      rule();
+      item("Mute", () => this.run("muteClip"), { checked: Boolean(clip.mute), shortcut: "Shift+M" });
+      item("Loop the clip", () => this.run("loopClip"), { shortcut: "Ctrl+L" });
+      item("Zoom to the clip", () => this.run("zoomClip"), { shortcut: "Z" });
+      if (audio) {
+        heading("Audio");
+        for (const [label, command, hint] of AUDIO_PROCESSES)
+          item(label, () => this.run(command), { hint, indent: true });
+      }
+      if (clip.midi) item("Edit notes", () => { this.setDockTab("track"); this.setDock(true); });
+    });
   }
 
   async duplicateTrack(id = this.selectedTrack) {
@@ -3739,7 +4567,7 @@ class DawScreen {
 
   // Zooms so start..end fills the view, with a little room on both sides.
   zoomToRange(start, end) {
-    const visible = Math.max(100, this.arrange.clientWidth - HEAD_WIDTH);
+    const visible = Math.max(100, this.arrange.clientWidth - this.headWidth);
     const span = Math.max(0.05, end - start);
     this.zoom = clamp((visible * 0.92) / span, MIN_ZOOM, MAX_ZOOM);
     this.renderArrange(true);
@@ -3800,11 +4628,14 @@ class DawScreen {
         const result = await daw("normaliseClip", { id: clip.id });
         if (result?.ok) toast(`Clip gain set to ${dbText(result.gain)} dB (peak at −1 dB).`);
       }),
+      stripSilenceQuiet: () => { this.stripThreshold = -55; this.run("stripSilence"); },
+      stripSilenceNormal: () => { this.stripThreshold = -45; this.run("stripSilence"); },
+      stripSilenceNoisy: () => { this.stripThreshold = -35; this.run("stripSilence"); },
       stripSilence: () => this.withClip(async (clip) => {
         const result = await daw("stripSilence", { id: clip.id, threshold: this.stripThreshold ?? -45 });
         if (result?.ok) {
           this.selectedClip = null;
-          toast(`Kept ${result.clips} phrase${result.clips === 1 ? "" : "s"}. Ctrl+Z puts the clip back.`);
+          toast(`Kept ${result.clips} phrase${result.clips === 1 ? "" : "s"}.`, "", "undo");
         }
       }),
       splitStems: () => this.withClip((clip) => this.toggleStems(true, clip)),
@@ -3844,7 +4675,7 @@ class DawScreen {
     const next = tracks[index + 1] ?? tracks[index - 1];
     await daw("removeTrack", { id: track.id });
     if (next) this.select(next.id, null);
-    toast(`Deleted "${track.name}". Ctrl+Z brings it back.`);
+    toast(`Deleted "${track.name}".`, "", "undo");
   }
 
   // Q: quantize the selected clip, or the whole selected track, with the settings last

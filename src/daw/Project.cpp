@@ -28,7 +28,7 @@ namespace
     {
         static const juce::Identifier textIds[] { ids::name, ids::file, ids::colour, ids::type, ids::kind, ids::plugin,
                                                   ids::format, ids::vendor, ids::description, ids::state };
-        static const juce::Identifier boolIds[] { ids::mute, ids::solo, ids::arm, ids::monitor, ids::loopOn, ids::keyMinor };
+        static const juce::Identifier boolIds[] { ids::mute, ids::solo, ids::arm, ids::monitor, ids::monitorAuto, ids::loopOn, ids::keyMinor };
         static const juce::Identifier intIds[] { ids::id, ids::version, ids::key };
 
         for (int i = 0; i < tree.getNumProperties(); ++i)

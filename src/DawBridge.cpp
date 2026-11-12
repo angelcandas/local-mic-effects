@@ -8,6 +8,7 @@
 #include "Presets.h"
 #include "dsp/FxModules.h"
 
+#include <map>
 #include <numeric>
 #include <variant>
 
@@ -213,6 +214,44 @@ namespace
                 lanes.add (juce::var (lane));
             }
         return lanes;
+    }
+
+    // What an edit command is called in "Undo ..." (the page shows it on the Undo button).
+    juce::String describeUndoStep (const juce::String& command, const juce::var& args)
+    {
+        if (command == "setTrack" || command == "setMaster")
+        {
+            static const std::pair<const char*, const char*> keys[] {
+                { "volume", "Volume" }, { "pan", "Pan" }, { "mute", "Mute" }, { "solo", "Solo" }, { "arm", "Arm" },
+                { "monitor", "Monitor" }, { "monitorMode", "Monitor" }, { "name", "Rename track" }, { "colour", "Track colour" }, { "input", "Track input" },
+                { "inGain", "Input gain" }, { "outGain", "Output gain" }, { "transpose", "Track key" },
+                { "clearRide", "Clear volume ride" }, { "clearAutomation", "Clear effect automation" } };
+            for (const auto& [key, name] : keys)
+                if (args.hasProperty (key))
+                    return name;
+            return command == "setMaster" ? "Master change" : "Track change";
+        }
+
+        static const std::map<juce::String, const char*> names {
+            { "addTrack", "Add track" }, { "addMidiTrack", "Add MIDI track" }, { "removeTrack", "Delete track" },
+            { "duplicateTrack", "Duplicate track" }, { "moveTrack", "Move track" }, { "linkTracks", "Link tracks" },
+            { "unlinkTrack", "Unlink track" }, { "moveClip", "Move clip" }, { "trimStart", "Trim clip" }, { "trimEnd", "Trim clip" },
+            { "clipFades", "Fade" }, { "clipGain", "Clip gain" }, { "split", "Split clip" }, { "removeClip", "Delete clip" },
+            { "duplicate", "Duplicate clip" }, { "pasteClip", "Paste clip" }, { "setClip", "Clip change" },
+            { "normaliseClip", "Normalise clip" }, { "stripSilence", "Strip silence" }, { "addMidiClip", "Add MIDI clip" },
+            { "editNotes", "Edit notes" }, { "addInsert", "Add effect" }, { "removeInsert", "Remove effect" },
+            { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "pasteInserts", "Paste effects" },
+            { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
+            { "addReturn", "Add return" }, { "removeReturn", "Delete return" }, { "moveReturn", "Move return" },
+            { "tempo", "Tempo" }, { "tempoMap", "Tempo change" }, { "beatsPerBar", "Time signature" }, { "loop", "Loop range" },
+            { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
+            { "quantize", "Quantize" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
+            { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "clearMuteSolo", "Clear mute and solo" },
+            { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" },
+        };
+        if (const auto it = names.find (command); it != names.end())
+            return it->second;
+        return command;
     }
 
     // A track's sends for the page: [{ target (return id), level (dB, -inf when off), pre }].
@@ -455,6 +494,7 @@ juce::var DawBridge::describeSession()
                               { "inGain", number (track, ids::inGain) }, { "outGain", number (track, ids::outGain) },
                               { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
+                              { "monitorMode", daw::Edit::getTrackMonitorMode (track) },
                               { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) }, { "automation", describeAutomation (track) },
                               { "link", daw::Edit::getLink (track) },
                               { "inserts", describeInserts (track) }, { "clips", clips },
@@ -534,6 +574,9 @@ juce::var DawBridge::describeSession()
         { "countIn", engine.getCountInBars() },
         { "canUndo", undo.canUndo() },
         { "canRedo", undo.canRedo() },
+        { "undoName", undo.getUndoDescription() },
+        { "redoName", undo.getRedoDescription() },
+        { "view", state[ids::viewState].toString() },
         { "returns", returns },
         { "master", object ({ { "volume", number (master, ids::volume) }, { "pan", number (master, ids::pan) }, { "inGain", number (master, ids::inGain) },
                               { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) } }) },
@@ -2105,9 +2148,18 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     // "dawStatus" (-1: none). Not an edit.
     if (command == "watchInserts") { watchedTrack = arg (args, "track", -1); complete (object ({ { "ok", true } })); return; }
 
-    // Each command is one undo step, unless it continues a drag (args.continue).
+    // The page's view state (zoom, scroll, selection...), kept in the project. Not an edit.
+    if (command == "viewState")
+    {
+        edit.getState().setProperty (ids::viewState, args["view"].toString(), nullptr);
+        complete (object ({ { "ok", true } }));
+        return;
+    }
+
+    // Each command is one undo step, unless it continues a drag (args.continue). The step
+    // is named for the Undo button and the toasts ("Undo move clip").
     if (! arg (args, "continue", false))
-        undo.beginNewTransaction (command);
+        undo.beginNewTransaction (describeUndoStep (command, args));
 
     const auto id = arg (args, "id", -1);
     const auto ok = [&] { complete (error ({})); };
@@ -2161,6 +2213,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("solo"))    edit.setTrackSolo (id, args["solo"]);
             if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
             if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
+            if (args.hasProperty ("monitorMode")) edit.setTrackMonitorMode (id, args["monitorMode"].toString());
             if (args.hasProperty ("input"))   // [left] mono, [left, right] stereo, [] none
             {
                 const auto* list = args["input"].getArray();

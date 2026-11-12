@@ -10,7 +10,7 @@ body.is-daw .chip--live { display: none; }
 .mode-switch button { padding: 5px 14px; font-weight: 600; }
 
 .daw {
-  --head: 210px;   /* HEAD_WIDTH in daw.js */
+  --head: 244px;   /* HEAD_WIDTH in daw.js (resizable) */
   --row: 84px;   /* rowHeight in daw.js (vertical zoom) */
   --clip: 76px;
   position: relative;
@@ -860,9 +860,6 @@ body.is-daw .chip--live { display: none; }
 .hslider-text { position: relative; z-index: 1; display: block; color: var(--text); font: 600 10px/14px var(--mono); text-align: center; pointer-events: none; }
 .hslider:hover, .hslider:focus-visible { border-color: var(--line-strong); outline: none; }
 
-.rows-medium .track-head-mix { display: none; }
-.rows-small .track-head-bottom { display: none; }
-.rows-small .level-meter { display: none; }
 
 /* ---------- Recording ---------- */
 
@@ -1670,6 +1667,143 @@ body.is-daw .app-project { color: var(--text); font-weight: 600; }
 .stereo-meter { display: flex; gap: 2px; }
 .stereo-meter .level-meter.is-vertical { width: 5px; }
 
+/* ---------- Toolbar: one row, three zones (song / transport / work and view) ---------- */
+
+.daw-transport {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0;
+  overflow: hidden;
+}
+.tb-zone { display: flex; align-items: center; gap: 6px; }
+.daw-transport [hidden] { display: none !important; }
+.tb-zone { flex: none; }
+.tb-zone.zone-transport { gap: 10px; }
+/* The gaps between the zones share the free room, so the transport sits near the middle. */
+.tb-spacer { flex: 1 1 0; min-width: 18px; }
+/* Buttons inside one control touch: the joined edges lose their rounding. */
+.tb-joined { position: relative; display: inline-flex; align-items: center; }
+.tb-joined > :not(:last-child):not(.tb-popover) { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.tb-joined > :not(:first-child) { margin-left: -1px; border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.tb-joined .tempo { height: 30px; padding: 0 2px 0 4px; border: 1px solid var(--line); border-radius: 9px; background: #0d1016; }
+.tb-joined .tempo-input { border: 0; background: transparent; }
+.tb-joined > .tap-tempo { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.tb-arrow { position: relative; display: inline-flex; align-items: center; gap: 2px; width: auto; padding: 0 6px; }
+.tb-arrow svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.tb-badge { font: 600 10px var(--mono); color: var(--accent-2); }
+.tb-badge:empty { display: none; }
+.snap-group select.grid-size { height: 30px; }
+.ib.has-label { width: auto; padding: 0 9px 0 7px; gap: 5px; }
+.ib-text { font-size: 11.5px; font-weight: 600; }
+.automix-button { color: var(--text); }
+
+/* The transport is the biggest thing in the bar. */
+.daw .zone-transport .daw-transport-buttons { display: flex; align-items: center; gap: 6px; }
+.daw .zone-transport .transport-button { width: 36px; height: 36px; }
+.daw .zone-transport .transport-button svg { width: 15px; height: 15px; }
+.daw .zone-transport .play-button { width: 42px; height: 42px; border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line-strong)); }
+.daw .zone-transport .play-button svg { width: 17px; height: 17px; }
+.daw .zone-transport .record-button { height: 36px; }
+.daw .zone-transport .daw-clock { min-width: 92px; padding: 3px 12px; font-size: 17px; }
+.daw .play-button { position: relative; }
+.return-dot { position: absolute; right: 1px; bottom: 1px; width: 7px; height: 7px; border: 1.5px solid var(--panel); border-radius: 50%; background: var(--accent-2); display: none; }
+.daw .play-button.returns-on-stop .return-dot { display: block; }
+
+/* Pop-overs under a toolbar control (click settings, running jobs). */
+.tb-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: grid;
+  gap: 8px;
+  min-width: 210px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+.tb-popover[hidden] { display: none; }
+.tb-popover-row { white-space: nowrap; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
+.tb-popover-row .click-volume { width: 110px; }
+.daw-transport { overflow: visible; }
+
+/* Folding for narrow windows (foldToolbar): text labels go first, then whole controls. */
+.daw-transport[data-fold="1"] .ib-text,
+.daw-transport[data-fold="2"] .ib-text,
+.daw-transport[data-fold="3"] .ib-text,
+.daw-transport[data-fold="4"] .ib-text,
+.daw-transport[data-fold="5"] .ib-text,
+.daw-transport[data-fold="6"] .ib-text { display: none; }
+.daw-transport:not([data-fold="0"]) .ib.has-label { width: 30px; padding: 0; }
+.daw-transport:not([data-fold="0"]) .mic-label { display: none; }
+.daw-transport .is-folded { display: none !important; }
+.daw-transport[data-fold="6"] .mic-meter { display: none; }
+
+/* Header: the project menu, Save, Export and undo beside the project name (DAW only). */
+.daw-project-actions { display: flex; align-items: center; gap: 4px; margin-left: 10px; }
+body:not(.is-daw) .daw-project-actions { display: none; }
+.daw-project-actions .tool { height: 28px; }
+.daw-project-actions .ib { width: 28px; }
+.project-menu-button { padding: 0 10px; }
+.project-menu-button::after { content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 0 3px 7px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+.daw-project-actions .tb-sep { height: 18px; align-self: center; }
+
+/* The timeline's view (Follow, fit, zoom, height) at the right of the bar above the bottom panel. */
+.timeline-tools { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.timeline-tools[hidden] { display: none; }
+.timeline-tools .ib, .timeline-tools .toggle { width: 22px; height: 18px; padding: 0; border-radius: 5px; }
+.timeline-tools .ib .ico { width: 13px; height: 13px; }
+.timeline-tools .zoom-slider { font-size: 11px; }
+.timeline-tools .zoom-slider input { width: 64px; height: 12px; }
+.timeline-tools + .dock-toggle { margin-left: 6px; }
+
+/* Running jobs. */
+.activity { position: relative; }
+.activity-button { display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; color: var(--text); }
+.activity-button[hidden] { display: none; }
+.activity-spinner { width: 12px; height: 12px; border: 2px solid var(--line-strong); border-top-color: var(--accent-2); border-radius: 50%; animation: activity-spin 0.9s linear infinite; }
+@keyframes activity-spin { to { transform: rotate(360deg); } }
+.activity-count { font: 600 11px var(--mono); }
+.activity-list { left: auto; right: 0; min-width: 260px; }
+.activity-job { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 8px; }
+.activity-job .export-bar { grid-column: 1; margin: 0; visibility: visible; }
+.activity-job .activity-cancel { grid-column: 2; grid-row: 1 / span 2; }
+.activity-name { padding: 0; border: 0; background: none; color: var(--text); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.activity-name:hover { color: var(--accent-2); }
+.export-bar.is-indeterminate div { width: 30%; animation: activity-slide 1.2s ease-in-out infinite alternate; }
+@keyframes activity-slide { from { margin-left: 0; } to { margin-left: 70%; } }
+
+/* Menus: a check column, shortcut chips, headings. */
+.track-menu-item { display: flex; align-items: center; gap: 6px; }
+.track-menu-check { flex: none; width: 12px; color: var(--accent-2); }
+.track-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track-menu-item.is-indented .track-menu-label { padding-left: 6px; }
+.track-menu-heading { padding: 6px 10px 2px 28px; color: var(--faint); font-size: 10.5px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; }
+.track-menu { max-width: 340px; max-height: calc(100vh - 8px); overflow-y: auto; }
+.key-chip { flex: none; margin-left: 14px; padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--muted); font: 10.5px/16px var(--mono); }
+
+/* A toast with an action (Undo). */
+.daw-toast.has-action.is-visible { pointer-events: auto; }
+.toast-action { margin-left: 12px; padding: 2px 10px; border: 1px solid var(--accent-2); border-radius: 6px; background: transparent; color: var(--accent-2); font: inherit; font-weight: 600; cursor: pointer; }
+.toast-action:hover { background: rgba(63, 217, 198, 0.12); }
+
+.clip-tools-hint { margin: 2px 0 0; color: var(--faint); font-size: 11px; line-height: 1.4; }
+
+/* Reduced motion: no transitions or looping animations (meters still show the level). */
+@media (prefers-reduced-motion: reduce) {
+  .daw *, .daw *::before, .daw *::after, .daw-toast, .track-menu { transition: none !important; animation: none !important; }
+}
+.tb-zone.zone-work, .tb-zone.zone-song { gap: 4px; }
+.daw-transport .segmented .ib, .daw-transport .view-tabs .ib { padding: 5px 7px; }
+.daw .zone-transport .mic-meter { margin-left: 0; gap: 4px; }
+.daw .zone-transport .mic-meter .level-meter { width: 52px; }
+.daw .zone-transport .daw-clock { min-width: 84px; }
+.daw .zone-transport .daw-transport-buttons { gap: 4px; }
+.daw-transport .tb-sep { margin: 3px 4px; }
+.daw-transport.is-wrapped { flex-wrap: wrap; row-gap: 8px; }
+.daw-transport.is-wrapped .tb-spacer { min-width: 8px; }
 /* ---------- Take lanes (ui/takes.js) ---------- */
 
 .tt-takes { display: inline-flex; align-items: center; gap: 3px; width: auto; min-width: 24px; padding: 0 5px; white-space: nowrap; }
@@ -1787,3 +1921,116 @@ body.is-daw .app-project { color: var(--text); font-weight: 600; }
   background-size: var(--bar) 100%;
 }
 .arrange-inner.tempo-varies .take-lane { background-image: var(--grid-image); background-size: var(--grid-width) 100%; background-repeat: no-repeat; }
+
+/* ---------- Track headers: sections, stereo meter, own height and fold ---------- */
+
+.track-row .track-head { flex-direction: row; align-items: stretch; justify-content: flex-start; gap: 6px; padding: 4px 4px 4px 0; }
+.track-row .track-head .track-swatch { align-self: stretch; }
+.track-head-body { display: flex; flex: 1; flex-direction: column; justify-content: center; gap: 3px; min-width: 0; }
+.th-line { display: flex; align-items: center; gap: 5px; min-width: 0; height: 22px; flex: none; }
+.th-name .track-name { flex: 1; }
+.th-fold { flex: none; width: 14px; height: 18px; padding: 0; border: 0; background: none; color: var(--faint); font-size: 10px; cursor: pointer; }
+.th-fold:hover { color: var(--text); }
+.th-mix .track-toggles { flex: none; }
+.th-mix .hslider { flex: 1 1 auto; min-width: 40px; }
+.th-mix .hslider.is-pan { flex: 0 0 44px; min-width: 44px; }
+.th-routing select.dropdown { flex: 1 1 0; min-width: 0; height: 20px; padding: 0 18px 0 6px; font-size: 10.5px; background-position: right 5px center; }
+.th-routing .instrument-chip { flex: 1 1 0; }
+.th-arrow { flex: none; color: var(--faint); font-size: 11px; }
+.th-sends { gap: 3px; overflow: hidden; }
+.track-row.is-folded .th-name .fx-count { display: none; }
+.track-row .tt-monitor { width: auto; min-width: 24px; padding: 0 4px; }
+.track-row .tt-monitor[data-mode="auto"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 30%, #0d1016); color: var(--text); }
+
+/* The meter down the right edge of the header: left and right, clip lights on top. */
+.head-meter { display: flex; flex: none; gap: 1px; align-self: stretch; margin: 1px 0; }
+.head-meter .level-meter.is-vertical { width: 4px; border-radius: 2px; }
+.head-meter .clip-light { top: 0; left: 0; right: 0; width: auto; height: 3px; border-radius: 1px; }
+
+/* Drag a track's bottom edge for its own height. */
+.th-resize { position: absolute; left: 0; right: 0; bottom: -3px; z-index: 4; height: 7px; cursor: ns-resize; }
+.th-resize:hover { background: linear-gradient(transparent 3px, var(--accent) 3px, var(--accent) 4px, transparent 4px); }
+.track-row .track-head { overflow: visible; }
+.track-row .track-head-body { overflow: hidden; }
+
+/* The header column's right edge: drag to resize it. */
+.corner { position: sticky; }
+.corner-gap { flex: 1; }
+.head-switch { height: 20px; padding: 0 6px; border-radius: 5px; font-size: 10px; }
+.head-resizer { position: absolute; top: 0; right: -4px; bottom: 0; z-index: 6; width: 8px; cursor: col-resize; }
+.head-resizer:hover { background: linear-gradient(90deg, transparent 3px, var(--accent) 3px, var(--accent) 5px, transparent 5px); }
+
+/* A send level box. */
+.send-box {
+  position: relative;
+  display: inline-flex;
+  flex: 0 1 52px;
+  align-items: center;
+  gap: 3px;
+  min-width: 34px;
+  height: 18px;
+  padding: 0 4px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #0d1016;
+  color: var(--faint);
+  font: 600 10px/1 var(--mono);
+  cursor: ns-resize;
+  touch-action: none;
+}
+.send-box::before { content: ""; position: absolute; left: 0; bottom: 0; height: 2px; width: calc(var(--level, 0) * 100%); background: var(--send-color, var(--accent)); }
+.send-box.is-on { color: var(--text); border-color: color-mix(in srgb, var(--send-color) 45%, var(--line)); }
+.send-box:hover, .send-box:focus-visible { border-color: var(--line-strong); outline: none; }
+.send-box-letter { color: var(--send-color, var(--accent)); }
+.send-box:not(.is-on) .send-box-letter { opacity: 0.55; }
+
+/* Typing a value over a control. */
+.value-entry {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  width: 100%;
+  min-width: 48px;
+  height: 100%;
+  padding: 0 4px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: #0d1016;
+  color: var(--text);
+  font: 600 11px var(--mono);
+  text-align: center;
+  outline: none;
+}
+.knob .readout, .hslider, .fader { position: relative; }
+
+/* ---------- Returns and master, pinned under the tracks ---------- */
+
+.pinned-rows { position: sticky; bottom: 0; z-index: 5; border-top: 1px solid var(--line-strong); background: var(--bg, #0b0d12); box-shadow: 0 -6px 14px rgba(0, 0, 0, 0.35); }
+.pinned-rows .track-row.bus-row { height: 30px; }
+.pinned-rows.is-folded .track-row.bus-row { height: 22px; }
+.bus-row .track-head { padding-top: 2px; padding-bottom: 2px; }
+.bus-row .th-name .hslider { flex: 0 1 72px; min-width: 44px; }
+.bus-row .th-name .hslider.is-pan { flex: 0 0 38px; min-width: 38px; }
+.pinned-rows.is-folded .th-line { height: 18px; }
+.bus-row .lane { background: rgba(255, 255, 255, 0.015); }
+.return-row .lane { background: color-mix(in srgb, var(--track-color) 4%, transparent); }
+.return-row .track-head { background: color-mix(in srgb, var(--track-color) 5%, var(--panel)); }
+.bus-row .track-name.is-static { flex: 1; padding: 0 2px; cursor: default; user-select: none; }
+.bus-row .th-mix .hslider { flex: 1; }
+.bus-tag { flex: none; padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, var(--accent-2) 20%, transparent); color: var(--accent-2); font: 700 9.5px/16px var(--mono); }
+.bus-row .return-letter { display: inline-grid; place-items: center; flex: none; width: 16px; height: 16px; border-radius: 4px; background: var(--track-color); color: #0b0d12; font: 700 10px var(--mono); }
+.pinned-add { position: sticky; left: 0; display: flex; align-items: center; width: var(--head); height: 22px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.pinned-add select { height: 18px; padding: 0 18px 0 8px; font-size: 10.5px; }
+.pinned-rows.is-folded .pinned-add { display: none; }
+
+/* Wider hit areas for clip edges, without changing how they look. */
+.trim-start, .trim-end { width: 10px; }
+.clip:hover .trim-start { background: linear-gradient(90deg, rgba(255, 255, 255, 0.12) 7px, transparent 7px); }
+.clip:hover .trim-end { background: linear-gradient(270deg, rgba(255, 255, 255, 0.12) 7px, transparent 7px); }
+.clip .fade-in::before, .clip .fade-out::before { content: ""; position: absolute; inset: -4px; }
+.fade-in { left: 10px; }
+.fade-out { right: 10px; }
+.bus-row .th-name .track-name.is-static { flex: 1 1 auto; min-width: 64px; }
+.bus-row .th-name .hslider { flex: 0 1 64px; min-width: 36px; }
+.bus-row .th-name .track-toggles { flex: none; }
