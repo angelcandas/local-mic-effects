@@ -3,7 +3,7 @@
 namespace
 {
     const juce::Identifier SONG { "SONG" }, SCENES { "SCENES" }, name { "name" }, sound { "sound" }, key { "key" },
-                           minor { "minor" }, tempo { "tempo" }, backing { "backing" }, lyrics { "lyrics" },
+                           isMinor { "minor" }, tempo { "tempo" }, backing { "backing" }, lyrics { "lyrics" },
                            notes { "notes" }, current { "current" };
 }
 
@@ -109,7 +109,7 @@ void Setlist::setSongInfo (int index, const juce::var& fields)
     if (fields.hasProperty ("name") && fields["name"].toString().trim().isNotEmpty())
         song.setProperty (name, fields["name"].toString().trim().substring (0, 60), nullptr);
     if (fields.hasProperty ("key"))    song.setProperty (key, juce::jlimit (-1, 11, (int) fields["key"]), nullptr);
-    if (fields.hasProperty ("minor"))  song.setProperty (minor, (bool) fields["minor"], nullptr);
+    if (fields.hasProperty ("minor"))  song.setProperty (isMinor, (bool) fields["minor"], nullptr);
     if (fields.hasProperty ("tempo"))  song.setProperty (tempo, juce::jlimit (0.0, 300.0, (double) fields["tempo"]), nullptr);
     if (fields.hasProperty ("backing")) song.setProperty (backing, fields["backing"].toString(), nullptr);
     if (fields.hasProperty ("lyrics")) song.setProperty (lyrics, fields["lyrics"].toString().substring (0, 100000), nullptr);
@@ -152,7 +152,7 @@ bool Setlist::loadSong (int index, juce::String& warning)
             if (choice->getParameterID() == "tuneKey")
                 set (*choice, choice->convertTo0to1 ((float) songKey));
             if (choice->getParameterID() == "tuneScale" && (choice->getIndex() == 1 || choice->getIndex() == 2))
-                set (*choice, choice->convertTo0to1 ((bool) song.getProperty (minor, false) ? 2.0f : 1.0f));
+                set (*choice, choice->convertTo0to1 ((bool) song.getProperty (isMinor, false) ? 2.0f : 1.0f));
         }
 
     scenes.replaceScenes (song.getChildWithName (SCENES));
@@ -232,7 +232,7 @@ juce::var Setlist::describe() const
         auto* entry = new juce::DynamicObject();
         entry->setProperty ("name", song[name].toString());
         entry->setProperty ("key", (int) song.getProperty (key, -1));
-        entry->setProperty ("minor", (bool) song.getProperty (minor, false));
+        entry->setProperty ("minor", (bool) song.getProperty (isMinor, false));
         entry->setProperty ("tempo", (double) song.getProperty (tempo, 0.0));
         entry->setProperty ("backing", song[backing].toString());
         entry->setProperty ("lyrics", song[lyrics].toString());
