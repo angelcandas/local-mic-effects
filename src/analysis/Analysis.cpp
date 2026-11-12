@@ -1,6 +1,9 @@
 #include "Analysis.h"
 
 #include "daw/DawEngine.h"
+#include <atomic>
+#include <mutex>
+#include <thread>
 #include "daw/Edit.h"
 
 #include <juce_audio_formats/juce_audio_formats.h>
@@ -220,6 +223,7 @@ Analyser::Analyser (double sampleRate)
     profile.sampleRate = sampleRate;
     kWeighting.setup (sampleRate);
     pitch.prepare (sampleRate);
+    pitch.setAutoAnalyse (false); // once per hop, in endHop()
 
     history.assign ((size_t) fftSize, 0.0f);
     fftData.assign ((size_t) fftSize * 2, 0.0f);
@@ -263,6 +267,7 @@ void Analyser::endHop()
     const auto n = (double) hopSize;
     hopPowers.push_back ((hopWeighted[0] + hopWeighted[1]) / n);
     profile.rmsDb.push_back (toDb (hopSquares / n));
+    pitch.analyseNow();
     profile.pitchHz.push_back (pitch.getFrequency());
     hopWeighted[0] = hopWeighted[1] = hopSquares = 0.0;
     hopFill = 0;
@@ -306,6 +311,40 @@ void Analyser::endHop()
     Chroma chroma {};
     computeChroma (fftData.data(), fftSize, profile.sampleRate, chroma);
     profile.chroma.push_back (chroma);
+
+    // Hum: the strongest bin near each mains harmonic against the mean of the bins 4 to
+    // 7 away on both sides (outside the window's main lobe). It only counts when its
+    // peak sits on the harmonic (within 1%, or 1.5 Hz): a note close by isn't hum.
+    std::array<std::array<float, Profile::humHarmonics>, 2> lines {};
+    for (int m = 0; m < 2; ++m)
+        for (int h = 0; h < Profile::humHarmonics; ++h)
+        {
+            const auto target = (m == 0 ? 50.0 : 60.0) * (h + 1);
+            const auto centre = (int) std::lround (target / binWidth);
+            int peakBin = centre;
+            for (int k = centre - 2; k <= centre + 2; ++k)
+                if (k >= 1 && fftData[(size_t) k] > fftData[(size_t) peakBin])
+                    peakBin = k;
+            if (std::abs (peakBin - centre) >= 2 || peakBin < 2)
+                continue; // the peak is something else's
+
+            const auto level = [this] (int k) { return std::log (juce::jmax (1.0e-12, juce::square ((double) fftData[(size_t) k]))); };
+            const auto a = level (peakBin - 1), b = level (peakBin), c = level (peakBin + 1);
+            const auto denominator = a - 2.0 * b + c;
+            const auto offset = std::abs (denominator) > 1.0e-9 ? juce::jlimit (-0.5, 0.5, 0.5 * (a - c) / denominator) : 0.0;
+            if (std::abs ((peakBin + offset) * binWidth - target) > juce::jmax (1.5, 0.01 * target))
+                continue;
+
+            double line = juce::square ((double) fftData[(size_t) peakBin]), around = 0.0;
+            int count = 0;
+            for (int offset = 4; offset <= 7; ++offset)
+                for (int k : { centre - offset, centre + offset })
+                    if (k >= 1)
+                        around += juce::square ((double) fftData[(size_t) k]), ++count;
+            around = count > 0 ? around / count : 0.0;
+            lines[(size_t) m][(size_t) h] = line > 1.0e-20 && around > 1.0e-20 ? (float) (10.0 * std::log10 (line / around)) : 0.0f;
+        }
+    humLines.push_back (lines);
 }
 
 Profile Analyser::finish()
@@ -380,6 +419,42 @@ Profile Analyser::finish()
         result.active.resize (result.rmsDb.size());
         for (size_t i = 0; i < result.rmsDb.size(); ++i)
             result.active[i] = result.rmsDb[i] > threshold;
+    }
+
+    // Hum: averaged over the hops where nothing plays (a sung note's harmonics can sit
+    // on 100 or 150 Hz), or the quietest fifth of a signal that never stops. A line
+    // 10 dB over its surroundings counts; the mains with the stronger lines wins.
+    {
+        std::vector<size_t> quiet;
+        for (size_t i = 0; i < result.active.size(); ++i)
+            if (! result.active[i] && result.rmsDb[i] > -100.0f)
+                quiet.push_back (i);
+
+        if (quiet.size() < 10 && result.rmsDb.size() >= 20)
+        {
+            std::vector<size_t> order (result.rmsDb.size());
+            std::iota (order.begin(), order.end(), (size_t) 0);
+            std::sort (order.begin(), order.end(), [&] (size_t a, size_t b) { return result.rmsDb[a] < result.rmsDb[b]; });
+            quiet.assign (order.begin(), order.begin() + (long) (order.size() / 5));
+            quiet.erase (std::remove_if (quiet.begin(), quiet.end(), [&] (size_t i) { return result.rmsDb[i] <= -100.0f; }), quiet.end());
+        }
+
+        if (quiet.size() >= 5)
+        {
+            std::array<std::array<float, Profile::humHarmonics>, 2> mean {};
+            for (auto i : quiet)
+                for (int m = 0; m < 2; ++m)
+                    for (int h = 0; h < Profile::humHarmonics; ++h)
+                        mean[(size_t) m][(size_t) h] += humLines[i][(size_t) m][(size_t) h] / (float) quiet.size();
+
+            const auto strength = [] (const auto& lines) { float sum = 0.0f; for (auto db : lines) sum += juce::jmax (0.0f, db - 10.0f); return sum; };
+            const auto best = strength (mean[1]) > strength (mean[0]) ? 1 : 0;
+            if (strength (mean[(size_t) best]) > 0.0f)
+            {
+                result.humHz = best == 0 ? 50.0f : 60.0f;
+                result.humHarmonicsDb = mean[(size_t) best];
+            }
+        }
     }
 
     return result;
@@ -470,10 +545,45 @@ SessionAnalyser::SessionAnalyser (daw::Edit& edit, Point p, bool mix, double rat
 {
 }
 
+std::optional<Profile> ProfileCache::find (const juce::String& key) const
+{
+    const std::scoped_lock guard (lock);
+    if (const auto it = profiles.find (key); it != profiles.end())
+        return it->second;
+    return std::nullopt;
+}
+
+void ProfileCache::store (const juce::String& key, const Profile& profile)
+{
+    const std::scoped_lock guard (lock);
+    if (profiles.count (key) == 0)
+        order.push_back (key);
+    profiles[key] = profile;
+
+    while ((int) order.size() > maxEntries)
+    {
+        profiles.erase (order.front());
+        order.erase (order.begin());
+    }
+}
+
+void ProfileCache::clear()
+{
+    const std::scoped_lock guard (lock);
+    profiles.clear();
+    order.clear();
+}
+
+int ProfileCache::size() const
+{
+    const std::scoped_lock guard (lock);
+    return (int) profiles.size();
+}
+
 Profile SessionAnalyser::render (const juce::ValueTree& session, const Progress& progress, double from, double to,
                                  bool& cancelled)
 {
-    constexpr int blockSize = 1024;
+    constexpr int blockSize = 4096;
 
     daw::Edit edit;
     edit.replaceState (session);
@@ -507,7 +617,7 @@ Profile SessionAnalyser::render (const juce::ValueTree& session, const Progress&
     return analyser.finish();
 }
 
-SessionAnalyser::Result SessionAnalyser::run (Progress progress)
+SessionAnalyser::Result SessionAnalyser::run (Progress progress, ProfileCache* cache)
 {
     Result result;
 
@@ -523,8 +633,9 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress)
         if (child.hasType (daw::ids::TRACK) && includeTracks)
             tracks.add (child);
 
-    const auto steps = (double) (tracks.size() + (includeMix ? 1 : 0));
-
+    // One render per track (and one for the mix), each on its own offline engine, as
+    // fast as the computer goes: they run side by side on the CPU's cores.
+    std::vector<juce::ValueTree> sessions;
     for (int t = 0; t < tracks.size(); ++t)
     {
         // This track alone (so other tracks' inserts don't add latency compensation),
@@ -563,19 +674,115 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress)
             }
         }
 
-        auto profile = render (session, progress, t / steps, (t + 1) / steps, result.cancelled);
-        if (result.cancelled)
-            return result;
-
-        result.tracks.emplace_back (id, std::move (profile));
+        sessions.push_back (session);
     }
-
     if (includeMix)
+        sessions.push_back (snapshot.createCopy());
+
+    // What each render depends on, and whether the cache has it already.
+    const auto keyOf = [this] (const juce::ValueTree& session)
     {
-        auto profile = render (snapshot, progress, tracks.size() / steps, 1.0, result.cancelled);
-        if (! result.cancelled)
-            result.mix = std::move (profile);
+        juce::String key;
+        key << "v2|" << sampleRate << "|" << songSeconds << "|" << (int) point << "|";
+        for (const auto& track : session)
+            for (const auto& clip : track)
+                if (clip.hasType (daw::ids::CLIP) && clip.hasProperty (daw::ids::file))
+                {
+                    const juce::File file (clip[daw::ids::file].toString());
+                    key << file.getSize() << ":" << file.getLastModificationTime().toMilliseconds() << "|";
+                }
+        return key + juce::String::toHexString (session.toXmlString().hashCode64());
+    };
+    const auto hasPluginInstrument = [] (const juce::ValueTree& session)
+    {
+        for (const auto& track : session)
+            if (const auto instrument = track.getChildWithName (daw::ids::INSTRUMENT); instrument.isValid())
+                if (! instrument[daw::ids::plugin].toString().startsWith ("builtin:"))
+                    return true;
+        return false;
+    };
+
+    const auto jobs = sessions.size();
+    std::vector<Profile> profiles (jobs);
+    std::vector<juce::String> keys (jobs);
+    std::vector<size_t> parallelJobs, serialJobs;
+    for (size_t job = 0; job < jobs; ++job)
+    {
+        keys[job] = keyOf (sessions[job]);
+        if (cache != nullptr)
+            if (auto known = cache->find (keys[job]))
+            {
+                profiles[job] = std::move (*known);
+                continue;
+            }
+        (hasPluginInstrument (sessions[job]) ? serialJobs : parallelJobs).push_back (job);
     }
+    lastRenderCount = (int) (parallelJobs.size() + serialJobs.size());
+
+    std::vector<std::atomic<double>> done (jobs);
+    for (size_t job = 0; job < jobs; ++job)
+        done[job] = profiles[job].getNumFrames() > 0 ? 1.0 : 0.0;
+    std::atomic<bool> cancelled { false };
+    std::atomic<size_t> next { 0 };
+    std::mutex reporting;
+
+    const auto report = [&] (size_t job, double fraction)
+    {
+        done[job] = fraction;
+        if (! progress)
+            return ! cancelled.load();
+
+        const std::scoped_lock lock (reporting); // the caller's callback, one thread at a time
+        double sum = 0.0;
+        for (const auto& d : done) sum += d.load();
+        if (! progress (sum / (double) juce::jmax ((size_t) 1, jobs)))
+            cancelled = true;
+        return ! cancelled.load();
+    };
+
+    const auto renderJob = [&] (size_t job)
+    {
+        bool stopped = false;
+        profiles[job] = render (sessions[job], [&report, job] (double p) { return report (job, p); }, 0.0, 1.0, stopped);
+        if (stopped)
+            cancelled = true;
+    };
+    const auto work = [&]
+    {
+        for (size_t i; (i = next++) < parallelJobs.size() && ! cancelled.load();)
+            renderJob (parallelJobs[i]);
+    };
+
+    const auto threads = (size_t) juce::jlimit (1, maxThreads, juce::jmin ((int) parallelJobs.size(), (int) std::thread::hardware_concurrency() - 1));
+    std::vector<std::thread> pool;
+    for (size_t i = 1; i < threads; ++i)
+        pool.emplace_back (work);
+    for (auto job : serialJobs) // on this thread, one at a time, while the others run
+        if (! cancelled.load())
+            renderJob (job);
+    work();
+    for (auto& thread : pool)
+        thread.join();
+
+    if (! cancelled.load() && cache != nullptr)
+        for (auto job : parallelJobs)
+            cache->store (keys[job], profiles[job]);
+    if (! cancelled.load() && cache != nullptr)
+        for (auto job : serialJobs)
+            cache->store (keys[job], profiles[job]);
+    if (progress && ! cancelled.load())
+        progress (1.0);
+
+    if (cancelled.load())
+    {
+        result.cancelled = true;
+        return result;
+    }
+
+    for (int t = 0; t < tracks.size(); ++t)
+        result.tracks.emplace_back ((int) tracks[t][daw::ids::id], std::move (profiles[(size_t) t]));
+    if (includeMix)
+        result.mix = std::move (profiles.back());
 
     return result;
 }

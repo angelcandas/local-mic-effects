@@ -7,8 +7,11 @@
 #include "dsp/PitchDetector.h"
 #include "Key.h"
 
+#include <algorithm>
 #include <array>
 #include <functional>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -56,6 +59,14 @@ struct Profile
     float integratedLufs = -200.0f;   // gated, over the whole signal (-200 = silence)
     float shortTermMaxLufs = -200.0f; // loudest 3 s
     float peakDb = -200.0f;           // sample peak, dBFS
+
+    // Mains hum, measured where nothing plays (or in the quietest hops when it never
+    // stops): 50 or 60 Hz, 0 when there's none. Per harmonic (1x to 4x the mains),
+    // how far that line stands over the spectrum around it, in dB.
+    static constexpr int humHarmonics = 4;
+    float humHz = 0.0f;
+    std::array<float, humHarmonics> humHarmonicsDb {};
+    float getHumProminenceDb() const noexcept { return *std::max_element (humHarmonicsDb.begin(), humHarmonicsDb.end()); }
 
     int getNumFrames() const noexcept { return (int) rmsDb.size(); }
     double getActiveSeconds() const;
@@ -124,6 +135,9 @@ private:
     int historyPos = 0;
     std::vector<float> window, fftData;
     double windowPower = 0.0;    // sum of squared window values
+
+    // Per hop, per mains frequency (50, 60 Hz) and harmonic: line over its surroundings, dB.
+    std::vector<std::array<std::array<float, Profile::humHarmonics>, 2>> humLines;
 };
 
 // A whole buffer at once.
@@ -146,6 +160,27 @@ struct Masking
 };
 
 Masking measureMasking (const Profile& voice, const Profile& backing);
+
+//==============================================================================
+// Profiles already measured, by what was rendered: the track's part of the session
+// (clips, notes, instrument, inserts when they count), its audio files' sizes and
+// dates, the sample rate and the song's length. "Listen again" then renders only the
+// tracks that changed; a fader move changes nothing that's measured. Thread-safe.
+class ProfileCache
+{
+public:
+    std::optional<Profile> find (const juce::String& key) const;
+    void store (const juce::String& key, const Profile&);
+    void clear();
+    int size() const;
+
+    static constexpr int maxEntries = 128; // the oldest go first
+
+private:
+    mutable std::mutex lock;
+    std::map<juce::String, Profile> profiles;
+    std::vector<juce::String> order; // oldest first
+};
 
 //==============================================================================
 // Profiles of every track of a DAW session (and the mix), rendered offline from a
@@ -172,8 +207,15 @@ public:
     // Message thread: takes a snapshot of the session.
     SessionAnalyser (daw::Edit&, Point, bool includeMix, double sampleRate = 48000.0, bool includeTracks = true);
 
-    // Any thread.
-    Result run (Progress = {});
+    // Any thread. The renders run side by side, up to maxThreads at once (offline,
+    // faster than real time); `progress` is called from them one at a time.
+    // With a cache, tracks it already knows aren't rendered again, and new ones are added.
+    // Tracks with a third-party plugin instrument render one at a time (a plugin may
+    // not be safe on several threads at once).
+    Result run (Progress = {}, ProfileCache* = nullptr);
+    static constexpr int maxThreads = 8;
+
+    int getLastRenderCount() const noexcept { return lastRenderCount; } // renders the last run() did
 
 private:
     Profile render (const juce::ValueTree& session, const Progress&, double from, double to, bool& cancelled);
@@ -183,5 +225,6 @@ private:
     bool includeMix, includeTracks;
     double sampleRate;
     double songSeconds = 0.0;
+    int lastRenderCount = 0;
 };
 }

@@ -7,6 +7,7 @@
 
 #include <juce_audio_processors/juce_audio_processors.h>
 #include <juce_gui_basics/juce_gui_basics.h>
+#include <juce_cryptography/juce_cryptography.h>
 
 #include <set>
 #include <thread>
@@ -14,6 +15,7 @@
 #include "DawBridge.h"
 #include "PluginProcessor.h"
 #include "analysis/Analysis.h"
+#include "dsp/Biquad.h"
 #include "analysis/Key.h"
 #include "analysis/MixAssistant.h"
 #include "Presets.h"
@@ -952,7 +954,7 @@ namespace
             { "Kick", Role::drums }, { "My song - Drums", Role::drums }, { "Overheads", Role::drums }, { "Bajo", Role::bass },
             { "Bass DI", Role::bass }, { "Lead guitar", Role::guitar }, { "Acoustic", Role::guitar }, { "Rhodes", Role::piano },
             { "Piano", Role::piano }, { "Karaoke", Role::backing }, { "Backing track", Role::backing }, { "Instrumental", Role::backing },
-            { "My song - Other", Role::instrument }, { "Strings", Role::instrument }, { "Synth lead", Role::instrument },
+            { "My song - Other", Role::instrument }, { "Strings", Role::pad }, { "Synth lead", Role::synth },
             { "Track 3", std::nullopt }, { "Audio 1", std::nullopt }
         };
         juce::StringArray wrong;
@@ -1148,8 +1150,322 @@ namespace
         folder.deleteRecursively();
     }
 
+    // Auto Mix listens offline: every track renders on its own engine, side by side, far
+    // faster than playing the song.
+    void testAnalysisSpeed()
+    {
+        std::cout << "\nAuto Mix analysis speed\n";
+        const auto folder = juce::File::createTempFile ("micfx-speed");
+        folder.createDirectory();
+        const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav");
+        writeWav (voiceFile, makeSungLine (30.0), sampleRate);
+        writeWav (backingFile, makeBacking (30.0), sampleRate);
+
+        daw::Edit edit;
+        std::vector<int> ids;
+        for (int t = 0; t < 6; ++t)
+        {
+            const auto id = (int) edit.addTrack ("Track " + juce::String (t + 1))[daw::ids::id];
+            edit.addClip (id, t % 2 == 0 ? voiceFile : backingFile, 0.0, 30.0);
+            ids.push_back (id);
+        }
+
+        const auto started = juce::Time::getMillisecondCounterHiRes();
+        double lastProgress = 0.0;
+        bool monotonic = true;
+        const auto result = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, true)
+                                .run ([&] (double p) { monotonic = monotonic && p >= lastProgress - 1.0e-9; lastProgress = p; return true; });
+        const auto seconds = (juce::Time::getMillisecondCounterHiRes() - started) / 1000.0;
+
+        bool inOrder = result.tracks.size() == ids.size() && result.mix.has_value();
+        for (size_t t = 0; inOrder && t < ids.size(); ++t)
+            inOrder = result.tracks[t].first == ids[t] && result.tracks[t].second.getNumFrames() >= 299
+                   && std::abs (result.tracks[t].second.integratedLufs - result.tracks[t % 2].second.integratedLufs) < 0.01f;
+        check (inOrder, "6 tracks and the mix, in track order, the same results side by side");
+        check (monotonic && std::abs (lastProgress - 1.0) < 1.0e-6, "progress only goes up, to 100%");
+        // A cache: listening again renders only what changed.
+        {
+            analysis::ProfileCache cache;
+            analysis::SessionAnalyser first (edit, analysis::SessionAnalyser::Point::source, false);
+            const auto fresh = first.run ({}, &cache);
+            analysis::SessionAnalyser again (edit, analysis::SessionAnalyser::Point::source, false);
+            const auto cached = again.run ({}, &cache);
+            bool same = cached.tracks.size() == fresh.tracks.size();
+            for (size_t t = 0; same && t < fresh.tracks.size(); ++t)
+                same = cached.tracks[t].first == fresh.tracks[t].first
+                    && juce::exactlyEqual (cached.tracks[t].second.integratedLufs, fresh.tracks[t].second.integratedLufs)
+                    && cached.tracks[t].second.rmsDb == fresh.tracks[t].second.rmsDb;
+            check (first.getLastRenderCount() == 6 && again.getLastRenderCount() == 0 && same,
+                   "listening again renders nothing new, with the same results (" + juce::String (again.getLastRenderCount()) + " renders)");
+
+            edit.setTrackVolume (ids[1], -6.0f);
+            const auto first0 = edit.getTrack (ids[0]);
+            edit.addInsert (ids[2], fx::ModuleType::reverb);
+            analysis::SessionAnalyser faders (edit, analysis::SessionAnalyser::Point::source, false);
+            faders.run ({}, &cache);
+            check (faders.getLastRenderCount() == 0, "a fader or an effect doesn't change what's measured at the source");
+
+            edit.setClipGain ((int) first0.getChildWithName (daw::ids::CLIP)[daw::ids::id], -3.0f);
+            analysis::SessionAnalyser moved (edit, analysis::SessionAnalyser::Point::source, false);
+            moved.run ({}, &cache);
+            check (moved.getLastRenderCount() == 1, "changing one clip renders that track again (" + juce::String (moved.getLastRenderCount()) + ")");
+        }
+
+        std::cout << "        6 tracks x 30 s + mix in " << juce::String (seconds, 2) << " s ("
+                  << juce::String (7.0 * 30.0 / juce::jmax (0.001, seconds), 0) << "x real time per track, "
+                  << (int) std::thread::hardware_concurrency() << " cores, this build)\n";
+        folder.deleteRecursively();
+    }
+
     // Volume automation: the Edit's ride, the engine playing it, and Auto Mix writing
     // a vocal ride and a dip on the backing while the voice sings.
+    void testAutoMixModes()
+    {
+        std::cout << "\nAuto Mix modes (fit into backing, clean & polish)\n";
+
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-modes");
+        folder.createDirectory();
+
+        // A voice recorded with 50 Hz mains hum (and its 2nd and 3rd harmonics) and some
+        // hiss, heard between the phrases; a backing that plays all through.
+        auto sung = makeSungLine (15.0, 3.0, 1.5);
+        {
+            juce::Random random (7);
+            const auto twoPi = juce::MathConstants<double>::twoPi;
+            for (int i = 0; i < sung.getNumSamples(); ++i)
+            {
+                const auto t = i / sampleRate;
+                const auto noise = 0.002 * std::sin (twoPi * 50.0 * t) + 0.0015 * std::sin (twoPi * 100.0 * t)
+                                 + 0.001 * std::sin (twoPi * 150.0 * t) + 0.002 * (random.nextFloat() * 2.0 - 1.0);
+                for (int ch = 0; ch < 2; ++ch)
+                    sung.addSample (ch, i, (float) noise);
+            }
+        }
+        const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav");
+        writeWav (voiceFile, sung, sampleRate);
+        writeWav (backingFile, makeBacking (15.0), sampleRate);
+        const auto voice = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Backing")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 15.0);
+        edit.addClip (backing, backingFile, 0.0, 15.0);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const auto& voiceProfile = source.tracks[0].second;
+        const auto& backingProfile = source.tracks[1].second;
+        check (juce::exactlyEqual (voiceProfile.humHz, 50.0f) && voiceProfile.humHarmonicsDb[0] > 15.0f,
+               "hum found on the voice: " + juce::String (voiceProfile.humHz, 0) + " Hz, lines "
+                   + juce::String (voiceProfile.humHarmonicsDb[0], 0) + " / " + juce::String (voiceProfile.humHarmonicsDb[1], 0) + " / "
+                   + juce::String (voiceProfile.humHarmonicsDb[2], 0) + " dB over the hiss");
+        check (backingProfile.humHz <= 0.0f, "no hum on the backing (its 110 Hz note is near 100 Hz, but not on it)");
+
+        const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { backing, analysis::Role::backing } };
+        const std::map<int, float> volumes { { voice, 0.0f }, { backing, 0.0f } };
+        const auto print = [] (const analysis::MixPlan& plan)
+        {
+            for (const auto& move : plan.moves)
+                for (const auto& reason : move.reasons)
+                    std::cout << "        " << move.trackId << (move.insert ? juce::String (" ") + fx::getModuleKey (*move.insert) : juce::String())
+                              << ": " << reason << "\n";
+            for (const auto& note : plan.notes)
+                std::cout << "        note: " << note << "\n";
+        };
+
+        // Clean & polish the voice (the lead, when no track is picked).
+        analysis::MixOptions clean;
+        clean.mode = analysis::MixMode::clean;
+        const auto cleanPlan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, clean);
+        print (cleanPlan);
+
+        bool onlyVoice = true, levels = false, space = false;
+        const analysis::MixMove* hum = nullptr;
+        const analysis::MixMove* gate = nullptr;
+        for (const auto& move : cleanPlan.moves)
+        {
+            onlyVoice = onlyVoice && move.trackId == voice;
+            levels = levels || ! move.insert.has_value();
+            space = space || move.insert == fx::ModuleType::reverb || move.insert == fx::ModuleType::echo;
+            if (move.insert == fx::ModuleType::paraEq && move.instance == 1) hum = &move;
+            if (move.insert == fx::ModuleType::gate) gate = &move;
+        }
+        check (onlyVoice && ! levels && ! space, "clean: only the voice, no volume, ride or space");
+        check (hum != nullptr && hum->values.count ("peqBell1Freq") > 0 && juce::exactlyEqual (hum->values.at ("peqBell1Freq"), 50.0f)
+                   && hum->values.at ("peqBell1Gain") <= -6.0f && juce::exactlyEqual (hum->values.at ("peqBell2Freq"), 100.0f)
+                   && juce::exactlyEqual (hum->values.at ("peqBell3Freq"), 150.0f),
+               "clean: narrow cuts at 50, 100 and 150 Hz in a second EQ");
+        check (gate != nullptr && gate->values.at ("gateThreshold") > -60.0f && gate->values.at ("gateThreshold") < -35.0f,
+               "clean: a gate over the noise between phrases ("
+                   + (gate != nullptr ? juce::String (gate->values.at ("gateThreshold"), 0) : juce::String ("none")) + " dB)");
+
+        // Applied: the gate first, the hum EQ right after the voice's own EQ.
+        analysis::applyMix (edit, cleanPlan);
+        {
+            juce::StringArray chain;
+            for (const auto& insert : daw::Edit::getInserts (edit.getTrack (voice)))
+                chain.add (insert[daw::ids::type].toString());
+            std::cout << "        chain: " << chain.joinIntoString (", ") << "\n";
+            check (chain.size() >= 3 && chain[0] == "gate" && chain[1] == "paraEq" && chain[2] == "paraEq", "clean: gate, the EQ, then the hum EQ");
+
+            const auto stem = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+            const auto breath = voiceProfile.rmsDb[22], after = stem.tracks[0].second.rmsDb[22]; // 2.2 s: between lines
+            check (after < breath - 15.0f, "clean: the breaths go quiet (" + juce::String (breath, 0) + " dB, then " + juce::String (after, 0) + ")");
+        }
+        edit.getUndoManager().undo();
+
+        // Without the gate, the hum EQ alone takes the hum lines down.
+        {
+            auto humOnly = cleanPlan;
+            humOnly.moves.erase (std::remove_if (humOnly.moves.begin(), humOnly.moves.end(),
+                                                 [] (const analysis::MixMove& m) { return m.insert != fx::ModuleType::paraEq || m.instance != 1; }),
+                                 humOnly.moves.end());
+            analysis::applyMix (edit, humOnly);
+            const auto stem = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+            const auto& p = stem.tracks[0].second;
+            check (p.getHumProminenceDb() < voiceProfile.getHumProminenceDb() - 6.0f,
+                   "clean: the hum lines come down (" + juce::String (voiceProfile.getHumProminenceDb(), 0) + " dB over the hiss, then "
+                       + juce::String (p.getHumProminenceDb(), 0) + ")");
+            edit.getUndoManager().undo();
+        }
+
+        // Fit the voice into the backing: the voice gets its treatment and level, the
+        // backing only makes room, the master stays.
+        analysis::MixOptions fit;
+        fit.mode = analysis::MixMode::fit;
+        fit.focusTrackId = voice;
+        const auto fitPlan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, fit);
+        print (fitPlan);
+        bool master = false, voiceVolume = false, backingOnlyRoom = true;
+        for (const auto& move : fitPlan.moves)
+        {
+            master = master || move.trackId == daw::Edit::masterId;
+            voiceVolume = voiceVolume || (move.trackId == voice && ! move.insert.has_value() && move.values.count ("volume") > 0);
+            if (move.trackId == backing)
+                backingOnlyRoom = backingOnlyRoom && (! move.ride.empty() || move.insert == fx::ModuleType::paraEq);
+        }
+        check (! master && voiceVolume && backingOnlyRoom, "fit: the voice's level, only a dip and a ride on the backing, the master stays");
+
+        // An instrument in focus: it gets the level (under the backing), the voice is left alone.
+        {
+            const auto guitarFile = folder.getChildFile ("guitar.wav");
+            writeWav (guitarFile, makeTones ({ { 15.0, 196.0, 0.1f, 0.1f } }), sampleRate);
+            const auto guitar = (int) edit.addTrack ("Guitar")[daw::ids::id];
+            edit.addClip (guitar, guitarFile, 0.0, 15.0);
+            const auto withGuitar = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+            auto guitarRoles = roles;
+            guitarRoles[guitar] = analysis::Role::guitar;
+            auto guitarVolumes = volumes;
+            guitarVolumes[guitar] = 0.0f;
+            fit.focusTrackId = guitar;
+            const auto guitarPlan = analysis::planMix (withGuitar, guitarRoles, guitarVolumes, 0.0f, analysis::MixStyle::pop, fit);
+            print (guitarPlan);
+            bool guitarVolume = false, voiceLevel = false, masterMove = false;
+            for (const auto& move : guitarPlan.moves)
+            {
+                guitarVolume = guitarVolume || (move.trackId == guitar && ! move.insert.has_value() && move.values.count ("volume") > 0);
+                voiceLevel = voiceLevel || (move.trackId == voice && ! move.insert.has_value() && move.ride.empty());
+                masterMove = masterMove || move.trackId == daw::Edit::masterId;
+            }
+            check (guitarVolume && ! voiceLevel && ! masterMove, "fit, guitar in focus: its level; the voice's and the master's stay");
+        }
+
+        check (analysis::getModeFromKey (analysis::getModeKey (analysis::MixMode::clean)) == analysis::MixMode::clean
+                   && analysis::getModeFromKey ("nonsense") == analysis::MixMode::mix,
+               "mode keys round-trip");
+
+        // Speech / podcast: the voice dry and well over a music bed that ducks under it.
+        {
+            const auto speech = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::speech);
+            bool character = false;
+            float duck = 0.0f, master = 0.0f;
+            for (const auto& move : speech.moves)
+            {
+                character = character || move.insert == fx::ModuleType::reverb || move.insert == fx::ModuleType::echo
+                         || move.insert == fx::ModuleType::saturation || move.insert == fx::ModuleType::exciter;
+                if (move.trackId == backing && ! move.ride.empty())
+                    for (const auto& point : move.ride) duck = juce::jmin (duck, point.second);
+                if (move.trackId == daw::Edit::masterId)
+                    master = 1.0f;
+            }
+            check (! character && std::abs (speech.voiceOverBackingLu - 10.0f) < 1.0f && duck <= -5.9f && master > 0.0f,
+                   "speech: no reverb, echo or colour; the voice " + juce::String (speech.voiceOverBackingLu, 1)
+                       + " LU over the music, which ducks " + juce::String (-duck, 1) + " dB while you talk");
+        }
+    }
+
+    void testAutoMixSynths()
+    {
+        std::cout << "\nAuto Mix on MIDI tracks (roles from the instrument, colour)\n";
+
+        using analysis::Role;
+        check (analysis::guessRoleFromInstrument ("builtin:pad", "Warm Pad") == Role::pad
+                   && analysis::guessRoleFromInstrument ("builtin:strings", "Strings") == Role::pad
+                   && analysis::guessRoleFromInstrument ("builtin:lead", "Lead") == Role::synth
+                   && analysis::guessRoleFromInstrument ("builtin:bass", "Synth Bass") == Role::bass
+                   && analysis::guessRoleFromInstrument ("builtin:keys", "Keys") == Role::piano
+                   && analysis::guessRoleFromInstrument ("builtin:organ", "Organ") == Role::piano,
+               "built-in synths: pad, strings, lead, bass, keys, organ");
+        check (analysis::guessRoleFromInstrument ("VST3-Serum", "Serum") == Role::synth
+                   && analysis::guessRoleFromInstrument ("VST3-x", "Superior Drummer 3") == Role::drums
+                   && analysis::guessRoleFromInstrument ("VST3-y", "Trilian Bass") == Role::bass
+                   && ! analysis::guessRoleFromInstrument ("VST3-z", "Thing").has_value(),
+               "plugins by their names (Serum, Superior Drummer, Trilian Bass; nothing from \"Thing\")");
+        check (analysis::guessRoleFromName ("Strings") == Role::pad && analysis::guessRoleFromName ("Synth arp") == Role::synth
+                   && analysis::guessRoleFromName ("Synth bass") == Role::bass,
+               "track names: Strings is a pad, Synth arp a synth, Synth bass a bass");
+        check (analysis::getRoleFromKey (analysis::getRoleKey (Role::pad)) == Role::pad
+                   && analysis::getRoleFromKey (analysis::getRoleKey (Role::synth)) == Role::synth,
+               "pad and synth keys round-trip");
+
+        // A voice, a pad, a synth lead and a synth bass; the three synths are MIDI tracks.
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-synths");
+        folder.createDirectory();
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto file = folder.getChildFile (name + ".wav");
+            writeWav (file, audio, sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, file, 0.0, 12.0);
+            return id;
+        };
+        const auto voice = add ("Vocal", makeSungLine (12.0, 3.0, 1.5));
+        const auto pad = add ("Pad", makeTones ({ { 12.0, 330.0, 0.1f, 0.1f } }));
+        const auto lead = add ("Lead", makeTones ({ { 12.0, 880.0, 0.05f, 0.05f } }));
+        const auto bass = add ("Bass", makeTones ({ { 12.0, 55.0, 0.2f, 0.2f } }));
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, Role> roles { { voice, Role::voice }, { pad, Role::pad }, { lead, Role::synth }, { bass, Role::bass } };
+        const std::map<int, float> volumes { { voice, 0.0f }, { pad, 0.0f }, { lead, 0.0f }, { bass, 0.0f } };
+
+        analysis::MixOptions options;
+        options.midiTracks = { pad, lead, bass };
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options);
+        const auto has = [&plan] (int id, fx::ModuleType type, const char* value = nullptr, float expected = 0.0f)
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == id && move.insert == type
+                    && (value == nullptr || (move.values.count (value) > 0 && juce::approximatelyEqual (move.values.at (value), expected))))
+                    return true;
+            return false;
+        };
+        for (const auto& move : plan.moves)
+            if (move.trackId != voice)
+                for (const auto& reason : move.reasons)
+                    std::cout << "        " << move.trackId << ": " << reason << "\n";
+
+        check (has (pad, fx::ModuleType::chorus) && has (pad, fx::ModuleType::width, "widthAmount", 140.0f), "pad: chorus and 140% width");
+        check (has (lead, fx::ModuleType::echo) && has (lead, fx::ModuleType::saturation), "synth lead: echo and drive");
+        check (has (bass, fx::ModuleType::saturation) && has (bass, fx::ModuleType::width, "widthAmount", 0.0f), "synth bass: drive and mono");
+
+        // Audio tracks with the same roles, or colour off: none of it.
+        options.colour = false;
+        const auto plain = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options);
+        bool none = true;
+        for (const auto& move : plain.moves)
+            none = none && move.insert != fx::ModuleType::chorus && ! (move.trackId == lead && move.insert == fx::ModuleType::echo);
+        check (none, "no colour when it's off");
+    }
+
     void testAutoMixRides()
     {
         std::cout << "\nVolume rides (automation)\n";
@@ -3119,6 +3435,14 @@ namespace
                        && std::abs ((double) clip["fileLength"] - (songSeconds + 0.5)) < 0.01
                        && peaks["peaks"].isArray(),
                    "the session shows the warp, both transposes and the rendered length (" + clip["fileLength"].toString() + " s)");
+            check (ok (run ("setClip", args ({ { "id", clipId }, { "stretch", "solo" }, { "formant", true } }))),
+                   "setClip takes a stretch algorithm and formants");
+            const auto chosen = lastSession()["tracks"][0]["clips"][0];
+            check (chosen["stretch"].toString() == "solo" && (bool) chosen["formant"]
+                       && chosen["audioKey"].toString() != clip["audioKey"].toString(),
+                   "the session shows them, and the clip plays another rendered copy");
+            run ("undo");
+            check (lastSession()["tracks"][0]["clips"][0]["stretch"].toString() == "mix", "and they undo");
             run ("undo"); run ("undo"); run ("undo");
             check (! edit.getClip (clipId).hasProperty (daw::ids::warp), "and each undoes");
         }
@@ -3371,7 +3695,7 @@ namespace
             };
 
             auto tags = run ("autoMix", args ({ { "action", "tags" } }));
-            check (roleOf (tags, kick) == "drums" && roleOf (tags, plain).isEmpty() && tags["roles"].getArray()->size() == 9,
+            check (roleOf (tags, kick) == "drums" && roleOf (tags, plain).isEmpty() && tags["roles"].getArray()->size() == 11,
                    "tags: guessed from the names before listening (" + roleOf (tags, kick) + ", '" + roleOf (tags, plain) + "')");
 
             tags = run ("autoMix", args ({ { "action", "tag" }, { "track", plain }, { "role", "background" } }));
@@ -3768,6 +4092,100 @@ namespace
         const auto firstHit = findPeak (nudged, 0.3, 0.8), secondHit = findPeak (nudged, 0.9, 1.4);
         check (std::abs (firstHit - 0.5) < 0.01 && std::abs (secondHit - 1.1) < 0.01,
                "a hit moved from 1.0 s to 1.1 s lands there (" + juce::String (firstHit, 3) + " s, " + juce::String (secondHit, 3) + " s)");
+
+        // Every algorithm: a stretch keeps the length (and the pitch, except varispeed), and
+        // a moved hit lands where its marker says.
+        for (const auto& key : daw::warp::getAlgorithmKeys())
+        {
+            const auto algorithm = daw::warp::algorithmFromKey (key);
+            check (daw::warp::getAlgorithmKey (algorithm) == key, key + ": its key reads back");
+
+            daw::warp::Settings longer;
+            longer.map = Map ({ { 0.0, 0.0 }, { 1.0, 2.0 } });
+            longer.algorithm = algorithm;
+            const auto out = daw::warp::render (sine, sampleRate, longer);
+            const auto pitch = measureFrequency (out, 0.3, 1.7);
+            const auto expected = algorithm == daw::warp::Algorithm::varispeed ? 220.0 : 440.0;
+            const auto level = rms (std::vector<float> (out.getReadPointer (0), out.getReadPointer (0) + out.getNumSamples()),
+                                    (size_t) (0.3 * sampleRate), (size_t) (1.7 * sampleRate));
+            if (algorithm != daw::warp::Algorithm::slice) // slicing leaves the stretched part's end silent
+                check (out.getNumSamples() == (int) (3.0 * sampleRate) && std::abs (pitch - expected) < expected * 0.005 && level > 0.3f,
+                       key + ": stretched 2x, " + juce::String (pitch, 1) + " Hz (expected " + juce::String (expected, 0)
+                           + "), level " + juce::String (level, 2));
+
+            daw::warp::Settings moved;
+            moved.map = Map ({ { 0.5, 0.5 }, { 1.0, 1.1 } });
+            moved.algorithm = algorithm;
+            const auto hitsOut = daw::warp::render (hits, sampleRate, moved);
+            const auto a = findPeak (hitsOut, 0.3, 0.8), b = findPeak (hitsOut, 0.9, 1.4);
+            check (std::abs (a - 0.5) < 0.01 && std::abs (b - 1.1) < 0.01,
+                   key + ": a hit moved to 1.1 s lands there (" + juce::String (a, 3) + " s, " + juce::String (b, 3) + " s)");
+        }
+
+        // Slice and efficient move audio that only slides without touching it.
+        for (const auto algorithm : { daw::warp::Algorithm::slice, daw::warp::Algorithm::efficient })
+        {
+            daw::warp::Settings slideOnly = slide;
+            slideOnly.algorithm = algorithm;
+            const auto out = daw::warp::render (source, sampleRate, slideOnly);
+            double error = 0.0;
+            for (int i = offset + 2048; i < (int) (2.0 * sampleRate); ++i)
+                error = std::max (error, (double) std::abs (out.getSample (1, i) - source.getSample (1, i - offset)));
+            check (error < 1.0e-4, daw::warp::getAlgorithmKey (algorithm) + ": a slide comes through unchanged (worst " + juce::String (error, 6) + ")");
+        }
+
+        // Formants: a buzz through a resonance at 1 kHz, up 5 semitones. Without formants the
+        // resonance moves up with the pitch; with them it stays near 1 kHz.
+        {
+            juce::AudioBuffer<float> buzz (1, (int) (2.0 * sampleRate));
+            fx::Biquad resonance, second;
+            resonance.setup (fx::Biquad::Type::bandPass, sampleRate, 1000.0, 4.0);
+            second.setup (fx::Biquad::Type::bandPass, sampleRate, 1000.0, 4.0);
+            const auto period = sampleRate / 140.0;
+            double phase = 0.0;
+            for (int i = 0; i < buzz.getNumSamples(); ++i)
+            {
+                phase += 1.0;
+                auto x = 0.0f;
+                if (phase >= period) { phase -= period; x = 1.0f; }
+                buzz.setSample (0, i, 2.0f * second.process (0, resonance.process (0, x)));
+            }
+
+            // Where the spectrum's energy sits, 300 Hz..5 kHz.
+            const auto centroid = [&] (const juce::AudioBuffer<float>& audio)
+            {
+                constexpr int order = 15, size = 1 << order;
+                juce::dsp::FFT fft (order);
+                std::vector<float> data ((size_t) size * 2, 0.0f);
+                const auto start = (int) (0.4 * sampleRate);
+                for (int i = 0; i < size && start + i < audio.getNumSamples(); ++i)
+                    data[(size_t) i] = audio.getSample (0, start + i) * (0.5f - 0.5f * (float) std::cos (juce::MathConstants<double>::twoPi * i / size));
+                fft.performFrequencyOnlyForwardTransform (data.data());
+                double sum = 0.0, weighted = 0.0;
+                for (int k = 1; k < size / 2; ++k)
+                    if (const auto f = k * sampleRate / size; f > 300.0 && f < 5000.0)
+                    {
+                        const auto e = (double) data[(size_t) k] * data[(size_t) k];
+                        sum += e;
+                        weighted += e * f;
+                    }
+                return weighted / juce::jmax (1.0e-12, sum);
+            };
+
+            const auto original = centroid (buzz);
+            for (const auto algorithm : { daw::warp::Algorithm::mix, daw::warp::Algorithm::solo })
+            {
+                daw::warp::Settings plain, kept;
+                plain.semitones = kept.semitones = 5.0;
+                plain.algorithm = kept.algorithm = algorithm;
+                kept.formant = true;
+                const auto moved = centroid (daw::warp::render (buzz, sampleRate, plain));
+                const auto stayed = centroid (daw::warp::render (buzz, sampleRate, kept));
+                check (moved > original * 1.15 && std::abs (stayed / original - 1.0) < 0.08,
+                       daw::warp::getAlgorithmKey (algorithm) + ": +5 st moves the resonance to " + juce::String (moved, 0)
+                           + " Hz, with formants kept it stays at " + juce::String (stayed, 0) + " Hz (from " + juce::String (original, 0) + ")");
+            }
+        }
 
         // Speed (for information: use the release build for real numbers).
         {
@@ -4631,6 +5049,37 @@ static void testStems()
     juce::String loadError;
     check (stems::Model::load (bogus, loadError) == nullptr && loadError.isNotEmpty(), "loading a wrong model fails with a message");
 
+    // The GPU model arrives as a zip of the .mlpackage folder: checked, then unpacked in place.
+    {
+        const auto packageName = juce::String (stems::GpuModel::fileName);
+        const auto source = folder.getChildFile ("gpu-source");
+        source.getChildFile (packageName).getChildFile ("Data").createDirectory();
+        source.getChildFile (packageName).getChildFile ("Manifest.json").replaceWithText ("{}");
+        source.getChildFile (packageName).getChildFile ("Data").getChildFile ("weight.bin").replaceWithText ("weights");
+
+        juce::ZipFile::Builder builder;
+        builder.addFile (source.getChildFile (packageName).getChildFile ("Manifest.json"), 9, packageName + "/Manifest.json");
+        builder.addFile (source.getChildFile (packageName).getChildFile ("Data").getChildFile ("weight.bin"), 9, packageName + "/Data/weight.bin");
+        const auto zip = folder.getChildFile ("gpu.zip");
+        {
+            juce::FileOutputStream zipOut (zip);
+            zipOut.setPosition (0);
+            zipOut.truncate();
+            builder.writeToStream (zipOut, nullptr);
+        }
+
+        const auto installed = folder.getChildFile ("gpu-models").getChildFile (packageName);
+        folder.getChildFile ("gpu-models").createDirectory();
+        check (stems::GpuModel::install (zip, installed, juce::SHA256 (zip).toHexString()).isEmpty()
+                   && installed.getChildFile ("Manifest.json").loadFileAsString() == "{}"
+                   && installed.getChildFile ("Data").getChildFile ("weight.bin").loadFileAsString() == "weights",
+               "the GPU model zip unpacks into the .mlpackage folder");
+
+        installed.deleteRecursively();
+        check (stems::GpuModel::install (zip, installed, "0000").isNotEmpty() && ! installed.exists(),
+               "a GPU model zip with the wrong checksum is refused and leaves nothing");
+    }
+
     // DawBridge: the stems land on four tracks under the song, lined up with its clip, and
     // the song's clip is muted. One undo takes it all back.
     {
@@ -4790,6 +5239,9 @@ int main()
     testAutoMixEffects();
     testAutoMixRoles();
     testAutoMixRides();
+    testAutoMixModes();
+    testAutoMixSynths();
+    testAnalysisSpeed();
     testLatency();
     testSmoothing();
     testStems();

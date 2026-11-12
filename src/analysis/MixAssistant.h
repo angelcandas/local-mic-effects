@@ -4,6 +4,7 @@
 #include "dsp/FxModule.h"
 
 #include <map>
+#include <set>
 
 namespace daw { class Edit; }
 
@@ -37,22 +38,26 @@ namespace analysis
 // voice: the lead (or a sung part); backingVocal: background vocals / harmonies;
 // backing: a full instrumental (karaoke track, the band on one track); instrument: any
 // other instrument; other: left as it is.
-enum class Role { voice, backingVocal, backing, guitar, piano, bass, drums, instrument, other };
+// pad: pads and strings (sustained, wide); synth: a synth lead, arp or pluck.
+enum class Role { voice, backingVocal, backing, guitar, piano, pad, synth, bass, drums, instrument, other };
 
-inline constexpr Role allRoles[] = { Role::voice, Role::backingVocal, Role::backing, Role::guitar, Role::piano,
-                                     Role::bass, Role::drums, Role::instrument, Role::other };
+inline constexpr Role allRoles[] = { Role::voice, Role::backingVocal, Role::backing, Role::guitar, Role::piano, Role::pad,
+                                     Role::synth, Role::bass, Role::drums, Role::instrument, Role::other };
 
 const char* getRoleKey (Role);              // "voice", "background", "instrumental", "guitar"... (project files, UI)
 Role getRoleFromKey (const juce::String&);  // other when unknown
 juce::String getRoleName (Role);            // "Voice", "Background vocals"...
 
-// The roles played by one instrument (guitar, piano, bass, drums, other instrument).
+// The roles played by one instrument (guitar, piano, pad, synth, bass, drums, other instrument).
 bool isInstrument (Role) noexcept;
 
-enum class MixStyle { pop, ballad, rock, coaching, hipHop, rnb, acoustic, electronic, jazz, lofi };
+// speech: talking (a podcast, a voice-over, a lesson) over a music bed: the voice clear and
+// dry well over the music, which ducks while you talk; -16 LUFS, the podcast level.
+enum class MixStyle { pop, ballad, rock, coaching, hipHop, rnb, acoustic, electronic, jazz, lofi, speech };
 
 inline constexpr MixStyle allStyles[] = { MixStyle::pop, MixStyle::ballad, MixStyle::rock, MixStyle::coaching, MixStyle::hipHop,
-                                          MixStyle::rnb, MixStyle::acoustic, MixStyle::electronic, MixStyle::jazz, MixStyle::lofi };
+                                          MixStyle::rnb, MixStyle::acoustic, MixStyle::electronic, MixStyle::jazz, MixStyle::lofi,
+                                          MixStyle::speech };
 
 struct MixTargets
 {
@@ -86,9 +91,24 @@ struct MixTargets
     MixStyle style = MixStyle::pop; // set by getTargets (its name goes in the reasons)
 };
 
+// What Auto Mix is asked to do.
+//   mix:   the whole song, every track by its role, and the master (global mixing).
+//   fit:   one track (your voice or instrument) into a backing that's already mixed:
+//          that track gets the full treatment and its level; the others only make room
+//          for it (a dip where they cover it, down while it plays). The master stays.
+//   clean: clean up and polish one track and nothing else: rumble, hum, noise between
+//          phrases, mud, harshness, S's, uneven level. No space, no character, no level.
+enum class MixMode { mix, fit, clean };
+
+const char* getModeKey (MixMode);              // "mix", "fit", "clean"
+MixMode getModeFromKey (const juce::String&);  // mix when unknown
+
 // Which effects Auto Mix may add. Volumes are always planned.
 struct MixOptions
 {
+    MixMode mode = MixMode::mix;
+    int focusTrackId = 0; // the track fit and clean work on (0: the lead voice)
+
     bool eq = true, compressor = true, deEsser = true, reverb = true;
     bool saturation = true, echo = true, exciter = true, width = true; // used when the style asks for them
 
@@ -103,6 +123,12 @@ struct MixOptions
     bool normalize = false;
 
     double tempo = 120.0; // BPM, for the echo's time
+
+    // Colour on MIDI tracks: a synth is dry and narrow as it comes, so each gets the
+    // effect its role is usually played with (a pad chorus and width, a synth lead an
+    // echo and some drive, a synth bass drive and a mono low end, keys some width).
+    bool colour = true;
+    std::set<int> midiTracks; // which tracks are MIDI (by id)
 
     // Insert types each track already has (by track id). A voice that already has a
     // reverb or an echo keeps its own space: Auto Mix doesn't add or change one.
@@ -125,6 +151,10 @@ std::optional<Role> guessRoleFromName (const juce::String& trackName);
 // most of the song; otherwise instrument, or other when it's silent.
 Role guessRole (const juce::String& trackName, const Profile&, double songSeconds);
 
+// A MIDI track's role from its instrument: the built-in synths by id ("builtin:pad"),
+// a plugin by its name ("Bass Station", "Superior Drummer"...). Nothing when it says nothing.
+std::optional<Role> guessRoleFromInstrument (const juce::String& pluginId, const juce::String& pluginName);
+
 //==============================================================================
 struct MixMove
 {
@@ -132,6 +162,7 @@ struct MixMove
     std::optional<fx::ModuleType> insert; // empty: the track's (or master's) "volume", or a change
                                           // to its chain's input gain "inGain" (dB, normalize)
     bool atEnd = false;              // a new insert goes after the track's own effects (reverb)
+    int instance = 0;                // which insert of that type (0: the first; 1: a second one, added if missing)
     std::map<juce::String, float> values; // insert values by ID, or "volume" in dB
     std::vector<std::pair<double, float>> ride; // volume automation (seconds, dB), when not empty (no insert, no values)
     juce::StringArray reasons;       // one line per change, for the UI
@@ -160,7 +191,7 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
 MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float currentMasterVolume);
 
 // Writes the plan into the session as one undo step. Inserts it needs are reused when
-// the track already has one of that type, otherwise added at the start of the chain
+// the track already has one of that type (or that many, for a move's instance), otherwise added at the start of the chain
 // (at the end for a move with atEnd). `amount` 0..1 scales every move from neutral
 // (EQ gains, compression, reverb mix) or from the current volume.
 void applyMix (daw::Edit&, const MixPlan&, float amount = 1.0f);

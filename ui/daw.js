@@ -23,7 +23,7 @@ const SCALE_STEPS = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 1
 // Auto Mix's track roles (the bridge sends the same list with its tags).
 const AUTOMIX_ROLES = [
   { key: "voice", name: "Voice" }, { key: "background", name: "Background vocals" }, { key: "instrumental", name: "Instrumental" },
-  { key: "guitar", name: "Guitar" }, { key: "piano", name: "Piano / keys" }, { key: "bass", name: "Bass" }, { key: "drums", name: "Drums" },
+  { key: "guitar", name: "Guitar" }, { key: "piano", name: "Piano / keys" }, { key: "pad", name: "Pad / strings" }, { key: "synth", name: "Synth lead" }, { key: "bass", name: "Bass" }, { key: "drums", name: "Drums" },
   { key: "instrument", name: "Other instrument" }, { key: "other", name: "Leave as is" },
 ];
 const SIGNATURES = [[2, "2/4"], [3, "3/4"], [4, "4/4"], [5, "5/4"], [6, "6/8"], [7, "7/8"], [9, "9/8"], [12, "12/8"]];
@@ -2563,11 +2563,14 @@ class DawScreen {
     const roles = () => Object.fromEntries([...panel.querySelectorAll(".automix-role select")].map((s) => [s.dataset.track, s.value]));
     const effects = () => Object.fromEntries([...panel.querySelectorAll(".automix-effects input")].map((c) => [c.name, c.checked]));
     this.autoMixEffects = effects;
+    const mode = () => ({ mode: $("[name=mode]").value, focus: Number($("[name=focus]").value) });
+    this.autoMixMode = mode;
+    const planArgs = () => ({ style: style(), roles: roles(), effects: effects(), ...mode() });
 
     $(".automix-close").addEventListener("click", () => this.toggleAutoMix(false));
     $(".automix-analyse").addEventListener("click", () => {
       this.setAutoMixResult("");
-      daw("autoMix", { action: "analyse", style: style(), effects: effects() });
+      daw("autoMix", { action: "analyse", style: style(), effects: effects(), ...mode() });
     });
     $(".automix-reference").addEventListener("click", () => {
       this.setAutoMixResult("");
@@ -2575,12 +2578,18 @@ class DawScreen {
     });
     $(".automix-cancel").addEventListener("click", () => daw("autoMix", { action: "cancel" }));
     $("[name=style]").addEventListener("change", () => {
-      if (this.autoMix.plan?.kind === "mix") this.replanAutoMix({ style: style(), roles: roles(), effects: effects() });
+      if (this.autoMix.plan?.kind === "mix") this.replanAutoMix(planArgs());
     });
+    // Mix the song, fit one track into the backing, or clean one up: the plan follows.
+    for (const name of ["mode", "focus"])
+      $(`[name=${name}]`).addEventListener("change", () => {
+        this.renderAutoMixMode();
+        if (this.autoMix.plan?.kind === "mix") this.replanAutoMix(planArgs());
+      });
     // Which effects it may add: the plan follows at once.
     for (const box of panel.querySelectorAll(".automix-effects input"))
       box.addEventListener("change", () => {
-        if (this.autoMix.plan?.kind === "mix") this.replanAutoMix({ style: style(), roles: roles(), effects: effects() });
+        if (this.autoMix.plan?.kind === "mix") this.replanAutoMix(planArgs());
       });
 
     $(".automix-apply").addEventListener("click", async () => {
@@ -2614,8 +2623,30 @@ class DawScreen {
     this.autoMixPanel.hidden = !show;
     if (show) {
       this.toggleExportPanel(false);
+      this.renderAutoMixMode();
       if (!this.autoMix.plan) this.refreshAutoMixTags(true);
     }
+  }
+
+  // The mode's own line, and the track it works on (fit and clean only), listed from the session.
+  renderAutoMixMode() {
+    const panel = this.autoMixPanel;
+    const mode = panel.querySelector("[name=mode]").value;
+    const focus = panel.querySelector("[name=focus]");
+    const selected = focus.value;
+    focus.replaceChildren(new Option("The lead voice", "0"));
+    for (const track of this.session?.tracks ?? []) focus.append(new Option(track.name, String(track.id)));
+    focus.value = [...focus.options].some((o) => o.value === selected) ? selected : "0";
+
+    panel.querySelector(".automix-focus").hidden = mode === "mix";
+    panel.classList.toggle("is-clean", mode === "clean");
+    const intro = panel.querySelector(".automix-mode-intro");
+    intro.hidden = mode === "mix";
+    intro.textContent = mode === "fit"
+      ? "For a backing that's already mixed: this track gets its EQ, compression, space and level; the others only make room for it (a dip where they cover it, a little lower while it plays). The master stays as it is."
+      : mode === "clean"
+        ? "Cleans up this track only: rumble, mains hum, noise between phrases, mud, harshness, S's and uneven level. No reverb, no level changes, no other tracks."
+        : "";
   }
 
   // Before listening: what each track is, guessed from its name or tagged by you. A tag
@@ -2627,7 +2658,7 @@ class DawScreen {
     const result = await daw("autoMix", { action: "tags" });
     if (!result?.ok || this.autoMix.plan) return;
     this.autoMixRoleNames = result.roles;
-    this.renderAutoMixRoles(result.tracks.map((t) => ({ ...t, detail: t.tagged ? "tagged" : t.role ? "from its name" : "" })), true);
+    this.renderAutoMixRoles(result.tracks.map((t) => ({ ...t, detail: t.tagged ? "tagged" : t.role ? (t.midi ? "from its name or instrument" : "from its name") : "" })), true);
   }
 
   // One row per track with its role. Before listening a pick tags the track; after, it
@@ -2658,7 +2689,7 @@ class DawScreen {
           return;
         }
         const roles = Object.fromEntries([...rolesBox.querySelectorAll("select")].map((s) => [s.dataset.track, s.value]));
-        this.replanAutoMix({ style: panel.querySelector("[name=style]").value, roles, effects: this.autoMixEffects() });
+        this.replanAutoMix({ style: panel.querySelector("[name=style]").value, roles, effects: this.autoMixEffects(), ...this.autoMixMode() });
       });
       row.append(name, select);
       rolesBox.append(row);
@@ -2809,6 +2840,12 @@ class DawScreen {
     Object.assign(this.autoMix, { plan: event, applied: false, after: true });
     this.setAutoMixResult("");
     if (event.style) panel.querySelector("[name=style]").value = event.style;
+    if (event.mode) {
+      panel.querySelector("[name=mode]").value = event.mode;
+      this.renderAutoMixMode();
+      const focus = panel.querySelector("[name=focus]");
+      if ([...focus.options].some((o) => o.value === String(event.focus ?? 0))) focus.value = String(event.focus ?? 0);
+    }
     for (const [name, on] of Object.entries(event.effects ?? {})) {
       const box = panel.querySelector(`.automix-effects [name=${name}]`);
       if (box) box.checked = Boolean(on);
@@ -2834,7 +2871,12 @@ class DawScreen {
       card.append(head, list);
       planBox.append(card);
     }
-    if (event.kind === "mix" && event.moves.length > 0)
+    if (event.kind === "mix" && event.mode === "clean") {
+      // No levels to sum up: it only cleaned one track.
+    } else if (event.kind === "mix" && event.mode === "fit" && event.moves.length > 0)
+      planBox.append(html("div", "automix-summary",
+        `${event.voiceOverBackingLu !== 0 ? `Voice ${event.voiceOverBackingLu >= 0 ? "+" : ""}${event.voiceOverBackingLu.toFixed(1)} LU over the backing · ` : ""}mix about ${event.mixLufs.toFixed(1)} LUFS, master unchanged`));
+    else if (event.kind === "mix" && event.moves.length > 0)
       planBox.append(html("div", "automix-summary",
         `Voice ${event.voiceOverBackingLu >= 0 ? "+" : ""}${event.voiceOverBackingLu.toFixed(1)} LU over the backing · mix about ${event.mixLufs.toFixed(1)} LUFS`));
     else if (event.kind === "reference" && event.mixLufs > -150)

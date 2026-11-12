@@ -161,20 +161,24 @@
         <strong>Auto Mix</strong>
         <button class="mini automix-close" title="Close" aria-label="Close">×</button>
       </div>
-      <p class="automix-intro">Tag what's on each track (voice, background vocals, drums, bass...), then Auto Mix listens and adds the effects each one needs (EQ, compressor, de-esser, reverb and more), sets the levels and writes volume rides. One undo takes it all back.</p>
+      <p class="automix-intro">Tag what's on each track (voice, background vocals, drums, bass...), then Auto Mix listens and adds the effects each one needs (EQ, compressor, de-esser, reverb and more), sets the levels and writes volume rides. Nothing plays while it listens: it measures every track offline, many times faster than real time, and listening again only measures the tracks you changed. One undo takes it all back.</p>
       <div class="export-options">
-        <label>Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="hiphop">Hip-hop</option><option value="rnb">R&amp;B</option><option value="acoustic">Acoustic</option><option value="electronic">Electronic</option><option value="jazz">Jazz</option><option value="lofi">Lo-fi</option><option value="coaching">Coaching (voice up front)</option></select></label>
+        <label title="What Auto Mix works on">Mode <select class="dropdown" name="mode"><option value="mix">Mix the whole song</option><option value="fit">Fit one track into the backing</option><option value="clean">Clean &amp; polish one track</option></select></label>
+        <label class="automix-focus" hidden title="The track to fit in or clean up">Track <select class="dropdown" name="focus"><option value="0">The lead voice</option></select></label>
+        <p class="automix-mode-intro" hidden></p>
+        <label>Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="hiphop">Hip-hop</option><option value="rnb">R&amp;B</option><option value="acoustic">Acoustic</option><option value="electronic">Electronic</option><option value="jazz">Jazz</option><option value="lofi">Lo-fi</option><option value="coaching">Coaching (voice up front)</option><option value="speech">Speech / podcast (music bed)</option></select></label>
         <div class="automix-effects" role="group" aria-label="Effects Auto Mix may add">
           <span>May add</span>
           <label class="check"><input type="checkbox" name="eq" checked> EQ</label>
           <label class="check"><input type="checkbox" name="compressor" checked> Compressor</label>
           <label class="check"><input type="checkbox" name="deEsser" checked> De-esser</label>
-          <label class="check"><input type="checkbox" name="reverb" checked> Reverb</label>
-          <label class="check" title="Tempo-synced echo on the lead, when the style uses one"><input type="checkbox" name="echo" checked> Echo</label>
-          <label class="check" title="Warmth or grit on the voice (and the bass), when the style uses it"><input type="checkbox" name="saturation" checked> Saturation</label>
-          <label class="check" title="Air on the voice, when the style uses it"><input type="checkbox" name="exciter" checked> Exciter</label>
-          <label class="check" title="Wider (or narrower) instruments and background vocals, when the style uses it"><input type="checkbox" name="width" checked> Width</label>
-          <label class="check" title="Automation: evens out your phrases, and dips the instruments while you sing (back up between lines)"><input type="checkbox" name="rides" checked> Volume rides</label>
+          <label class="check" data-mix-only><input type="checkbox" name="reverb" checked> Reverb</label>
+          <label class="check" data-mix-only title="Tempo-synced echo on the lead, when the style uses one"><input type="checkbox" name="echo" checked> Echo</label>
+          <label class="check" data-mix-only title="Warmth or grit on the voice (and the bass), when the style uses it"><input type="checkbox" name="saturation" checked> Saturation</label>
+          <label class="check" data-mix-only title="Air on the voice, when the style uses it"><input type="checkbox" name="exciter" checked> Exciter</label>
+          <label class="check" data-mix-only title="Wider (or narrower) instruments and background vocals, when the style uses it"><input type="checkbox" name="width" checked> Width</label>
+          <label class="check" data-mix-only title="Automation: evens out your phrases, and dips the instruments while you sing (back up between lines)"><input type="checkbox" name="rides" checked> Volume rides</label>
+          <label class="check" data-mix-only title="MIDI tracks: chorus and width on pads, echo and drive on synth leads, drive and a mono low end on synth bass, width on keys"><input type="checkbox" name="colour" checked> Colour on synths</label>
         </div>
         <div class="automix-effects" role="group" aria-label="Before mixing">
           <span>First</span>

@@ -4,6 +4,16 @@
 // warped copy of the take and the recording stays as it was (see src/daw/Warp.h).
 import { html } from "./widgets.js";
 
+// How clips are stretched and transposed (see src/daw/Warp.h), best use first.
+export const ALGORITHMS = [
+  ["mix", "Mix", "Full mixes, chords, pads and loops: keeps harmonies clean"],
+  ["solo", "Solo", "Voices and solo instruments: smooth glides and consonants"],
+  ["drums", "Drums", "Drums, plucked and percussive parts: keeps hits sharp"],
+  ["efficient", "Efficient", "Quick edits and background parts: much less work, a little rougher"],
+  ["slice", "Slice", "No stretching: cuts at the markers and moves the pieces (gaps stay silent)"],
+  ["varispeed", "Varispeed", "Like tape: time and pitch change together"],
+];
+
 const STEPS = [[1, "1/4 (beats)"], [0.5, "1/8"], [1 / 3, "1/8 triplets"], [0.25, "1/16"], ["bar", "Bars"]];
 
 // Warp maps as the session sends them: [[source, target], ...] in seconds.
@@ -71,7 +81,32 @@ export function createRhythmPanel(screen, track, clip, ui) {
     (v, first) => daw("setTrack", { id: track.id, transpose: v, continue: !first }));
   const updateClip = clip ? transposeKnobs("Clip key", clip.transpose,
     (v, first) => daw("setClip", { id: clip.id, transpose: v, continue: !first })) : null;
-  sections.append(section("transpose", "Transpose", true, knobs));
+  // Algorithm and formants: for the selected clip, or every audio clip on the track.
+  const audioClips = () => (clip ? [clip] : track.clips.filter((c) => !c.midi));
+  const algorithm = html("select", "dropdown");
+  algorithm.title = "How the audio is stretched and transposed";
+  for (const [key, name, about] of ALGORITHMS) {
+    const option = new Option(name, key);
+    option.title = about;
+    algorithm.append(option);
+  }
+  algorithm.addEventListener("change", () => {
+    audioClips().forEach((c, i) => daw("setClip", { id: c.id, stretch: algorithm.value, continue: i > 0 }));
+    algorithmInfo.textContent = ALGORITHMS.find(([key]) => key === algorithm.value)?.[2] ?? "";
+  });
+  const algorithmInfo = html("p", "panel-caption");
+
+  const formant = html("label", "rhythm-check");
+  const formantBox = html("input");
+  formantBox.type = "checkbox";
+  formantBox.addEventListener("change", () =>
+    audioClips().forEach((c, i) => daw("setClip", { id: c.id, formant: formantBox.checked, continue: i > 0 })));
+  formant.append(formantBox, document.createTextNode(" Keep formants"));
+  formant.title = "Transpose a voice without the chipmunk or giant sound: its character stays where it was";
+
+  const algorithmRow = html("div", "panel-actions");
+  algorithmRow.append(algorithm, formant);
+  sections.append(section("transpose", "Transpose", true, knobs, algorithmRow, algorithmInfo));
 
   // Quantize.
   const grid = html("select", "dropdown");
@@ -141,6 +176,17 @@ export function createRhythmPanel(screen, track, clip, ui) {
 
   const update = (t, c) => {
     updateTrack(t.transpose);
+    const shown = c ? [c] : t.clips.filter((x) => !x.midi);
+    const keys = [...new Set(shown.map((x) => x.stretch ?? "mix"))];
+    algorithm.value = keys.length === 1 ? keys[0] : "mix";
+    algorithm.disabled = formantBox.disabled = !shown.length;
+    algorithmInfo.textContent = keys.length > 1 ? "Clips on this track use different algorithms: picking one sets them all."
+                                                : ALGORITHMS.find(([key]) => key === algorithm.value)?.[2] ?? "";
+    formantBox.checked = shown.length > 0 && shown.every((x) => x.formant);
+    formantBox.indeterminate = shown.some((x) => x.formant) && !formantBox.checked;
+    formant.title = algorithm.value === "efficient" ? "Efficient doesn't keep formants: pick Mix, Solo or Drums for that"
+                                                    : "Transpose a voice without the chipmunk or giant sound: its character stays where it was";
+    formantBox.disabled = formantBox.disabled || algorithm.value === "efficient";
     if (c && updateClip) updateClip(c.transpose);
     const count = c?.warp?.length ?? 0;
     warpInfo.textContent = c ? (count ? `Clip warped: ${count} markers. Warp tool (W): drag in a clip to stretch, double-click a marker to remove it.`
