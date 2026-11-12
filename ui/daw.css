@@ -2204,3 +2204,6 @@ body.is-daw .library-hint { display: none; }
 .strip-toggles { flex-wrap: nowrap; gap: 2px; }
 .strip .strip-toggles .tt { min-width: 19px; padding: 0 2px; }
 .strip .strip-toggles .tt-monitor { min-width: 22px; padding: 0 2px; font-size: 9.5px; }
+
+/* ---------- Selection: a box drawn on empty lane space ---------- */
+.select-box { position: absolute; z-index: 6; border: 1px solid var(--accent); border-radius: 3px; background: color-mix(in srgb, var(--accent) 12%, transparent); pointer-events: none; }
