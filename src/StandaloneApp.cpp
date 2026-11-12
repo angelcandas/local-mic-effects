@@ -693,6 +693,14 @@ namespace
                 }
                 else if (action (item).startsWith ("app:"))
                     entry.isEnabled = true;
+                else if (isDaw && (action (item) == "undo" || action (item) == "redo"))
+                {
+                    // Names the step, as the toolbar's buttons do: "Undo Move clip".
+                    const auto step = action (item) == "undo" ? editor->getUndoName() : editor->getRedoName();
+                    entry.isEnabled = step.isNotEmpty();
+                    if (step.isNotEmpty())
+                        entry.text = juce::String (item.name) + " " + step;
+                }
 
                 menu.addItem (std::move (entry));
             }
