@@ -7,6 +7,7 @@
 #include "dsp/PitchDetector.h"
 #include "Key.h"
 
+#include <algorithm>
 #include <array>
 #include <functional>
 #include <map>
@@ -58,6 +59,14 @@ struct Profile
     float integratedLufs = -200.0f;   // gated, over the whole signal (-200 = silence)
     float shortTermMaxLufs = -200.0f; // loudest 3 s
     float peakDb = -200.0f;           // sample peak, dBFS
+
+    // Mains hum, measured where nothing plays (or in the quietest hops when it never
+    // stops): 50 or 60 Hz, 0 when there's none. Per harmonic (1x to 4x the mains),
+    // how far that line stands over the spectrum around it, in dB.
+    static constexpr int humHarmonics = 4;
+    float humHz = 0.0f;
+    std::array<float, humHarmonics> humHarmonicsDb {};
+    float getHumProminenceDb() const noexcept { return *std::max_element (humHarmonicsDb.begin(), humHarmonicsDb.end()); }
 
     int getNumFrames() const noexcept { return (int) rmsDb.size(); }
     double getActiveSeconds() const;
@@ -126,6 +135,9 @@ private:
     int historyPos = 0;
     std::vector<float> window, fftData;
     double windowPower = 0.0;    // sum of squared window values
+
+    // Per hop, per mains frequency (50, 60 Hz) and harmonic: line over its surroundings, dB.
+    std::vector<std::array<std::array<float, Profile::humHarmonics>, 2>> humLines;
 };
 
 // A whole buffer at once.

@@ -311,6 +311,40 @@ void Analyser::endHop()
     Chroma chroma {};
     computeChroma (fftData.data(), fftSize, profile.sampleRate, chroma);
     profile.chroma.push_back (chroma);
+
+    // Hum: the strongest bin near each mains harmonic against the mean of the bins 4 to
+    // 7 away on both sides (outside the window's main lobe). It only counts when its
+    // peak sits on the harmonic (within 1%, or 1.5 Hz): a note close by isn't hum.
+    std::array<std::array<float, Profile::humHarmonics>, 2> lines {};
+    for (int m = 0; m < 2; ++m)
+        for (int h = 0; h < Profile::humHarmonics; ++h)
+        {
+            const auto target = (m == 0 ? 50.0 : 60.0) * (h + 1);
+            const auto centre = (int) std::lround (target / binWidth);
+            int peakBin = centre;
+            for (int k = centre - 2; k <= centre + 2; ++k)
+                if (k >= 1 && fftData[(size_t) k] > fftData[(size_t) peakBin])
+                    peakBin = k;
+            if (std::abs (peakBin - centre) >= 2 || peakBin < 2)
+                continue; // the peak is something else's
+
+            const auto level = [this] (int k) { return std::log (juce::jmax (1.0e-12, juce::square ((double) fftData[(size_t) k]))); };
+            const auto a = level (peakBin - 1), b = level (peakBin), c = level (peakBin + 1);
+            const auto denominator = a - 2.0 * b + c;
+            const auto offset = std::abs (denominator) > 1.0e-9 ? juce::jlimit (-0.5, 0.5, 0.5 * (a - c) / denominator) : 0.0;
+            if (std::abs ((peakBin + offset) * binWidth - target) > juce::jmax (1.5, 0.01 * target))
+                continue;
+
+            double line = juce::square ((double) fftData[(size_t) peakBin]), around = 0.0;
+            int count = 0;
+            for (int offset = 4; offset <= 7; ++offset)
+                for (int k : { centre - offset, centre + offset })
+                    if (k >= 1)
+                        around += juce::square ((double) fftData[(size_t) k]), ++count;
+            around = count > 0 ? around / count : 0.0;
+            lines[(size_t) m][(size_t) h] = line > 1.0e-20 && around > 1.0e-20 ? (float) (10.0 * std::log10 (line / around)) : 0.0f;
+        }
+    humLines.push_back (lines);
 }
 
 Profile Analyser::finish()
@@ -385,6 +419,42 @@ Profile Analyser::finish()
         result.active.resize (result.rmsDb.size());
         for (size_t i = 0; i < result.rmsDb.size(); ++i)
             result.active[i] = result.rmsDb[i] > threshold;
+    }
+
+    // Hum: averaged over the hops where nothing plays (a sung note's harmonics can sit
+    // on 100 or 150 Hz), or the quietest fifth of a signal that never stops. A line
+    // 10 dB over its surroundings counts; the mains with the stronger lines wins.
+    {
+        std::vector<size_t> quiet;
+        for (size_t i = 0; i < result.active.size(); ++i)
+            if (! result.active[i] && result.rmsDb[i] > -100.0f)
+                quiet.push_back (i);
+
+        if (quiet.size() < 10 && result.rmsDb.size() >= 20)
+        {
+            std::vector<size_t> order (result.rmsDb.size());
+            std::iota (order.begin(), order.end(), (size_t) 0);
+            std::sort (order.begin(), order.end(), [&] (size_t a, size_t b) { return result.rmsDb[a] < result.rmsDb[b]; });
+            quiet.assign (order.begin(), order.begin() + (long) (order.size() / 5));
+            quiet.erase (std::remove_if (quiet.begin(), quiet.end(), [&] (size_t i) { return result.rmsDb[i] <= -100.0f; }), quiet.end());
+        }
+
+        if (quiet.size() >= 5)
+        {
+            std::array<std::array<float, Profile::humHarmonics>, 2> mean {};
+            for (auto i : quiet)
+                for (int m = 0; m < 2; ++m)
+                    for (int h = 0; h < Profile::humHarmonics; ++h)
+                        mean[(size_t) m][(size_t) h] += humLines[i][(size_t) m][(size_t) h] / (float) quiet.size();
+
+            const auto strength = [] (const auto& lines) { float sum = 0.0f; for (auto db : lines) sum += juce::jmax (0.0f, db - 10.0f); return sum; };
+            const auto best = strength (mean[1]) > strength (mean[0]) ? 1 : 0;
+            if (strength (mean[(size_t) best]) > 0.0f)
+            {
+                result.humHz = best == 0 ? 50.0f : 60.0f;
+                result.humHarmonicsDb = mean[(size_t) best];
+            }
+        }
     }
 
     return result;
@@ -610,7 +680,7 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress, ProfileCache* c
     const auto keyOf = [this] (const juce::ValueTree& session)
     {
         juce::String key;
-        key << "v1|" << sampleRate << "|" << songSeconds << "|" << (int) point << "|";
+        key << "v2|" << sampleRate << "|" << songSeconds << "|" << (int) point << "|";
         for (const auto& track : session)
             for (const auto& clip : track)
                 if (clip.hasType (daw::ids::CLIP) && clip.hasProperty (daw::ids::file))

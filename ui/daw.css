@@ -797,6 +797,9 @@ body.is-daw .chip--live { display: none; }
 .automix-move ul { margin: 0; padding-left: 16px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .automix-summary { color: var(--text); font-size: 12px; }
 .automix-note { color: var(--warn); font-size: 12px; }
+.automix-focus[hidden], .automix-mode-intro[hidden] { display: none; }
+.automix-mode-intro { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
+.automix-panel.is-clean [data-mix-only] { display: none; }
 .automix-amount { display: flex; align-items: center; gap: 10px; margin: 10px 0 4px; color: var(--muted); }
 .automix-amount[hidden] { display: none; }
 .automix-amount input { flex: 1; accent-color: var(--accent); }

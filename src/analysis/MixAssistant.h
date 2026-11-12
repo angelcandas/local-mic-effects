@@ -86,9 +86,24 @@ struct MixTargets
     MixStyle style = MixStyle::pop; // set by getTargets (its name goes in the reasons)
 };
 
+// What Auto Mix is asked to do.
+//   mix:   the whole song, every track by its role, and the master (global mixing).
+//   fit:   one track (your voice or instrument) into a backing that's already mixed:
+//          that track gets the full treatment and its level; the others only make room
+//          for it (a dip where they cover it, down while it plays). The master stays.
+//   clean: clean up and polish one track and nothing else: rumble, hum, noise between
+//          phrases, mud, harshness, S's, uneven level. No space, no character, no level.
+enum class MixMode { mix, fit, clean };
+
+const char* getModeKey (MixMode);              // "mix", "fit", "clean"
+MixMode getModeFromKey (const juce::String&);  // mix when unknown
+
 // Which effects Auto Mix may add. Volumes are always planned.
 struct MixOptions
 {
+    MixMode mode = MixMode::mix;
+    int focusTrackId = 0; // the track fit and clean work on (0: the lead voice)
+
     bool eq = true, compressor = true, deEsser = true, reverb = true;
     bool saturation = true, echo = true, exciter = true, width = true; // used when the style asks for them
 
@@ -132,6 +147,7 @@ struct MixMove
     std::optional<fx::ModuleType> insert; // empty: the track's (or master's) "volume", or a change
                                           // to its chain's input gain "inGain" (dB, normalize)
     bool atEnd = false;              // a new insert goes after the track's own effects (reverb)
+    int instance = 0;                // which insert of that type (0: the first; 1: a second one, added if missing)
     std::map<juce::String, float> values; // insert values by ID, or "volume" in dB
     std::vector<std::pair<double, float>> ride; // volume automation (seconds, dB), when not empty (no insert, no values)
     juce::StringArray reasons;       // one line per change, for the UI
@@ -160,7 +176,7 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
 MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float currentMasterVolume);
 
 // Writes the plan into the session as one undo step. Inserts it needs are reused when
-// the track already has one of that type, otherwise added at the start of the chain
+// the track already has one of that type (or that many, for a move's instance), otherwise added at the start of the chain
 // (at the end for a move with atEnd). `amount` 0..1 scales every move from neutral
 // (EQ gains, compression, reverb mix) or from the current volume.
 void applyMix (daw::Edit&, const MixPlan&, float amount = 1.0f);
