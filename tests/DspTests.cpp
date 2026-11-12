@@ -877,14 +877,14 @@ namespace
         // Only what it's allowed to add.
         analysis::MixOptions eqOnly;
         eqOnly.compressor = eqOnly.deEsser = eqOnly.reverb = false;
-        eqOnly.saturation = eqOnly.echo = eqOnly.exciter = eqOnly.width = false;
+        eqOnly.saturation = eqOnly.echo = eqOnly.exciter = eqOnly.width = eqOnly.dynamicEq = eqOnly.transients = false;
         const auto limited = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, eqOnly);
         bool onlyEq = true;
         for (const auto& move : limited.moves)
             onlyEq = onlyEq && (! move.insert.has_value() || *move.insert == fx::ModuleType::paraEq);
         analysis::MixOptions none;
         none.eq = none.compressor = none.deEsser = none.reverb = false;
-        none.saturation = none.echo = none.exciter = none.width = false;
+        none.saturation = none.echo = none.exciter = none.width = none.dynamicEq = none.transients = false;
         const auto volumesOnly = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, none);
         bool onlyVolumes = ! volumesOnly.moves.empty();
         for (const auto& move : volumesOnly.moves)
@@ -1609,6 +1609,147 @@ namespace
         for (const auto& move : analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options).moves)
             insert = insert || (move.trackId == voice && move.insert == fx::ModuleType::reverb);
         check (insert, "shared reverb off: a reverb insert on the voice");
+    }
+
+    void testDynamics()
+    {
+        std::cout << "\nTransient shaper and dynamic EQ\n";
+        const juce::dsp::ProcessSpec spec { sampleRate, 512, 2 };
+
+        // Drum-like hits: a 200 Hz tone that starts at once and decays over ~150 ms, every 0.5 s.
+        juce::AudioBuffer<float> hits (2, (int) (2.0 * sampleRate));
+        for (int i = 0; i < hits.getNumSamples(); ++i)
+        {
+            const auto t = std::fmod (i / sampleRate, 0.5);
+            const auto v = (float) (0.5 * std::exp (-t / 0.05) * std::sin (juce::MathConstants<double>::twoPi * 200.0 * t));
+            hits.setSample (0, i, v);
+            hits.setSample (1, i, v);
+        }
+        const auto shape = [&] (float attack, float sustain)
+        {
+            fx::modules::Transient shaper;
+            shaper.findValue ("tsOn")->store (1.0f);
+            shaper.findValue ("tsAttack")->store (attack);
+            shaper.findValue ("tsSustain")->store (sustain);
+            shaper.prepare (spec);
+            auto buffer = hits;
+            for (int start = 0; start < buffer.getNumSamples(); start += 512)
+            {
+                juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 2, (size_t) start,
+                                                    (size_t) juce::jmin (512, buffer.getNumSamples() - start));
+                shaper.process (fx::Module::Context (block));
+            }
+            // The second hit (from 0.5 s): its first 5 ms, and 100-150 ms in.
+            const auto at = [&] (double from, double to)
+            {
+                return buffer.getMagnitude (0, (int) ((0.5 + from) * sampleRate), (int) ((to - from) * sampleRate))
+                     / hits.getMagnitude (0, (int) ((0.5 + from) * sampleRate), (int) ((to - from) * sampleRate));
+            };
+            return std::pair { at (0.0, 0.005), at (0.1, 0.15) };
+        };
+        const auto snap = shape (100.0f, 0.0f), soft = shape (-100.0f, 0.0f), ring = shape (0.0f, 100.0f), flat = shape (0.0f, 0.0f);
+        std::cout << "        onset x" << snap.first << " / x" << soft.first << ", tail x" << ring.second << "\n";
+        check (snap.first > 1.4f && soft.first < 0.8f, "transient shaper: attack + makes each hit's start louder, - softer");
+        check (ring.second > 1.25f, "transient shaper: sustain + brings up the ring after the hit");
+        check (std::abs (flat.first - 1.0f) < 0.01f && std::abs (flat.second - 1.0f) < 0.01f, "transient shaper at 0/0 leaves the sound as it is");
+
+        // Dynamic EQ: cuts a loud 3 kHz tone by its range, leaves a quiet one and other bands.
+        const auto through = [&] (float hz, float amplitude)
+        {
+            fx::modules::DynamicEq eq;
+            eq.findValue ("deqOn")->store (1.0f);
+            eq.findValue ("deqFreq")->store (3000.0f);
+            eq.findValue ("deqThreshold")->store (-30.0f);
+            eq.findValue ("deqRange")->store (6.0f);
+            eq.prepare (spec);
+            juce::AudioBuffer<float> buffer (2, (int) sampleRate);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+                for (int ch = 0; ch < 2; ++ch)
+                    buffer.setSample (ch, i, amplitude * (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / sampleRate));
+            for (int start = 0; start < buffer.getNumSamples(); start += 512)
+            {
+                juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 2, (size_t) start,
+                                                    (size_t) juce::jmin (512, buffer.getNumSamples() - start));
+                eq.process (fx::Module::Context (block));
+            }
+            const auto n = (int) (0.2 * sampleRate);
+            return juce::Decibels::gainToDecibels (buffer.getRMSLevel (0, buffer.getNumSamples() - n, n) / (amplitude / std::sqrt (2.0f)));
+        };
+        const auto loud = through (3000.0f, 0.3f), quiet = through (3000.0f, 0.003f), other = through (300.0f, 0.3f);
+        std::cout << "        loud 3 kHz " << loud << " dB, quiet " << quiet << " dB, 300 Hz " << other << " dB\n";
+        check (std::abs (loud + 6.0f) < 0.7f, "dynamic EQ: a loud tone in its band is cut by the range (6 dB)");
+        check (std::abs (quiet) < 0.3f && std::abs (other) < 1.0f, "dynamic EQ: a quiet tone, and other bands, pass as they are");
+
+        // Auto Mix: a voice with piercing 3 kHz on some notes gets a dynamic EQ; rock drums a
+        // transient shaper with more attack, ballad drums softer hits.
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-dynamics");
+        folder.createDirectory();
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto file = folder.getChildFile (name + ".wav");
+            writeWav (file, audio, sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, file, 0.0, 12.0);
+            return id;
+        };
+        auto harsh = makeSungLine (12.0, 3.0, 1.5);
+        for (int i = 0; i < harsh.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            if (std::fmod (t, 3.0) > 1.5 || std::fmod (t, 0.75) > 0.25)
+                continue; // a piercing note now and then
+            const auto level = harsh.getSample (0, i) != 0.0f ? 0.06f : 0.0f;
+            for (int ch = 0; ch < 2; ++ch)
+                harsh.addSample (ch, i, level * (float) std::sin (juce::MathConstants<double>::twoPi * 3150.0 * t));
+        }
+        const auto voice = add ("Vocal", harsh);
+        const auto drums = add ("Drums", makeTones ({ { 12.0, 80.0, 0.2f, 0.2f } }));
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { drums, analysis::Role::drums } };
+        const std::map<int, float> volumes { { voice, 0.0f }, { drums, 0.0f } };
+
+        const auto find = [] (const analysis::MixPlan& plan, int track, fx::ModuleType type) -> const analysis::MixMove*
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == track && move.insert == type)
+                    return &move;
+            return nullptr;
+        };
+        const auto rock = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::rock);
+        const auto* dyn = find (rock, voice, fx::ModuleType::dynamicEq);
+        if (dyn != nullptr)
+            std::cout << "        " << dyn->reasons[0] << "\n";
+        check (dyn != nullptr && std::abs (dyn->values.at ("deqFreq") - 3150.0f) < 700.0f,
+               "Auto Mix: the voice's piercing notes get a dynamic EQ near 3 kHz");
+        const auto* snapMove = find (rock, drums, fx::ModuleType::transient);
+        const auto* softMove = find (analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad), drums, fx::ModuleType::transient);
+        check (snapMove != nullptr && snapMove->values.at ("tsAttack") > 0.0f && softMove != nullptr && softMove->values.at ("tsAttack") < 0.0f,
+               "Auto Mix: rock drums get more attack, ballad drums softer hits");
+
+        analysis::MixOptions off;
+        off.dynamicEq = off.transients = false;
+        const auto plain = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::rock, off);
+        check (find (plain, voice, fx::ModuleType::dynamicEq) == nullptr && find (plain, drums, fx::ModuleType::transient) == nullptr,
+               "switched off: no dynamic EQ, no transient shaper");
+
+        // A steady voice (no piercing notes) gets none.
+        daw::Edit steadyEdit;
+        const auto steadyFile = folder.getChildFile ("steady.wav");
+        writeWav (steadyFile, makeSungLine (12.0, 3.0, 1.5), sampleRate);
+        const auto steady = (int) steadyEdit.addTrack ("Vocal")[daw::ids::id];
+        steadyEdit.addClip (steady, steadyFile, 0.0, 12.0);
+        const auto steadySource = analysis::SessionAnalyser (steadyEdit, analysis::SessionAnalyser::Point::source, false).run();
+        check (find (analysis::planMix (steadySource, { { steady, analysis::Role::voice } }, { { steady, 0.0f } }, 0.0f, analysis::MixStyle::rock),
+                     steady, fx::ModuleType::dynamicEq) == nullptr,
+               "a steady voice gets no dynamic EQ");
+
+        analysis::applyMix (edit, rock);
+        bool applied = false;
+        for (const auto& insert : daw::Edit::getInserts (edit.getTrack (drums)))
+            applied = applied || insert[daw::ids::type].toString() == "transient";
+        check (applied, "applied: the drums have a transient shaper insert");
+        folder.deleteRecursively();
     }
 
     void testEffectAutomation()
@@ -5712,6 +5853,7 @@ int main()
     testAutoMixSynths();
     testAutoMixMaster();
     testAutoMixSends();
+    testDynamics();
     testEffectAutomation();
     testAnalysisSpeed();
     testLatency();

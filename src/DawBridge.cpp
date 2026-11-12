@@ -1423,6 +1423,8 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("colour", autoMixOptions.colour);
     read ("sends", autoMixOptions.sends);
     read ("throws", autoMixOptions.throws);
+    read ("dynamicEq", autoMixOptions.dynamicEq);
+    read ("transients", autoMixOptions.transients);
     read ("split", autoMixSplit);
 }
 
@@ -1505,6 +1507,13 @@ juce::var DawBridge::describeAutoMix() const
                    : *move.insert == fx::ModuleType::exciter    ? "Exciter"
                    : *move.insert == fx::ModuleType::echo       ? "Echo"
                    : *move.insert == fx::ModuleType::width      ? "Stereo width"
+                   : *move.insert == fx::ModuleType::transient  ? "Transient shaper"
+                   : *move.insert == fx::ModuleType::dynamicEq  ? "Dynamic EQ"
+                   : *move.insert == fx::ModuleType::masterEq   ? "Mastering EQ"
+                   : *move.insert == fx::ModuleType::multiband  ? "Multiband compressor"
+                   : *move.insert == fx::ModuleType::imager     ? "Stereo imager"
+                   : *move.insert == fx::ModuleType::limiter    ? "Limiter"
+                   : *move.insert == fx::ModuleType::loudness   ? "Loudness meter"
                                                                 : juce::String (fx::getModuleKey (*move.insert));
 
         juce::Array<juce::var> reasons;
@@ -1522,6 +1531,7 @@ juce::var DawBridge::describeAutoMix() const
                                    { "saturation", autoMixOptions.saturation }, { "echo", autoMixOptions.echo },
                                    { "exciter", autoMixOptions.exciter }, { "width", autoMixOptions.width },
                                    { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour }, { "sends", autoMixOptions.sends }, { "throws", autoMixOptions.throws },
+                                   { "dynamicEq", autoMixOptions.dynamicEq }, { "transients", autoMixOptions.transients },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },

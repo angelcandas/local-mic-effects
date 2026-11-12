@@ -476,10 +476,69 @@ namespace
         return roundTo (juce::jlimit ((double) daw::Edit::minSendDb, 0.0, 20.0 * std::log10 (m / (100.0 - m))), 0.5);
     }
 
+    // See MixOptions::dynamicEq. The band's level is compared with the voice's body
+    // (300 Hz - 1.5 kHz) in the same analysis window, only where a note is held (the body
+    // within 20 dB of the loud notes), not breaths or the edges of words.
+    void planDynamicEq (MixMove& move, const Profile& voice, bool background)
+    {
+        std::vector<float> body (voice.bandsDb.size(), -200.0f);
+        std::vector<float> held;
+        for (size_t i = 0; i < voice.bandsDb.size(); ++i)
+            if (voice.active[i])
+            {
+                double p = 0.0;
+                for (int b = findBand (300.0); b <= findBand (1500.0); ++b)
+                    p += dbToPower (voice.bandsDb[i][(size_t) b]);
+                body[i] = (float) powerToDb (p);
+                held.push_back (body[i]);
+            }
+        if (held.size() < 20)
+            return;
+        const auto floorDb = percentile (held, 0.9) - 20.0f;
+
+        int best = -1;
+        float bestSpread = 0.0f, bestThreshold = 0.0f;
+
+        for (int b = findBand (2000.0); b <= findBand (5000.0); ++b)
+        {
+            std::vector<float> relative, level;
+            for (size_t i = 0; i < voice.bandsDb.size(); ++i)
+                if (voice.active[i] && body[i] > floorDb && voice.bandsDb[i][(size_t) b] > body[i] - 80.0f)
+                {
+                    relative.push_back (voice.bandsDb[i][(size_t) b] - body[i]);
+                    level.push_back (body[i]);
+                }
+
+            if (relative.size() < 20)
+                continue;
+
+            // Harsh notes come near the body's level; a band that stays far under it
+            // (nothing much there, only its leakage moving) isn't harsh.
+            const auto spread = percentile (relative, 0.9) - percentile (relative, 0.5);
+            if (spread > bestSpread && percentile (relative, 0.9) > -20.0f)
+            {
+                best = b;
+                bestSpread = spread;
+                // Where the band sits on a typical loud note, plus 3 dB: harsh notes go over it.
+                bestThreshold = percentile (level, background ? 0.6 : 0.75) + percentile (relative, 0.5) + 3.0f;
+            }
+        }
+
+        if (best < 0 || bestSpread < 10.0f)
+            return;
+
+        const auto range = juce::jlimit (3.0f, 9.0f, roundTo (bestSpread - 2.0f, 0.5));
+        move.insert = fx::ModuleType::dynamicEq;
+        move.values = { { "deqOn", 1.0f }, { "deqFreq", (float) roundTo (getBandCentre (best), 10.0) }, { "deqQ", 2.0f },
+                        { "deqThreshold", juce::jlimit (-70.0f, 0.0f, roundTo (bestThreshold, 1.0)) }, { "deqRange", range } };
+        move.reasons.add ("Dynamic EQ at " + formatHz (getBandCentre (best)) + ", up to -" + juce::String (range, 1)
+                          + " dB: that band jumps out by " + formatDb (bestSpread) + " on the harshest notes, so it's cut only there");
+    }
+
     //==========================================================================
     struct VoicePlan
     {
-        MixMove eq, compressor, deEsser, saturation, exciter, echo, reverb, width, ride;
+        MixMove eq, dynEq, compressor, deEsser, saturation, exciter, echo, reverb, width, ride;
         double eqChange = 0.0;       // what the EQ does to its loudness
         double loudnessChange = 0.0; // what the EQ and compressor do to its loudness
         double peakChange = 0.0;     // roughly, to the peak
@@ -489,7 +548,7 @@ namespace
                          const juce::String& name, bool background = false)
     {
         VoicePlan plan;
-        for (auto* move : { &plan.eq, &plan.compressor, &plan.deEsser, &plan.saturation, &plan.exciter, &plan.echo, &plan.reverb, &plan.width })
+        for (auto* move : { &plan.eq, &plan.dynEq, &plan.compressor, &plan.deEsser, &plan.saturation, &plan.exciter, &plan.echo, &plan.reverb, &plan.width })
             move->trackId = trackId;
         plan.eq.insert = fx::ModuleType::paraEq;
         plan.compressor.insert = fx::ModuleType::compressor;
@@ -652,6 +711,12 @@ namespace
                                           + ": the S's stand out by " + formatDb (excess));
             }
         }
+
+        // Dynamic EQ on the harsh band (2-5 kHz) when it jumps out on some notes only: how
+        // far the band sits over the hop's level swings by 10 dB or more between a typical
+        // note and the harshest ones. The bell cuts above a typical note's level there.
+        if (options.dynamicEq)
+            planDynamicEq (plan.dynEq, voice, background);
 
         // Compressor from how much the level swings between phrases.
         double compChange = 0.0;
@@ -972,7 +1037,7 @@ namespace
             auto cleanOptions = options;
             cleanOptions.reverb = cleanOptions.echo = cleanOptions.exciter = cleanOptions.saturation = cleanOptions.width = false;
             auto vp = planVoice (id, profile, targets, cleanOptions, plan.notes, name, role == Role::backingVocal);
-            for (auto* move : { &vp.eq, &vp.deEsser, &vp.compressor })
+            for (auto* move : { &vp.eq, &vp.dynEq, &vp.deEsser, &vp.compressor })
                 if (! move->values.empty())
                     plan.moves.push_back (*move);
             firstEq = ! vp.eq.values.empty();
@@ -1056,16 +1121,17 @@ MixTargets getTargets (MixStyle style)
         case MixStyle::pop:
             t = { 1.5f, 2.0f, 0.0f, -14.0f, 12.0f, 45.0f, 6.0f };
             t.voiceSaturationDb = 3.0f; t.exciterAmount = 20.0f; t.echoMix = 10.0f; t.echoBeats = 0.5f; t.widthAmount = 115.0f;
+            t.drumAttack = 20.0f;
             break;
         case MixStyle::ballad:
             t = { 2.5f, 0.0f, 1.5f, -14.0f, 20.0f, 65.0f, 7.0f };
             t.exciterAmount = 10.0f; t.echoMix = 12.0f; t.echoBeats = 1.0f; t.echoFeedback = 30.0f; t.widthAmount = 110.0f;
-            t.rideRangeDb = 5.0f; t.duckDb = 2.0f;
+            t.rideRangeDb = 5.0f; t.duckDb = 2.0f; t.drumAttack = -15.0f; t.drumSustain = 10.0f;
             break;
         case MixStyle::rock:
             t = { 0.0f, 1.0f, -1.0f, -14.0f, 9.0f, 35.0f, 5.0f };
             t.voiceSaturationDb = 6.0f; t.bassSaturationDb = 6.0f; t.widthAmount = 120.0f; t.duckDb = 1.0f;
-            t.drumsLufs = -19.0f; t.guitarLufs = -21.0f;
+            t.drumsLufs = -19.0f; t.guitarLufs = -21.0f; t.drumAttack = 30.0f; t.drumSustain = -10.0f;
             break;
         case MixStyle::coaching: // the voice up front and dry, so every detail of it can be heard
             t = { 4.0f, 1.5f, 0.0f, -14.0f, 0.0f, 50.0f, 9.0f };
@@ -1075,31 +1141,33 @@ MixTargets getTargets (MixStyle style)
             t = { 2.5f, 2.5f, 0.5f, -13.0f, 6.0f, 30.0f, 6.0f };
             t.voiceSaturationDb = 4.0f; t.bassSaturationDb = 4.0f; t.exciterAmount = 25.0f;
             t.echoMix = 8.0f; t.echoBeats = 0.5f; t.echoFeedback = 20.0f; t.widthAmount = 110.0f;
-            t.drumsLufs = -19.0f; t.bassLufs = -19.5f; t.duckDb = 2.0f;
+            t.drumsLufs = -19.0f; t.bassLufs = -19.5f; t.duckDb = 2.0f; t.drumAttack = 35.0f; t.drumSustain = -15.0f;
             break;
         case MixStyle::rnb:
             t = { 2.0f, 1.5f, 1.5f, -14.0f, 16.0f, 55.0f, 6.0f };
             t.voiceSaturationDb = 2.0f; t.exciterAmount = 20.0f; t.echoMix = 12.0f; t.echoBeats = 0.75f; t.echoFeedback = 30.0f;
-            t.widthAmount = 120.0f; t.bassLufs = -20.0f;
+            t.widthAmount = 120.0f; t.bassLufs = -20.0f; t.drumAttack = 15.0f;
             break;
         case MixStyle::acoustic:
             t = { 2.0f, 0.5f, 1.0f, -16.0f, 14.0f, 50.0f, 7.0f };
             t.widthAmount = 110.0f; t.guitarLufs = -20.0f; t.pianoLufs = -21.0f; t.drumsLufs = -23.0f;
+            t.drumAttack = -10.0f; t.drumSustain = 10.0f;
             break;
         case MixStyle::electronic:
             t = { 1.0f, 2.5f, -0.5f, -12.0f, 14.0f, 60.0f, 5.0f };
             t.voiceSaturationDb = 3.0f; t.bassSaturationDb = 3.0f; t.exciterAmount = 30.0f;
             t.echoMix = 15.0f; t.echoBeats = 0.75f; t.echoFeedback = 35.0f; t.widthAmount = 140.0f;
-            t.drumsLufs = -19.0f; t.bassLufs = -20.0f; t.duckDb = 2.0f;
+            t.drumsLufs = -19.0f; t.bassLufs = -20.0f; t.duckDb = 2.0f; t.drumAttack = 30.0f; t.drumSustain = -10.0f;
             break;
         case MixStyle::jazz:
             t = { 1.0f, 0.0f, 1.0f, -18.0f, 18.0f, 55.0f, 8.0f };
             t.voiceSaturationDb = 2.0f; t.pianoLufs = -21.0f; t.drumsLufs = -23.0f; t.rideRangeDb = 3.0f; t.duckDb = 1.0f;
+            t.drumAttack = -20.0f; t.drumSustain = 15.0f;
             break;
         case MixStyle::lofi:
             t = { 0.5f, -2.0f, 2.0f, -14.0f, 15.0f, 45.0f, 6.0f };
             t.voiceSaturationDb = 8.0f; t.bassSaturationDb = 5.0f; t.echoMix = 10.0f; t.echoBeats = 0.5f; t.echoFeedback = 30.0f;
-            t.widthAmount = 90.0f; t.rideRangeDb = 3.0f; t.duckDb = 1.0f;
+            t.widthAmount = 90.0f; t.rideRangeDb = 3.0f; t.duckDb = 1.0f; t.drumAttack = -25.0f;
             break;
         case MixStyle::speech: // every word clear, the music a bed under it that dips while you talk
             t = { 10.0f, 2.0f, 1.0f, -16.0f, 0.0f, 30.0f, 6.0f };
@@ -1699,6 +1767,20 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             }
         }
 
+        // Snap (or softer hits) on the drums, as the style asks.
+        if (options.transients && role == Role::drums && ! makeRoomOnly
+            && (std::abs (targets.drumAttack) > 0.0f || std::abs (targets.drumSustain) > 0.0f))
+        {
+            MixMove shaper;
+            shaper.trackId = id;
+            shaper.insert = fx::ModuleType::transient;
+            shaper.values = { { "tsOn", 1.0f }, { "tsAttack", targets.drumAttack }, { "tsSustain", targets.drumSustain } };
+            shaper.reasons.add ("Transient shaper, attack " + juce::String (targets.drumAttack, 0) + "%, sustain "
+                                + juce::String (targets.drumSustain, 0) + "%: "
+                                + (targets.drumAttack > 0.0f ? "more snap on each hit" : "softer hits") + " for " + getStyleName (style));
+            plan.moves.push_back (shaper);
+        }
+
         finalLoudness[id] += eqChange;
 
         // A dip while the lead sings, up between lines (not bass and drums: the groove
@@ -1760,7 +1842,7 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
 
     for (const auto& [id, vp] : voicePlans)
     {
-        for (auto* move : { &vp.eq, &vp.compressor, &vp.deEsser, &vp.saturation, &vp.exciter, &vp.echo, &vp.reverb, &vp.width, &vp.ride })
+        for (auto* move : { &vp.eq, &vp.dynEq, &vp.compressor, &vp.deEsser, &vp.saturation, &vp.exciter, &vp.echo, &vp.reverb, &vp.width, &vp.ride })
             if (! move->values.empty() || ! move->ride.empty())
                 plan.moves.push_back (*move);
     }

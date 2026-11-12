@@ -246,4 +246,15 @@ Parameters::Parameters (Layout& l)
     number (l, "compAttack", "Comp Attack", 0.5f, 100.0f, 0.1f, 10.0f, "ms", 10.0f);
     number (l, "compRelease", "Comp Release", 10.0f, 1000.0f, 1.0f, 120.0f, "ms", 120.0f);
     decibels (l, "compMakeup", "Comp Makeup", 0.0f, 24.0f, 0.0f);
+
+    // Transient shaper and dynamic EQ (Dynamics.h), added after those.
+    toggle (l, "tsOn", "Transient Shaper On");
+    number (l, "tsAttack", "Transient Attack", -100.0f, 100.0f, 1.0f, 0.0f, "%");
+    number (l, "tsSustain", "Transient Sustain", -100.0f, 100.0f, 1.0f, 0.0f, "%");
+
+    toggle (l, "deqOn", "Dynamic EQ On");
+    hertz (l, "deqFreq", "Dynamic EQ Freq", 40.0f, 16000.0f, 3000.0f, 1000.0f);
+    number (l, "deqQ", "Dynamic EQ Q", 0.3f, 10.0f, 0.01f, 2.0f, "", 2.0f);
+    decibels (l, "deqThreshold", "Dynamic EQ Threshold", -70.0f, 0.0f, -30.0f);
+    decibels (l, "deqRange", "Dynamic EQ Range", 0.0f, 18.0f, 6.0f);
 }
