@@ -182,6 +182,27 @@ namespace
         return points;
     }
 
+    // A track's effect automation for the page: [{ insert, type, value, points: [[seconds, value]...] }].
+    juce::var describeAutomation (const juce::ValueTree& track)
+    {
+        juce::Array<juce::var> lanes;
+        for (const auto& insert : daw::Edit::getInserts (track))
+            for (const auto& [valueId, points] : daw::Edit::getInsertAutomation (insert))
+            {
+                juce::Array<juce::var> list;
+                for (const auto& point : points)
+                    list.add (juce::Array<juce::var> { point.time, point.value });
+                auto* lane = new juce::DynamicObject();
+                lane->setProperty ("insert", (int) insert[ids::id]);
+                lane->setProperty ("type", insert[ids::type].toString());
+                lane->setProperty ("value", valueId);
+                lane->setProperty ("base", insert.getProperty (juce::Identifier (valueId), 0.0f));
+                lane->setProperty ("points", list);
+                lanes.add (juce::var (lane));
+            }
+        return lanes;
+    }
+
     // A track's sends for the page: [{ target (return id), level (dB, -inf when off), pre }].
     juce::var describeSends (const juce::ValueTree& track)
     {
@@ -413,7 +434,7 @@ juce::var DawBridge::describeSession()
                               { "inGain", number (track, ids::inGain) }, { "outGain", number (track, ids::outGain) },
                               { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
-                              { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) },
+                              { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) }, { "automation", describeAutomation (track) },
                               { "link", daw::Edit::getLink (track) },
                               { "inserts", describeInserts (track) }, { "clips", clips },
                               { "output", daw::Edit::getTrackOutput (track) }, { "sends", describeSends (track) },
@@ -1402,6 +1423,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("rides", autoMixOptions.rides);
     read ("colour", autoMixOptions.colour);
     read ("sends", autoMixOptions.sends);
+    read ("throws", autoMixOptions.throws);
     read ("split", autoMixSplit);
 }
 
@@ -1500,7 +1522,7 @@ juce::var DawBridge::describeAutoMix() const
                                    { "deEsser", autoMixOptions.deEsser }, { "reverb", autoMixOptions.reverb },
                                    { "saturation", autoMixOptions.saturation }, { "echo", autoMixOptions.echo },
                                    { "exciter", autoMixOptions.exciter }, { "width", autoMixOptions.width },
-                                   { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour }, { "sends", autoMixOptions.sends },
+                                   { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour }, { "sends", autoMixOptions.sends }, { "throws", autoMixOptions.throws },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
@@ -1904,6 +1926,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
             if (args.hasProperty ("transpose")) edit.setTrackTranspose (id, args["transpose"]);
             if (arg (args, "clearRide", false)) edit.setVolumeRide (id, {});
+            if (arg (args, "clearAutomation", false)) edit.clearTrackAutomation (id);
             if (args.hasProperty ("inGain"))  edit.setChainGain (id, false, args["inGain"]);
             if (args.hasProperty ("outGain")) edit.setChainGain (id, true, args["outGain"]);
         }

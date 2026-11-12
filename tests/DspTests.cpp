@@ -1591,6 +1591,80 @@ namespace
         check (insert, "shared reverb off: a reverb insert on the voice");
     }
 
+    void testEffectAutomation()
+    {
+        std::cout << "\nEffect automation\n";
+
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-automation");
+        folder.createDirectory();
+
+        // The Edit: lanes per value, in time order, straight lines, holds; one undo step.
+        const auto tone = (int) edit.addTrack ("Tone")[daw::ids::id];
+        const auto eq = (int) edit.addInsert (tone, fx::ModuleType::paraEq)[daw::ids::id];
+        edit.setInsertValue (eq, "peqLowFreq", 1000.0f);
+        edit.getUndoManager().beginNewTransaction();
+        edit.setInsertAutomation (eq, "peqLowGain", { { 3.0, -12.0f }, { 0.0, 0.0f }, { 2.0, 0.0f } });
+        edit.setInsertAutomation (eq, "nonsense", { { 0.0, 1.0f } });
+        const auto lanes = daw::Edit::getInsertAutomation (edit.getInsert (eq));
+        check (lanes.size() == 1 && lanes.at ("peqLowGain").size() == 3
+                   && juce::approximatelyEqual (daw::Edit::getAutomationValueAt (lanes.at ("peqLowGain"), 2.5), -6.0f)
+                   && juce::approximatelyEqual (daw::Edit::getAutomationValueAt (lanes.at ("peqLowGain"), 9.0), -12.0f),
+               "automation: one lane (unknown values refused), sorted, straight lines, holds");
+        edit.getUndoManager().undo();
+        check (! edit.getInsert (eq).hasProperty (daw::ids::automation), "automation: one undo step");
+        edit.setInsertAutomation (eq, "peqLowGain", { { 0.0, 0.0f }, { 2.0, 0.0f }, { 2.1, -12.0f } });
+
+        // The engine plays it (offline, like an export).
+        const auto toneFile = folder.getChildFile ("tone.wav");
+        writeWav (toneFile, makeTones ({ { 4.0, 100.0, 0.3f, 0.3f } }), sampleRate);
+        edit.addClip (tone, toneFile, 0.0, 4.0);
+        {
+            const auto played = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+            const auto& rms = played.tracks.front().second.rmsDb;
+            const auto drop = rms[10] - rms[30];
+            check (std::abs (drop - 12.0f) < 1.5f, "the engine plays the automation (" + juce::String (drop, 1) + " dB down after 2 s)");
+        }
+
+        edit.clearTrackAutomation (tone);
+        check (! edit.getInsert (eq).hasProperty (daw::ids::automation), "clear the track's automation");
+
+        // Auto Mix: echo throws at the end of each phrase on the lead.
+        const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav");
+        writeWav (voiceFile, makeSungLine (15.0, 3.0, 1.5), sampleRate);
+        writeWav (backingFile, makeBacking (15.0), sampleRate);
+        const auto voice = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Backing")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 15.0);
+        edit.addClip (backing, backingFile, 0.0, 15.0);
+        edit.removeTrack (tone);
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { backing, analysis::Role::backing } };
+        const std::map<int, float> volumes { { voice, 0.0f }, { backing, 0.0f } };
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::electronic);
+        const analysis::MixMove* echo = nullptr;
+        for (const auto& move : plan.moves)
+            if (move.insert == fx::ModuleType::echo && move.trackId == voice)
+                echo = &move;
+        check (echo != nullptr && echo->automation.count ("delayMix") > 0 && echo->automation.at ("delayMix").size() >= 1 + 4 * 4,
+               "echo throws planned on the lead's phrase ends");
+        if (echo != nullptr)
+            for (const auto& reason : echo->reasons) std::cout << "        " << reason << "\n";
+
+        analysis::applyMix (edit, plan);
+        bool written = false;
+        for (const auto& insert : daw::Edit::getInserts (edit.getTrack (voice)))
+            written = written || daw::Edit::getInsertAutomation (insert).count ("delayMix") > 0;
+        check (written, "applied: the echo's mix is automated");
+
+        analysis::MixOptions noThrows;
+        noThrows.throws = false;
+        bool none = true;
+        for (const auto& move : analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::electronic, noThrows).moves)
+            none = none && move.automation.empty();
+        check (none, "no throws when they're off");
+    }
+
     void testAutoMixRides()
     {
         std::cout << "\nVolume rides (automation)\n";
@@ -5738,6 +5812,7 @@ int main()
     testAutoMixSynths();
     testAutoMixMaster();
     testAutoMixSends();
+    testEffectAutomation();
     testAnalysisSpeed();
     testLatency();
     testSmoothing();
