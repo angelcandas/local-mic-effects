@@ -3648,6 +3648,7 @@ namespace
             const auto warped = lastSession();
             const auto clip = warped["tracks"][0]["clips"][0];
             const auto peaks = run ("peaks", args ({ { "clip", clipId } }));
+            std::cout << "  (diag) warp json: " << juce::JSON::toString (clip["warp"], true) << " isArray=" << (int) clip["warp"].isArray() << " size=" << clip["warp"].size() << "\n";
             check (clip["warp"].size() == 2 && std::abs ((double) clip["transpose"] - 3.0) < 1e-9
                        && std::abs ((double) warped["tracks"][0]["transpose"] + 1.5) < 1e-9
                        && clip["audioKey"].toString().contains ("#")

@@ -412,7 +412,12 @@ juce::var DawBridge::describeSession()
 
             juce::Array<juce::var> markers;
             for (const auto& m : daw::Edit::getShownWarp (clip))
-                markers.add (juce::Array<juce::var> { m.source, m.target });
+            {
+                juce::Array<juce::var> pair;
+                pair.add (m.source);
+                pair.add (m.target);
+                markers.add (juce::var (pair));
+            }
 
             // Typed explicitly: the page does arithmetic on these, and text ("0.0") breaks it.
             clips.add (object ({ { "id", (int) clip[ids::id] }, { "name", clip[ids::name].toString() }, { "file", file.getFullPathName() },
