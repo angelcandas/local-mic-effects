@@ -1411,14 +1411,12 @@ class DawScreen {
     this.showLoop(session.loop);
     this.renderMarkers();
 
-    this.meters.clear();
     const scroll = this.arrange.scrollLeft;
     this.oldWaves = new Map();
     if (this.zooming)
       for (const canvas of this.rows.querySelectorAll("canvas.clip-wave"))
         if (canvas.clip && canvas.drawn) this.oldWaves.set(canvas.clip.id, canvas);
-    this.rows.replaceChildren(...session.tracks.flatMap((track, index) =>
-      [this.createTrackRow(track, index), ...this.takes.createRows(track, trackColour(track, index))]));
+    this.updateTrackRows(force);
     this.renderReturnRows();
     this.renderMasterRow();
     this.emptyHint.hidden = session.tracks.some((track) => track.clips.length > 0);
@@ -1428,6 +1426,43 @@ class DawScreen {
     this.movePlayhead();
     this.revealPending();
     this.oldWaves = null;
+  }
+
+  // Updates the track rows to the session in place, matched by track id: a row is only
+  // built again when something update() can't change has changed (its clips, colour,
+  // input, kind...). A view change (zoom, height, tempo, tool) or `force` rebuilds all.
+  updateTrackRows(force) {
+    const session = this.session;
+    const viewKey = JSON.stringify([this.zoom, this.rowHeight, session.tempo, session.tempoMap, session.beatsPerBar, this.snap, this.tool, session.inputs]);
+    const rebuild = force || viewKey !== this.rowsViewKey;
+    this.rowsViewKey = viewKey;
+    const existing = new Map(rebuild ? [] : [...this.rows.querySelectorAll(":scope > .track-row")].map((row) => [row.dataset.track, row]));
+    const trackRows = session.tracks.map((track, index) => {
+      const key = this.trackRowKey(track);
+      let row = existing.get(String(track.id));
+      if (row?.key === key) {
+        row.update(track);
+      } else {
+        row = this.createTrackRow(track, index);
+        row.key = key;
+      }
+      // Its take lanes follow it (built again only when the takes or the comp change).
+      const takesKey = JSON.stringify([track.takes, track.takesShown, track.listenTake, this.takes.version,
+                                       track.clips.filter((c) => c.take >= 0).map((c) => [c.take, c.start, c.length, c.fadeIn, c.fadeOut])]);
+      if (row.takesKey !== takesKey) {
+        row.takesKey = takesKey;
+        row.takeRows = this.takes.createRows(track, trackColour(track, index));
+      }
+      return row;
+    });
+    const rows = trackRows.flatMap((row) => [row, ...row.takeRows]);
+    // Move only rows that are out of place: rows left in the document keep their focus.
+    rows.forEach((row, i) => {
+      if (this.rows.children[i] !== row) this.rows.insertBefore(row, this.rows.children[i] ?? null);
+    });
+    while (this.rows.children.length > rows.length) this.rows.lastElementChild.remove();
+    this.meters.clear();
+    for (const row of trackRows) this.meters.set(row.track.id, row.meter);
   }
 
   renderRuler(width) {
@@ -1457,13 +1492,22 @@ class DawScreen {
     this.loopShade.style.left = `${HEAD_WIDTH + loop.start * this.zoom}px`;
   }
 
+  // Everything a track row draws apart from what update() can change in place: when
+  // this differs, the row is built again. Volume, pan, the switches, the name and the
+  // selection are left out, so moving a fader or selecting a track keeps the row (and
+  // its focus, hover and the control under the mouse).
+  trackRowKey(track) {
+    const { volume, pan, mute, solo, arm, monitor, name, inserts, ...rest } = track;
+    const links = track.link ? this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name) : null;
+    return JSON.stringify([rest, inserts.length, links]); // the colour comes from the id, not the index
+  }
+
   createTrackRow(track, index) {
     const row = html("div", "track-row");
     row.dataset.track = track.id;
+    row.track = track; // the latest session's copy, see update below
     row.style.setProperty("--track-color", trackColour(track, index));
-    row.classList.toggle("is-selected", this.selectedTrack === track.id);
-    row.classList.toggle("is-muted", track.mute);
-    row.classList.toggle("is-armed", track.arm);
+    const current = () => row.track;
 
     const head = html("div", "track-head");
     head.addEventListener("pointerdown", (event) => {
@@ -1474,18 +1518,19 @@ class DawScreen {
       if (event.target.closest("input")) return;
       event.preventDefault();
       this.select(track.id, null);
-      this.openTrackMenu(track, event.clientX, event.clientY);
+      this.openTrackMenu(current(), event.clientX, event.clientY);
     });
 
     const name = html("input", "track-name");
     Object.assign(name, { value: track.name, spellcheck: false, title: "Rename the track" });
-    name.addEventListener("change", () => daw("setTrack", { id: track.id, name: name.value.trim() || track.name }));
+    name.addEventListener("change", () => daw("setTrack", { id: track.id, name: name.value.trim() || current().name }));
     name.addEventListener("keydown", (event) => { if (event.key === "Enter") name.blur(); });
 
     const toggles = html("div", "track-toggles");
+    const switches = {};
     const toggle = (key, text, title) => {
-      const b = button(`tt tt-${key}`, text, title, (event) => this.toggleTrackKey(track, key, !track[key], event));
-      b.setAttribute("aria-pressed", String(Boolean(track[key])));
+      const b = button(`tt tt-${key}`, text, title, (event) => this.toggleTrackKey(current(), key, !current()[key], event));
+      switches[key] = b;
       return b;
     };
     const isMidi = track.kind === "midi";
@@ -1505,12 +1550,13 @@ class DawScreen {
     }
 
     const meter = new Level(false, track.id);
-    this.meters.set(track.id, meter);
+    row.meter = meter;
 
     const fx = button("fx-count", track.inserts.length ? `${track.inserts.length} fx` : "+ fx", "Effects on this track", () => this.select(track.id, null));
     const remove = button("mini is-danger track-remove", "×", "Delete the track", async () => {
-      await daw("removeTrack", { id: track.id });
-      if (track.clips.length > 0) toast(`Deleted "${track.name}". Ctrl+Z brings it back.`);
+      const gone = current();
+      await daw("removeTrack", { id: gone.id });
+      if (gone.clips.length > 0) toast(`Deleted "${gone.name}". Ctrl+Z brings it back.`);
     });
 
     const send = (key) => (value, first) => daw("setTrack", { id: track.id, [key]: value, continue: !first });
@@ -1520,7 +1566,6 @@ class DawScreen {
                               fromPosition: (p) => (Math.abs(p - 0.5) < 0.01 ? 0 : Math.round((p * 2 - 1) * 100) / 100),
                               format: panText, title: "Pan", bipolar: true, onChange: send("pan") });
     pan.element.classList.add("is-pan");
-
     const top = html("div", "track-head-top");
     const duplicate = button("mini track-duplicate", "⧉", "Duplicate the track with its clips and effects (Ctrl+Shift+D)", () => this.duplicateTrack(track.id));
     top.append(html("span", "track-swatch"), name, duplicate, remove);
@@ -1562,7 +1607,7 @@ class DawScreen {
         const box = lane.getBoundingClientRect();
         const time = (event.clientX - box.left) / this.zoom;
         const map = this.tempoMap, bars = this.beatsPerBar;
-        this.addMidiClip(track, map.toSeconds(Math.floor(map.toBeats(time) / bars + 1e-6) * bars));
+        this.addMidiClip(current(), map.toSeconds(Math.floor(map.toBeats(time) / bars + 1e-6) * bars));
       });
     }
 
@@ -1571,8 +1616,25 @@ class DawScreen {
     for (const automation of track.automation ?? []) lane.append(this.createAutomation(automation));
 
     row.append(head, lane);
+
+    // Brings the row up to date with a newer copy of the same track, without rebuilding it.
+    row.update = (latest) => {
+      row.track = latest;
+      row.classList.toggle("is-selected", this.selectedTrack === latest.id);
+      row.classList.toggle("is-muted", Boolean(latest.mute));
+      row.classList.toggle("is-armed", Boolean(latest.arm));
+      for (const [key, b] of Object.entries(switches)) b.setAttribute("aria-pressed", String(Boolean(latest[key])));
+      if (document.activeElement !== name) name.value = latest.name;
+      volume.update(latest.volume);
+      pan.update(latest.pan);
+      for (const clip of lane.querySelectorAll(":scope > .clip"))
+        clip.classList.toggle("is-selected", String(this.selectedClip) === clip.dataset.clip);
+    };
+    row.update(track);
     return row;
   }
+
+
 
   // A track's volume ride (automation), drawn over its clips: the middle is 0 dB, the
   // top and bottom ±12 dB. It holds its last value after the last point.

@@ -14,20 +14,21 @@ namespace fx
 // The effects a chain can hold, in the order Live mode runs them.
 enum class ModuleType
 {
-    highPass, gate, pitch, eq, paraEq, compressor, deEsser, exciter, saturation, radio, bitcrusher,
+    highPass, denoise, gate, pitch, eq, paraEq, compressor, deEsser, exciter, saturation, radio, bitcrusher,
     robot, filter, autoWah, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, width,
-    multiband, limiter, masterEq, imager, loudness // mastering (see Mastering.h)
+    multiband, limiter, masterEq, imager, loudness, // mastering (see Mastering.h)
+    transient, dynamicEq
 };
 
-inline constexpr int numModuleTypes = (int) ModuleType::loudness + 1;
+inline constexpr int numModuleTypes = (int) ModuleType::dynamicEq + 1;
 
 // A stable name for each type, for project files, parameter IDs and the UI.
 inline const char* getModuleKey (ModuleType type)
 {
     static constexpr const char* keys[] = {
-        "highPass", "gate", "pitch", "eq", "paraEq", "compressor", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
+        "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "compressor", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
         "robot", "filter", "autoWah", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "width",
-        "multiband", "limiter", "masterEq", "imager", "loudness"
+        "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq"
     };
     static_assert (std::size (keys) == numModuleTypes);
     return keys[(size_t) type];
@@ -112,6 +113,12 @@ public:
     // Extra live readings for the UI (gain reduction, loudness...), added to the module's
     // meter object. Message thread.
     virtual void addReadings (juce::DynamicObject&) {}
+
+    // Called on a new module, before prepare(), with the module of the same type it
+    // replaces (a DAW track's chain is rebuilt when its inserts change), to carry over
+    // what it has learnt that isn't a value, such as the denoiser's noise profile. The
+    // previous module may still be running. Message thread.
+    virtual void carryStateFrom (const Module&) {}
 
     //==============================================================================
     // Metering, for the UI's live pictures. Peak levels (linear) going into and out of
