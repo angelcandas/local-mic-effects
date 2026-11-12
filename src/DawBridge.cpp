@@ -908,12 +908,33 @@ juce::var DawBridge::handleStems (const juce::var& args)
         auto& result = job->result;
         stems::Separator separator;
 
-        // The GPU first, when its converted model is there (scripts/export_htdemucs_coreml.py).
-        if (const auto gpuModel = stems::GpuModel::getDefaultFile(); stems::GpuModel::isBuiltIn() && gpuModel.isDirectory())
+        // The GPU first, where Core ML is built in: its converted model downloads once, like the CPU one.
+        if (const auto gpuModel = stems::GpuModel::getDefaultFile(); stems::GpuModel::isBuiltIn())
         {
-            job->phase = StemJob::loading;
             juce::String problem;
-            separator = stems::GpuModel::load (gpuModel, problem);
+
+            if (! gpuModel.isDirectory())
+            {
+                job->phase = StemJob::downloading;
+                problem = stems::GpuModel::download (gpuModel, progress);
+
+                if (job->cancel.load())
+                {
+                    result.cancelled = true;
+                    job->finished = true;
+                    return;
+                }
+
+                if (problem.isNotEmpty())
+                    problem = "couldn't get it: " + problem;
+            }
+
+            if (problem.isEmpty())
+            {
+                job->phase = StemJob::loading;
+                job->progress = 0.0;
+                separator = stems::GpuModel::load (gpuModel, problem);
+            }
 
             if (separator != nullptr)
                 job->gpu = true;
