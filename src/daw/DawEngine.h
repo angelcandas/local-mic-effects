@@ -281,6 +281,7 @@ private:
     struct Bus
     {
         std::shared_ptr<Strip> strip;
+        std::vector<Send> sends; // group tracks only: into the plain returns, which come later
         Delay delay; // lines its output up with the slowest return (after its inserts)
     };
 

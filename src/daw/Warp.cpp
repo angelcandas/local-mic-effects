@@ -159,6 +159,8 @@ juce::String Settings::getKey() const
         key << "|formant";
     if (linked.size() > 1)
         key << "|linked " << juce::String::toHexString (linked.joinIntoString ("\n").hashCode64());
+    if (hasNoteEdits())
+        key << "|notes " << juce::String::toHexString (analysis::pitch::toString (notes).hashCode64());
     return key;
 }
 
@@ -223,6 +225,68 @@ namespace
         return result;
     }
 
+    // How the pitch moves over the output: the read-back's speed at each moment (the pitch
+    // ratio) and where it has got to in the stretched copy. Steady for a plain transpose;
+    // following the note edits otherwise, on a grid of `step` output samples.
+    struct Path
+    {
+        double ratio = 1.0;          // steady
+        int step = 64;
+        std::vector<double> position; // stretched-copy sample at output sample j * step (when it varies)
+        std::vector<float> ratios, formants;
+        double highest = 1.0;
+
+        bool varies() const noexcept { return ! position.empty(); }
+
+        double stretchedAt (double out) const noexcept
+        {
+            if (! varies())
+                return out * ratio;
+            const auto g = out / step;
+            if (g <= 0.0)
+                return out * ratios.front();
+            const auto i = (size_t) g;
+            if (i + 1 >= position.size())
+                return position.back() + (out - (double) (position.size() - 1) * step) * ratios.back();
+            return position[i] + (g - (double) i) * (position[i + 1] - position[i]);
+        }
+
+        double outAt (double stretched) const noexcept
+        {
+            if (! varies())
+                return stretched / ratio;
+            if (stretched <= 0.0)
+                return stretched / ratios.front();
+            if (stretched >= position.back())
+                return (double) (position.size() - 1) * step + (stretched - position.back()) / ratios.back();
+            const auto next = (size_t) (std::upper_bound (position.begin(), position.end(), stretched) - position.begin());
+            const auto a = position[next - 1], b = position[next];
+            return ((double) (next - 1) + (b > a ? (stretched - a) / (b - a) : 0.0)) * step;
+        }
+
+        float ratioAt (double out) const noexcept { return varies() ? ratios[(size_t) juce::jlimit (0, (int) ratios.size() - 1, (int) std::lround (out / step))] : (float) ratio; }
+        float formantAt (double out) const noexcept { return varies() ? formants[(size_t) juce::jlimit (0, (int) formants.size() - 1, (int) std::lround (out / step))] : 1.0f; }
+    };
+
+    juce::AudioBuffer<float> readBack (juce::AudioBuffer<float>& stretched, double sampleRate, const Path& path, int outLength)
+    {
+        if (! path.varies())
+            return readBack (stretched, sampleRate, path.ratio, outLength);
+
+        if (path.highest > 1.0)
+            lowPass (stretched, sampleRate, 0.45 * sampleRate / path.highest);
+
+        juce::AudioBuffer<float> result (stretched.getNumChannels(), outLength);
+        for (int ch = 0; ch < stretched.getNumChannels(); ++ch)
+        {
+            const auto* y = stretched.getReadPointer (ch);
+            auto* out = result.getWritePointer (ch);
+            for (int j = 0; j < outLength; ++j)
+                out[j] = interpolate (y, stretched.getNumSamples(), path.stretchedAt (j));
+        }
+        return result;
+    }
+
     struct VocoderOptions
     {
         double windowSeconds = 0.046;
@@ -234,7 +298,7 @@ namespace
     // The phase vocoder: writes a copy `ratio` times longer than the output, following the
     // map, then reads it back to move the pitch. With `formant`, each frame's spectral
     // envelope is put back where it was before the read-back moves it.
-    juce::AudioBuffer<float> vocode (const juce::AudioBuffer<float>& source, double sampleRate, const Map& map, double ratio,
+    juce::AudioBuffer<float> vocode (const juce::AudioBuffer<float>& source, double sampleRate, const Map& map, const Path& path,
                                      int outLength, const VocoderOptions& options, const std::function<bool()>& shouldContinue)
     {
         const auto numChannels = juce::jmax (1, source.getNumChannels());
@@ -242,9 +306,8 @@ namespace
 
         const auto order = juce::jlimit (9, 13, (int) std::round (std::log2 (sampleRate * options.windowSeconds)));
         const int size = 1 << order, half = size / 2, hop = size / juce::jlimit (4, 16, options.overlap);
-        const auto stretchedLength = (int) std::ceil (outLength * ratio) + 4;
+        const auto stretchedLength = (int) std::ceil (path.stretchedAt (outLength)) + 4;
         const auto overlapGain = 0.375f * (float) (size / hop); // Hann² summed over the frames (1.5 at 75% overlap)
-        const auto shapeFormants = options.formant && std::abs (ratio - 1.0) > 1.0e-6;
 
         juce::dsp::FFT fft (order);
         std::vector<float> window ((size_t) size);
@@ -291,7 +354,7 @@ namespace
         // set it), then the gain per bin that puts the envelope at k * ratio back at k once
         // the read-back has moved it.
         std::vector<float> logMagnitude ((size_t) bins);
-        const auto shapeFrame = [&]
+        const auto shapeFrame = [&] (double ratio, double formantFactor)
         {
             auto loudest = 0.0f;
             for (auto m : magnitude)
@@ -340,7 +403,7 @@ namespace
 
             for (int k = 0; k < bins; ++k)
             {
-                const auto at = juce::jmin ((double) (bins - 1), k * ratio);
+                const auto at = juce::jmin ((double) (bins - 1), k * ratio / formantFactor);
                 const auto i = (int) at;
                 const auto f = (float) (at - i);
                 const auto wanted = logEnvelope[(size_t) i] + f * (logEnvelope[(size_t) juce::jmin (i + 1, bins - 1)] - logEnvelope[(size_t) i]);
@@ -356,7 +419,8 @@ namespace
                 return {};
 
             const auto centre = (double) frame * hop;                                       // in the stretched copy
-            const auto sourceCentre = map.toSource (centre / ratio / sampleRate) * sampleRate; // in the file
+            const auto outCentre = path.outAt (centre);                                    // in the output
+            const auto sourceCentre = map.toSource (outCentre / sampleRate) * sampleRate;     // in the file
 
             if (sourceCentre < -size || sourceCentre > numSource + size)
             {
@@ -437,8 +501,13 @@ namespace
             fresh = false;
             lastTheta = theta;
 
-            if (shapeFormants)
-                shapeFrame();
+            // Formants: kept where they were (or moved by the note's formant shift) when the
+            // read-back moves the pitch.
+            if (const auto frameRatio = path.ratioAt (outCentre), formantFactor = path.formantAt (outCentre);
+                options.formant && (std::abs (frameRatio - 1.0f) > 1.0e-6f || std::abs (formantFactor - 1.0f) > 1.0e-6f))
+                shapeFrame (frameRatio, formantFactor);
+            else
+                std::fill (formantGain.begin(), formantGain.end(), 1.0f);
 
             // Synthesis: each channel keeps its own magnitude and its phase relative to the mix,
             // so the stereo picture survives.
@@ -466,7 +535,7 @@ namespace
             }
         }
 
-        return readBack (stretched, sampleRate, ratio, outLength);
+        return readBack (stretched, sampleRate, path, outLength);
     }
 
     // Overlap-add in the time domain (WSOLA): 40 ms grains taken where the map says, each
@@ -674,14 +743,75 @@ juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& source, double 
     VocoderOptions options;
     options.formant = settings.formant;
 
-    // Slice and varispeed place the audio themselves; a transpose then goes through the
-    // vocoder on the result.
+    // Note edits: the pitch moves along the notes' shapes (looked up in file time), and the
+    // voice's formants are kept, as each note says.
+    const auto edits = settings.hasNoteEdits();
+    std::shared_ptr<const analysis::pitch::Track> track;
+    std::vector<analysis::pitch::Shape> shapes;
+    if (edits)
+    {
+        track = analysis::pitch::analyseCached (source, sampleRate);
+        shapes = analysis::pitch::getShapes (*track, settings.notes);
+        options.formant = true;
+    }
+    const auto shapeAtOutput = [&] (double outSample) { return analysis::pitch::shapeAt (*track, shapes, map.toSource (outSample / sampleRate)); };
+
+    Path path;
+    path.ratio = ratio;
+    auto steady = true; // no pitch or formant moves anywhere
+    if (edits)
+    {
+        const auto count = (size_t) (outLength / path.step + 2);
+        path.position.assign (count, 0.0);
+        path.ratios.assign (count, 1.0f);
+        path.formants.assign (count, 1.0f);
+        path.highest = 0.0;
+        for (size_t j = 0; j < count; ++j)
+        {
+            const auto shape = shapeAtOutput ((double) j * path.step);
+            const auto semitones = juce::jlimit (-Settings::maxSemitones, Settings::maxSemitones, settings.semitones + (double) shape.semitones);
+            path.ratios[j] = (float) std::pow (2.0, semitones / 12.0);
+            path.formants[j] = (float) std::pow (2.0, shape.formant / 12.0);
+            path.highest = juce::jmax (path.highest, (double) path.ratios[j]);
+            steady = steady && std::abs (path.ratios[j] - 1.0f) < 1.0e-6f && std::abs (path.formants[j] - 1.0f) < 1.0e-6f;
+            if (j > 0)
+                path.position[j] = path.position[j - 1] + path.step * 0.5 * ((double) path.ratios[j - 1] + path.ratios[j]);
+        }
+    }
+    else
+    {
+        steady = std::abs (ratio - 1.0) < 1.0e-9;
+    }
+
+    // The notes' levels, on the finished audio.
+    const auto withGains = [&] (juce::AudioBuffer<float> out)
+    {
+        if (! edits || std::none_of (settings.notes.begin(), settings.notes.end(), [] (const auto& n) { return std::abs (n.gain) > 1.0e-3f; }))
+            return out;
+        constexpr int step = 64;
+        for (int j0 = 0; j0 < out.getNumSamples(); j0 += step)
+        {
+            const auto a = juce::Decibels::decibelsToGain (shapeAtOutput (j0).gainDb);
+            const auto b = juce::Decibels::decibelsToGain (shapeAtOutput (j0 + step).gainDb);
+            const auto n = juce::jmin (step, out.getNumSamples() - j0);
+            for (int ch = 0; ch < out.getNumChannels(); ++ch)
+                out.applyGainRamp (ch, j0, n, a, a + (b - a) * (float) n / (float) step);
+        }
+        return out;
+    };
+
+    // Slice and varispeed place the audio themselves; a transpose or note edits then go
+    // through the vocoder on the result.
     const auto thenTranspose = [&] (juce::AudioBuffer<float> placed)
     {
-        if (std::abs (ratio - 1.0) < 1.0e-9 || placed.getNumSamples() == 0)
-            return placed;
-        return vocode (placed, sampleRate, {}, ratio, placed.getNumSamples(), options, shouldContinue);
+        if (steady || placed.getNumSamples() == 0)
+            return withGains (std::move (placed));
+        return withGains (vocode (placed, sampleRate, {}, path, placed.getNumSamples(), options, shouldContinue));
     };
+
+    // Only levels changed: the audio as it is.
+    if (edits && steady && map.isIdentity())
+        return withGains (juce::AudioBuffer<float> (source));
 
     switch (settings.algorithm)
     {
@@ -694,6 +824,12 @@ juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& source, double 
             options.attackRatio = 2.0;
             break;
         case Algorithm::efficient:
+            if (edits) // the time-domain path can't follow the notes: the voice setting does
+            {
+                options.overlap = 8;
+                options.attackRatio = 3.0;
+                break;
+            }
             return overlapAdd (source, sampleRate, map, ratio, outLength, shouldContinue);
         case Algorithm::slice:
             return thenTranspose (slice (source, sampleRate, map, outLength));
@@ -703,7 +839,7 @@ juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& source, double 
             break;
     }
 
-    return vocode (source, sampleRate, map, ratio, outLength, options, shouldContinue);
+    return withGains (vocode (source, sampleRate, map, path, outLength, options, shouldContinue));
 }
 
 std::vector<juce::AudioBuffer<float>> renderLinked (const std::vector<const juce::AudioBuffer<float>*>& sources, double sampleRate,

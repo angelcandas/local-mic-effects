@@ -311,7 +311,14 @@ void Edit::removeReturn (int returnId)
 
         if (getTrackOutput (track) == returnId)
             track.removeProperty (ids::output, undoTarget);
+
+        if (getTrackGroup (track) == returnId)
+            track.removeProperty (ids::group, undoTarget);
     }
+
+    for (auto other : getReturns())
+        if (auto send = getSend (other, returnId); send.isValid())
+            other.removeChild (send, undoTarget);
 
     state.removeChild (bus, undoTarget);
 }
@@ -350,9 +357,20 @@ juce::ValueTree Edit::getSend (const juce::ValueTree& track, int returnId)
     return {};
 }
 
+// The source of a send: a track, or a group track (which can only send to plain returns).
+static juce::ValueTree getSendSource (const Edit& edit, int sourceId, int returnId)
+{
+    auto source = edit.getChannel (sourceId);
+    if (! source.isValid() || (! source.hasType (ids::TRACK) && ! Edit::isGroup (source)))
+        return {};
+    if (Edit::isGroup (source) && (Edit::isGroup (edit.getReturn (returnId)) || sourceId == returnId))
+        return {};
+    return source;
+}
+
 void Edit::setSend (int trackId, int returnId, float decibels)
 {
-    auto track = getTrack (trackId);
+    auto track = getSendSource (*this, trackId, returnId);
     if (! track.isValid() || ! getReturn (returnId).isValid())
         return;
 
@@ -378,7 +396,7 @@ void Edit::setSend (int trackId, int returnId, float decibels)
 
 void Edit::setSendPre (int trackId, int returnId, bool preFader)
 {
-    auto track = getTrack (trackId);
+    auto track = getSendSource (*this, trackId, returnId);
     if (! track.isValid() || ! getReturn (returnId).isValid())
         return;
 
@@ -397,11 +415,81 @@ void Edit::setSendPre (int trackId, int returnId, bool preFader)
     send.setProperty (ids::pre, preFader, undoTarget);
 }
 
+//==============================================================================
+int Edit::groupTracks (const juce::Array<int>& trackIds, const juce::String& name)
+{
+    juce::Array<juce::ValueTree> members;
+    for (const auto& track : getTracks()) // in track order
+        if (trackIds.contains ((int) track[ids::id]))
+            members.add (track);
+
+    if (members.isEmpty())
+        return -1;
+
+    auto group = addReturn (name);
+    group.setProperty (ids::group, true, nullptr);
+    const auto groupId = (int) group[ids::id];
+
+    // Next to each other, where the first one is.
+    const auto first = state.indexOf (members.getFirst());
+    for (int i = 1; i < members.size(); ++i)
+        state.moveChild (state.indexOf (members[i]), first + i, undoTarget);
+
+    for (auto track : members)
+        setTrackGroup ((int) track[ids::id], groupId);
+
+    return groupId;
+}
+
+void Edit::ungroup (int groupId)
+{
+    if (isGroup (getReturn (groupId)))
+        removeReturn (groupId);
+}
+
+void Edit::setTrackGroup (int trackId, int groupId)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid())
+        return;
+
+    if (groupId < 0 || ! isGroup (getReturn (groupId)))
+    {
+        if (const auto old = getTrackGroup (track); old >= 0)
+        {
+            track.removeProperty (ids::group, undoTarget);
+            if (getTrackOutput (track) == old)
+                track.removeProperty (ids::output, undoTarget);
+        }
+        return;
+    }
+
+    track.setProperty (ids::group, groupId, undoTarget);
+    track.setProperty (ids::output, groupId, undoTarget);
+
+    // Right after the group's other tracks.
+    int last = -1;
+    for (const auto& other : getTracks())
+        if (other != track && getTrackGroup (other) == groupId)
+            last = state.indexOf (other);
+    if (last >= 0 && state.indexOf (track) != last + 1 && state.indexOf (track) != last)
+        state.moveChild (state.indexOf (track), state.indexOf (track) < last ? last : last + 1, undoTarget);
+}
+
+void Edit::setGroupFolded (int groupId, bool folded)
+{
+    if (auto group = getReturn (groupId); isGroup (group))
+        group.setProperty (ids::folded, folded, nullptr);
+}
+
 void Edit::setTrackOutput (int trackId, int returnIdOrMaster)
 {
     auto track = getTrack (trackId);
     if (! track.isValid())
         return;
+
+    if (getTrackGroup (track) >= 0 && getTrackGroup (track) != returnIdOrMaster)
+        track.removeProperty (ids::group, undoTarget); // routed elsewhere by hand: out of its group
 
     if (returnIdOrMaster == masterId || ! getReturn (returnIdOrMaster).isValid())
         track.removeProperty (ids::output, undoTarget);
@@ -766,6 +854,22 @@ void Edit::setClipFormant (int clipId, bool keep)
     }
 }
 
+void Edit::setClipNotes (int clipId, const std::vector<analysis::pitch::Note>& notes)
+{
+    if (auto clip = getClip (clipId); clip.isValid() && ! isMidiClip (clip))
+    {
+        if (analysis::pitch::anyEdited (notes))
+            clip.setProperty (ids::pitchNotes, analysis::pitch::toString (notes), undoTarget);
+        else
+            clip.removeProperty (ids::pitchNotes, undoTarget);
+    }
+}
+
+std::vector<analysis::pitch::Note> Edit::getClipNotes (const juce::ValueTree& clip)
+{
+    return analysis::pitch::fromString (clip[ids::pitchNotes].toString());
+}
+
 void Edit::setTrackTranspose (int trackId, double semitones)
 {
     if (auto track = getTrack (trackId); track.isValid())
@@ -1125,6 +1229,8 @@ warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
     settings.semitones = juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, settings.semitones);
     settings.algorithm = warp::algorithmFromKey (clip[ids::stretch].toString());
     settings.formant = (bool) clip.getProperty (ids::formant, false);
+    if (getLinkedClips (clip).isEmpty())
+        settings.notes = getClipNotes (clip);
 
     // Linked: rendered with its partners' files, so they all stay in phase.
     if (! settings.isNeutral())

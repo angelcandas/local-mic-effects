@@ -272,7 +272,7 @@ Result quantizeClips (Edit& edit, AudioPool& pool, const juce::Array<int>& clipI
     return result;
 }
 
-std::vector<analysis::rhythm::Onset> findHitpoints (const Edit& edit, AudioPool& pool, int clipId, float sensitivity)
+std::function<std::vector<analysis::rhythm::Onset>()> prepareHitpoints (const Edit& edit, AudioPool& pool, int clipId, float sensitivity)
 {
     const auto clip = edit.getClip (clipId);
     if (! clip.isValid() || Edit::isMidiClip (clip))
@@ -284,10 +284,20 @@ std::vector<analysis::rhythm::Onset> findHitpoints (const Edit& edit, AudioPool&
 
     const auto map = Edit::getEffectiveWarp (clip);
     const auto offset = (double) clip[ids::offset], length = (double) clip[ids::length];
-    auto onsets = analysis::rhythm::findOnsets (*source, pool.getSampleRate(), juce::jmax (0.0, map.toSource (offset)),
-                                                map.toSource (offset + length), sensitivity);
-    for (auto& onset : onsets)
-        onset.time = map.toTarget (onset.time);
-    return onsets;
+    const auto rate = pool.getSampleRate();
+    return [source, map, offset, length, rate, sensitivity]
+    {
+        auto onsets = analysis::rhythm::findOnsets (*source, rate, juce::jmax (0.0, map.toSource (offset)),
+                                                    map.toSource (offset + length), sensitivity);
+        for (auto& onset : onsets)
+            onset.time = map.toTarget (onset.time);
+        return onsets;
+    };
+}
+
+std::vector<analysis::rhythm::Onset> findHitpoints (const Edit& edit, AudioPool& pool, int clipId, float sensitivity)
+{
+    const auto find = prepareHitpoints (edit, pool, clipId, sensitivity);
+    return find ? find() : std::vector<analysis::rhythm::Onset>();
 }
 }

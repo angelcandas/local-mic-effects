@@ -359,8 +359,20 @@ void DawEngine::updateMix()
     }
 
     for (const auto& bus : returns)
+    {
+        const auto audible = ! (bool) bus[ids::mute] && (! anyReturnSolo || (bool) bus[ids::solo]);
+
         if (const auto it = strips.find ((int) bus[ids::id]); it != strips.end())
-            setStripTargets (*it->second, bus, ! (bool) bus[ids::mute] && (! anyReturnSolo || (bool) bus[ids::solo]), false);
+            setStripTargets (*it->second, bus, audible, false);
+
+        for (const auto& send : bus)
+            if (send.hasType (ids::SEND))
+                if (const auto it = sendLevels.find ({ (int) bus[ids::id], (int) send[ids::target] }); it != sendLevels.end())
+                {
+                    const auto db = (float) send.getProperty (ids::level, -100.0f);
+                    it->second->target = audible && db >= Edit::minSendDb ? juce::Decibels::decibelsToGain (db) : 0.0f;
+                }
+    }
 
     if (const auto it = strips.find (Edit::masterId); it != strips.end())
         setStripTargets (*it->second, edit.getMaster(), true, false);
@@ -460,15 +472,50 @@ void DawEngine::rebuild()
     graph->tempo = edit.getTempoMap();
 
     std::map<int, int> busIndex; // return id -> index in graph->returns
-    for (const auto& returnTree : edit.getReturns())
+    // Group tracks first: they send into the plain returns, which must come later.
+    auto returnTrees = edit.getReturns();
+    std::stable_partition (returnTrees.begin(), returnTrees.end(), [] (const auto& tree) { return Edit::isGroup (tree); });
+
+    for (const auto& returnTree : returnTrees)
     {
         busIndex[(int) returnTree[ids::id]] = (int) graph->returns.size();
-        graph->returns.push_back ({ reuse (returnTree), {} });
+        graph->returns.push_back ({ reuse (returnTree), {}, {} });
     }
 
     std::map<std::pair<int, int>, std::shared_ptr<SendLevel>> previousSends;
     std::swap (previousSends, sendLevels);
     std::vector<std::shared_ptr<SendLevel>> newSends; // start at their level instead of fading in
+
+    for (const auto& returnTree : returnTrees)
+    {
+        if (! Edit::isGroup (returnTree))
+            continue;
+
+        const auto groupId = (int) returnTree[ids::id];
+        auto& bus = graph->returns[(size_t) busIndex[groupId]];
+
+        for (const auto& sendTree : returnTree)
+        {
+            if (! sendTree.hasType (ids::SEND))
+                continue;
+
+            const auto target = (int) sendTree[ids::target];
+            const auto found = busIndex.find (target);
+            if (found == busIndex.end() || Edit::isGroup (edit.getReturn (target)))
+                continue;
+
+            const std::pair key { groupId, target };
+            auto level = previousSends.count (key) > 0 ? previousSends[key] : nullptr;
+            if (level == nullptr)
+            {
+                level = std::make_shared<SendLevel>();
+                newSends.push_back (level);
+            }
+
+            sendLevels[key] = level;
+            bus.sends.push_back ({ level, found->second, (bool) sendTree.getProperty (ids::pre, false) });
+        }
+    }
 
     juce::int64 end = 0;
     int maxLatency = 0;
@@ -1320,9 +1367,9 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         direct.clear (0, numSamples);
 
     // A track's sends: its signal into the returns, gliding to new levels.
-    const auto feedSends = [&graph, numSamples] (Track& track, bool pre)
+    const auto feedSendsFrom = [&graph, numSamples] (std::vector<Send>& sends, Strip& source, bool pre)
     {
-        for (auto& send : track.sends)
+        for (auto& send : sends)
         {
             if (send.pre != pre)
                 continue;
@@ -1336,10 +1383,12 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
                 continue;
 
             auto& into = graph.returns[(size_t) send.bus].strip->buffer;
-            into.addFromWithRamp (0, 0, track.strip->buffer.getReadPointer (0), numSamples, from, to);
-            into.addFromWithRamp (1, 0, track.strip->buffer.getReadPointer (1), numSamples, from, to);
+            into.addFromWithRamp (0, 0, source.buffer.getReadPointer (0), numSamples, from, to);
+            into.addFromWithRamp (1, 0, source.buffer.getReadPointer (1), numSamples, from, to);
         }
     };
+
+    const auto feedSends = [&] (Track& track, bool pre) { feedSendsFrom (track.sends, *track.strip, pre); };
 
     for (auto& track : graph.tracks)
     {
@@ -1442,10 +1491,17 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         auto block = juce::dsp::AudioBlock<float> (strip.buffer).getSubBlock (0, (size_t) numSamples);
         strip.chain.process (fx::Module::Context (block));
 
+        if (! bus.sends.empty())
+            feedSendsFrom (bus.sends, strip, true);
+
         strip.left.setTargetValue (strip.targetLeft.load (std::memory_order_relaxed));
         strip.right.setTargetValue (strip.targetRight.load (std::memory_order_relaxed));
         strip.buffer.applyGainRamp (0, 0, numSamples, strip.left.getCurrentValue(), strip.left.skip (numSamples));
         strip.buffer.applyGainRamp (1, 0, numSamples, strip.right.getCurrentValue(), strip.right.skip (numSamples));
+
+        if (! bus.sends.empty())
+            feedSendsFrom (bus.sends, strip, false);
+
         updatePeak (strip.peakLeft, strip.buffer.getMagnitude (0, 0, numSamples));
         updatePeak (strip.peakRight, strip.buffer.getMagnitude (1, 0, numSamples));
 

@@ -242,6 +242,7 @@ namespace
             { "editNotes", "Edit notes" }, { "addInsert", "Add effect" }, { "removeInsert", "Remove effect" },
             { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "pasteInserts", "Paste effects" },
             { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
+            { "groupTracks", "Group tracks" }, { "ungroup", "Ungroup tracks" }, { "setGroup", "Move to group" },
             { "addReturn", "Add return" }, { "removeReturn", "Delete return" }, { "moveReturn", "Move return" },
             { "tempo", "Tempo" }, { "tempoMap", "Tempo change" }, { "beatsPerBar", "Time signature" }, { "loop", "Loop range" },
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
@@ -308,6 +309,7 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
 
 DawBridge::~DawBridge()
 {
+    *alive = false;
     edit.getState().removeListener (this);
     processor.getPluginHost().onScanFinished = nullptr;
     instrumentWindows.clear();
@@ -460,6 +462,7 @@ juce::var DawBridge::describeSession()
                            { "transpose", number (clip, ids::transpose) }, { "warp", markers },
                            { "stretch", daw::warp::getAlgorithmKey (warpSettings.algorithm) }, { "formant", warpSettings.formant },
                            { "musical", daw::Edit::isMusical (clip) }, { "clipTempo", daw::Edit::getClipTempo (clip) },
+                           { "pitchEdited", ! warpSettings.notes.empty() },
                            // The audio the clip plays (its file, or a rendered copy): the page keys waveforms on it.
                            { "audioKey", warpSettings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, warpSettings) },
                            { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
@@ -499,6 +502,7 @@ juce::var DawBridge::describeSession()
                               { "link", daw::Edit::getLink (track) },
                               { "inserts", describeInserts (track) }, { "clips", clips },
                               { "output", daw::Edit::getTrackOutput (track) }, { "sends", describeSends (track) },
+                              { "group", daw::Edit::getTrackGroup (track) },
                               { "input", [&track]
                                 {
                                     const auto input = daw::Edit::getTrackInput (track);
@@ -537,6 +541,8 @@ juce::var DawBridge::describeSession()
                                { "volume", number (bus, ids::volume) }, { "pan", number (bus, ids::pan) },
                                { "inGain", number (bus, ids::inGain) }, { "outGain", number (bus, ids::outGain) },
                                { "mute", (bool) bus[ids::mute] }, { "solo", (bool) bus[ids::solo] },
+                               { "group", daw::Edit::isGroup (bus) }, { "folded", (bool) bus.getProperty (ids::folded, false) },
+                               { "sends", describeSends (bus) },
                                { "inserts", describeInserts (bus) } }));
 
     if (lastInputNames.isEmpty())
@@ -2255,6 +2261,26 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    if (command == "groupTracks")
+    {
+        juce::Array<int> trackIds;
+        if (const auto* list = args["tracks"].getArray())
+            for (const auto& item : *list)
+                trackIds.add ((int) item);
+
+        auto name = arg (args, "name", juce::String());
+        if (name.trim().isEmpty())
+            name = "Group";
+        const auto group = edit.groupTracks (trackIds, name.substring (0, 60));
+        if (group < 0) { complete (error ("Pick at least one track to group.")); return; }
+        complete (group);
+        return;
+    }
+
+    if (command == "ungroup")   { edit.ungroup (id); ok(); return; }
+    if (command == "setGroup")  { edit.setTrackGroup (id, arg (args, "group", -1)); ok(); return; }
+    if (command == "foldGroup") { edit.setGroupFolded (id, arg (args, "folded", true)); ok(); return; }
+
     if (command == "removeReturn") { edit.removeReturn (id); ok(); return; }
     if (command == "moveReturn")   { edit.moveReturn (id, arg (args, "index", 0)); ok(); return; }
 
@@ -2524,13 +2550,136 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    // The note pitch editor's view of a clip (args.id): the take's sung notes with their
+    // edits (the stored ones, or as found when nothing is edited yet), and the pitch line
+    // as sung and as edited, with the loudness, every 10 ms of the clip. Times: `start`/`end`
+    // and the notes' are file seconds; `at`/`until` and `times` are in the clip's rendered
+    // time, as the clip editor shows it. Pitches are MIDI note numbers before transposes
+    // (`transpose`: the clip's and its track's), 0 where nothing is sung.
+    if (command == "pitchNotes")
+    {
+        const auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+        {
+            complete (error ("Pick an audio clip to edit its notes."));
+            return;
+        }
+        auto source = engine.getAudioPool().loadNow (juce::File (clip[ids::file].toString()));
+        if (source == nullptr)
+        {
+            complete (error ("The clip's audio couldn't be read."));
+            return;
+        }
+
+        const auto settings = daw::Edit::getWarpSettings (clip);
+        const auto map = settings.map;
+        const auto offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+        const auto linked = ! daw::Edit::getLinkedClips (clip).isEmpty();
+        auto stored = daw::Edit::getClipNotes (clip);
+        const auto rate = engine.getAudioPool().getSampleRate();
+        const auto transpose = settings.semitones;
+
+        juce::Thread::launch ([source, map, offset, length, linked, stored, rate, transpose, complete, weak = std::weak_ptr<bool> (alive)]
+        {
+            namespace pitch = analysis::pitch;
+            const auto track = pitch::analyseCached (*source, rate);
+            const auto notes = stored.empty() ? pitch::findNotes (*track) : stored;
+            const auto shapes = pitch::getShapes (*track, notes);
+            const auto from = juce::jmax (0.0, map.toSource (offset) - 0.5), to = map.toSource (offset + length) + 0.5;
+
+            juce::DynamicObject::Ptr result (new juce::DynamicObject());
+            juce::Array<juce::var> list, times, sung, edited, energy;
+            for (const auto& n : notes)
+                list.add (object ({ { "start", n.start }, { "end", n.end }, { "pitch", n.pitch }, { "shift", n.shift },
+                                    { "straighten", n.straighten }, { "vibrato", n.vibrato }, { "formant", n.formant },
+                                    { "gain", n.gain }, { "transition", n.transition },
+                                    { "at", map.toTarget (n.start) }, { "until", map.toTarget (n.end) } }));
+            for (int i = track->frameAt (from); i < track->size() && track->timeOf (i) <= to; i += 2)
+            {
+                const auto t = track->timeOf (i);
+                const auto m = track->midi[(size_t) i];
+                times.add (std::round (map.toTarget (t) * 1000.0) / 1000.0);
+                sung.add (std::round (m * 100.0f) / 100.0f);
+                edited.add (m > 0.0f ? std::round ((m + shapes[(size_t) i].semitones) * 100.0f) / 100.0f : 0.0f);
+                energy.add (std::round (track->energy[(size_t) i] * 10.0f) / 10.0f);
+            }
+
+            result->setProperty ("ok", true);
+            result->setProperty ("edited", ! stored.empty());
+            result->setProperty ("linked", linked);
+            result->setProperty ("transpose", transpose);
+            result->setProperty ("notes", list);
+            result->setProperty ("times", times);
+            result->setProperty ("sung", sung);
+            result->setProperty ("pitch", edited);
+            result->setProperty ("energy", energy);
+            juce::var reply (result.get());
+
+            juce::MessageManager::callAsync ([reply, complete, weak]
+            {
+                if (auto flag = weak.lock(); flag != nullptr && *flag)
+                    complete (reply);
+            });
+        });
+        return;
+    }
+
+    // Stores a clip's notes with their edits (args.notes: [{ start, end, pitch, shift,
+    // straighten, vibrato, formant, gain, transition }], file seconds). Nothing edited (or no
+    // notes) takes the edits off.
+    if (command == "setPitchNotes")
+    {
+        const auto clip = edit.getClip (id);
+        if (! daw::Edit::getLinkedClips (clip).isEmpty())
+        {
+            complete (error ("Notes on linked tracks can't be edited one by one: unlink the track first."));
+            return;
+        }
+        std::vector<analysis::pitch::Note> notes;
+        if (const auto* list = args["notes"].getArray())
+            for (const auto& n : *list)
+            {
+                analysis::pitch::Note note;
+                note.start = arg (n, "start", 0.0);
+                note.end = arg (n, "end", 0.0);
+                note.pitch = arg (n, "pitch", 0.0f);
+                note.shift = arg (n, "shift", 0.0f);
+                note.straighten = arg (n, "straighten", 0.0f);
+                note.vibrato = arg (n, "vibrato", 1.0f);
+                note.formant = arg (n, "formant", 0.0f);
+                note.gain = arg (n, "gain", 0.0f);
+                note.transition = arg (n, "transition", analysis::pitch::Note::defaultTransition);
+                notes.push_back (note);
+            }
+        // Through the text form, which keeps every value in range.
+        edit.setClipNotes (id, analysis::pitch::fromString (analysis::pitch::toString (notes)));
+        ok();
+        return;
+    }
+
     // Note starts in a clip (args.id), in its rendered copy's time: [[time, strength], ...].
     if (command == "hitpoints")
     {
-        juce::Array<juce::var> list;
-        for (const auto& onset : daw::rhythm::findHitpoints (edit, engine.getAudioPool(), id, juce::jlimit (0.0f, 1.0f, arg (args, "sensitivity", 0.5f))))
-            list.add (juce::Array<juce::var> { onset.time, onset.strength });
-        complete (object ({ { "ok", true }, { "hits", list } }));
+        // Analysed off the message thread: a long take takes a moment, and the page waits.
+        auto find = daw::rhythm::prepareHitpoints (edit, engine.getAudioPool(), id, juce::jlimit (0.0f, 1.0f, arg (args, "sensitivity", 0.5f)));
+        if (! find)
+        {
+            complete (object ({ { "ok", true }, { "hits", juce::Array<juce::var>() } }));
+            return;
+        }
+        juce::Thread::launch ([find = std::move (find), complete, weak = std::weak_ptr<bool> (alive)]
+        {
+            auto hits = std::make_shared<std::vector<analysis::rhythm::Onset>> (find());
+            juce::MessageManager::callAsync ([hits, complete, weak]
+            {
+                if (auto flag = weak.lock(); flag == nullptr || ! *flag)
+                    return;
+                juce::Array<juce::var> list;
+                for (const auto& onset : *hits)
+                    list.add (juce::Array<juce::var> { onset.time, onset.strength });
+                complete (object ({ { "ok", true }, { "hits", list } }));
+            });
+        });
         return;
     }
 

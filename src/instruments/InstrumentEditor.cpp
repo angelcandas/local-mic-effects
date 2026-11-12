@@ -159,6 +159,16 @@ void InstrumentLook::drawButtonBackground (juce::Graphics& g, juce::Button& butt
 }
 
 //==============================================================================
+// A drawbar pulls down: its value grows downwards (and so does dragging it).
+class DrawbarSlider final : public juce::Slider
+{
+public:
+    DrawbarSlider() : Slider (juce::Slider::LinearVertical, juce::Slider::NoTextBox) {}
+    double proportionOfLengthToValue (double proportion) override { return Slider::proportionOfLengthToValue (1.0 - proportion); }
+    double valueToProportionOfLength (double value) override { return 1.0 - Slider::valueToProportionOfLength (value); }
+};
+
+//==============================================================================
 // One parameter's control: a knob, a menu, a switch or a drawbar, with its name under
 // it (its value while the mouse is over it or it's being moved).
 class InstrumentEditor::Control final : public juce::Component, private juce::Slider::Listener
@@ -184,8 +194,10 @@ public:
         }
         else
         {
-            slider = std::make_unique<juce::Slider> (p.vertical ? juce::Slider::LinearVertical : juce::Slider::RotaryHorizontalVerticalDrag,
-                                                     juce::Slider::NoTextBox);
+            if (p.vertical)
+                slider = std::make_unique<DrawbarSlider>();
+            else
+                slider = std::make_unique<juce::Slider> (juce::Slider::RotaryHorizontalVerticalDrag, juce::Slider::NoTextBox);
             slider->setRotaryParameters (juce::degreesToRadians (225.0f), juce::degreesToRadians (495.0f), true);
             slider->setPopupDisplayEnabled (false, false, nullptr);
             slider->setMouseDragSensitivity (180);
@@ -195,7 +207,7 @@ public:
             slider->setDoubleClickReturnValue (true, p.def);
             slider->addListener (this);
             slider->addMouseListener (this, true);
-            slider->setTooltip (p.name);
+            slider->setTooltip (juce::String::fromUTF8 (p.name));
         }
     }
 
@@ -237,7 +249,7 @@ public:
         const auto value = slider != nullptr ? (float) slider->getValue() : 0.0f;
         g.setFont (uiFont (11.5f, showValue));
         g.setColour (showValue ? juce::Colour (0xffffffff) : juce::Colour (InstrumentLook::dimText));
-        g.drawFittedText (showValue ? formatValue (param, value) : juce::String (param.name),
+        g.drawFittedText (showValue ? formatValue (param, value) : juce::String::fromUTF8 (param.name),
                           getLocalBounds().removeFromBottom (16), juce::Justification::centred, 1, 0.8f);
     }
 
@@ -433,12 +445,42 @@ private:
 };
 
 //==============================================================================
+// The keyboard, with names on the keys when the instrument gives them (a drum kit's).
+class InstrumentEditor::Keyboard final : public juce::MidiKeyboardComponent
+{
+public:
+    Keyboard (juce::MidiKeyboardState& state, const Spec& s)
+        : MidiKeyboardComponent (state, juce::MidiKeyboardComponent::horizontalKeyboard), spec (s) {}
+
+    juce::String getWhiteNoteText (int note) override
+    {
+        return spec.keyName ? spec.keyName (note) : MidiKeyboardComponent::getWhiteNoteText (note);
+    }
+
+    void drawBlackNote (int note, juce::Graphics& g, juce::Rectangle<float> area, bool down, bool over, juce::Colour colour) override
+    {
+        MidiKeyboardComponent::drawBlackNote (note, g, area, down, over, colour);
+        if (spec.keyName)
+            if (const auto name = spec.keyName (note); name.isNotEmpty())
+            {
+                g.setColour (juce::Colour (0xffc9cdd8));
+                g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)));
+                g.drawFittedText (name, area.reduced (1.0f, 4.0f).toNearestInt(), juce::Justification::centredBottom, 2, 0.7f);
+            }
+    }
+
+private:
+    const Spec& spec;
+};
+
+//==============================================================================
 InstrumentEditor::InstrumentEditor (InstrumentProcessor& p)
     : AudioProcessorEditor (p),
       processor (p),
       spec (p.getSpec()),
       look (p.getSpec().accent),
-      keyboard (p.getKeyboardState(), juce::MidiKeyboardComponent::horizontalKeyboard)
+      keyboardView (std::make_unique<Keyboard> (p.getKeyboardState(), p.getSpec())),
+      keyboard (*keyboardView)
 {
     setLookAndFeel (&look);
 
@@ -483,8 +525,8 @@ InstrumentEditor::InstrumentEditor (InstrumentProcessor& p)
         if (control->param.vertical)
         {
             const juce::String id (control->param.id);
-            control->setDrawbarColour (id.endsWith ("16") || id.endsWith ("513") ? juce::Colour (0xff9a5a36)
-                                       : id.endsWith ("135") || id.endsWith ("113") || id.endsWith ("171") ? juce::Colour (0xff2b2b30).brighter (0.6f)
+            control->setDrawbarColour (id == "db16" || id == "db513" ? juce::Colour (0xffa0603a)
+                                       : id == "db223" || id == "db135" || id == "db113" ? juce::Colour (0xff3a3d46)
                                        : juce::Colour (0xffeae6dc));
         }
 
@@ -603,7 +645,8 @@ void InstrumentEditor::resized()
             {
                 const auto w = Control::cellWidth (c->param);
                 const auto h = Control::cellHeight (c->param);
-                c->setBounds (x, inside.getBottom() - h, w, h);
+                const auto y = view.envelope != nullptr ? inside.getBottom() - h : inside.getCentreY() - h / 2;
+                c->setBounds (x, y, w, h);
                 x += w + spread;
             }
         }
