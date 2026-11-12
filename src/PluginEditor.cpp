@@ -250,7 +250,8 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
 
                        // (action, args) -> the looper's state (see describeLooper). Actions: "main" (record /
                        // overdub / end the overdub / play), "stop", "play", "undo", "redo", "clear", "status",
-                       // "layer" { layer, gain?, muted? }, "settings" { bpm?, beatsPerBar?, locked?, volume? }.
+                       // "layer" { layer, gain?, muted? }, "settings" { bpm?, beatsPerBar?, locked?, volume? };
+                       // "save" and "sendToDaw" answer with their own result (below).
                        .withNativeFunction ("looper", [this] (const auto& args, auto complete)
                        {
                            const auto action = args.size() > 0 ? args[0].toString() : juce::String();
@@ -270,6 +271,47 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                const auto layer = (int) options.getProperty ("layer", -1);
                                if (options.hasProperty ("gain"))  looper.setLayerGain (layer, (float) options["gain"]);
                                if (options.hasProperty ("muted")) looper.setLayerMuted (layer, (bool) options["muted"]);
+                           }
+
+                           // "save" -> { ok, error, files, folder }: every layer as a WAV in the recordings folder.
+                           // "sendToDaw" { repeats } -> { ok, error, tracks }: also puts them on DAW tracks.
+                           if (action == "save" || action == "sendToDaw")
+                           {
+                               const auto toDaw = action == "sendToDaw";
+                               auto* result = new juce::DynamicObject();
+                               juce::String error;
+
+                               if (toDaw && (daw == nullptr || ! DawBridge::isAvailable()))
+                                   error = "The DAW is only in the standalone app.";
+
+                               const auto folder = getRecordingFolder();
+                               const auto files = error.isEmpty()
+                                                      ? looper.saveLayers (folder, "Loop " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S"), error)
+                                                      : juce::Array<juce::File>();
+
+                               if (error.isEmpty() && toDaw)
+                               {
+                                   std::vector<DawBridge::LoopLayer> layers;
+                                   for (int i = 0; i < files.size(); ++i)
+                                       layers.push_back ({ files[i], juce::Decibels::gainToDecibels (looper.getLayerGain (i), -60.0f), looper.isLayerMuted (i) });
+
+                                   const auto added = daw->addLoopTracks (layers, (double) looper.getLength() / looper.getSampleRate(),
+                                                                          (int) options.getProperty ("repeats", 8),
+                                                                          looper.isTempoLocked() ? looper.getBpm() : 0.0, looper.getBeatsPerBar());
+                                   error = added["error"].toString();
+                                   result->setProperty ("tracks", added["tracks"]);
+                               }
+
+                               juce::Array<juce::var> paths;
+                               for (const auto& file : files)
+                                   paths.add (file.getFullPathName());
+
+                               result->setProperty ("ok", error.isEmpty());
+                               result->setProperty ("error", error);
+                               result->setProperty ("files", paths);
+                               result->setProperty ("folder", folder.getFullPathName());
+                               complete (juce::var (result));
+                               return;
                            }
 
                            if (action == "settings")

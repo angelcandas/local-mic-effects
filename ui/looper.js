@@ -136,12 +136,46 @@ export class LoopPanel {
     volumeLabel.append(html("span", "", "Loop"), this.volume);
     tempo.append(this.lock, bpmLabel, this.tap, this.meter, volumeLabel);
 
+    // Keep the loop: WAV files in the recordings folder, or tracks in the DAW project.
+    const actions = html("div", "loop-actions");
+    this.saveButton = tool("loop-save", "Save WAV", "Save each layer as a WAV file in the recordings folder", () => this.onSave(false));
+    this.repeats = document.createElement("select");
+    this.repeats.className = "dropdown loop-repeats";
+    this.repeats.title = "How many times each layer repeats on its DAW track";
+    for (const n of [1, 2, 4, 8, 16]) this.repeats.append(Object.assign(document.createElement("option"), { value: n, textContent: `×${n}` }));
+    this.repeats.value = "8";
+    this.sendButton = tool("loop-send is-accent", "Send to DAW", "Put each layer on its own track in the DAW project, from bar 1 (with the loop's tempo in Bars mode)", () => this.onSave(true));
+    this.openDaw = tool("loop-open-daw", "Open DAW", "Switch to the DAW to see the loop tracks", () => Juce.getNativeFunction("daw")("mode", { daw: true }));
+    this.openDaw.hidden = true;
+    actions.append(this.saveButton, this.repeats, this.sendButton, this.openDaw);
+
     const head = html("div", "loop-head");
-    head.append(html("h2", "", "Looper"), (this.hint = html("span", "loop-hint")));
+    head.append(html("h2", "", "Looper"), (this.hint = html("span", "loop-hint")), actions);
 
     const body = html("div", "loop-body");
     body.append(controls, clockColumn, this.lanes, tempo);
     this.element.append(head, body);
+  }
+
+  onSave(toDaw) {
+    const busy = toDaw ? this.sendButton : this.saveButton;
+    busy.disabled = true;
+    looper(toDaw ? "sendToDaw" : "save", { repeats: Number(this.repeats.value) }).then((result) => {
+      busy.disabled = false;
+      if (!result?.ok) { this.flash(result?.error || "Couldn't save the loop."); return; }
+      const count = result.files?.length ?? 0;
+      const layers = `${count} layer${count === 1 ? "" : "s"}`;
+      this.flash(toDaw ? `Sent ${layers} to the DAW project as tracks Loop 1–${count}.` : `Saved ${layers} in ${result.folder}.`);
+      this.openDaw.hidden = !toDaw;
+    });
+  }
+
+  // A message in place of the hint for a few seconds.
+  flash(text) {
+    this.message = text;
+    this.hint.textContent = text;
+    clearTimeout(this.messageTimer);
+    this.messageTimer = setTimeout(() => { this.message = ""; this.openDaw.hidden = true; this.renderClock(); }, 6000);
   }
 
   onClear() {
@@ -212,6 +246,13 @@ export class LoopPanel {
     this.redo.disabled = !(s.redo > 0 && (s.state === "playing" || stopped));
     this.clear.disabled = s.state === "empty";
     if (this.clear.disabled) this.disarmClear();
+    const closed = s.layers > 0 && (s.state === "playing" || s.state === "stopped");
+    this.saveButton.disabled = !closed;
+    this.sendButton.disabled = !closed;
+    this.repeats.disabled = !closed;
+    const dawAvailable = !document.querySelector(".mode-switch")?.hidden;
+    this.sendButton.hidden = !dawAvailable;
+    this.repeats.hidden = !dawAvailable;
 
     for (const button of this.lock.children) button.classList.toggle("is-selected", button.dataset.locked === String(s.locked));
     if (document.activeElement !== this.bpm) this.bpm.value = String(s.bpm);
@@ -263,6 +304,7 @@ export class LoopPanel {
                             : `${s.layers} of ${s.maxLayers} layers.`;
     }
 
+    if (this.message) this.hint.textContent = this.message;
     this.ringArc.style.strokeDasharray = `${clamp(progress) * 100} 100`;
 
     // One dot per beat of the bar, the current one lit (bars mode only).

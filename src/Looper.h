@@ -86,6 +86,11 @@ public:
     // (the parts an overdub didn't reach are silent). Returns false if there's no such layer.
     bool copyLayer (int layer, juce::AudioBuffer<float>& destination) const;
 
+    // Message thread. Writes every layer (one pass each) as a 24-bit stereo WAV named
+    // "<baseName> - layer N.wav" in `folder`, and returns them in layer order. Empty, with
+    // `error` set, if there's no closed loop or a file can't be written.
+    juce::Array<juce::File> saveLayers (const juce::File& folder, const juce::String& baseName, juce::String& error) const;
+
 private:
     struct Layer
     {

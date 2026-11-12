@@ -2629,10 +2629,74 @@ namespace
                        && std::abs (centsBetween (measurePitch (played), 220.0f)) < 10.0f,
                    "the processor plays the looped voice with the mic silent");
 
+            // Keep it: WAV files, then tracks in the DAW project.
+            looper.send (Command::main); // a second layer, half a pass long
+            for (size_t start = 0; start + blockSize <= voice.size() / 2; start += blockSize)
+            {
+                buffer.clear();
+                buffer.copyFrom (0, 0, voice.data() + start, blockSize);
+                processor.processBlock (buffer, midi);
+            }
+            looper.send (Command::main);
+            playSilence (processor, 4);
+            looper.setLayerMuted (1, true);
+            looper.setLayerGain (0, 0.5f);
+
+            const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-loops", {});
+            juce::String error;
+            const auto files = looper.saveLayers (folder, "Loop test", error);
+            double fileRate = 0.0;
+            const auto first = files.size() == 2 ? readWav (files[0], fileRate) : juce::AudioBuffer<float>();
+            check (error.isEmpty() && files.size() == 2 && first.getNumChannels() == 2 && first.getNumSamples() == (int) looper.getLength()
+                       && fileRate == sampleRate && files[1].getFileName() == "Loop test - layer 2.wav",
+                   "Save writes each layer as a stereo WAV one loop long");
+
+            juce::PropertiesFile::Options options;
+            options.applicationName = "MicFXTests";
+            juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+            DawBridge::availableForTesting = true;
+            DawBridge bridge (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+            auto& edit = processor.getDawEdit();
+            const auto tracksBefore = edit.getTracks().size();
+
+            std::vector<DawBridge::LoopLayer> layers;
+            for (int i = 0; i < files.size(); ++i)
+                layers.push_back ({ files[i], juce::Decibels::gainToDecibels (looper.getLayerGain (i)), looper.isLayerMuted (i) });
+            const auto loopSeconds = (double) looper.getLength() / sampleRate;
+            const auto added = bridge.addLoopTracks (layers, loopSeconds, 4, 96.0, 3);
+            const auto tracks = edit.getTracks();
+
+            auto clipsOk = tracks.size() == tracksBefore + 2;
+            for (int t = tracksBefore; clipsOk && t < tracks.size(); ++t)
+            {
+                const auto clips = tracks[t];
+                int count = 0;
+                for (const auto& child : clips)
+                    if (child.hasType (daw::ids::CLIP))
+                    {
+                        clipsOk = clipsOk && std::abs ((double) child[daw::ids::start] - count * loopSeconds) < 1e-6
+                                  && std::abs ((double) child[daw::ids::length] - loopSeconds) < 1e-6;
+                        ++count;
+                    }
+                clipsOk = clipsOk && count == 4;
+            }
+            check ((bool) added["ok"] && clipsOk && tracks[tracksBefore][daw::ids::name].toString() == "Loop 1",
+                   "Send to DAW: a track per layer, the loop repeated from the start");
+            check (std::abs (edit.getTempo() - 96.0) < 1e-6 && edit.getBeatsPerBar() == 3, "with the loop's tempo and bar");
+            check ((bool) tracks[tracksBefore + 1][daw::ids::mute] && ! (bool) tracks[tracksBefore][daw::ids::mute],
+                   "a muted layer arrives muted");
+            edit.getUndoManager().undo();
+            check (edit.getTracks().size() == tracksBefore && std::abs (edit.getTempo() - 120.0) < 1e-6, "one undo takes it all back");
+            check (! (bool) bridge.addLoopTracks ({}, 1.0, 4, 0.0, 4)["ok"], "nothing to send is an error, not empty tracks");
+
+            DawBridge::availableForTesting = false;
+            folder.deleteRecursively();
+
             looper.send (Command::clear);
-            playSilence (processor, 2);
+            playSilence (processor, (int) (3.0 * sampleRate) / blockSize); // the effects' tails ring out
             const auto silent = playSilence (processor, 40);
-            check (rms (silent, 0, silent.size()) < 1e-3f, "silent again after clear");
+            check (rms (silent, 0, silent.size()) < 1e-3f, "silent again after clear (rms " + juce::String (rms (silent, 0, silent.size()), 5) + ")");
+            check (looper.saveLayers (folder, "x", error).isEmpty() && error.isNotEmpty(), "nothing to save once cleared");
         }
     }
     //==========================================================================

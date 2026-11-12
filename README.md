@@ -114,6 +114,10 @@ you sing.
   little early keeps recording to the bar line; a little late trims the extra and plays on in time.
 - Each layer has a waveform, **M** (mute) and a level slider; **Loop** sets the volume of all of them.
   Double-click a slider for 100%.
+- **Save WAV** writes each layer (one pass, 24-bit stereo) to the recordings folder. **Send to DAW**
+  (in the app) also puts each layer on its own DAW track, "Loop 1" and on, repeated from bar 1 as many
+  times as the **×** menu says, with each layer's level and mute. In Bars mode the project takes the
+  loop's tempo and time signature. One undo in the DAW takes it all back.
 - The loop is part of what **Record** captures, so a take holds your voice and your loops.
 - Tempo, Free/Bars and loop volume are remembered; the loop itself isn't saved when you quit.
 

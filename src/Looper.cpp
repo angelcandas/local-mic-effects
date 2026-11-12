@@ -1,5 +1,7 @@
 #include "Looper.h"
 
+#include <juce_audio_formats/juce_audio_formats.h>
+
 juce::String Looper::getStateName (State s)
 {
     switch (s)
@@ -477,4 +479,59 @@ bool Looper::copyLayer (int layer, juce::AudioBuffer<float>& destination) const
     }
 
     return true;
+}
+
+juce::Array<juce::File> Looper::saveLayers (const juce::File& folder, const juce::String& baseName, juce::String& error) const
+{
+    juce::Array<juce::File> files;
+    const auto s = state.load();
+
+    if (s == State::recording || s == State::closing)
+    {
+        error = "Close the loop first.";
+        return {};
+    }
+
+    if (numLayers.load() == 0 || length.load() <= 0)
+    {
+        error = "There's no loop yet.";
+        return {};
+    }
+
+    if (! folder.createDirectory())
+    {
+        error = "Couldn't create " + folder.getFullPathName();
+        return {};
+    }
+
+    juce::AudioBuffer<float> audio;
+
+    for (int layer = 0; layer < numLayers.load(); ++layer)
+    {
+        if (! copyLayer (layer, audio))
+            continue;
+
+        const auto file = folder.getNonexistentChildFile (baseName + " - layer " + juce::String (layer + 1), ".wav", false);
+        std::unique_ptr<juce::OutputStream> stream = std::make_unique<juce::FileOutputStream> (file);
+        if (! static_cast<juce::FileOutputStream&> (*stream).openedOk())
+        {
+            error = "Couldn't create " + file.getFullPathName();
+            return {};
+        }
+
+        const auto options = juce::AudioFormatWriterOptions{}.withSampleRate (sampleRate).withNumChannels (2).withBitsPerSample (24);
+        auto writer = juce::WavAudioFormat().createWriterFor (stream, options);
+        if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (audio, 0, audio.getNumSamples()))
+        {
+            error = "Couldn't write " + file.getFullPathName();
+            writer.reset();
+            file.deleteFile();
+            return {};
+        }
+
+        writer.reset(); // flushes and closes the file
+        files.add (file);
+    }
+
+    return files;
 }
