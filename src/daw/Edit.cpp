@@ -226,6 +226,29 @@ void Edit::setTrackArm (int trackId, bool arm)          { getTrack (trackId).set
 void Edit::setTrackMonitor (int trackId, bool monitor)  { getTrack (trackId).setProperty (ids::monitor, monitor, nullptr); }
 void Edit::setTempo (double bpm)                        { state.setProperty (ids::tempo, juce::jlimit (20.0, 400.0, bpm), &undoManager); }
 
+TempoMap Edit::getTempoMap() const
+{
+    return TempoMap::fromProject (getTempo(), state[ids::tempoChanges].toString());
+}
+
+void Edit::setTempoMap (const TempoMap& map)
+{
+    setTempo (map.getPoints().front().bpm);
+
+    if (const auto changes = map.changesToString(); changes.isEmpty())
+        state.removeProperty (ids::tempoChanges, &undoManager);
+    else
+        state.setProperty (ids::tempoChanges, changes, &undoManager);
+}
+
+void Edit::setTempoAt (double seconds, double bpm)
+{
+    const auto map = getTempoMap();
+    auto points = map.getPoints();
+    points[(size_t) map.getPointIndexAt (map.toBeats (seconds))].bpm = bpm;
+    setTempoMap (TempoMap (std::move (points)));
+}
+
 //==============================================================================
 namespace
 {
@@ -631,8 +654,7 @@ void Edit::setClipFades (int clipId, double fadeInSeconds, double fadeOutSeconds
 
 double Edit::snapToGrid (double seconds, double beats) const
 {
-    const auto step = juce::jmax (1.0e-3, beats) * 60.0 / getTempo();
-    return std::round (seconds / step) * step;
+    return getTempoMap().snap (seconds, beats);
 }
 
 void Edit::setBeatsPerBar (int beats)

@@ -8,6 +8,7 @@ import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
+import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createRhythmPanel, drawWarpMarkers, savedQuantizeArgs, startWarpDrag } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
 
@@ -74,6 +75,7 @@ const ICONS = {
   import: '<path d="M12 3v12M7 10l5 5 5-5M4 20h16"/>',
   automix: '<path d="M5 4v16M12 4v16M19 4v16"/><circle cx="5" cy="14" r="2" fill="currentColor"/><circle cx="12" cy="8" r="2" fill="currentColor"/><circle cx="19" cy="15" r="2" fill="currentColor"/>',
   export: '<path d="M12 15V3M7 8l5-5 5 5M4 20h16"/>',
+  tempo: '<path d="M3 18h5l5-10h8"/><circle cx="8" cy="18" r="1.6" fill="currentColor"/><circle cx="13" cy="8" r="1.6" fill="currentColor"/><path d="M3 21h18" stroke-dasharray="2 3"/>',
   tap: '<path d="M9 11V5a2 2 0 0 1 4 0v6M9 11l-1-1.5a1.8 1.8 0 0 0-3 2L8 18a5 5 0 0 0 4 2h2a5 5 0 0 0 5-5v-3a2 2 0 0 0-4 0M13 11a2 2 0 0 1 4 0"/>',
   key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>',
   click: '<path d="M8 21h8l-2-16h-4zM12 17l4-9"/>',
@@ -742,18 +744,33 @@ class DawScreen {
   get beat() { return 60 / this.tempo; }
   get beatsPerBar() { return this.session?.beatsPerBar ?? 4; }
   get bar() { return this.beat * this.beatsPerBar; }
-  get gridSeconds() { return this.grid === "bar" ? this.bar : this.beat * this.grid; }
+  get gridBeats() { return this.grid === "bar" ? this.beatsPerBar : this.grid; }
+
+  // The tempo over the song (src/daw/TempoMap): beats <-> seconds through every change.
+  get tempoMap() {
+    const key = JSON.stringify(this.session?.tempoMap ?? this.tempo);
+    if (key !== this.tempoMapKey) {
+      this.tempoMapKey = key;
+      this.tempoMapCache = new TempoMap(this.session?.tempoMap, this.tempo);
+    }
+    return this.tempoMapCache;
+  }
+
+  // Seconds `beats` beats on from a time, on the tempo map (a beat or bar from there).
+  beatsFrom(seconds, beats) {
+    const map = this.tempoMap;
+    return map.toSeconds(map.toBeats(seconds) + beats) - seconds;
+  }
   get markers() { return this.session?.markers ?? []; }
 
   // Seconds snapped to the grid (unless snap is off or Alt is held).
   snapTime(seconds, event) {
     if (!this.snap || event?.altKey) return Math.max(0, seconds);
-    const step = this.gridSeconds;
-    return Math.max(0, Math.round(seconds / step) * step);
+    return Math.max(0, this.tempoMap.snap(seconds, this.gridBeats));
   }
 
   barsBeats(seconds) {
-    const beats = Math.max(0, seconds) / this.beat;
+    const beats = Math.max(0, this.tempoMap.toBeats(Math.max(0, seconds)) + 1e-9);
     return `${Math.floor(beats / this.beatsPerBar) + 1}.${Math.floor(beats % this.beatsPerBar) + 1}`;
   }
 
@@ -766,7 +783,7 @@ class DawScreen {
     if ((m = t.match(/^(\d+)(?:\.(\d+))?$/))) {
       const bar = Number(m[1]), beat = Number(m[2] ?? 1);
       if (bar < 1 || beat < 1 || beat > this.beatsPerBar) return null;
-      return (bar - 1) * this.bar + (beat - 1) * this.beat;
+      return this.tempoMap.toSeconds((bar - 1) * this.beatsPerBar + (beat - 1));
     }
     return null;
   }
@@ -805,7 +822,7 @@ class DawScreen {
     if (this.taps.length < 3) return toast(this.taps.length === 1 ? "Keep tapping on the beat…" : "One more…");
     const gaps = this.taps.slice(1).map((t, i) => t - this.taps[i]);
     const bpm = Math.round(60000 / (gaps.reduce((a, b) => a + b, 0) / gaps.length));
-    daw("tempo", { bpm: clamp(bpm, 20, 400), continue: this.taps.length > 3 });
+    daw("tempo", { bpm: clamp(bpm, 20, 400), continue: this.taps.length > 3, ...(this.tempoMap.steady ? {} : { at: this.status.position }) });
   }
 
   //============================================================================ markers
@@ -933,7 +950,9 @@ class DawScreen {
     const timing = html("div", "daw-group");
     this.tempoInput = html("input", "tempo-input");
     Object.assign(this.tempoInput, { type: "number", min: 20, max: 400, step: 1, title: "Tempo (BPM)" });
-    this.tempoInput.addEventListener("change", () => daw("tempo", { bpm: Number(this.tempoInput.value) || 120 }));
+    // With tempo changes, the box shows and sets the tempo at the playhead.
+    this.tempoInput.addEventListener("change", () => daw("tempo", { bpm: Number(this.tempoInput.value) || 120,
+                                                                    ...(this.tempoMap.steady ? {} : { at: this.status.position }) }));
     const tempo = html("label", "tempo");
     tempo.append(this.tempoInput, html("span", "", "BPM"));
     const tap = iconButton("tool tap-tempo", "tap", "Tap tempo: click on the beat a few times (T)", () => this.tapTempo());
@@ -969,7 +988,14 @@ class DawScreen {
     click.append((this.metronomeButton = iconButton("toggle", "click", "Click: metronome on / off (C)", () => daw("metronome", { on: !this.session?.metronome }))),
                  this.clickVolume);
     this.keyButton = iconButton("tool key-button", "key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
-    timing.append(tempo, tap, this.signature, this.keyButton, click,
+    this.showTempo = prefs.get("showTempo", false);
+    this.tempoButton = iconButton("toggle", "tempo", "Tempo track: tempo changes and ramps over the song", () => {
+      this.showTempo = !this.showTempo;
+      prefs.set("showTempo", this.showTempo);
+      this.renderTransport();
+      this.renderArrange(true);
+    });
+    timing.append(tempo, tap, this.tempoButton, this.signature, this.keyButton, click,
       this.countIn,
       (this.loopButton = iconButton("toggle", "loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop())),
       (this.snapButton = iconButton("toggle", "snap", "Snap edits to the grid (hold Alt to drag freely)", () => {
@@ -1041,7 +1067,7 @@ class DawScreen {
       this.recentSelect.replaceChildren(new Option("Recent…", ""), ...recent.map((r) => new Option(r.name, r.path)));
       this.recentWrap.hidden = recent.length === 0;
     }
-    if (document.activeElement !== this.tempoInput) this.tempoInput.value = Math.round(s.tempo * 100) / 100;
+    this.showTempoValue();
     this.countIn.value = String(s.countIn);
     this.signature.value = String(s.beatsPerBar ?? 4);
     const songKey = s.key?.key ?? -1;
@@ -1056,6 +1082,7 @@ class DawScreen {
     this.loopButton.setAttribute("aria-pressed", String(s.loop.on));
     this.snapButton.setAttribute("aria-pressed", String(this.snap));
     this.followButton.setAttribute("aria-pressed", String(this.follow));
+    this.tempoButton.setAttribute("aria-pressed", String(!!this.showTempo));
     [...this.tools.children].forEach((b) => b.classList.toggle("is-selected", b.dataset.tool === this.tool));
     if (document.activeElement !== this.zoomSlider)
       this.zoomSlider.value = String(Math.round(1000 * Math.log(this.zoom / MIN_ZOOM) / Math.log(MAX_ZOOM / MIN_ZOOM)));
@@ -1091,7 +1118,7 @@ class DawScreen {
     else {
       // No range yet: loop the next 4 bars from the playhead.
       const start = this.snapTime(this.status.position);
-      daw("loop", { on: true, start, end: start + 4 * this.bar });
+      daw("loop", { on: true, start, end: start + this.beatsFrom(start, 4 * this.beatsPerBar) });
     }
   }
 
@@ -1112,6 +1139,16 @@ class DawScreen {
     this.ruler.append(this.loopBand);
     rulerRow.append(corner, this.ruler);
 
+    // The tempo track, under the ruler (shown with the Tempo button).
+    this.tempoRow = html("div", "tempo-row");
+    const tempoCorner = html("div", "corner tempo-corner");
+    tempoCorner.append(html("span", "tempo-corner-name", "Tempo"),
+                       button("tool", "Steady", "Remove every tempo change: the whole song at the start tempo",
+                              () => daw("tempoMap", { points: [[0, this.tempo, false]] })));
+    this.tempoLane = createTempoLane(this, daw);
+    this.tempoRow.append(tempoCorner, this.tempoLane.element);
+    this.tempoRow.hidden = true;
+
     this.rows = html("div", "track-rows");
     this.masterRow = html("div", "track-row master-row");
     this.loopShade = html("div", "loop-shade");
@@ -1121,7 +1158,7 @@ class DawScreen {
 
     this.cutGuide = html("div", "cut-guide");
     this.cutGuide.hidden = true;
-    this.inner.append(rulerRow, this.rows, this.masterRow, this.loopShade, this.playhead, this.cutGuide);
+    this.inner.append(rulerRow, this.tempoRow, this.rows, this.masterRow, this.loopShade, this.playhead, this.cutGuide);
 
     // Scrolling by hand while playing switches Follow off, so you can look around
     // (and edit) elsewhere while the song keeps playing.
@@ -1251,7 +1288,7 @@ class DawScreen {
 
   // An empty MIDI clip (one bar) on a MIDI track at a time, opened in the piano roll.
   async addMidiClip(track, start) {
-    const id = await daw("addMidiClip", { track: track.id, start: Math.max(0, start), length: this.bar });
+    const id = await daw("addMidiClip", { track: track.id, start: Math.max(0, start), length: this.beatsFrom(Math.max(0, start), this.beatsPerBar) });
     if (typeof id === "number" && id > 0) {
       this.showWhenDrawn({ track: track.id, clip: id });
       this.setDockTab("track");
@@ -1295,7 +1332,7 @@ class DawScreen {
     const width = this.timelineSeconds() * this.zoom;
     const signature = JSON.stringify([
       session.tracks.map(({ inserts, ...track }) => [track, inserts.length]),
-      session.master.volume, session.master.inserts.length, session.tempo, session.loop, session.beatsPerBar, session.markers,
+      session.master.volume, session.master.inserts.length, session.tempo, session.tempoMap, this.showTempo, session.loop, session.beatsPerBar, session.markers,
       this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight,
     ]);
     if (!force && signature === this.arrangeSignature) return this.movePlayhead();
@@ -1309,6 +1346,15 @@ class DawScreen {
     this.inner.style.setProperty("--bar", `${this.bar * this.zoom}px`);
     this.inner.style.setProperty("--beat", `${this.beat * this.zoom}px`);
     this.inner.classList.toggle("dense", this.beat * this.zoom < 8);
+    // A changing tempo: the lanes' grid is drawn line by line instead of repeating.
+    const varies = !this.tempoMap.steady;
+    this.inner.classList.toggle("tempo-varies", varies);
+    if (varies) {
+      this.inner.style.setProperty("--grid-image", gridImage(this.tempoMap, this.beatsPerBar, this.zoom, width));
+      this.inner.style.setProperty("--grid-width", `${Math.ceil(width)}px`);
+    }
+    this.tempoRow.hidden = !this.showTempo;
+    if (this.showTempo) this.tempoLane.update(session, width);
     this.renderRuler(width);
     this.showLoop(session.loop);
     this.renderMarkers();
@@ -1332,13 +1378,16 @@ class DawScreen {
 
   renderRuler(width) {
     [...this.ruler.querySelectorAll(".bar-label")].forEach((label) => label.remove());
-    const barSeconds = this.bar;
-    const barPixels = barSeconds * this.zoom;
+    const map = this.tempoMap, bars = this.beatsPerBar;
+    const x = (bar) => map.toSeconds(bar * bars) * this.zoom;
+    // Spacing from the shortest bar (the fastest tempo), so labels never crowd.
+    const fastest = Math.max(...map.points.map((p) => p[1]));
+    const barPixels = 60 / fastest * bars * this.zoom;
     const every = [1, 2, 4, 8, 16, 32, 64].find((n) => n * barPixels >= 44) ?? 128;
 
-    for (let bar = 0; bar * barSeconds * this.zoom < width; bar += every) {
+    for (let bar = 0; x(bar) < width; bar += every) {
       const label = html("span", "bar-label", String(bar + 1));
-      label.style.left = `${bar * barPixels}px`;
+      label.style.left = `${x(bar)}px`;
       this.ruler.append(label);
     }
   }
@@ -1448,8 +1497,8 @@ class DawScreen {
         if (event.target !== lane) return;
         const box = lane.getBoundingClientRect();
         const time = (event.clientX - box.left) / this.zoom;
-        const bar = this.bar;
-        this.addMidiClip(track, Math.floor(time / bar + 1e-6) * bar);
+        const map = this.tempoMap, bars = this.beatsPerBar;
+        this.addMidiClip(track, map.toSeconds(Math.floor(map.toBeats(time) / bars + 1e-6) * bars));
       });
     }
 
@@ -1788,7 +1837,16 @@ class DawScreen {
     this.redrawWaves(file);
   }
 
+  // The tempo box: the tempo at the playhead (the start tempo while it's steady).
+  showTempoValue() {
+    if (!this.tempoInput || document.activeElement === this.tempoInput) return;
+    const bpm = this.tempoMap.steady ? this.tempo : this.tempoMap.bpmAt(Math.max(0, this.status?.position ?? 0));
+    const text = String(Math.round(bpm * 100) / 100);
+    if (this.tempoInput.value !== text) this.tempoInput.value = text;
+  }
+
   movePlayhead(force = false) {
+    if (!this.tempoMap.steady) this.showTempoValue();
     const x = HEAD_WIDTH + Math.max(0, this.status.position) * this.zoom;
     this.playhead.style.transform = `translateX(${x}px)`;
 
@@ -3415,7 +3473,7 @@ class DawScreen {
     const code = event.code; // for Alt (Option on a Mac) combinations, which change event.key
     const handled = () => event.preventDefault();
     const onSlider = event.target.closest?.("[role=slider]");
-    const step = event.shiftKey ? this.bar : this.beat;
+    const step = this.beatsFrom(this.status.position, event.shiftKey ? this.beatsPerBar : 1);
     const command = (name) => { handled(); this.run(name); };
 
     if (mod && event.altKey) { if (code === "KeyB") command("toggleLibrary"); }

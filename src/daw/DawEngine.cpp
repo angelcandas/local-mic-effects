@@ -224,7 +224,9 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
 
     if (tree.hasType (ids::PROJECT))
     {
-        if (property == ids::tempo || property == ids::beatsPerBar)
+        if (property == ids::tempo || property == ids::tempoChanges)
+            triggerAsyncUpdate(); // the click follows the new tempo map (and so will musical clips)
+        else if (property == ids::beatsPerBar)
             updateTempo();
         else if (property == ids::loopOn || property == ids::loopStart || property == ids::loopEnd)
             updateLoop();
@@ -379,6 +381,7 @@ void DawEngine::rebuild()
     };
 
     graph->master = reuse (edit.getMaster());
+    graph->tempo = edit.getTempoMap();
 
     juce::int64 end = 0;
     int maxLatency = 0;
@@ -563,8 +566,6 @@ void DawEngine::collectGarbage()
 //==============================================================================
 void DawEngine::updateTempo()
 {
-    const auto bpm = juce::jlimit (20.0, 400.0, (double) edit.getState().getProperty (ids::tempo, 120.0));
-    samplesPerBeat = sampleRate * 60.0 / bpm;
     beatsPerBar = edit.getBeatsPerBar();
     updateLoop();
 }
@@ -605,7 +606,10 @@ juce::String DawEngine::startRecording (const juce::File& folder)
     if (const auto bars = countInBars.load(); bars > 0)
     {
         countingIn = true;
-        position = start - (juce::int64) std::llround (bars * beatsPerBar.load() * samplesPerBeat.load());
+        const auto tempo = edit.getTempoMap();
+        const auto startBeat = tempo.toBeats ((double) start / sampleRate);
+        const auto countIn = tempo.toSeconds (startBeat) - tempo.toSeconds (startBeat - bars * beatsPerBar.load());
+        position = start - (juce::int64) std::llround (countIn * sampleRate);
     }
 
     playing = true;
@@ -732,32 +736,37 @@ Recorder::Take DawEngine::stopRecording()
     return take;
 }
 
-void DawEngine::renderClick (juce::AudioBuffer<float>& output, int offset, int numChannels, int numSamples,
+void DawEngine::renderClick (const TempoMap& tempo, juce::AudioBuffer<float>& output, int offset, int numChannels, int numSamples,
                              juce::int64 blockStart) noexcept
 {
-    const auto spb = samplesPerBeat.load();
     const auto counting = countingIn.load();
     const auto start = recordStart.load();
     const auto clickOn = metronome.load();
     const auto barLength = (juce::int64) beatsPerBar.load();
     const auto volume = metronomeVolume.load();
 
+    // The beats that start in this block, on the tempo map.
+    auto nextBeat = (juce::int64) std::ceil (tempo.toBeats ((double) blockStart / sampleRate) - 1.0e-9);
+    auto nextAt = (juce::int64) std::llround (tempo.toSeconds ((double) nextBeat) * sampleRate);
+    if (nextAt < blockStart)
+        nextAt = (juce::int64) std::llround (tempo.toSeconds ((double) ++nextBeat) * sampleRate);
+
     for (int i = 0; i < numSamples; ++i)
     {
         const auto t = blockStart + i;
 
-        if (clickOn || (counting && t < start))
+        if (t == nextAt)
         {
-            const auto beat = (juce::int64) std::floor ((double) t / spb);
-
-            if ((double) t - (double) beat * spb < 1.0) // a beat starts on this sample
+            if (clickOn || (counting && t < start))
             {
-                const auto downbeat = ((beat % barLength) + barLength) % barLength == 0;
+                const auto downbeat = ((nextBeat % barLength) + barLength) % barLength == 0;
                 clickPhase = 0.0f;
                 clickIncrement = (downbeat ? 1500.0f : 1000.0f) / (float) sampleRate;
                 clickLevel = (downbeat ? 0.35f : 0.22f) * volume;
                 clickDecay = (float) std::exp (-1.0 / (0.012 * sampleRate));
             }
+
+            nextAt = (juce::int64) std::llround (tempo.toSeconds ((double) ++nextBeat) * sampleRate);
         }
 
         if (clickLevel < 1.0e-4f)
@@ -1028,7 +1037,7 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 
     if (isPlaying)
     {
-        renderClick (output, outputOffset, numChannels, numSamples, blockStart);
+        renderClick (graph.tempo, output, outputOffset, numChannels, numSamples, blockStart);
         position = blockStart + numSamples;
     }
 }

@@ -171,6 +171,15 @@ namespace
             points.add (juce::Array<juce::var> { point.time, point.db });
         return points;
     }
+
+    // The tempo map for the page: [[beat, bpm, ramp], ...], the first at beat 0.
+    juce::var describeTempo (const daw::TempoMap& tempo)
+    {
+        juce::Array<juce::var> points;
+        for (const auto& point : tempo.getPoints())
+            points.add (juce::Array<juce::var> { point.beat, point.bpm, point.ramp });
+        return points;
+    }
 }
 
 //==============================================================================
@@ -402,6 +411,7 @@ juce::var DawBridge::describeSession()
                                { "recoverable", project.getRecoverableBackup().getFileName() },
                                { "missing", project.getMissingFiles().size() } }) },
         { "tempo", edit.getTempo() },
+        { "tempoMap", describeTempo (edit.getTempoMap()) },
         { "beatsPerBar", edit.getBeatsPerBar() },
         { "key", object ({ { "key", edit.getKey() }, { "minor", edit.isKeyMinor() },
                            { "name", analysis::KeyEstimate::getName (edit.getKey(), edit.isKeyMinor()) } }) },
@@ -1997,7 +2007,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
         if (arg (args, "apply", false))
         {
-            edit.setTempo (bpm);
+            edit.setTempoMap (daw::TempoMap (bpm)); // a steady tempo: any tempo changes go
             if (arg (args, "lineUp", false))
             {
                 auto fitted = tempo;
@@ -2041,7 +2051,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         }
         else
         {
-            grid = analysis::rhythm::makeGrid (edit.getTempo(), steps, 0.0, songEnd, 0.0, swing);
+            grid = edit.getTempoMap().makeGrid (steps, 0.0, songEnd, swing);
         }
 
         daw::rhythm::Options options;
@@ -2080,7 +2090,34 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "clipFades")  { edit.setClipFades (id, args["fadeIn"], args["fadeOut"]); ok(); return; }
 
     //================================================================ timeline and transport
-    if (command == "tempo")     { edit.setTempo (args["bpm"]); ok(); return; }
+    // The tempo; with `at` (seconds), the tempo of the point in force there.
+    if (command == "tempo")
+    {
+        if (args.hasProperty ("at"))
+            edit.setTempoAt (args["at"], args["bpm"]);
+        else
+            edit.setTempo (args["bpm"]);
+        ok();
+        return;
+    }
+
+    // The whole tempo map: points [[beat, bpm, ramp], ...]; the first is the start tempo
+    // (it moves to beat 0). One point (or none) makes the tempo steady.
+    if (command == "tempoMap")
+    {
+        std::vector<daw::TempoMap::Point> points;
+        if (const auto* list = args["points"].getArray())
+            for (const auto& p : *list)
+                if (p.isArray() && p.size() >= 2)
+                    points.push_back ({ (double) p[0], (double) p[1], p.size() > 2 && (bool) p[2] });
+
+        if (points.empty())
+            points.push_back ({ 0.0, edit.getTempo(), false });
+
+        edit.setTempoMap (daw::TempoMap (std::move (points)));
+        ok();
+        return;
+    }
     if (command == "loop")      { edit.setLoop (args["on"], args["start"], args["end"]); ok(); return; }
     if (command == "metronome") { engine.setMetronome (args["on"]); sessionChanged = true; ok(); return; }
     if (command == "countIn")   { engine.setCountInBars (args["bars"]); sessionChanged = true; ok(); return; }
@@ -2490,8 +2527,10 @@ bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, 
     if (command == "addMidiClip")
     {
         const auto trackId = arg (args, "track", -1);
-        const auto beat = 60.0 / edit.getTempo();
-        const auto clip = edit.addMidiClip (trackId, arg (args, "start", 0.0), arg (args, "length", beat * edit.getBeatsPerBar()));
+        const auto start = arg (args, "start", 0.0);
+        const auto tempo = edit.getTempoMap();
+        const auto bar = tempo.toSeconds (tempo.toBeats (start) + edit.getBeatsPerBar()) - start; // one bar from there
+        const auto clip = edit.addMidiClip (trackId, start, arg (args, "length", bar));
         complete (clip.isValid() ? clip[ids::id] : juce::var (-1));
         return true;
     }

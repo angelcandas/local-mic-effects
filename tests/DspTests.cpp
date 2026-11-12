@@ -3061,6 +3061,23 @@ namespace
             check (! edit.getClip (clipId).hasProperty (daw::ids::warp), "and each undoes");
         }
 
+        // The tempo map through the page's commands.
+        {
+            const auto points = juce::Array<juce::var> { juce::var (juce::Array<juce::var> { 0.0, 100.0, false }),
+                                                         juce::var (juce::Array<juce::var> { 8.0, 140.0, true }) };
+            check (ok (run ("tempoMap", args ({ { "points", points } }))), "tempoMap completes");
+            const auto shown = lastSession();
+            check (shown["tempoMap"].size() == 2 && std::abs ((double) shown["tempoMap"][1][1] - 140.0) < 1e-9
+                       && (bool) shown["tempoMap"][1][2] && std::abs ((double) shown["tempo"] - 100.0) < 1e-9,
+                   "the session shows the tempo points, the first as the tempo");
+            const auto set = ok (run ("tempo", args ({ { "bpm", 150.0 }, { "at", 30.0 } })));
+            const auto after = lastSession();
+            check (set && std::abs ((double) after["tempoMap"][1][1] - 150.0) < 1e-9 && std::abs ((double) after["tempo"] - 100.0) < 1e-9,
+                   "tempo with a time sets the point in force there");
+            run ("undo"); run ("undo");
+            check (lastSession()["tempoMap"].size() == 1, "and both undo");
+        }
+
         // Rhythm commands: tempo from a leading track (lined up with the bars), quantize
         // to the grid and to its groove, clear the warp. Each is one undo step.
         {
@@ -3627,6 +3644,96 @@ namespace
             if (std::abs (x[i]) > std::abs (x[best]))
                 best = i;
         return best / sampleRate;
+    }
+
+    void testTempoMap()
+    {
+        std::cout << "\nTempo map (tempo changes and ramps)\n";
+        using daw::TempoMap;
+
+        const TempoMap steady (120.0);
+        check (steady.isSteady() && std::abs (steady.toSeconds (8.0) - 4.0) < 1e-12 && std::abs (steady.toBeats (3.0) - 6.0) < 1e-12,
+               "a steady 120 BPM: 8 beats are 4 s");
+
+        // 120 BPM for 4 beats, a step to 90, then a ramp to 180 over 8 beats, then steady.
+        const TempoMap map ({ { 0.0, 120.0, false }, { 4.0, 90.0, false }, { 12.0, 180.0, true } });
+        check (map.getPoints().size() == 3 && ! map.isSteady(), "three points");
+        check (std::abs (map.toSeconds (4.0) - 2.0) < 1e-12 && std::abs (map.toSeconds (6.0) - (2.0 + 0.0)) > 0.1,
+               "the step lands at beat 4 = 2 s");
+
+        // The ramp's length: the integral of 60 / T over 8 beats, T from 90 to 180.
+        const auto k = (180.0 - 90.0) / 8.0;
+        const auto rampSeconds = 60.0 / k * std::log (180.0 / 90.0);
+        check (std::abs (map.toSeconds (12.0) - (2.0 + rampSeconds)) < 1e-9,
+               "a ramp takes the integral of its tempo (" + juce::String (rampSeconds, 4) + " s for 8 beats from 90 to 180)");
+        check (std::abs (map.getBpmAtBeat (8.0) - 135.0) < 1e-9 && std::abs (map.getBpmAtBeat (20.0) - 180.0) < 1e-9
+                   && std::abs (map.getBpmAtBeat (2.0) - 120.0) < 1e-9,
+               "the tempo halfway up the ramp is halfway between");
+
+        // Numerically: stepping through the ramp in small beats adds up to the same.
+        double sum = 0.0;
+        for (int i = 0; i < 80000; ++i)
+            sum += 60.0 / map.getBpmAtBeat (4.0 + (i + 0.5) * 1.0e-4) * 1.0e-4;
+        check (std::abs (sum - rampSeconds) < 1e-6, "and agrees with adding up small steps");
+
+        auto roundTrip = true;
+        for (double t = -1.0; t < 20.0; t += 0.0731)
+            roundTrip = roundTrip && std::abs (map.toSeconds (map.toBeats (t)) - t) < 1e-9;
+        check (roundTrip, "toBeats undoes toSeconds, before, through and after the changes");
+
+        const auto saved = TempoMap::fromProject (120.0, map.changesToString());
+        check (saved == map && TempoMap (120.0).changesToString().isEmpty(), "the changes save to text and back");
+
+        check (std::abs (map.snap (2.3, 1.0) - map.toSeconds (std::round (map.toBeats (2.3)))) < 1e-12,
+               "snapping rounds in beats");
+        const auto grid = map.makeGrid (1.0, 0.0, 6.0);
+        auto onBeats = grid.size() > 10;
+        for (auto t : grid)
+            onBeats = onBeats && std::abs (map.toBeats (t) - std::round (map.toBeats (t))) < 1e-9;
+        check (onBeats, "the quantize grid follows the tempo changes (" + juce::String ((int) grid.size()) + " lines)");
+
+        // In the project: the click follows the map.
+        daw::Edit edit;
+        edit.setTempoMap (map);
+        check (edit.getTempoMap() == map && edit.getTempo() == 120.0, "the project keeps the map, the start tempo as its tempo");
+        edit.getUndoManager().beginNewTransaction();
+        edit.setTempoAt (5.0, 100.0); // inside the ramp: the ramp's start point (beat 4)
+        check (std::abs (edit.getTempoMap().getPoints()[1].bpm - 100.0) < 1e-9, "setting the tempo at a time sets the point in force there");
+        edit.getUndoManager().undo();
+        check (edit.getTempoMap() == map, "and undoes");
+
+        daw::DawEngine engine (edit, false);
+        engine.prepare (sampleRate, blockSize);
+        engine.loadAllNow();
+        engine.setMetronome (true);
+        engine.seek (0);
+        engine.play();
+        std::vector<double> clicks;
+        float last = 0.0f;
+        int quiet = 1 << 30;
+        const auto total = (int) (8.0 * sampleRate);
+        for (int done = 0; done < total; done += blockSize)
+        {
+            juce::AudioBuffer<float> block (2, blockSize);
+            block.clear();
+            engine.process (block, 2, blockSize);
+            for (int i = 0; i < blockSize; ++i)
+            {
+                const auto v = std::abs (block.getSample (0, i));
+                if (v > 0.05f && last <= 0.05f && quiet > (int) (0.1 * sampleRate))
+                    clicks.push_back ((done + i) / sampleRate);
+                quiet = v > 0.05f ? 0 : quiet + 1;
+                last = v;
+            }
+        }
+        engine.stop();
+        auto clicksOnBeats = clicks.size() >= 14;
+        double worst = 0.0;
+        for (size_t n = 0; n < clicks.size(); ++n)
+            worst = std::max (worst, std::abs (clicks[n] - map.toSeconds ((double) n)));
+        clicksOnBeats = clicksOnBeats && worst < 0.002;
+        check (clicksOnBeats, "the click plays every beat of the map (" + juce::String ((int) clicks.size()) + " clicks, worst "
+                                  + juce::String (worst * 1000.0, 2) + " ms off)");
     }
 
     void testWarp()
@@ -4839,6 +4946,7 @@ int main()
     testClipEditing();
     testDawMode();
     testClipTools();
+    testTempoMap();
     testWarp();
     testRhythm();
     testTrackTools();
