@@ -132,6 +132,14 @@ public:
     // Click loudness, 0 (silent) .. 1 (the default) .. 2.
     void setMetronomeVolume (float v) noexcept { metronomeVolume = juce::jlimit (0.0f, 2.0f, v); }
     float getMetronomeVolume() const noexcept  { return metronomeVolume.load(); }
+    // Library preview: plays a decoded sound (at the engine's sample rate, one or two
+    // channels) once, straight to the output, on top of whatever plays. It is not part of
+    // the mix, a recording or an export. Message thread; a new preview replaces the last.
+    void startPreview (juce::AudioBuffer<float>&& audio, float gain);
+    void stopPreview();
+    void setPreviewGain (float gain) noexcept   { previewGain = juce::jlimit (0.0f, 2.0f, gain); }
+    bool isPreviewing() const noexcept          { return previewPlaying.load(); }
+
     // Bars of click before recording starts (0 = none). The click plays during the
     // count-in even when the metronome is off.
     void setCountInBars (int bars) noexcept { countInBars = juce::jlimit (0, 4, bars); }
@@ -301,7 +309,7 @@ private:
     void valueTreeRedirected (juce::ValueTree&) override                          { triggerAsyncUpdate(); }
 
     void handleAsyncUpdate() override { rebuild(); }
-    void timerCallback() override     { collectGarbage(); drainRecordedMidi(); }
+    void timerCallback() override     { collectGarbage(); collectPreviews(); drainRecordedMidi(); }
 
     void rebuild();
     std::shared_ptr<Strip> getStrip (const juce::ValueTree& trackOrMaster);
@@ -310,6 +318,9 @@ private:
 
     void publish (std::unique_ptr<Graph>);
     void collectGarbage();
+    void collectPreviews();
+    void renderPreview (juce::AudioBuffer<float>& output, int numChannels, int numSamples) noexcept;
+    void retirePreview (juce::AudioBuffer<float>*) noexcept;
 
     static void renderClip (const Clip&, juce::AudioBuffer<float>&, juce::int64 blockStart, int numSamples) noexcept;
     void renderBlock (Graph&, juce::AudioBuffer<float>& output, int outputOffset, int numChannels, int numSamples,
@@ -341,6 +352,16 @@ private:
     static constexpr int retiredCapacity = 64;
     juce::AbstractFifo retiredFifo { retiredCapacity };
     std::array<Graph*, retiredCapacity> retired {};
+
+    // The library preview: handed over like the graphs, and freed on the message thread.
+    std::atomic<juce::AudioBuffer<float>*> previewIncoming { nullptr };
+    juce::AudioBuffer<float>* previewActive = nullptr; // audio thread
+    int previewPosition = 0;                           // audio thread
+    std::atomic<bool> previewStop { false }, previewPlaying { false };
+    std::atomic<float> previewGain { 1.0f };
+    static constexpr int previewRetiredCapacity = 8;
+    juce::AbstractFifo previewRetiredFifo { previewRetiredCapacity };
+    std::array<juce::AudioBuffer<float>*, previewRetiredCapacity> previewRetired {};
 
     std::atomic<bool> playing { false };
     std::atomic<juce::int64> position { 0 }, length { 0 };
