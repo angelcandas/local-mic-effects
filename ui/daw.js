@@ -3234,12 +3234,33 @@ class DawScreen {
   }
 
   toggleAutoMix(show = this.autoMixPanel.hidden) {
+    const wasOpen = !this.autoMixPanel.hidden;
     this.autoMixPanel.hidden = !show;
+    // Closing ends the run: opened again, it starts clean from the tracks as they are now.
+    if (!show && wasOpen) this.resetAutoMix();
     if (show) {
       this.toggleExportPanel(false);
       this.renderAutoMixMode();
       if (!this.autoMix.plan) this.refreshAutoMixTags(true);
     }
+  }
+
+  // Forgets the last run (its plan, roles, results and amount, and its mode and track),
+  // unless it's still listening. The style and the effects it may add are kept.
+  resetAutoMix() {
+    const panel = this.autoMixPanel;
+    if (panel.classList.contains("is-running")) return;
+    this.autoMix = { plan: null, applied: false, after: true };
+    panel.querySelector("[name=mode]").value = "mix";
+    panel.querySelector("[name=focus]").value = "0";
+    panel.querySelector("[name=masterLufs]").value = "-14";
+    const slider = panel.querySelector("[name=amount]");
+    slider.value = "100";
+    panel.querySelector(".automix-amount-value").textContent = "100%";
+    panel.querySelector(".automix-plan").replaceChildren();
+    panel.querySelector(".automix-roles").replaceChildren();
+    this.setAutoMixResult("");
+    this.renderAutoMixControls();
   }
 
   // The mode's own line, and the track it works on (fit and clean only), listed from the session.
