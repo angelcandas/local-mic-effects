@@ -48,6 +48,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/browser.js
         ui/pianoroll.js
         ui/takes.js
+        ui/looper.js
         ui/daw.css
         ui/aiviews.css
         ui/aiviews.js
@@ -90,6 +91,8 @@ set(MICFX_DSP_SOURCES
     src/Presets.cpp
     src/PluginProcessor.cpp
     src/Recorder.cpp
+    src/Looper.cpp
+    src/Looper.h
     src/Multitrack.cpp
     src/daw/AudioPool.cpp
     src/daw/DawEngine.cpp

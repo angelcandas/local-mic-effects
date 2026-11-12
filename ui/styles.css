@@ -1075,7 +1075,7 @@ body.is-dry .chain { opacity: 0.45; filter: grayscale(0.7); transition: opacity 
   font: 600 11px var(--mono);
   text-align: center;
 }
-body.is-daw .dry-button, body.is-daw .keys-button { display: none; }
+body.is-daw .dry-button, body.is-daw .keys-button, body.is-daw .loop-toggle { display: none; }
 
 /* ---------- Per-effect presets and in/out gain (card footer; DAW inserts use the same parts) ---------- */
 
@@ -1110,3 +1110,120 @@ body.is-daw .dry-button, body.is-daw .keys-button { display: none; }
 .card-gains .knob, .insert-gains .knob { min-width: 44px; gap: 1px; }
 .card-gains .knob .readout, .insert-gains .knob .readout { font-size: 9.5px; }
 .card-gains .knob .name, .insert-gains .knob .name { font-size: 9px; }
+
+/* ---------- Looper ---------- */
+
+.loop-toggle { cursor: pointer; font: inherit; font-size: 11.5px; }
+.loop-toggle svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.loop-toggle:hover,
+.loop-toggle[aria-pressed="true"] { color: var(--text); border-color: var(--line-strong); }
+.loop-toggle[data-state="recording"], .loop-toggle[data-state="closing"], .loop-toggle[data-state="overdubbing"] { color: var(--hot); border-color: var(--hot); }
+.loop-toggle[data-state="playing"] { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 60%, transparent); }
+
+.looper {
+  --loop-1: #8c7bff;
+  --loop-2: #3fd9c6;
+  --loop-3: #ffc94d;
+  --loop-4: #ff7a90;
+  --loop-state: var(--faint);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--line);
+}
+.looper[hidden] { display: none; }
+.looper[data-state="recording"], .looper[data-state="closing"], .looper[data-state="overdubbing"] { --loop-state: var(--hot); }
+.looper[data-state="playing"] { --loop-state: var(--accent-2); }
+
+.loop-head { display: flex; align-items: baseline; gap: 10px; }
+.loop-head h2 { margin: 0; color: var(--muted); font-size: 10.5px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; }
+.loop-hint { overflow: hidden; color: var(--faint); font-size: 11.5px; white-space: nowrap; text-overflow: ellipsis; }
+
+.loop-body { display: flex; align-items: center; gap: 14px; min-width: 0; }
+.loop-controls { display: flex; flex: none; align-items: center; gap: 6px; }
+
+.loop-main {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 128px;
+  height: 40px;
+  padding: 0 16px 0 13px;
+  border: 1px solid var(--line-strong);
+  border-radius: 999px;
+  background: var(--panel-raised);
+  font-weight: 650;
+  cursor: pointer;
+}
+.loop-main:hover:not(:disabled) { border-color: #414b61; }
+.loop-main:disabled { opacity: 0.55; cursor: default; }
+.loop-main-dot { width: 12px; height: 12px; flex: none; border-radius: 50%; background: var(--hot); }
+.looper[data-state="playing"] .loop-main-dot { border-radius: 3px; background: var(--hot); transform: rotate(45deg) scale(0.85); }
+.looper[data-state="stopped"] .loop-main-dot { border-radius: 0; background: var(--accent-2); clip-path: polygon(15% 0, 100% 50%, 15% 100%); }
+.looper[data-state="recording"] .loop-main,
+.looper[data-state="closing"] .loop-main,
+.looper[data-state="overdubbing"] .loop-main { border-color: var(--hot); background: rgba(255, 93, 108, 0.14); }
+.looper[data-state="recording"] .loop-main-dot,
+.looper[data-state="closing"] .loop-main-dot,
+.looper[data-state="overdubbing"] .loop-main-dot { animation: record-blink 1.2s infinite; }
+.loop-clear.is-armed { color: var(--hot); border-color: var(--hot); }
+
+.loop-clock-column { display: flex; flex: none; flex-direction: column; align-items: center; gap: 4px; }
+.loop-clock { display: flex; align-items: center; gap: 8px; }
+.loop-ring { width: 34px; height: 34px; transform: rotate(-90deg); }
+.loop-ring-track { fill: none; stroke: var(--line); stroke-width: 4; }
+.loop-ring-arc { fill: none; stroke: var(--loop-state); stroke-width: 4; stroke-linecap: round; stroke-dasharray: 0 100; transition: stroke 0.15s; }
+.loop-clock-readout { display: flex; flex-direction: column; min-width: 58px; }
+.loop-clock-text { font: 600 13px/1.1 var(--mono); font-variant-numeric: tabular-nums; }
+.loop-clock-sub { color: var(--faint); font-size: 10.5px; }
+.loop-beats { display: flex; gap: 5px; height: 6px; }
+.loop-beats i { width: 6px; height: 6px; border-radius: 50%; background: var(--line-strong); }
+.loop-beats i:first-child { width: 9px; border-radius: 3px; }
+.loop-beats i.is-on { background: var(--loop-state); }
+
+.loop-layers { display: grid; flex: 1 1 auto; grid-template-columns: 1fr 1fr; gap: 4px 10px; min-width: 0; }
+.loop-layer { display: flex; align-items: center; gap: 6px; min-width: 0; height: 22px; opacity: 0.45; }
+.loop-layer.is-used { opacity: 1; }
+.loop-layer.is-redo { opacity: 0.6; }
+.loop-layer-number { width: 14px; color: var(--faint); font: 600 10.5px/1 var(--mono); text-align: center; }
+.loop-layer.is-recording .loop-layer-number { color: var(--hot); }
+.loop-layer-wave { flex: 1 1 auto; min-width: 40px; height: 100%; border: 1px solid var(--line); border-radius: 5px; background: #0d1016; }
+.loop-layer.is-recording .loop-layer-wave { border-color: color-mix(in srgb, var(--hot) 70%, transparent); }
+.loop-layer-mute {
+  width: 22px;
+  height: 20px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 10px;
+  font-weight: 700;
+  cursor: pointer;
+}
+.loop-layer-mute[aria-pressed="true"] { border-color: var(--warn); background: rgba(255, 201, 77, 0.16); color: var(--warn); }
+.loop-layer-mute:disabled { cursor: default; }
+.loop-layer-gain, .loop-volume { width: 64px; accent-color: var(--accent); }
+
+.loop-tempo { display: flex; flex: none; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 6px; max-width: 300px; }
+.loop-field { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+.loop-bpm {
+  width: 58px;
+  height: 28px;
+  padding: 0 6px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #0d1016;
+  color: var(--text);
+  font: 600 12px var(--mono);
+}
+.loop-bpm:disabled, .loop-meter:disabled { opacity: 0.45; }
+.looper select.loop-meter { min-width: 0; height: 28px; padding-top: 0; padding-bottom: 0; }
+.loop-tap { height: 28px; font-variant-numeric: tabular-nums; }
+.loop-tap.is-tapped { animation: tap-flash 0.25s; }
+
+@media (max-width: 1200px) {
+  .loop-layers { grid-template-columns: 1fr; }
+  .loop-layer { height: 16px; }
+}

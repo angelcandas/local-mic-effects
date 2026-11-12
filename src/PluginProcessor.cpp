@@ -104,6 +104,9 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     recorder.prepare (sampleRate, (int) spec.numChannels);
     multitrack.prepare (sampleRate);
+    looper.prepare (sampleRate);
+    loopInput.setSize (2, juce::jmax (samplesPerBlock, 4096));
+    loopInput.clear();
     dawEngine.prepare (sampleRate, samplesPerBlock);
     mixGuardGain = 1.0f;
     mixGuardRelease = 1.0f - std::exp (-1.0f / (0.1f * (float) sampleRate)); // ~100 ms
@@ -193,7 +196,30 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         chain.process (context);
 
     outputGain.process (context);
+
+    // The looper hears the voice before the limiter; its layers are added after it.
+    const auto looping = looper.getState() != Looper::State::empty || looper.hasPendingCommands();
+    const auto loopChunk = loopInput.getNumSamples();
+    if (looping)
+        for (int ch = 0; ch < juce::jmin (2, numOut); ++ch)
+            loopInput.copyFrom (ch, 0, buffer, ch, 0, juce::jmin (numSamples, loopChunk));
+
     limiter.process (context);
+
+    if (looping)
+    {
+        for (int start = 0; start < numSamples; start += loopChunk)
+        {
+            const auto length = juce::jmin (loopChunk, numSamples - start);
+            if (start > 0)
+                for (int ch = 0; ch < juce::jmin (2, numOut); ++ch)
+                    loopInput.copyFrom (ch, 0, buffer, ch, start, length); // oversized block: limited, but rare
+
+            juce::AudioBuffer<float> output (buffer.getArrayOfWritePointers(), juce::jmin (2, numOut), start, length);
+            looper.process (loopInput, output, juce::jmin (2, numOut), length);
+        }
+        applyPeakGuard (buffer, numOut, numSamples);
+    }
 
     // Where this block sits on the multitrack timeline. The playback is added after the
     // voice is recorded, so takes contain only the voice.

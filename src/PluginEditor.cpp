@@ -110,6 +110,14 @@ PluginEditor::PluginEditor (PluginProcessor& p)
         };
    #endif
 
+    // The looper's tempo, lock and volume are app preferences, like the recording folder.
+    {
+        auto& looper = processorRef.getLooper();
+        looper.setTempo (settings.getDoubleValue ("looper.bpm", 120.0), settings.getIntValue ("looper.beatsPerBar", 4));
+        looper.setTempoLocked (settings.getBoolValue ("looper.locked", false));
+        looper.setVolume ((float) settings.getDoubleValue ("looper.volume", 1.0));
+    }
+
     addAndMakeVisible (*webView);
     webView->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
 
@@ -238,6 +246,42 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            state->setProperty ("muted", processorRef.outputMuted.load());
                            state->setProperty ("dry", processorRef.dryCompare.load());
                            complete (juce::var (state));
+                       })
+
+                       // (action, args) -> the looper's state (see describeLooper). Actions: "main" (record /
+                       // overdub / end the overdub / play), "stop", "play", "undo", "redo", "clear", "status",
+                       // "layer" { layer, gain?, muted? }, "settings" { bpm?, beatsPerBar?, locked?, volume? }.
+                       .withNativeFunction ("looper", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           const auto options = args.size() > 1 ? args[1] : juce::var();
+                           auto& looper = processorRef.getLooper();
+                           using Command = Looper::Command;
+
+                           if (action == "main")  looper.send (Command::main);
+                           if (action == "stop")  looper.send (Command::stop);
+                           if (action == "play")  looper.send (Command::play);
+                           if (action == "undo")  looper.send (Command::undo);
+                           if (action == "redo")  looper.send (Command::redo);
+                           if (action == "clear") looper.send (Command::clear);
+
+                           if (action == "layer")
+                           {
+                               const auto layer = (int) options.getProperty ("layer", -1);
+                               if (options.hasProperty ("gain"))  looper.setLayerGain (layer, (float) options["gain"]);
+                               if (options.hasProperty ("muted")) looper.setLayerMuted (layer, (bool) options["muted"]);
+                           }
+
+                           if (action == "settings")
+                           {
+                               looper.setTempo (options.getProperty ("bpm", looper.getBpm()),
+                                                options.getProperty ("beatsPerBar", looper.getBeatsPerBar()));
+                               if (options.hasProperty ("locked")) looper.setTempoLocked ((bool) options["locked"]);
+                               if (options.hasProperty ("volume")) looper.setVolume (juce::jlimit (0.0f, 2.0f, (float) options["volume"]));
+                               saveLooperSettings();
+                           }
+
+                           complete (describeLooper (true));
                        })
 
                        // (key) -> the stored string, or "" / (key, value) -> value. Small UI preferences
@@ -544,6 +588,11 @@ void PluginEditor::timerCallback()
         status->setProperty ("fx", juce::var (effects));
     }
 
+    // The looper, with its layers' waveforms 5 times a second while it has a loop.
+    if (! processorRef.isDawMode())
+        status->setProperty ("looper", describeLooper (++looperTicks % 6 == 0
+                                                       && processorRef.getLooper().getState() != Looper::State::empty));
+
     const auto& recorder = processorRef.getRecorder();
     status->setProperty ("recording", recorder.isRecording() ? recorder.getSeconds() : -1.0);
 
@@ -563,6 +612,60 @@ void PluginEditor::timerCallback()
     status->setProperty ("transport", juce::var (transport));
 
     webView->emitEventIfBrowserIsVisible ("meters", juce::var (status));
+}
+
+juce::var PluginEditor::describeLooper (bool withOverview)
+{
+    const auto& looper = processorRef.getLooper();
+    const auto rate = looper.getSampleRate();
+    const auto layers = looper.getNumLayers();
+
+    auto* result = new juce::DynamicObject();
+    result->setProperty ("state", Looper::getStateName (looper.getState()));
+    result->setProperty ("layers", layers);
+    result->setProperty ("redo", looper.getNumRedoLayers());
+    result->setProperty ("maxLayers", Looper::maxLayers);
+    result->setProperty ("length", (double) looper.getLength() / rate);
+    result->setProperty ("position", (double) looper.getPosition() / rate);
+    result->setProperty ("closing", (double) looper.getClosingTarget() / rate);
+    result->setProperty ("maxSeconds", Looper::maxSeconds);
+    result->setProperty ("bpm", looper.getBpm());
+    result->setProperty ("beatsPerBar", looper.getBeatsPerBar());
+    result->setProperty ("locked", looper.isTempoLocked());
+    result->setProperty ("volume", (double) looper.getVolume());
+
+    juce::Array<juce::var> gains, mutes;
+    for (int i = 0; i < Looper::maxLayers; ++i)
+    {
+        gains.add ((double) looper.getLayerGain (i));
+        mutes.add (looper.isLayerMuted (i));
+    }
+    result->setProperty ("gains", gains);
+    result->setProperty ("mutes", mutes);
+
+    if (withOverview)
+    {
+        juce::Array<juce::var> overviews;
+        for (int i = 0; i < layers; ++i)
+        {
+            juce::Array<juce::var> peaks;
+            for (auto peak : looper.getOverview (i, 96))
+                peaks.add (std::round (peak * 1000.0f) / 1000.0f);
+            overviews.add (peaks);
+        }
+        result->setProperty ("overviews", overviews);
+    }
+
+    return juce::var (result);
+}
+
+void PluginEditor::saveLooperSettings()
+{
+    const auto& looper = processorRef.getLooper();
+    settings.setValue ("looper.bpm", looper.getBpm());
+    settings.setValue ("looper.beatsPerBar", looper.getBeatsPerBar());
+    settings.setValue ("looper.locked", looper.isTempoLocked());
+    settings.setValue ("looper.volume", (double) looper.getVolume());
 }
 
 juce::var PluginEditor::describeTracks()
