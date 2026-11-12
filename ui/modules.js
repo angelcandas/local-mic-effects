@@ -53,7 +53,8 @@ export const MODULES = [
 
   { id: "comp", name: "Compressor", category: "cleanup", power: "compOn",
     description: "Evens out loud and quiet moments",
-    controls: [knob("compThreshold", "Threshold"), knob("compRatio", "Ratio")] },
+    controls: [knob("compThreshold", "Threshold"), knob("compRatio", "Ratio"), knob("compAttack", "Attack"),
+               knob("compRelease", "Release"), knob("compMakeup", "Makeup")] },
 
   { id: "deess", name: "De-esser", category: "cleanup", power: "deessOn",
     description: "Tames harsh S and T sounds",
