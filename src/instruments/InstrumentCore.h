@@ -129,6 +129,7 @@ struct Spec
     std::vector<Preset> presets;
     std::function<std::unique_ptr<Engine> (Params)> makeEngine;
     int lowestKey = 36, highestKey = 96; // the window's keyboard
+    std::function<juce::String (int note)> keyName; // a name on each key (a drum kit's), or C octave labels
 };
 
 //==============================================================================

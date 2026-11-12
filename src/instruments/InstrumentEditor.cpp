@@ -445,12 +445,42 @@ private:
 };
 
 //==============================================================================
+// The keyboard, with names on the keys when the instrument gives them (a drum kit's).
+class InstrumentEditor::Keyboard final : public juce::MidiKeyboardComponent
+{
+public:
+    Keyboard (juce::MidiKeyboardState& state, const Spec& s)
+        : MidiKeyboardComponent (state, juce::MidiKeyboardComponent::horizontalKeyboard), spec (s) {}
+
+    juce::String getWhiteNoteText (int note) override
+    {
+        return spec.keyName ? spec.keyName (note) : MidiKeyboardComponent::getWhiteNoteText (note);
+    }
+
+    void drawBlackNote (int note, juce::Graphics& g, juce::Rectangle<float> area, bool down, bool over, juce::Colour colour) override
+    {
+        MidiKeyboardComponent::drawBlackNote (note, g, area, down, over, colour);
+        if (spec.keyName)
+            if (const auto name = spec.keyName (note); name.isNotEmpty())
+            {
+                g.setColour (juce::Colour (0xffc9cdd8));
+                g.setFont (juce::Font (juce::FontOptions (9.5f, juce::Font::bold)));
+                g.drawFittedText (name, area.reduced (1.0f, 4.0f).toNearestInt(), juce::Justification::centredBottom, 2, 0.7f);
+            }
+    }
+
+private:
+    const Spec& spec;
+};
+
+//==============================================================================
 InstrumentEditor::InstrumentEditor (InstrumentProcessor& p)
     : AudioProcessorEditor (p),
       processor (p),
       spec (p.getSpec()),
       look (p.getSpec().accent),
-      keyboard (p.getKeyboardState(), juce::MidiKeyboardComponent::horizontalKeyboard)
+      keyboardView (std::make_unique<Keyboard> (p.getKeyboardState(), p.getSpec())),
+      keyboard (*keyboardView)
 {
     setLookAndFeel (&look);
 

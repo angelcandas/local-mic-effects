@@ -276,10 +276,18 @@ keyboard you can click): open it with the instrument's button on the track or in
   key click, scanner vibrato and chorus, an overdriven amp and a rotary speaker (the mod wheel
   switches it to fast).
 
+- **Pluck**: plucked strings from a waveguide: nylon and steel guitar, harp and koto bodies, pick
+  hardness and position, palm mute, chorus and room.
+- **Mallets**: struck bars and bells by modal synthesis: marimba, vibraphone (with its motor's
+  tremolo), glockenspiel, kalimba and tubular bells.
+- **Beat**: a synthesized drum kit on the General MIDI drum notes (36 kick, 38 snare, 42/46 hats,
+  toms, crash, ride, clap, cowbell…), with tuning and decay per drum, drive and room. Its keyboard
+  shows which drum is on each key.
+
 Projects that used the first built-in sounds (Keys, Organ, Soft Piano, Warm Pad, Strings, Synth
 Bass, Lead) open on the matching instrument and preset.
 
-Each one is also a VST3 (and AU on macOS) plugin for other DAWs, "MicFX Grand", "MicFX Nova", "MicFX Tines" and "MicFX Drawbar":
+Each one is also a VST3 (and AU on macOS) plugin for other DAWs, "MicFX Grand", "MicFX Nova", "MicFX Tines", "MicFX Drawbar", "MicFX Pluck", "MicFX Mallets" and "MicFX Beat":
 `cmake --build build/debug --target MicFXInstruments`, then copy the `.vst3` (or `.component`)
 from `build/debug/MicFX<Name>_artefacts/` into your plugin folder.
 
@@ -382,7 +390,7 @@ src/analysis/           Auto Mix measurements: loudness (BS.1770 / EBU R128), 1/
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/stems/              Split into stems: chunked, multi-threaded separation, model download and
                         check (StemSplitter), and the Demucs adapter (DemucsSeparator)
-src/instruments/        the MicFX instruments (Grand, Nova, Tines, Drawbar): a Spec per instrument (parameters,
+src/instruments/        the MicFX instruments (Grand, Nova, Tines, Drawbar, Pluck, Mallets, Beat): a Spec per instrument (parameters,
                         window layout, presets, sound engine), InstrumentProcessor (the built-in
                         instrument and the VST3/AU plugin), InstrumentEditor (its window)
 src/DawBridge.*         the DAW screen's commands and events (session, status, export, stems)
