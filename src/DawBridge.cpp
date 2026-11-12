@@ -1177,7 +1177,26 @@ void DawBridge::startAutoMix (const juce::File& reference)
     // Snapshot on this thread. For a reference match only the mix is needed, without
     // a master EQ an earlier match added (the new one replaces it).
     std::shared_ptr<analysis::SessionAnalyser> analyser;
-    if (reference == juce::File())
+    if (reference == juce::File() && autoMixOptions.mode == analysis::MixMode::master)
+    {
+        // Master mode measures the mix as it plays, without the mastering chain an
+        // earlier pass added (the new one replaces it).
+        daw::Edit copy;
+        copy.replaceState (edit.getState().createCopy());
+        auto inserts = daw::Edit::getInserts (copy.getMaster());
+        for (int i = inserts.getNumChildren(); --i >= 0;)
+            for (auto type : { fx::ModuleType::masterEq, fx::ModuleType::multiband, fx::ModuleType::imager, fx::ModuleType::limiter,
+                               fx::ModuleType::loudness })
+                if (inserts.getChild (i)[ids::type].toString() == fx::getModuleKey (type))
+                {
+                    inserts.removeChild (i, nullptr);
+                    break;
+                }
+
+        analyser = std::make_shared<analysis::SessionAnalyser> (copy, analysis::SessionAnalyser::Point::stem, true,
+                                                                engine.getSampleRate(), false);
+    }
+    else if (reference == juce::File())
     {
         analyser = std::make_shared<analysis::SessionAnalyser> (edit, analysis::SessionAnalyser::Point::source, false,
                                                                 engine.getSampleRate());
@@ -1369,6 +1388,8 @@ void DawBridge::readAutoMixMode (const juce::var& args)
         autoMixOptions.mode = analysis::getModeFromKey (args["mode"].toString());
     if (args.hasProperty ("focus"))
         autoMixOptions.focusTrackId = (int) args["focus"];
+    if (args.hasProperty ("masterLufs"))
+        autoMixOptions.masterLufs = juce::jlimit (-24.0f, -6.0f, (float) args["masterLufs"]);
 }
 
 // Every track's tag before Auto Mix listens: the one you picked (tagged), or the guess
@@ -1459,7 +1480,7 @@ juce::var DawBridge::describeAutoMix() const
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
                      { "style", styleKey (autoMixStyle) }, { "mode", analysis::getModeKey (autoMixOptions.mode) },
-                     { "focus", autoMixOptions.focusTrackId }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
+                     { "focus", autoMixOptions.focusTrackId }, { "masterLufs", autoMixOptions.masterLufs }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
                      { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs } });
 }
 
@@ -1654,8 +1675,9 @@ int DawBridge::setAutotunesToKey()
 //   tag {track, role}   tag a track: a role key (analysis::getRoleKey), or "auto" to guess
 //                       from its name and sound again. Saved with the project.
 //   replan {style, mode, focus, effects, roles: {trackId: role key}}  (roles also saved as the tracks' tags)
-//                       mode: "mix" (the whole song), "fit" (focus into the backing) or "clean"
-//                       (clean & polish focus only); focus: a track id (0: the lead voice).
+//                       mode: "mix" (the whole song), "fit" (focus into the backing), "clean"
+//                       (clean & polish focus only) or "master" (a mastering chain on the master,
+//                       towards masterLufs); focus: a track id (0: the lead voice).
 //                       analyse takes mode and focus too.
 //                       effects: {eq, compressor, deEsser, reverb, saturation, echo, exciter,
 //                       width}, the effects it may add; normalize, split (see MixOptions)

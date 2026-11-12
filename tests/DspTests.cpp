@@ -1466,6 +1466,74 @@ namespace
         check (none, "no colour when it's off");
     }
 
+    void testAutoMixMaster()
+    {
+        std::cout << "\nAuto Mix: Master mode\n";
+
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-master");
+        folder.createDirectory();
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto file = folder.getChildFile (name + ".wav");
+            writeWav (file, audio, sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, file, 0.0, 12.0);
+            return id;
+        };
+        add ("Vocal", makeSungLine (12.0, 3.0, 1.5));
+        add ("Backing", makeBacking (12.0));
+        edit.setMasterVolume (-10.0f); // a quiet mix
+
+        const auto measure = [&edit]
+        {
+            return *analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, true, 48000.0, false).run().mix;
+        };
+        const auto before = measure();
+
+        analysis::SessionAnalyser::Result result;
+        result.mix = before;
+        analysis::MixOptions options;
+        options.mode = analysis::MixMode::master;
+        options.masterLufs = -14.0f;
+        const auto plan = analysis::planMix (result, {}, {}, -10.0f, analysis::MixStyle::pop, options);
+        juce::StringArray chain;
+        for (const auto& move : plan.moves)
+        {
+            if (move.insert.has_value())
+                chain.add (fx::getModuleKey (*move.insert));
+            for (const auto& reason : move.reasons)
+                std::cout << "        " << reason << "\n";
+        }
+        for (const auto& note : plan.notes)
+            std::cout << "        note: " << note << "\n";
+        check (chain.joinIntoString (",") == "masterEq,multiband,imager,limiter,loudness",
+               "a mastering chain on the master: " + chain.joinIntoString (", "));
+
+        analysis::applyMix (edit, plan);
+        const auto after = measure();
+        check (std::abs (after.integratedLufs - (-14.0f)) < 1.5f && after.peakDb < -0.8f,
+               "mastered: " + juce::String (before.integratedLufs, 1) + " LUFS, then " + juce::String (after.integratedLufs, 1)
+                   + " LUFS (target -14), peak " + juce::String (after.peakDb, 1) + " dB");
+
+        // Again from the mastered song: the chain is replaced, not stacked.
+        analysis::applyMix (edit, plan);
+        check (daw::Edit::getInserts (edit.getMaster()).getNumChildren() == 5, "applied twice: still one chain");
+
+        // Loud: -10 LUFS, still under the ceiling.
+        edit.getUndoManager().undo();
+        edit.getUndoManager().undo();
+        options.masterLufs = -10.0f;
+        analysis::applyMix (edit, analysis::planMix (result, {}, {}, -10.0f, analysis::MixStyle::pop, options));
+        const auto loud = measure();
+        check (std::abs (loud.integratedLufs - (-10.0f)) < 1.5f && loud.peakDb < -0.8f,
+               "loud: " + juce::String (loud.integratedLufs, 1) + " LUFS (target -10), peak " + juce::String (loud.peakDb, 1) + " dB");
+
+        // Without a measured mix, it says to listen in Master mode.
+        check (! analysis::planMix ({}, {}, {}, 0.0f, analysis::MixStyle::pop, options).notes.isEmpty() && analysis::getModeFromKey ("master") == analysis::MixMode::master,
+               "no mix measured: a note to listen again");
+    }
+
     void testAutoMixRides()
     {
         std::cout << "\nVolume rides (automation)\n";
@@ -5241,6 +5309,7 @@ int main()
     testAutoMixRides();
     testAutoMixModes();
     testAutoMixSynths();
+    testAutoMixMaster();
     testAnalysisSpeed();
     testLatency();
     testSmoothing();

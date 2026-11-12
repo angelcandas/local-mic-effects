@@ -98,9 +98,12 @@ struct MixTargets
 //          for it (a dip where they cover it, down while it plays). The master stays.
 //   clean: clean up and polish one track and nothing else: rumble, hum, noise between
 //          phrases, mud, harshness, S's, uneven level. No space, no character, no level.
-enum class MixMode { mix, fit, clean };
+//   master: master the song as it plays now: a mastering chain on the master bus
+//          (mastering EQ, multiband, imager, limiter, loudness meter) towards a loudness
+//          target. Needs the mix measured (SessionAnalyser with includeMix), not the tracks.
+enum class MixMode { mix, fit, clean, master };
 
-const char* getModeKey (MixMode);              // "mix", "fit", "clean"
+const char* getModeKey (MixMode);              // "mix", "fit", "clean", "master"
 MixMode getModeFromKey (const juce::String&);  // mix when unknown
 
 // Which effects Auto Mix may add. Volumes are always planned.
@@ -108,6 +111,7 @@ struct MixOptions
 {
     MixMode mode = MixMode::mix;
     int focusTrackId = 0; // the track fit and clean work on (0: the lead voice)
+    float masterLufs = -14.0f; // master mode's target: -14 streaming, -10 loud, -16 dynamic
 
     bool eq = true, compressor = true, deEsser = true, reverb = true;
     bool saturation = true, echo = true, exciter = true, width = true; // used when the style asks for them
@@ -188,6 +192,11 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
 // wide bells) towards the reference's long-term tonal balance, and the master volume
 // towards its loudness, held below clipping. `mix` is the session's mix as it plays
 // now (SessionAnalyser with includeMix), at `currentMasterVolume`.
+// Master mode: a mastering chain on the master bus from the mix as it plays now
+// (mastering EQ towards a typical finished master's tonal balance, a gentle multiband,
+// width with a mono low end, a limiter towards the loudness target, a loudness meter).
+MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVolume);
+
 MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float currentMasterVolume);
 
 // Writes the plan into the session as one undo step. Inserts it needs are reused when
