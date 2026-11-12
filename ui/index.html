@@ -161,15 +161,25 @@
         <strong>Auto Mix</strong>
         <button class="mini automix-close" title="Close" aria-label="Close">×</button>
       </div>
-      <p class="automix-intro">Listens to your voice, the backing and any instruments, then adds the effects each track needs (EQ, compressor, de-esser, reverb) and sets the levels. One undo takes it all back.</p>
+      <p class="automix-intro">Tag what's on each track (voice, background vocals, drums, bass...), then Auto Mix listens and adds the effects each one needs (EQ, compressor, de-esser, reverb and more), sets the levels and writes volume rides. One undo takes it all back.</p>
       <div class="export-options">
-        <label>Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="coaching">Coaching (voice up front)</option></select></label>
+        <label>Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="hiphop">Hip-hop</option><option value="rnb">R&amp;B</option><option value="acoustic">Acoustic</option><option value="electronic">Electronic</option><option value="jazz">Jazz</option><option value="lofi">Lo-fi</option><option value="coaching">Coaching (voice up front)</option></select></label>
         <div class="automix-effects" role="group" aria-label="Effects Auto Mix may add">
           <span>May add</span>
           <label class="check"><input type="checkbox" name="eq" checked> EQ</label>
           <label class="check"><input type="checkbox" name="compressor" checked> Compressor</label>
           <label class="check"><input type="checkbox" name="deEsser" checked> De-esser</label>
           <label class="check"><input type="checkbox" name="reverb" checked> Reverb</label>
+          <label class="check" title="Tempo-synced echo on the lead, when the style uses one"><input type="checkbox" name="echo" checked> Echo</label>
+          <label class="check" title="Warmth or grit on the voice (and the bass), when the style uses it"><input type="checkbox" name="saturation" checked> Saturation</label>
+          <label class="check" title="Air on the voice, when the style uses it"><input type="checkbox" name="exciter" checked> Exciter</label>
+          <label class="check" title="Wider (or narrower) instruments and background vocals, when the style uses it"><input type="checkbox" name="width" checked> Width</label>
+          <label class="check" title="Automation: evens out your phrases, and dips the instruments while you sing (back up between lines)"><input type="checkbox" name="rides" checked> Volume rides</label>
+        </div>
+        <div class="automix-effects" role="group" aria-label="Before mixing">
+          <span>First</span>
+          <label class="check" title="Bring every track to a level that fits its role in the style (with each track's input gain) before mixing"><input type="checkbox" name="normalize"> Normalize levels</label>
+          <label class="check" title="Split the track tagged Instrumental into vocals, drums, bass and other, and mix those instead (takes a few minutes)"><input type="checkbox" name="split"> Split the song into stems</label>
         </div>
       </div>
       <div class="automix-roles"></div>

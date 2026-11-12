@@ -20,6 +20,12 @@ const METER_FLOOR_DB = -60;
 const FADER_MIN_DB = -60, FADER_MAX_DB = 6;
 const GRIDS = [["bar", "Bar"], [1, "Beat"], [0.5, "1/2 beat"], [0.25, "1/4 beat"]];
 const SCALE_STEPS = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10] };
+// Auto Mix's track roles (the bridge sends the same list with its tags).
+const AUTOMIX_ROLES = [
+  { key: "voice", name: "Voice" }, { key: "background", name: "Background vocals" }, { key: "instrumental", name: "Instrumental" },
+  { key: "guitar", name: "Guitar" }, { key: "piano", name: "Piano / keys" }, { key: "bass", name: "Bass" }, { key: "drums", name: "Drums" },
+  { key: "instrument", name: "Other instrument" }, { key: "other", name: "Leave as is" },
+];
 const SIGNATURES = [[2, "2/4"], [3, "3/4"], [4, "4/4"], [5, "5/4"], [6, "6/8"], [7, "7/8"], [9, "9/8"], [12, "12/8"]];
 
 // Per-viewer UI preferences (grid, return on stop). The page may have no storage.
@@ -1448,9 +1454,29 @@ class DawScreen {
     }
 
     for (const clip of track.clips) lane.append(this.createClip(clip, track));
+    if (track.ride?.length) lane.append(this.createRide(track.ride));
 
     row.append(head, lane);
     return row;
+  }
+
+  // A track's volume ride (automation), drawn over its clips: the middle is 0 dB, the
+  // top and bottom ±12 dB. It holds its last value after the last point.
+  createRide(points) {
+    const width = Math.max(1, (points[points.length - 1][0] + 4) * this.zoom);
+    const y = (db) => 50 - Math.max(-12, Math.min(12, db)) / 12 * 46;
+    const coords = points.map(([t, db]) => `${(t * this.zoom).toFixed(1)},${y(db).toFixed(2)}`);
+    coords.push(`${width.toFixed(1)},${y(points[points.length - 1][1]).toFixed(2)}`);
+    const box = svg("svg", { class: "lane-ride", viewBox: `0 0 ${width.toFixed(1)} 100`, preserveAspectRatio: "none" });
+    box.style.width = `${width}px`;
+    box.append(svg("line", { class: "lane-ride-zero", x1: 0, x2: width.toFixed(1), y1: 50, y2: 50 }),
+               svg("polyline", { points: coords.join(" ") }));
+    const most = Math.max(...points.map(([, db]) => Math.abs(db)));
+    const label = html("span", "lane-ride-label", `ride ±${most.toFixed(1)} dB`);
+    label.title = "Volume ride (automation) on top of the fader. Right-click the track's name to clear it.";
+    const wrap = html("div", "lane-ride-wrap");
+    wrap.append(box, label);
+    return wrap;
   }
 
   renderMasterRow() {
@@ -2438,7 +2464,57 @@ class DawScreen {
 
   toggleAutoMix(show = this.autoMixPanel.hidden) {
     this.autoMixPanel.hidden = !show;
-    if (show) this.toggleExportPanel(false);
+    if (show) {
+      this.toggleExportPanel(false);
+      if (!this.autoMix.plan) this.refreshAutoMixTags(true);
+    }
+  }
+
+  // Before listening: what each track is, guessed from its name or tagged by you. A tag
+  // is saved with the project, and the plan uses it instead of guessing.
+  async refreshAutoMixTags(force = false) {
+    const key = (this.session?.tracks ?? []).map((t) => `${t.id}:${t.name}`).join("|");
+    if (!force && key === this.autoMixTagsKey) return;
+    this.autoMixTagsKey = key;
+    const result = await daw("autoMix", { action: "tags" });
+    if (!result?.ok || this.autoMix.plan) return;
+    this.autoMixRoleNames = result.roles;
+    this.renderAutoMixRoles(result.tracks.map((t) => ({ ...t, detail: t.tagged ? "tagged" : t.role ? "from its name" : "" })), true);
+  }
+
+  // One row per track with its role. Before listening a pick tags the track; after, it
+  // also replans.
+  renderAutoMixRoles(tracks, beforeListening) {
+    const panel = this.autoMixPanel;
+    const rolesBox = panel.querySelector(".automix-roles");
+    rolesBox.replaceChildren();
+    if (tracks.length === 0) return;
+    rolesBox.append(html("div", "automix-roles-head", beforeListening
+      ? "What's on each track? Tag them so Auto Mix treats each one right."
+      : "Tracks (change a role and the plan follows)"));
+
+    const names = this.autoMixRoleNames ?? AUTOMIX_ROLES;
+    for (const track of tracks) {
+      const row = html("label", "automix-role");
+      const name = html("span", "", track.name);
+      if (track.detail) name.append(html("small", "", track.detail));
+      const select = html("select", "dropdown");
+      select.dataset.track = track.id;
+      if (beforeListening) select.append(new Option("Not sure: listen", "auto"));
+      for (const role of names) select.append(new Option(role.name, role.key));
+      select.value = track.role || "auto";
+      select.addEventListener("change", async () => {
+        if (beforeListening) {
+          await daw("autoMix", { action: "tag", track: track.id, role: select.value });
+          this.refreshAutoMixTags(true);
+          return;
+        }
+        const roles = Object.fromEntries([...rolesBox.querySelectorAll("select")].map((s) => [s.dataset.track, s.value]));
+        this.replanAutoMix({ style: panel.querySelector("[name=style]").value, roles, effects: this.autoMixEffects() });
+      });
+      row.append(name, select);
+      rolesBox.append(row);
+    }
   }
 
   //============================================================================ Song key
@@ -2574,6 +2650,9 @@ class DawScreen {
     panel.classList.toggle("is-running", event.state === "analysing");
     panel.querySelector(".export-bar").style.setProperty("--progress", event.progress ?? 1);
 
+    panel.classList.toggle("is-running", event.state === "analysing" || event.state === "splitting");
+    if (event.state === "splitting")
+      return this.setAutoMixResult(event.phase === 0 ? "Downloading the stem model…" : event.phase === 1 ? "Loading the stem model…" : "Splitting the song into stems…");
     if (event.state === "analysing") return this.setAutoMixResult("Listening…");
     if (event.state === "cancelled") return this.setAutoMixResult("Cancelled.");
     if (event.state === "error") return this.setAutoMixResult(event.error, true);
@@ -2588,23 +2667,10 @@ class DawScreen {
     }
 
     // Who is who: change a role and the plan follows.
-    const rolesBox = panel.querySelector(".automix-roles");
-    rolesBox.replaceChildren();
-    for (const track of event.tracks) {
-      const row = html("label", "automix-role");
-      const name = html("span", "", track.name);
-      name.append(html("small", "", track.active > 0 ? `${track.lufs.toFixed(1)} LUFS` : "silent"));
-      const select = html("select", "dropdown");
-      select.dataset.track = track.id;
-      for (const [value, label] of [["voice", "Voice"], ["instrument", "Instrument"], ["backing", "Backing"], ["other", "Leave as is"]]) select.append(new Option(label, value));
-      select.value = track.role;
-      select.addEventListener("change", () => {
-        const roles = Object.fromEntries([...rolesBox.querySelectorAll("select")].map((s) => [s.dataset.track, s.value]));
-        this.replanAutoMix({ style: panel.querySelector("[name=style]").value, roles, effects: this.autoMixEffects() });
-      });
-      row.append(name, select);
-      rolesBox.append(row);
-    }
+    if (event.kind === "mix")
+      this.renderAutoMixRoles(event.tracks.map((t) => ({ ...t, detail: t.active > 0 ? `${t.lufs.toFixed(1)} LUFS` : "silent" })), false);
+    else
+      this.autoMixPanel.querySelector(".automix-roles").replaceChildren();
 
     // What it will change, and why.
     const planBox = panel.querySelector(".automix-plan");
@@ -2684,6 +2750,7 @@ class DawScreen {
     this.projectPath = path;
     if (pathChanged) this.library?.refresh();
     document.dispatchEvent(new CustomEvent("daw-session", { detail: session }));
+    if (this.autoMixPanel && !this.autoMixPanel.hidden && !this.autoMix?.plan) this.refreshAutoMixTags();
     if (this.active) this.render();
     for (const [id, resolve] of this.trackWaiters) if (tracks.some((t) => t.id === id)) { this.trackWaiters.delete(id); resolve(); }
   }
@@ -3110,6 +3177,7 @@ class DawScreen {
     item("Move down", () => daw("moveTrack", { id: track.id, index: index + 1 }), { disabled: index >= tracks.length - 1 });
     rule();
     item("Add effect…", () => { this.select(track.id, null); this.setDockTab?.("effects"); toast("Pick an effect from Add effect, or drag one from the library."); });
+    item("Clear volume ride", () => daw("setTrack", { id: track.id, clearRide: true }), { disabled: !track.ride?.length });
     item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
     item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
     if (track.kind !== "midi")

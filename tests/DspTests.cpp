@@ -813,10 +813,11 @@ namespace
             roles[id] = analysis::guessRole (edit.getTrack (id)[daw::ids::name].toString(), profile, 12.0);
             volumes[id] = 0.0f;
         }
-        check (roles[guitar] == analysis::Role::instrument && roles[voice] == analysis::Role::voice && roles[roomy] == analysis::Role::voice,
-               "guesses the guitar is an instrument");
+        check (roles[guitar] == analysis::Role::guitar && roles[voice] == analysis::Role::voice && roles[roomy] == analysis::Role::backingVocal,
+               "guesses the guitar and the harmony vocal from their names");
 
-        analysis::MixOptions options;
+        analysis::MixOptions options; // the effects these checks are about (the style's character has its own test)
+        options.saturation = options.echo = options.exciter = options.width = false;
         options.existingInserts[guitar] = { fx::ModuleType::chorus };
         const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options);
 
@@ -842,8 +843,8 @@ namespace
 
         const auto* guitarEq = find (plan, guitar, fx::ModuleType::paraEq);
         check (guitarEq != nullptr && juce::exactlyEqual (guitarEq->values.at ("peqLowCutOn"), 1.0f)
-                   && guitarEq->values.at ("peqLowCutFreq") >= 60.0f && guitarEq->values.at ("peqLowCutFreq") <= 120.0f,
-               "instrument: low cut under its lowest note (196 Hz)");
+                   && guitarEq->values.at ("peqLowCutFreq") >= 80.0f && guitarEq->values.at ("peqLowCutFreq") <= 150.0f,
+               "guitar: low cut under its lowest note (196 Hz), leaving the low end to the bass");
         check (find (plan, guitar, fx::ModuleType::compressor) != nullptr, "instrument: compresses its loud and quiet bars");
         check (find (plan, backing, fx::ModuleType::compressor) == nullptr && find (plan, backing, fx::ModuleType::reverb) == nullptr,
                "a full backing gets no compressor or reverb");
@@ -874,12 +875,14 @@ namespace
         // Only what it's allowed to add.
         analysis::MixOptions eqOnly;
         eqOnly.compressor = eqOnly.deEsser = eqOnly.reverb = false;
+        eqOnly.saturation = eqOnly.echo = eqOnly.exciter = eqOnly.width = false;
         const auto limited = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, eqOnly);
         bool onlyEq = true;
         for (const auto& move : limited.moves)
             onlyEq = onlyEq && (! move.insert.has_value() || *move.insert == fx::ModuleType::paraEq);
         analysis::MixOptions none;
         none.eq = none.compressor = none.deEsser = none.reverb = false;
+        none.saturation = none.echo = none.exciter = none.width = false;
         const auto volumesOnly = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, none);
         bool onlyVolumes = ! volumesOnly.moves.empty();
         for (const auto& move : volumesOnly.moves)
@@ -890,6 +893,373 @@ namespace
         // Coaching keeps the voice dry.
         const auto coaching = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::coaching, options);
         check (find (coaching, voice, fx::ModuleType::reverb) == nullptr, "coaching: no reverb");
+
+        folder.deleteRecursively();
+    }
+
+    // Drums: a kick (a falling 60 Hz thump) on every beat, a noise hat between, 120 BPM.
+    juce::AudioBuffer<float> makeDrumLoop (double seconds)
+    {
+        juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
+        buffer.clear();
+        juce::Random random (5);
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto sinceKick = std::fmod (t, 0.5), sinceHat = std::fmod (t + 0.25, 0.5);
+            const auto kick = 0.6 * std::sin (twoPi * (50.0 + 60.0 * std::exp (-sinceKick * 30.0)) * sinceKick) * std::exp (-sinceKick * 12.0);
+            const auto hat = 0.15 * (random.nextFloat() * 2.0 - 1.0) * std::exp (-sinceHat * 60.0);
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.setSample (ch, i, (float) (kick + hat));
+        }
+
+        return buffer;
+    }
+
+    // A bass line: 55 and 73 Hz notes, a bar each, a little uneven.
+    juce::AudioBuffer<float> makeBassLine (double seconds)
+    {
+        juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto bar = (int) std::floor (t / 2.0);
+            const auto f = bar % 2 == 0 ? 55.0 : 73.4;
+            const auto level = bar % 3 == 0 ? 0.35 : 0.2;
+            const auto value = level * (std::sin (twoPi * f * t) + 0.3 * std::sin (twoPi * 2.0 * f * t)) * (0.6 + 0.4 * std::exp (-std::fmod (t, 0.5) * 6.0));
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.setSample (ch, i, (float) value);
+        }
+
+        return buffer;
+    }
+
+    // Auto Mix with every track tagged: the names, a guess from the sound for drums and
+    // bass, and what each role gets (background vocals under the lead, bass and drums
+    // only a rumble cut).
+    void testAutoMixRoles()
+    {
+        std::cout << "\nAuto Mix track roles\n";
+        using analysis::Role;
+
+        const std::pair<const char*, std::optional<Role>> names[] = {
+            { "Lead vocal", Role::voice }, { "Voz", Role::voice }, { "Backing vocals", Role::backingVocal },
+            { "Harmony 2", Role::backingVocal }, { "Coros", Role::backingVocal }, { "BGV", Role::backingVocal },
+            { "Kick", Role::drums }, { "My song - Drums", Role::drums }, { "Overheads", Role::drums }, { "Bajo", Role::bass },
+            { "Bass DI", Role::bass }, { "Lead guitar", Role::guitar }, { "Acoustic", Role::guitar }, { "Rhodes", Role::piano },
+            { "Piano", Role::piano }, { "Karaoke", Role::backing }, { "Backing track", Role::backing }, { "Instrumental", Role::backing },
+            { "My song - Other", Role::instrument }, { "Strings", Role::instrument }, { "Synth lead", Role::instrument },
+            { "Track 3", std::nullopt }, { "Audio 1", std::nullopt }
+        };
+        juce::StringArray wrong;
+        for (const auto& [name, expected] : names)
+            if (analysis::guessRoleFromName (name) != expected)
+                wrong.add (name);
+        check (wrong.isEmpty(), "guesses roles from track names" + (wrong.isEmpty() ? juce::String() : " (wrong: " + wrong.joinIntoString (", ") + ")"));
+
+        bool keysRoundTrip = true;
+        for (auto role : analysis::allRoles)
+            keysRoundTrip = keysRoundTrip && analysis::getRoleFromKey (analysis::getRoleKey (role)) == role;
+        check (keysRoundTrip && analysis::getRoleFromKey ("backing") == Role::backing, "role keys round-trip (old 'backing' still reads)");
+
+        const auto folder = juce::File::createTempFile ("micfx-roles");
+        folder.createDirectory();
+        const auto file = [&] (const char* name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto f = folder.getChildFile (name);
+            writeWav (f, audio, sampleRate);
+            return f;
+        };
+
+        daw::Edit edit;
+        const auto add = [&] (const char* name, const juce::File& f)
+        {
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, f, 0.0, 12.0);
+            return id;
+        };
+
+        auto harmony = makeSungLine (12.0);
+        harmony.applyGain (0.8f);
+        const auto voice = add ("Track 1", file ("voice.wav", makeSungLine (12.0)));
+        const auto bgv = add ("Track 2", file ("harmony.wav", harmony));
+        const auto drums = add ("Track 3", file ("drums.wav", makeDrumLoop (12.0)));
+        const auto bass = add ("Track 4", file ("bass.wav", makeBassLine (12.0)));
+        const auto guitar = add ("Track 5", file ("guitar.wav", makePlucks (12.0)));
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        std::map<int, Role> guessed;
+        for (const auto& [id, profile] : source.tracks)
+            guessed[id] = analysis::guessRole (edit.getTrack (id)[daw::ids::name].toString(), profile, 12.0);
+        check (guessed[drums] == Role::drums && guessed[bass] == Role::bass,
+               "guesses drums and bass from the sound (" + juce::String (analysis::getRoleKey (guessed[drums])) + ", "
+                   + analysis::getRoleKey (guessed[bass]) + ")");
+
+        const std::map<int, Role> roles { { voice, Role::voice }, { bgv, Role::backingVocal }, { drums, Role::drums },
+                                          { bass, Role::bass }, { guitar, Role::guitar } };
+        std::map<int, float> volumes;
+        for (const auto& [id, role] : roles)
+            volumes[id] = 0.0f;
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop);
+
+        for (const auto& move : plan.moves)
+            for (const auto& reason : move.reasons)
+                std::cout << "        " << (move.trackId == daw::Edit::masterId ? juce::String ("Master") : analysis::getRoleName (roles.at (move.trackId)))
+                          << ": " << reason << "\n";
+        for (const auto& note : plan.notes)
+            std::cout << "        note: " << note << "\n";
+
+        const auto find = [&] (int track, std::optional<fx::ModuleType> type) -> const analysis::MixMove*
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == track && move.insert == type)
+                    return &move;
+            return nullptr;
+        };
+        const auto value = [&] (int track, fx::ModuleType type, const char* id)
+        {
+            const auto* move = find (track, type);
+            return move != nullptr && move->values.count (id) > 0 ? move->values.at (id) : -1000.0f;
+        };
+
+        check (value (bgv, fx::ModuleType::paraEq, "peqLowCutFreq") >= 100.0f
+                   && value (bgv, fx::ModuleType::paraEq, "peqLowCutFreq") > value (voice, fx::ModuleType::paraEq, "peqLowCutFreq"),
+               "background vocals: a higher low cut than the lead's");
+        check (value (bgv, fx::ModuleType::reverb, "reverbMix") > value (voice, fx::ModuleType::reverb, "reverbMix"),
+               "background vocals: more reverb than the lead");
+        check (juce::exactlyEqual (value (bass, fx::ModuleType::paraEq, "peqLowCutFreq"), 30.0f)
+                   && juce::exactlyEqual (value (drums, fx::ModuleType::paraEq, "peqLowCutFreq"), 30.0f),
+               "bass and drums: only a rumble cut (30 Hz)");
+        check (find (bass, fx::ModuleType::compressor) != nullptr, "bass: a compressor keeps the low end even");
+        check (value (guitar, fx::ModuleType::paraEq, "peqLowCutFreq") >= 80.0f, "guitar: low cut from 80 Hz up");
+        check (find (bass, fx::ModuleType::reverb) == nullptr && find (drums, fx::ModuleType::reverb) == nullptr,
+               "instruments get no reverb");
+
+        // Applied: the background vocals land about the style's LU under the lead.
+        analysis::applyMix (edit, plan);
+        const auto after = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+        const analysis::Profile* leadAfter = nullptr;
+        const analysis::Profile* bgvAfter = nullptr;
+        for (const auto& [id, profile] : after.tracks)
+        {
+            if (id == voice) leadAfter = &profile;
+            if (id == bgv)   bgvAfter = &profile;
+        }
+        const auto under = leadAfter->getLoudnessOver() - bgvAfter->getLoudnessOver();
+        const auto target = analysis::getTargets (analysis::MixStyle::pop).backingVocalUnderLeadLu;
+        check (std::abs (under - target) < 1.5f,
+               "background vocals sit " + juce::String (under, 1) + " LU under the lead (target " + juce::String (target, 1) + ")");
+
+        // More styles: each its own name and character.
+        {
+            juce::StringArray styleNames;
+            for (auto style : analysis::allStyles)
+                styleNames.addIfNotAlreadyThere (analysis::getStyleName (style));
+            check (styleNames.size() == (int) std::size (analysis::allStyles) && styleNames.size() >= 10, "ten mix styles, each named");
+        }
+
+        analysis::MixOptions electronicOptions;
+        electronicOptions.tempo = 100.0;
+        const auto electronic = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::electronic, electronicOptions);
+        const auto electronicValue = [&] (int track, fx::ModuleType type, const char* id)
+        {
+            for (const auto& move : electronic.moves)
+                if (move.trackId == track && move.insert == type && move.values.count (id) > 0)
+                    return move.values.at (id);
+            return -1000.0f;
+        };
+        check (juce::exactlyEqual (electronicValue (voice, fx::ModuleType::echo, "delayTime"), 450.0f)
+                   && electronicValue (voice, fx::ModuleType::echo, "delayMix") > 0.0f,
+               "electronic: a dotted-eighth echo on the lead (450 ms at 100 BPM)");
+        check (electronicValue (bgv, fx::ModuleType::echo, "delayMix") < -999.0f, "no echo on the background vocals");
+        check (electronicValue (voice, fx::ModuleType::saturation, "satDrive") > 0.0f
+                   && electronicValue (bass, fx::ModuleType::saturation, "satDrive") > 0.0f,
+               "electronic: saturation on the voice and the bass");
+        check (electronicValue (guitar, fx::ModuleType::width, "widthAmount") > 100.0f
+                   && electronicValue (bass, fx::ModuleType::width, "widthAmount") < -999.0f
+                   && electronicValue (drums, fx::ModuleType::width, "widthAmount") < -999.0f,
+               "electronic: wider guitar, bass and drums stay centred");
+        {
+            const auto coaching = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::coaching);
+            bool plain = true;
+            for (const auto& move : coaching.moves)
+                plain = plain && (! move.insert.has_value() || (*move.insert != fx::ModuleType::echo && *move.insert != fx::ModuleType::saturation
+                                                                && *move.insert != fx::ModuleType::exciter && *move.insert != fx::ModuleType::width));
+            check (plain, "coaching: no echo, saturation, exciter or width");
+        }
+
+        // Normalize: each track to its role's level first (input gain), then the rest.
+        {
+            analysis::MixOptions normalizeOnly;
+            normalizeOnly.eq = normalizeOnly.compressor = normalizeOnly.deEsser = normalizeOnly.reverb = false;
+            normalizeOnly.saturation = normalizeOnly.echo = normalizeOnly.exciter = normalizeOnly.width = false;
+            normalizeOnly.normalize = true;
+
+            const auto normalized = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::rock, normalizeOnly);
+            int trims = 0;
+            for (const auto& move : normalized.moves)
+                trims += move.values.count ("inGain") > 0 ? 1 : 0;
+            check (trims >= 3 && normalized.moves.front().values.count ("inGain") > 0, "normalize: input gain moves first ("
+                       + juce::String (trims) + " tracks)");
+
+            // The session without the Auto Mix applied above: no inserts, unity volumes.
+            daw::Edit target;
+            target.replaceState (edit.getState().createCopy());
+            for (const auto& track : target.getTracks())
+            {
+                auto inserts = daw::Edit::getInserts (track);
+                inserts.removeAllChildren (nullptr);
+                target.setTrackVolume ((int) track[daw::ids::id], 0.0f);
+            }
+            analysis::applyMix (target, normalized);
+            const auto levels = analysis::SessionAnalyser (target, analysis::SessionAnalyser::Point::stem, false).run();
+            const auto targets = analysis::getTargets (analysis::MixStyle::rock);
+            juce::String detail;
+            bool near = true;
+            for (const auto& [id, profile] : levels.tracks)
+            {
+                const auto role = roles.at (id);
+                if (role != Role::drums && role != Role::bass && role != Role::guitar)
+                    continue;
+                const auto wanted = role == Role::drums ? targets.drumsLufs : role == Role::bass ? targets.bassLufs : targets.guitarLufs;
+                const auto peakLimited = profile.peakDb > -1.6f;
+                near = near && (peakLimited || std::abs (profile.integratedLufs - wanted) < 1.0f);
+                detail << analysis::getRoleName (role) << " " << juce::String (profile.integratedLufs, 1) << " (" << juce::String (wanted, 0) << ") ";
+            }
+            check (near, "normalize: instruments land on their levels: " + detail.trim());
+
+            // Half the amount: half the width change too.
+            analysis::MixPlan wide;
+            analysis::MixMove width;
+            width.trackId = guitar;
+            width.insert = fx::ModuleType::width;
+            width.values = { { "widthOn", 1.0f }, { "widthAmount", 140.0f } };
+            wide.moves.push_back (width);
+            analysis::applyMix (target, wide, 0.5f);
+            const auto guitarInserts = daw::Edit::getInserts (target.getTrack (guitar));
+            check (juce::exactlyEqual ((float) guitarInserts.getChild (guitarInserts.getNumChildren() - 1)["widthAmount"], 120.0f),
+                   "amount 50%: width halfway from as it is");
+        }
+
+        folder.deleteRecursively();
+    }
+
+    // Volume automation: the Edit's ride, the engine playing it, and Auto Mix writing
+    // a vocal ride and a dip on the backing while the voice sings.
+    void testAutoMixRides()
+    {
+        std::cout << "\nVolume rides (automation)\n";
+
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-rides");
+        folder.createDirectory();
+
+        // The Edit: points in time order, straight lines between them, holds at the ends.
+        const auto tone = (int) edit.addTrack ("Tone")[daw::ids::id];
+        edit.getUndoManager().beginNewTransaction();
+        edit.setVolumeRide (tone, { { 2.0, -12.0f }, { 0.0, 0.0f }, { 1.0, 0.0f } });
+        const auto ride = daw::Edit::getVolumeRide (edit.getTrack (tone));
+        check (ride.size() == 3 && juce::exactlyEqual (ride[1].time, 1.0) && juce::exactlyEqual (daw::Edit::getRideDbAt (ride, 1.5), -6.0f)
+                   && juce::exactlyEqual (daw::Edit::getRideDbAt (ride, 9.0), -12.0f),
+               "ride: sorted, straight lines, holds after the last point");
+        edit.getUndoManager().undo();
+        check (edit.getTrack (tone).isValid() && ! edit.getTrack (tone).hasProperty (daw::ids::ride), "ride: one undo step");
+        edit.setVolumeRide (tone, { { 0.0, 0.0f }, { 1.0, 0.0f }, { 2.0, -12.0f } });
+
+        // The engine plays it (offline, like an export).
+        const auto toneFile = folder.getChildFile ("tone.wav");
+        writeWav (toneFile, makeTones ({ { 4.0, 440.0, 0.3f, 0.3f } }), sampleRate);
+        edit.addClip (tone, toneFile, 0.0, 4.0);
+        {
+            const auto played = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+            const auto& rms = played.tracks.front().second.rmsDb;
+            const auto drop = rms[5] - rms[30];
+            check (std::abs (drop - 12.0f) < 0.5f, "the engine plays the ride (" + juce::String (drop, 1) + " dB down after 2 s)");
+
+            const auto raw = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+            const auto& rawRms = raw.tracks.front().second.rmsDb;
+            check (std::abs (rawRms[5] - rawRms[30]) < 0.5f, "Auto Mix measures the tracks without their rides");
+        }
+        edit.removeTrack (tone);
+
+        // Auto Mix: a voice singing 1.5 s lines with 1.5 s breaths, loud and soft lines in
+        // turn, over a backing that plays all through.
+        const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav");
+        writeWav (voiceFile, makeSungLine (15.0, 3.0, 1.5), sampleRate);
+        writeWav (backingFile, makeBacking (15.0), sampleRate);
+        const auto voice = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Backing")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 15.0);
+        edit.addClip (backing, backingFile, 0.0, 15.0);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { backing, analysis::Role::backing } };
+        const std::map<int, float> volumes { { voice, 0.0f }, { backing, 0.0f } };
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop);
+
+        const analysis::MixMove* voiceRide = nullptr;
+        const analysis::MixMove* duck = nullptr;
+        for (const auto& move : plan.moves)
+        {
+            if (! move.ride.empty() && move.trackId == voice) voiceRide = &move;
+            if (! move.ride.empty() && move.trackId == backing) duck = &move;
+            if (! move.ride.empty())
+                for (const auto& reason : move.reasons)
+                    std::cout << "        " << (move.trackId == voice ? "voice: " : "backing: ") << reason << "\n";
+        }
+        check (voiceRide != nullptr && voiceRide->ride.size() >= 4, "a ride on the voice");
+        check (duck != nullptr, "a dip on the backing while the voice sings");
+
+        analysis::MixOptions noRides;
+        noRides.rides = false;
+        bool none = true;
+        for (const auto& move : analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, noRides).moves)
+            none = none && move.ride.empty();
+        check (none, "no rides when they're off");
+
+        // Applied: the soft lines come up towards the loud ones, and the backing is lower
+        // while the voice sings than in the breaths.
+        const auto lineSpread = [] (const analysis::Profile& p)
+        {
+            // Mean level of each 1.5 s line (0.3 .. 1.2 s into each 3 s period).
+            std::vector<float> lines;
+            for (int line = 0; line < 5; ++line)
+            {
+                double sum = 0.0;
+                for (int f = line * 30 + 3; f < line * 30 + 12; ++f) sum += p.rmsDb[(size_t) f];
+                lines.push_back ((float) (sum / 9.0));
+            }
+            return *std::max_element (lines.begin(), lines.end()) - *std::min_element (lines.begin(), lines.end());
+        };
+
+        analysis::MixOptions ridesOnly;
+        ridesOnly.eq = ridesOnly.compressor = ridesOnly.deEsser = ridesOnly.reverb = false;
+        ridesOnly.saturation = ridesOnly.echo = ridesOnly.exciter = ridesOnly.width = false;
+        const auto ridePlan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, ridesOnly);
+        const auto before = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+        analysis::applyMix (edit, ridePlan);
+        const auto after = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+        const auto spreadBefore = lineSpread (before.tracks[0].second), spreadAfter = lineSpread (after.tracks[0].second);
+        check (spreadAfter < spreadBefore - 3.0f, "the voice's lines even out: " + juce::String (spreadBefore, 1) + " dB apart, then "
+                                                     + juce::String (spreadAfter, 1));
+
+        const auto& backingRms = after.tracks[1].second.rmsDb;
+        const auto singingLevel = backingRms[36], breathLevel = backingRms[52]; // 3.6 s (singing), 5.2 s (breath)
+        const auto dip = breathLevel - singingLevel;
+        const auto target = analysis::getTargets (analysis::MixStyle::pop).duckDb;
+        check (std::abs (dip - target) < 0.4f, "the backing dips " + juce::String (dip, 1) + " dB while the voice sings (target "
+                                                  + juce::String (target, 1) + ")");
+
+        // Half the amount: half the ride.
+        edit.getUndoManager().undo();
+        analysis::applyMix (edit, ridePlan, 0.5f);
+        const auto half = daw::Edit::getVolumeRide (edit.getTrack (backing));
+        const auto lowest = std::min_element (half.begin(), half.end(), [] (auto& a, auto& b) { return a.db < b.db; });
+        check (lowest != half.end() && std::abs (lowest->db + target / 2.0f) < 0.06f, "amount 50% halves the rides");
 
         folder.deleteRecursively();
     }
@@ -1055,6 +1425,7 @@ namespace
 
         const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { backing, analysis::Role::backing } };
         analysis::MixOptions existing; // as DawBridge passes them: the voice has its own reverb
+        existing.saturation = existing.exciter = existing.width = false;
         existing.existingInserts[voice] = { fx::ModuleType::reverb };
         const auto plan = analysis::planMix (source, roles, { { voice, 0.0f }, { backing, 0.0f } }, 0.0f, analysis::MixStyle::pop, existing);
 
@@ -2693,6 +3064,33 @@ namespace
             again.getDawProject().close();
         }
 
+        // Auto Mix tags: guessed from the name before listening, picked by hand, saved
+        // on the track, and "auto" guesses again.
+        {
+            const auto kick = (int) edit.addTrack ("Kick")[daw::ids::id];
+            const auto plain = (int) edit.addTrack ("Track 9")[daw::ids::id];
+            const auto roleOf = [&] (const juce::var& tags, int trackId)
+            {
+                for (const auto& track : *tags["tracks"].getArray())
+                    if ((int) track["id"] == trackId)
+                        return track["role"].toString() + ((bool) track["tagged"] ? " (tagged)" : "");
+                return juce::String ("missing");
+            };
+
+            auto tags = run ("autoMix", args ({ { "action", "tags" } }));
+            check (roleOf (tags, kick) == "drums" && roleOf (tags, plain).isEmpty() && tags["roles"].getArray()->size() == 9,
+                   "tags: guessed from the names before listening (" + roleOf (tags, kick) + ", '" + roleOf (tags, plain) + "')");
+
+            tags = run ("autoMix", args ({ { "action", "tag" }, { "track", plain }, { "role", "background" } }));
+            check (roleOf (tags, plain) == "background (tagged)" && edit.getTrack (plain)[daw::ids::mixRole].toString() == "background",
+                   "tagging a track saves its role on it");
+
+            tags = run ("autoMix", args ({ { "action", "tag" }, { "track", plain }, { "role", "auto" } }));
+            check (roleOf (tags, plain).isEmpty() && ! edit.getTrack (plain).hasProperty (daw::ids::mixRole), "auto forgets the tag");
+            edit.removeTrack (kick);
+            edit.removeTrack (plain);
+        }
+
         project.close();
         DawBridge::availableForTesting = false;
         folder.deleteRecursively();
@@ -4095,6 +4493,8 @@ int main()
     testKeyDetection();
     testDawKey();
     testAutoMixEffects();
+    testAutoMixRoles();
+    testAutoMixRides();
     testLatency();
     testSmoothing();
     testStems();
