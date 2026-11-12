@@ -180,9 +180,7 @@ body.is-daw .chip--live { display: none; }
 
 /* The tracks keep room for the ruler and two rows: the effects panel below shrinks first
    (on a short window it used to leave one row, so new tracks landed out of sight). */
-.daw-main > .arrange,
-.daw-main > .mixer { flex: 1 1 0; min-height: 210px; }
-.daw-main > .mixer { min-height: 390px; }
+.daw-main > .arrange { flex: 1 1 0; min-height: 210px; }
 
 .arrange,
 .mixer,
@@ -195,9 +193,10 @@ body.is-daw .chip--live { display: none; }
 }
 
 .arrange { overflow: auto; }
-.mixer { display: none; overflow-x: auto; overflow-y: hidden; padding: 10px; gap: 8px; }
-.daw.show-mixer .arrange { display: none; }
-.daw.show-mixer .mixer { display: flex; }
+/* The mixer is the bottom panel's Mixer tab, in the inspector's place. */
+.mixer { display: none; flex: 0 1 var(--dock, 290px); min-height: 140px; overflow-x: auto; overflow-y: hidden; padding: 10px; gap: 8px; }
+.daw.dock-mixer .inspector { display: none; }
+.daw.dock-mixer:not(.dock-hidden) .mixer { display: flex; }
 
 .arrange-inner { position: relative; min-height: 100%; }
 
@@ -2191,3 +2190,20 @@ body.is-daw .library-hint { display: none; }
 .track-menu.is-columns .track-menu-item { width: 100%; }
 .insert-trim-switch:not(.is-set):not([aria-pressed="true"]) { visibility: hidden; }
 .insert:hover .insert-trim-switch, .insert:focus-within .insert-trim-switch { visibility: visible; }
+
+/* ---------- Mixer strips: the header switches show their sections ---------- */
+
+.mixer:not(.show-routing) .strip-input,
+.mixer:not(.show-routing) .strip-output { display: none; }
+.mixer:not(.show-sends) .strip-sends { display: none; }
+.strip .tt-monitor { width: auto; min-width: 24px; padding: 0 4px; }
+.strip .tt-monitor[data-mode="auto"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 30%, #0d1016); color: var(--text); }
+.strip-output { width: 100%; }
+.strip.is-return { border-style: dashed solid solid; }
+.mixer-button[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
+.strip-toggles { flex-wrap: nowrap; gap: 2px; }
+.strip .strip-toggles .tt { min-width: 19px; padding: 0 2px; }
+.strip .strip-toggles .tt-monitor { min-width: 22px; padding: 0 2px; font-size: 9.5px; }
+
+/* ---------- Selection: a box drawn on empty lane space ---------- */
+.select-box { position: absolute; z-index: 6; border: 1px solid var(--accent); border-radius: 3px; background: color-mix(in srgb, var(--accent) 12%, transparent); pointer-events: none; }

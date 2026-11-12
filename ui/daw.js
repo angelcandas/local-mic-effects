@@ -39,6 +39,8 @@ const prefs = {
   set(key, value) { try { localStorage.setItem(`micfx.daw.${key}`, JSON.stringify(value)); } catch { /* no storage */ } },
 };
 
+const DOCK_TABS = ["effects", "track", "mixer"];
+const MIXER_HEIGHT = 400; // px: the bottom panel opens at least this tall for the mixer
 const TRACK_COLOURS = ["#8c7bff", "#3fd9c6", "#ffb547", "#ff6fb1", "#5aafff", "#9be15d", "#ff8a5c", "#c78bff"];
 
 
@@ -1230,6 +1232,8 @@ class DawScreen {
     this.view = "arrange";     // or "mixer"
     this.selectedTrack = null; // track id, 0 = master
     this.selectedClip = null;
+    this.clipSelection = new Set();  // clip ids picked together (Shift/Ctrl+click, box): more than one
+    this.trackSelection = new Set(); // track ids picked together (Shift/Ctrl+click on headers)
     this.peaks = new Map();    // file -> { seconds, peaks } | "loading" (whole-file overview)
     this.detail = new Map();   // file -> [{ id, start, end, seconds, min, max }] (zoomed-in stretches)
     this.detailPending = new Set();
@@ -1590,12 +1594,8 @@ class DawScreen {
     this.autoMixButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Auto Mix</span>');
     this.buildActivity();
 
-    this.viewTabs = html("div", "segmented view-tabs");
-    for (const view of ["arrange", "mixer"]) {
-      const tab = iconButton("", view === "arrange" ? "tracks" : "mixer", view === "arrange" ? "Tracks and clips (Tab)" : "Mixer (Tab / X)", () => this.setView(view));
-      tab.dataset.view = view;
-      this.viewTabs.append(tab);
-    }
+    // The mixer is a tab of the bottom panel: this shows or hides it.
+    this.viewTabs = iconButton("toggle mixer-button", "mixer", "Mixer (Tab / X)", () => this.run("toggleView"));
     this.libraryButton = iconButton("toggle", "library", "Show / hide the library (Shift+B)", () => this.library.toggle());
     this.dockButton = iconButton("toggle", "panel", "Show / hide the bottom panel (E)", () => this.run("toggleDock"));
     this.pianoButton = iconButton("tool", "piano", "Play MIDI from the computer keyboard (M)", () => this.togglePiano());
@@ -1752,7 +1752,7 @@ class DawScreen {
     this.redoButton.title = s.canRedo ? `Redo${what(s.redoName)} (Ctrl+Shift+Z)` : "Nothing to redo";
     this.undoButton.setAttribute("aria-label", this.undoButton.title.replace(/ \(.*\)$/, ""));
     this.redoButton.setAttribute("aria-label", this.redoButton.title.replace(/ \(.*\)$/, ""));
-    [...this.viewTabs.children].forEach((tab) => tab.classList.toggle("is-selected", tab.dataset.view === this.view));
+    this.viewTabs.setAttribute("aria-pressed", String(this.mixerShown));
     this.timelineTools.hidden = this.view !== "arrange";
   }
 
@@ -1853,6 +1853,7 @@ class DawScreen {
         b.setAttribute("aria-pressed", String(this[key]));
         this.rememberView();
         this.renderArrange();
+        if (this.mixerShown) this.renderMixer();
       });
       b.dataset.key = key;
       return b;
@@ -2252,7 +2253,10 @@ class DawScreen {
 
     const head = html("div", "track-head");
     head.addEventListener("pointerdown", (event) => {
-      if (!event.target.closest("button, input, select, .hslider, .send-box")) this.select(track.id, null);
+      if (event.target.closest("button, input, select, .hslider, .send-box")) return;
+      // Shift or Ctrl+click: several tracks, so a fader, mute, solo or colour change on one applies to all.
+      if (event.shiftKey || event.ctrlKey || event.metaKey) return this.toggleTrackInSelection(track.id);
+      this.select(track.id, null);
     });
     head.addEventListener("contextmenu", (event) => {
       if (event.target.closest("input")) return;
@@ -2293,14 +2297,14 @@ class DawScreen {
       ? toggle("monitor", "In", "Play this track's instrument from your MIDI keyboard")
       : button("tt tt-monitor", "Off", "", () => {
           const next = { off: "in", in: "auto", auto: "off" }[monitorMode(current())];
-          daw("setTrack", { id: track.id, monitorMode: next });
+          this.eachStep(this.tracksFor(track.id), (id, more) => daw("setTrack", { id, monitorMode: next, continue: more }));
         });
     toggles.append(monitor);
     const takesToggle = this.takes.createToggle(track);
     if (takesToggle) toggles.append(takesToggle);
     row.classList.toggle("has-takes", Boolean(takesToggle && track.takesShown));
 
-    const send = (key) => (value, first) => daw("setTrack", { id: track.id, [key]: value, continue: !first });
+    const send = (key) => this.groupSetter(track.id, key);
     const volume = new HSlider({ value: track.volume, defaultValue: 0, toPosition: Fader.toPosition, fromPosition: Fader.toDecibels,
                                  parse: (t) => (/inf/i.test(t) ? FADER_MIN_DB : parseNumber(t)),
                                  format: (v) => `${dbText(v)} dB`, title: "Volume", onChange: send("volume") });
@@ -2359,11 +2363,17 @@ class DawScreen {
     // you can click around while a take plays back. (The ruler always moves it.)
     const lane = html("div", "lane");
     lane.addEventListener("pointerdown", (event) => {
-      if (event.target !== lane) return;
-      this.select(track.id, null);
-      if (this.status.playing) return;
-      const box = lane.getBoundingClientRect();
-      daw("transport", { action: "seek", time: Math.max(0, (event.clientX - box.left) / this.zoom) });
+      if (event.target !== lane || event.button !== 0) return;
+      // A click selects the track (and moves the playhead while stopped); a drag draws a
+      // box that selects the clips it touches (Shift or Ctrl: adds them).
+      const add = event.shiftKey || event.ctrlKey || event.metaKey;
+      const clientX = event.clientX;
+      this.boxSelect(event, add, () => {
+        this.select(track.id, null);
+        if (this.status.playing) return;
+        const box = lane.getBoundingClientRect();
+        daw("transport", { action: "seek", time: Math.max(0, (clientX - box.left) / this.zoom) });
+      });
     });
     lane.addEventListener("contextmenu", (event) => {
       if (event.target !== lane) return;
@@ -2393,7 +2403,7 @@ class DawScreen {
     // Brings the row up to date with a newer copy of the same track, without rebuilding it.
     row.update = (latest) => {
       row.track = latest;
-      row.classList.toggle("is-selected", this.selectedTrack === latest.id);
+      row.classList.toggle("is-selected", this.isTrackSelected(latest.id));
       row.classList.toggle("is-muted", Boolean(latest.mute));
       row.classList.toggle("is-armed", Boolean(latest.arm));
       for (const [key, b] of Object.entries(switches)) b.setAttribute("aria-pressed", String(Boolean(latest[key])));
@@ -2415,7 +2425,7 @@ class DawScreen {
         box.update(s ? s.level : -100, Boolean(s?.pre));
       }
       for (const clip of lane.querySelectorAll(":scope > .clip"))
-        clip.classList.toggle("is-selected", String(this.selectedClip) === clip.dataset.clip);
+        clip.classList.toggle("is-selected", this.isClipSelected(Number(clip.dataset.clip)));
     };
     row.update(track);
     return row;
@@ -2619,7 +2629,7 @@ class DawScreen {
   createClip(clip, track, height = this.trackHeight(track.id)) {
     const element = html("div", "clip");
     element.dataset.clip = clip.id;
-    element.classList.toggle("is-selected", this.selectedClip === clip.id);
+    element.classList.toggle("is-selected", this.isClipSelected(clip.id));
     element.classList.toggle("is-missing", clip.missing);
     element.classList.toggle("is-muted", Boolean(clip.mute));
     element.classList.toggle("is-midi", Boolean(clip.midi));
@@ -2681,6 +2691,11 @@ class DawScreen {
     element.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       event.stopPropagation();
+      // Shift or Ctrl+click: add the clip to the selection, or take it out.
+      if ((event.shiftKey || event.ctrlKey || event.metaKey) && this.tool === "select") {
+        event.preventDefault();
+        return this.toggleClipInSelection(track, clip);
+      }
       this.select(track.id, clip.id, false);
 
       if (this.tool === "warp" && !clip.midi) {
@@ -2720,14 +2735,26 @@ class DawScreen {
       let targetTrack = track.id;
       this.dragging = true;
       element.classList.add("is-dragging");
+      // Moving one clip of a group moves the group (in time; each stays on its track).
+      const group = mode === "move" && this.clipSelection.size > 1 && this.clipSelection.has(clip.id)
+        ? this.selectedClipIds().filter((id) => id !== clip.id).map((id) => ({ found: this.findClip(id), element: this.root.querySelector(`.clip[data-clip="${id}"]`) }))
+        : [];
+      const earliest = Math.min(clip.start, ...group.map((g) => g.found.clip.start));
+      let lastMove = null;
+      const scroller = this.edgeScroller(() => lastMove && onMove(...lastMove));
 
-      drag(event, (dx, dy, e) => {
-        const dt = dx / this.zoom;
+      const onMove = (dx, dy, e) => {
+        lastMove = [dx, dy, e];
+        scroller.update(e);
+        const dt = (dx + scroller.shift()) / this.zoom;
 
         if (mode === "move") {
-          const start = this.snapTime(clip.start + dt, e);
+          // The group keeps its spacing, and no clip goes before 0.
+          const start = Math.max(clip.start - earliest, this.snapTime(clip.start + dt, e));
           edit = { command: "moveClip", args: { id: clip.id, start } };
           place(start, clip.length);
+          for (const g of group) if (g.element) g.element.style.left = `${(g.found.clip.start + start - clip.start) * this.zoom}px`;
+          if (group.length) { edit.delta = start - clip.start; return; }
 
           const row = [...this.rows.querySelectorAll(":scope > .track-row")].find((r) => {
             const box = r.getBoundingClientRect();
@@ -2757,10 +2784,16 @@ class DawScreen {
           edit = { command: "clipFades", args: { id: clip.id, fadeIn: fadeInS, fadeOut: fadeOutS } };
           drawFades(clip.length, fadeInS, fadeOutS);
         }
-      }, (moved) => {
+      };
+      drag(event, onMove, async (moved) => {
+        scroller.stop();
         this.dragging = false;
         element.classList.remove("is-dragging");
-        if (moved && edit) daw(edit.command, edit.args);
+        if (moved && edit && group.length) {
+          // One undo step for the whole group.
+          const moves = [[clip.id, clip.start], ...group.map((g) => [g.found.clip.id, g.found.clip.start])];
+          await this.eachStep(moves, ([id, start], more) => daw("moveClip", { id, start: start + edit.delta, continue: more }));
+        } else if (moved && edit) daw(edit.command, edit.args);
         if (moved && targetTrack !== track.id) this.selectedTrack = targetTrack;
         this.flushSession();
       });
@@ -3007,6 +3040,9 @@ class DawScreen {
     const signature = session.tracks.map(describe).join("|") + `|r:${returns.map(describe).join("|")}` + `|in:${(session.inputs ?? []).join(",")}`
                       + `|m:${session.master.inserts.map((i) => i.type).join("+")}`;
 
+    // The track headers' I/O and Sends switches show the same sections on the strips.
+    this.mixer.classList.toggle("show-routing", this.showRouting);
+    this.mixer.classList.toggle("show-sends", this.showSends);
     if (signature !== this.mixerSignature) {
       this.mixerSignature = signature;
       this.strips.clear();
@@ -3025,7 +3061,14 @@ class DawScreen {
       strip.pan.update(track.pan);
       strip.readout.textContent = dbText(track.volume);
       for (const [key, b] of Object.entries(strip.toggles)) b.setAttribute("aria-pressed", String(Boolean(track[key])));
-      strip.element.classList.toggle("is-selected", this.selectedTrack === track.id);
+      const monitor = !strip.toggles.monitor && strip.element.querySelector(".tt-monitor");
+      if (monitor) {
+        const mode = monitorMode(track);
+        monitor.textContent = { in: "In", auto: "Auto", off: "Off" }[mode];
+        monitor.dataset.mode = mode;
+        monitor.setAttribute("aria-pressed", String(mode !== "off"));
+      }
+      strip.element.classList.toggle("is-selected", this.isTrackSelected(track.id));
       strip.sends?.update(track);
       strip.input?.update(track);
     }
@@ -3190,7 +3233,9 @@ class DawScreen {
     if (!isMaster) element.dataset.track = track.id;
     element.style.setProperty("--track-color", isMaster ? "var(--accent-2)" : isReturn ? returnColour(track, index) : trackColour(track, index));
     element.addEventListener("pointerdown", (event) => {
-      if (!event.target.closest(".fader, .knob, button")) this.select(track.id, null);
+      if (event.target.closest(".fader, .knob, button, select")) return;
+      if (kind === "track" && (event.shiftKey || event.ctrlKey || event.metaKey)) return this.toggleTrackInSelection(track.id);
+      this.select(track.id, null);
     });
     element.addEventListener("contextmenu", (event) => {
       if (event.target.closest("input, select")) return;
@@ -3206,7 +3251,7 @@ class DawScreen {
     }
     inserts.append(button("strip-insert is-add", "+ Effect", "Add an effect", () => this.select(track.id, null, true, true)));
 
-    const send = (key) => (value, first) =>
+    const send = (key) => kind === "track" ? this.groupSetter(track.id, key) : (value, first) =>
       daw(isMaster ? "setMaster" : "setTrack", isMaster ? { [key]: value, continue: !first } : { id: track.id, [key]: value, continue: !first });
 
     const pan = new ValueKnob({ label: isMaster ? "Balance" : "Pan", min: -1, max: 1, value: track.pan ?? 0, defaultValue: 0, bipolar: true,
@@ -3224,10 +3269,20 @@ class DawScreen {
     const keys = isMaster ? [] : isReturn ? [["mute", "M", "Mute"], ["solo", "S", "Solo"]]
                                           : [["mute", "M", "Mute"], ["solo", "S", "Solo"], ["arm", "●", "Arm"], ["monitor", "In", "Monitor"]];
     for (const [key, text, title] of keys) {
-        toggles[key] = button(`tt tt-${key}`, text, key === "solo" ? "Solo (Alt+click: solo only this track)" : title,
-                              (event) => this.toggleTrackKey(track, key, toggles[key].getAttribute("aria-pressed") !== "true", event));
-        buttons.append(toggles[key]);
+      if (key === "monitor" && track.kind !== "midi") {
+        // In / Auto / Off, as on the track header.
+        const monitor = button("tt tt-monitor", "Off", "Monitor: In → Auto → Off", () => {
+          const latest = this.session.tracks.find((t) => t.id === track.id) ?? track;
+          const next = { off: "in", in: "auto", auto: "off" }[monitorMode(latest)];
+          this.eachStep(this.tracksFor(track.id), (id, more) => daw("setTrack", { id, monitorMode: next, continue: more }));
+        });
+        buttons.append(monitor);
+        continue;
       }
+      toggles[key] = button(`tt tt-${key}`, text, key === "solo" ? "Solo (Alt+click: solo only this track)" : title,
+                            (event) => this.toggleTrackKey(track, key, toggles[key].getAttribute("aria-pressed") !== "true", event));
+      buttons.append(toggles[key]);
+    }
 
     const sends = kind === "track" && (this.session.returns ?? []).length ? this.createSends(track, { compact: true }) : null;
     const name = html("div", "strip-name", isReturn ? `${returnLetter(index)} · ${track.name}` : track.name);
@@ -3239,16 +3294,34 @@ class DawScreen {
       element.append(remove);
     }
     const input = kind === "track" && track.kind !== "midi" ? this.createInputPicker(track) : null;
-    element.append(...(input ? [input.element] : []), inserts, ...(sends ? [sends.element] : []), pan.element, buttons, faderRow, readout, name);
+    // Top to bottom in signal order: input, effects, sends, pan, fader and meter,
+    // M S arm monitor, output, name.
+    const output = sends?.element.querySelector(".track-output");
+    if (output) output.classList.add("strip-output");
+    if (input) input.element.classList.add("strip-input");
+    element.append(...(input ? [input.element] : []), inserts, ...(sends ? [sends.element] : []), pan.element, faderRow, readout, buttons,
+                   ...(output ? [output] : []), name);
     this.strips.set(track.id, { element, fader, pan, readout, toggles, meter, sends, input });
     return element;
   }
 
+  // The mixer is the bottom panel's Mixer tab; "arrange" goes back to the tab before it.
   setView(view) {
-    this.view = view;
-    this.root.classList.toggle("show-mixer", view === "mixer");
-    this.render();
-    this.rememberView();
+    this.showMixer(view === "mixer");
+  }
+
+  get mixerShown() { return this.dockTab === "mixer" && !this.root.classList.contains("dock-hidden"); }
+
+  showMixer(on) {
+    if (on) {
+      if (this.dockTab !== "mixer") this.tabBeforeMixer = this.dockTab;
+      this.setDockTab("mixer");
+      // Tall enough for the strips' faders.
+      this.setDock(true, Math.max(this.dockHeight, MIXER_HEIGHT));
+    } else if (this.dockTab === "mixer") {
+      this.setDockTab(this.tabBeforeMixer ?? "effects");
+    }
+    this.renderTransport();
   }
 
   //============================================================================ view state
@@ -3258,7 +3331,7 @@ class DawScreen {
   viewState() {
     return {
       zoom: this.zoom, rowHeight: this.rowHeight, left: Math.round(this.arrange.scrollLeft), top: Math.round(this.arrange.scrollTop),
-      track: this.selectedTrack, view: this.view, follow: this.follow, grid: this.grid, snap: this.snap,
+      track: this.selectedTrack, view: "arrange", follow: this.follow, grid: this.grid, snap: this.snap,
       dock: { hidden: this.root.classList.contains("dock-hidden"), height: this.dockHeight, tab: this.dockTab },
       head: this.headWidth, heights: Object.fromEntries(this.trackHeights), folded: [...this.folded],
       routing: this.showRouting, sends: this.showSends, pinnedFolded: this.pinnedFolded, foldedFx: [...this.foldedInserts],
@@ -3308,12 +3381,10 @@ class DawScreen {
     this.showSends = Boolean(state.sends);
     this.pinnedFolded = Boolean(state.pinnedFolded);
     this.headSwitches.forEach((b) => b.setAttribute("aria-pressed", String(this[b.dataset.key])));
-    if (state.view === "arrange" || state.view === "mixer") {
-      this.view = state.view;
-      this.root.classList.toggle("show-mixer", this.view === "mixer");
-    }
     if (state.dock && typeof state.dock === "object") {
-      if (state.dock.tab === "effects" || state.dock.tab === "track") this.setDockTab(state.dock.tab, false);
+      if (DOCK_TABS.includes(state.dock.tab)) this.setDockTab(state.dock.tab, false);
+      // Projects saved before the mixer moved into the bottom panel.
+      if (state.view === "mixer") this.setDockTab("mixer", false);
       this.setDock(!state.dock.hidden, clamp(num(state.dock.height, this.dockHeight), 140, 900), false);
     }
     this.restoringView = false;
@@ -3332,12 +3403,13 @@ class DawScreen {
     const saved = (() => { try { return JSON.parse(localStorage.getItem("micfx.dock") ?? "null"); } catch { return null; } })();
     this.dockHeight = saved?.height ?? 290;
     this.dockTabs = [...splitter.querySelectorAll(".dock-tab")];
-    this.setDockTab(saved?.tab === "track" ? "track" : "effects", false);
+    this.setDockTab(DOCK_TABS.includes(saved?.tab) ? saved.tab : "effects", false);
     this.setDock(saved?.hidden ? false : true, this.dockHeight);
 
     // Two tabs: Effects (the track's inserts) and Track (the clip, pitch & time, quantize, tempo).
     // Clicking the open tab while the panel is folded away shows it again.
     this.dockTabs.forEach((tab) => tab.addEventListener("click", () => {
+      if (tab.dataset.tab === "mixer") return this.showMixer(true);
       this.setDockTab(tab.dataset.tab);
       if (this.root.classList.contains("dock-hidden")) this.setDock(true);
     }));
@@ -3393,10 +3465,12 @@ class DawScreen {
     } catch { /* not kept */ }
   }
 
-  // Picks the bottom panel's tab: "effects" or "track".
+  // Picks the bottom panel's tab: "effects", "track" or "mixer".
   setDockTab(tab, save = true) {
     if (tab === this.dockTab) return;
+    if (tab !== "mixer" && this.dockTab) this.tabBeforeMixer = tab;
     this.dockTab = tab;
+    this.root.classList.toggle("dock-mixer", tab === "mixer");
     this.dockTabs.forEach((t) => {
       const on = t.dataset.tab === tab;
       t.classList.toggle("is-active", on);
@@ -3408,20 +3482,24 @@ class DawScreen {
     if (this.session) {
       this.inspectorKey = "";
       this.renderInspector();
+      if (tab === "mixer") this.renderMixer();
+      this.renderTransport();
     }
   }
 
 
+  // Selects one track and clip (or none). A plain select drops a group selection,
+  // unless the clip or track is part of it (so a group can be dragged by any member).
   select(trackId, clipId, render = true, openAdd = false) {
-    const changed = this.selectedTrack !== trackId || this.selectedClip !== clipId;
+    let changed = this.selectedTrack !== trackId || this.selectedClip !== clipId;
+    if (this.clipSelection.size && (clipId == null || !this.clipSelection.has(clipId))) { this.clipSelection.clear(); changed = true; }
+    if (this.trackSelection.size && !this.trackSelection.has(trackId)) { this.trackSelection.clear(); changed = true; }
     this.selectedTrack = trackId;
     this.selectedClip = clipId;
     if (changed) this.rememberView();
     if (changed && render) this.render();
     else if (changed) {
-      this.root.querySelectorAll(".clip.is-selected, .track-row.is-selected").forEach((e) => e.classList.remove("is-selected"));
-      this.root.querySelector(`.clip[data-clip="${clipId}"]`)?.classList.add("is-selected");
-      this.root.querySelector(`.track-row[data-track="${trackId}"]`)?.classList.add("is-selected");
+      this.markSelection();
       this.renderInspector();
     }
     if (openAdd) {
@@ -3430,6 +3508,138 @@ class DawScreen {
       // Open the add menu on the chain's "+" (after the panel is drawn).
       requestAnimationFrame(() => { if (this.rack?.addButton?.isConnected) this.rack.openAddMenu(this.rack.owner.inserts.length, this.rack.addButton); });
     }
+  }
+
+  //============================================================================ selection (several clips or tracks)
+  isClipSelected(id) { return this.clipSelection.size ? this.clipSelection.has(id) : this.selectedClip === id; }
+  isTrackSelected(id) { return this.trackSelection.size ? this.trackSelection.has(id) : this.selectedTrack === id; }
+
+  // The clips an edit applies to: the group, or the one selected clip.
+  selectedClipIds() {
+    if (this.clipSelection.size) return [...this.clipSelection].filter((id) => this.findClip(id));
+    return this.selectedClip != null && this.findClip(this.selectedClip) ? [this.selectedClip] : [];
+  }
+
+  // The tracks a header change applies to: the group when `id` is in it, else just `id`.
+  tracksFor(id) {
+    return this.trackSelection.size > 1 && this.trackSelection.has(id) ? [...this.trackSelection] : [id];
+  }
+
+  markSelection() {
+    this.root.querySelectorAll(".clip.is-selected, .track-row.is-selected, .strip.is-selected").forEach((e) => e.classList.remove("is-selected"));
+    for (const id of this.clipSelection.size ? this.clipSelection : [this.selectedClip])
+      this.root.querySelector(`.clip[data-clip="${id}"]`)?.classList.add("is-selected");
+    for (const id of this.trackSelection.size ? this.trackSelection : [this.selectedTrack]) {
+      this.root.querySelector(`.track-row[data-track="${id}"]`)?.classList.add("is-selected");
+      this.mixer?.querySelector(`.strip[data-track="${id}"]`)?.classList.add("is-selected");
+    }
+  }
+
+  // Drag on empty lane space: a box that selects the clips it touches. click() runs
+  // instead when the pointer didn't move.
+  boxSelect(event, add, click) {
+    const inner = this.inner, origin = inner.getBoundingClientRect();
+    const x0 = event.clientX - origin.left, y0 = event.clientY - origin.top;
+    const before = add ? new Set(this.selectedClipIds()) : new Set();
+    let rect = null, last = null;
+    const scroller = this.edgeScroller(() => last && move(last));
+    const move = (e) => {
+      last = e;
+      scroller.update(e);
+      const box = inner.getBoundingClientRect();
+      const x1 = e.clientX - box.left, y1 = e.clientY - box.top;
+      if (!rect) { rect = html("div", "select-box"); inner.append(rect); }
+      const left = Math.max(this.headWidth, Math.min(x0, x1)), top = Math.min(y0, y1);
+      Object.assign(rect.style, { left: `${left}px`, top: `${top}px`, width: `${Math.max(x0, x1) - left}px`, height: `${Math.abs(y1 - y0)}px` });
+      const r = rect.getBoundingClientRect();
+      const ids = new Set(before);
+      for (const clip of this.rows.querySelectorAll(":scope > .track-row .clip")) {
+        const c = clip.getBoundingClientRect();
+        if (c.right > r.left && c.left < r.right && c.bottom > r.top && c.top < r.bottom) ids.add(Number(clip.dataset.clip));
+      }
+      this.clipSelection = new Set(ids.size > 1 ? ids : []);
+      this.selectedClip = ids.size ? [...ids].pop() : null;
+      this.markSelection();
+    };
+    drag(event, (dx, dy, e) => move(e), (moved) => {
+      scroller.stop();
+      rect?.remove();
+      if (!moved) return click();
+      const ids = [...this.clipSelection.size ? this.clipSelection : this.selectedClip != null ? [this.selectedClip] : []];
+      this.selectClips(ids, this.selectedClip);
+    });
+  }
+
+  // Shift or Ctrl+click on a clip: adds it to the group, or takes it out.
+  toggleClipInSelection(track, clip) {
+    if (!this.clipSelection.size && this.selectedClip != null && this.selectedClip !== clip.id) this.clipSelection.add(this.selectedClip);
+    if (this.clipSelection.has(clip.id)) {
+      this.clipSelection.delete(clip.id);
+      const next = [...this.clipSelection].pop() ?? null;
+      this.selectedClip = next;
+      this.selectedTrack = next != null ? this.findClip(next)?.track.id ?? this.selectedTrack : track.id;
+    } else {
+      this.clipSelection.add(clip.id);
+      this.selectedClip = clip.id;
+      this.selectedTrack = track.id;
+    }
+    if (this.clipSelection.size === 1) this.clipSelection.clear();
+    this.markSelection();
+    this.renderInspector();
+  }
+
+  // Shift or Ctrl+click on a track header: adds it to the group, or takes it out.
+  toggleTrackInSelection(id) {
+    if (!this.trackSelection.size && this.selectedTrack != null && this.selectedTrack !== id && this.selectedTrack > 0) this.trackSelection.add(this.selectedTrack);
+    if (this.trackSelection.has(id)) this.trackSelection.delete(id);
+    else this.trackSelection.add(id);
+    this.selectedTrack = this.trackSelection.has(id) ? id : [...this.trackSelection].pop() ?? id;
+    if (this.trackSelection.size === 1) this.trackSelection.clear();
+    this.markSelection();
+    this.renderInspector();
+  }
+
+  selectClips(ids, primary = ids[ids.length - 1]) {
+    this.clipSelection = new Set(ids.length > 1 ? ids : []);
+    this.selectedClip = primary ?? null;
+    if (primary != null) this.selectedTrack = this.findClip(primary)?.track.id ?? this.selectedTrack;
+    this.markSelection();
+    this.renderInspector();
+  }
+
+  selectAllClips() {
+    const ids = this.session.tracks.flatMap((t) => t.clips.filter((c) => !(c.take >= 0)).map((c) => c.id));
+    if (ids.length) this.selectClips(ids, this.findClip(this.selectedClip) ? this.selectedClip : ids[0]);
+  }
+
+  // Runs one command per item (clip or track) as one undo step.
+  async eachStep(ids, run) {
+    for (let i = 0; i < ids.length; i++) await run(ids[i], i > 0);
+  }
+
+  // Scrolls the timeline while a drag is within 40 px of its left or right edge, faster
+  // the closer it gets. update(event) with each move; stop() at the end. shift() is how
+  // far it has scrolled since the start, in px.
+  edgeScroller(onScroll = () => {}) {
+    const arrange = this.arrange, start = arrange.scrollLeft;
+    let x = null, frame = 0;
+    const tick = () => {
+      frame = 0;
+      if (x === null) return;
+      const box = arrange.getBoundingClientRect();
+      const left = box.left + this.headWidth;
+      const speed = x < left + 40 ? -(left + 40 - x) : x > box.right - 40 ? x - (box.right - 40) : 0;
+      if (!speed) return;
+      const before = arrange.scrollLeft;
+      arrange.scrollLeft = Math.max(0, before + clamp(speed, -40, 40) * 0.5);
+      if (arrange.scrollLeft !== before) onScroll();
+      frame = requestAnimationFrame(tick);
+    };
+    return {
+      update: (e) => { x = e.clientX; if (!frame) frame = requestAnimationFrame(tick); },
+      stop: () => { x = null; cancelAnimationFrame(frame); frame = 0; },
+      shift: () => arrange.scrollLeft - start,
+    };
   }
 
   findClip(id) {
@@ -3441,6 +3651,10 @@ class DawScreen {
   }
 
   renderInspector() {
+    if (this.dockTab === "mixer") {
+      this.watchInserts(-1);
+      return;
+    }
     const session = this.session;
     const selectedReturn = (session.returns ?? []).find((r) => r.id === this.selectedTrack);
     let owner = this.selectedTrack === 0 ? { ...session.master, id: 0, name: "Master" }
@@ -3648,15 +3862,33 @@ class DawScreen {
   }
 
   async duplicateSelected() {
-    if (this.selectedClip == null) return;
-    const id = await daw("duplicate", { id: this.selectedClip });
-    if (id >= 0) this.select(this.selectedTrack, id);
+    const ids = this.selectedClipIds();
+    if (!ids.length) return;
+    if (ids.length === 1) {
+      const id = await daw("duplicate", { id: ids[0] });
+      if (id >= 0) this.select(this.selectedTrack, id);
+      return;
+    }
+    const copies = [];
+    await this.eachStep(ids, async (id, more) => { const copy = await daw("duplicate", { id, continue: more }); if (copy >= 0) copies.push(copy); });
+    if (copies.length) this.selectClips(copies);
   }
 
   deleteSelected() {
-    if (this.selectedClip == null) return;
-    daw("removeClip", { id: this.selectedClip });
+    const ids = this.selectedClipIds();
+    if (!ids.length) return;
+    this.eachStep(ids, (id, more) => daw("removeClip", { id, continue: more }));
+    if (ids.length > 1) toast(`Deleted ${ids.length} clips.`, "", "undo");
+    this.clipSelection.clear();
     this.selectedClip = null;
+  }
+
+  // Mutes the selected clips, or unmutes them when the clicked (main) one is muted.
+  muteSelected() {
+    const ids = this.selectedClipIds();
+    if (!ids.length) return toast("Select a clip first.");
+    const mute = !this.findClip(this.selectedClip ?? ids[0])?.clip.mute;
+    this.eachStep(ids, (id, more) => daw("setClip", { id, mute, continue: more }));
   }
 
   //============================================================================ tooltips and hint line
@@ -4366,11 +4598,10 @@ class DawScreen {
 
   render() {
     if (!this.session) return;
-    this.root.classList.toggle("show-mixer", this.view === "mixer");
     this.renderTransport();
     this.renderBanner();
     if (!this.dragging) this.renderArrange();
-    if (this.view === "mixer") this.renderMixer();
+    if (this.mixerShown) this.renderMixer();
     this.renderInspector();
   }
 
@@ -4422,7 +4653,7 @@ class DawScreen {
       this.chainGains.output.meter.push(chain?.out, elapsed);
       this.status.chains = undefined;
     }
-    if (this.view === "mixer") for (const [id, strip] of this.strips) strip.meter.push(stereo(id), elapsed);
+    if (this.mixerShown) for (const [id, strip] of this.strips) strip.meter.push(stereo(id), elapsed);
     this.status.master = undefined;
     if (this.status.tracks) this.status.tracks = {};
     this.status.stereo = undefined;
@@ -4448,7 +4679,8 @@ class DawScreen {
                                  ["A S D F G H J K", "White keys, C to C (; adds one more)"], ["W E T Y U O P", "Black keys"],
                                  ["Z / X", "Octave down / up"], ["C / V", "Velocity down / up"],
                                  ["While on", "Opens a floating piano and plays the armed (or selected) MIDI track. Single-key shortcuts (R, Space, S...) are off; Ctrl / Cmd ones still work. Esc closes it."]]],
-    ["Clips", [[", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
+    ["Clips", [["Shift / Ctrl+click", "Add a clip (or a track header) to the selection"], ["Drag on an empty lane", "Select the clips in a box"],
+               ["Ctrl+A", "Select every clip"], [", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
                ["V / B / G / W", "Select, cut, gain and warp tools"], ["Shift+M", "Mute / unmute the selected clip"],
@@ -4717,7 +4949,22 @@ class DawScreen {
 
   toggleTrackKey(track, key, on, event) {
     if (key === "solo" && event?.altKey) return daw("soloExclusive", { id: track.solo && session_onlySolo(this.session, track.id) ? -1 : track.id });
-    return daw("setTrack", { id: track.id, [key]: on });
+    const ids = this.tracksFor(track.id);
+    return this.eachStep(ids, (id, more) => daw("setTrack", { id, [key]: on, continue: more }));
+  }
+
+  // A volume or pan move on one track of a group moves every track of the group by
+  // the same amount (from where each was when the move started), as one undo step.
+  groupSetter(trackId, key) {
+    let from = null;
+    return (value, first) => {
+      const ids = this.tracksFor(trackId);
+      if (ids.length < 2) return daw("setTrack", { id: trackId, [key]: value, continue: !first });
+      if (first || !from) from = new Map(ids.map((id) => [id, this.session.tracks.find((t) => t.id === id)?.[key] ?? 0]));
+      const delta = value - from.get(trackId);
+      const limit = key === "pan" ? [-1, 1] : [FADER_MIN_DB, 6];
+      ids.forEach((id, i) => daw("setTrack", { id, [key]: id === trackId ? value : clamp(from.get(id) + delta, ...limit), continue: !first || i > 0 }));
+    };
   }
 
   // Right-click menu on a track header.
@@ -4746,7 +4993,10 @@ class DawScreen {
       rule();
       const colours = html("div", "colour-row track-menu-colours");
       TRACK_COLOURS.forEach((colour) => {
-        const swatch = button("colour-swatch", "", "Track colour", () => { closeMenu(); daw("setTrack", { id: track.id, colour }); });
+        const swatch = button("colour-swatch", "", "Track colour", () => {
+          closeMenu();
+          this.eachStep(this.tracksFor(track.id), (id, more) => daw("setTrack", { id, colour, continue: more }));
+        });
         swatch.style.background = colour;
         colours.append(swatch);
       });
@@ -4898,7 +5148,7 @@ class DawScreen {
       split: () => this.splitSelected(),
       delete: () => this.deleteSelected(),
       addTrack: () => this.addTrack(),
-      toggleView: () => this.setView(this.view === "arrange" ? "mixer" : "arrange"),
+      toggleView: () => this.showMixer(!this.mixerShown),
       toggleDock: () => this.setDock(this.root.classList.contains("dock-hidden")),
       toggleLibrary: () => this.library.toggle(),
       searchLibrary: () => this.library.focusSearch(),
@@ -4920,7 +5170,8 @@ class DawScreen {
       copyEffects: () => this.copyEffects(),
       pasteEffects: () => this.pasteEffects(),
       clearMuteSolo: () => daw("clearMuteSolo"),
-      muteClip: () => this.withClip((clip) => daw("setClip", { id: clip.id, mute: !clip.mute })),
+      muteClip: () => this.muteSelected(),
+      selectAll: () => this.selectAllClips(),
       normaliseClip: () => this.withClip(async (clip) => {
         const result = await daw("normaliseClip", { id: clip.id });
         if (result?.ok) toast(`Clip gain set to ${dbText(result.gain)} dB (peak at −1 dB).`);
@@ -4959,7 +5210,6 @@ class DawScreen {
   renameTrack() {
     const input = this.rows.querySelector(`.track-row[data-track="${this.selectedTrack}"] .track-name`);
     if (!input) return toast("Select a track first.");
-    if (this.view !== "arrange") this.setView("arrange");
     input.scrollIntoView({ block: "nearest" });
     input.focus();
     input.select();
@@ -5026,6 +5276,7 @@ class DawScreen {
       else if (key === "c") command("copy");
       else if (key === "v") command("paste");
       else if (key === "f") command("searchLibrary");
+      else if (key === "a") command("selectAll");
       else if (event.key === "Delete" || event.key === "Backspace") command("deleteTrack");
     }
     else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { handled(); this.nudgeSelected(event.key === "ArrowLeft" ? -step : step); }
@@ -5055,7 +5306,10 @@ class DawScreen {
       this.toggleAutoMix(false);
       this.toggleShortcuts(false);
       this.setTool("select");
+      this.clipSelection.clear();
+      this.trackSelection.clear();
       this.select(this.selectedTrack, null);
+      this.markSelection();
     }
     else if (event.shiftKey) {
       if (key === "m") command("muteClip");
