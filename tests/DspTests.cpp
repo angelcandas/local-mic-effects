@@ -6754,6 +6754,33 @@ namespace
             const auto& engine = processor.getPitchEngine();
             check (name == "G7" && engine.voiceNotes[0].load() == 71 && engine.voiceNotes[1].load() == 74,
                    "Live: G4 sung over the song's G7 gets B4 and D5 (" + name + ")");
+
+            // Keys held on a MIDI keyboard win over the backing track while they're down;
+            // with "MIDI keys" chosen, their chord stays after release.
+            const auto playKeys = [&] (bool down)
+            {
+                juce::MidiBuffer keys;
+                for (auto note : { 62, 65, 69 })
+                    keys.addEvent (down ? juce::MidiMessage::noteOn (1, note, (juce::uint8) 100) : juce::MidiMessage::noteOff (1, note), 0);
+                buffer.clear();
+                processor.processBlock (buffer, keys);
+                return processor.getHarmonyChord().getName();
+            };
+            const auto held = playKeys (true);
+            const auto backAgain = playKeys (false);
+            set ("harmonySource", 2.0f);
+            playKeys (true);
+            playKeys (false);
+            for (int b = 0; b < 20; ++b)
+            {
+                buffer.clear();
+                processor.processBlock (buffer, midi);
+            }
+            const auto kept = processor.getHarmonyChord().getName();
+            check (held == "Dm" && backAgain == "G7" && kept == "Dm",
+                   "Live: MIDI keys win while held (" + held + ", then the song's " + backAgain + "); as the source their chord stays ("
+                       + kept + ")");
+
             multitrack.pause();
             folder.deleteRecursively();
         }

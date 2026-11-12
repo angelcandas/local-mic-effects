@@ -399,10 +399,10 @@ class ChordReadout {
 
     this.voices.replaceChildren(...sung.map((note) => html("span", "voice", noteName(note))));
 
-    const fromInput = Juce.getComboBoxState("harmonySource").getChoiceIndex() === 1;
+    const source = Juce.getComboBoxState("harmonySource").getChoiceIndex();
     this.detail.textContent = !following ? (sung.length ? "" : "Sing to hear the voices")
       : chord ? (sung.length ? "Voices on the chord's notes" : "Sing to hear the voices")
-      : fromInput ? "Play chords into input 2" : "Load and play a backing track";
+      : ["Load and play a backing track", "Play chords into input 2", "Play chords on a MIDI keyboard"][source] ?? "";
   }
 }
 

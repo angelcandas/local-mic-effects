@@ -145,8 +145,10 @@ private:
 
     // Live mode's chord for the harmonizer (Chords mode): from the backing track's
     // chord list, or by listening to the instrument input (the interface's 2nd input).
-    void followChords (const juce::AudioBuffer<float>&, int numIn, int numSamples) noexcept;
+    // Keys held on a MIDI keyboard win while they're down.
+    void followChords (const juce::AudioBuffer<float>&, int numIn, int numSamples, const juce::MidiBuffer&) noexcept;
     analysis::ChordFollower chordFollower;
+    std::bitset<128> heldKeys; // Live MIDI notes down now (audio thread)
 
     void applyPeakGuard (juce::AudioBuffer<float>&, int numChannels, int numSamples) noexcept;
     // Transparent peak guard for the voice + playback sum: only acts above -1 dB, so

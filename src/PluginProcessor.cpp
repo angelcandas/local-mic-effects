@@ -189,7 +189,7 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     }
 
     updateDspParameters();
-    followChords (buffer, numIn, numSamples); // before the mic is copied over the other inputs
+    followChords (buffer, numIn, numSamples, midi); // before the mic is copied over the other inputs
 
     // A mono mic feeds every output channel so stereo effects have signal on both sides.
     // The app has the interface's every input: Live mode uses the first, as a mono mic.
@@ -263,8 +263,21 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     updatePeak (outputPeak, buffer.getMagnitude (0, numSamples));
 }
 
-void PluginProcessor::followChords (const juce::AudioBuffer<float>& buffer, int numIn, int numSamples) noexcept
+void PluginProcessor::followChords (const juce::AudioBuffer<float>& buffer, int numIn, int numSamples,
+                                    const juce::MidiBuffer& midi) noexcept
 {
+    // The keys down, kept up to date even while nothing follows them.
+    for (const auto metadata : midi)
+    {
+        const auto message = metadata.getMessage();
+        if (message.isNoteOn())
+            heldKeys.set ((size_t) message.getNoteNumber());
+        else if (message.isNoteOff())
+            heldKeys.reset ((size_t) message.getNoteNumber());
+        else if (message.isAllNotesOff() || message.isAllSoundOff())
+            heldKeys.reset();
+    }
+
     if (! pitchModule.isFollowingChords())
         return;
 
@@ -275,7 +288,12 @@ void PluginProcessor::followChords (const juce::AudioBuffer<float>& buffer, int 
     const auto key = juce::roundToInt (pitchModule.tuneKey.load (std::memory_order_relaxed));
     chordFollower.setKeyMask (scale == 1 || scale == 2 ? analysis::getKeyMask (key, scale == 2) : 0);
 
-    if (pitchModule.getHarmonySource() == Pitch::instrumentInput)
+    if (heldKeys.any() || pitchModule.getHarmonySource() == Pitch::midiKeys)
+    {
+        // Held keys decide; released, the last chord they made stays.
+        chordFollower.setHeldNotes (heldKeys);
+    }
+    else if (pitchModule.getHarmonySource() == Pitch::instrumentInput)
     {
         // The second input (a guitar or keyboard on input 2 of the interface).
         if (numIn > 1)

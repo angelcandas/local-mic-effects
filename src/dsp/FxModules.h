@@ -158,11 +158,12 @@ public:
     Value& harmonySpread   = addValue ("harmonySpread", 50.0f);
     Value& harmonyFormant  = addValue ("harmonyFormant", 0.0f);
 
-    // Where Live mode hears the chords (the DAW listens to the other tracks).
-    enum HarmonySource { backingTrack, instrumentInput };
+    // Where Live mode hears the chords (the DAW listens to the other tracks). Keys held
+    // on a MIDI keyboard win over the others while they're down.
+    enum HarmonySource { backingTrack, instrumentInput, midiKeys };
     static const juce::StringArray& getHarmonySourceNames()
     {
-        static const juce::StringArray names { "Backing track", "Instrument input" };
+        static const juce::StringArray names { "Backing track", "Instrument input", "MIDI keys" };
         return names;
     }
 

@@ -61,6 +61,8 @@ Where the chords come from (**Chords from**, Live mode):
   then change exactly when the song does.
 - **Instrument input**: a guitar or keyboard on input 2 of the audio interface, followed as you play
   (about 0.1 to 0.3 s to settle on a new chord).
+- **MIDI keys**: the chord you hold on a MIDI keyboard (one key alone plays the key's triad on it), kept
+  after you let go. Held keys also win over the backing track or input 2 while they're down.
 
 In DAW mode a harmonizer insert listens to the tracks without pitch inserts (read slightly ahead) and
 to the MIDI being played; held MIDI keys win while they're down.
