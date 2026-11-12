@@ -87,8 +87,8 @@ jobs:
       - name: Configure
         run: cmake --preset debug -DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
 
-      - name: Build the tests, the standalone app and the VST3
-        run: cmake --build build/debug --target MicFXTests MicFX_Standalone MicFX_VST3
+      - name: Build the tests, the standalone app, the VST3 and the instrument plugins
+        run: cmake --build build/debug --target MicFXTests MicFX_Standalone MicFX_VST3 MicFXInstruments
 
       - name: Run the tests
         run: ./build/debug/MicFXTests_artefacts/Debug/MicFXTests
@@ -109,7 +109,7 @@ jobs:
         run: cmake --preset debug
 
       - name: Build the tests, the app and the plugins
-        run: cmake --build build/debug --target MicFXTests MicFX_Standalone MicFX_VST3 MicFX_AU
+        run: cmake --build build/debug --target MicFXTests MicFX_Standalone MicFX_VST3 MicFX_AU MicFXInstruments
 
       - name: Run the tests
         run: ./build/debug/MicFXTests_artefacts/Debug/MicFXTests
