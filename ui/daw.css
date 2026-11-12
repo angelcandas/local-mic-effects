@@ -1470,6 +1470,7 @@ body.library-dragging * { cursor: grabbing !important; }
 .clip-editor-bar { display: flex; flex: none; align-items: center; gap: 6px; }
 .clip-editor-bar > .tool { height: 26px; padding: 0 10px; font-size: 11px; }
 .clip-editor-bar .rhythm-check { white-space: nowrap; }
+.clip-editor-bar [hidden] { display: none; }
 .clip-editor-bar .tempo { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }
 .clip-editor-bar .rhythm-clip-tempo { width: 64px; }
 .clip-editor-bar .rhythm-clip-tempo:disabled { opacity: 0.45; }
