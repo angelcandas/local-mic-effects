@@ -112,6 +112,8 @@ struct DawBridge::StemJob
     int trackId = -1;
     stems::Result result;
     std::atomic<juce::int64> splitStartedMs { 0 }; // when separating began (after download and load)
+    std::atomic<bool> gpu { false };               // separating on the GPU (Core ML), not the CPU
+    juce::String note;                             // why the GPU wasn't used, when it was meant to be; set before finished
     bool autoMix = false; // started by Auto Mix, which listens once it's done
 };
 
@@ -665,7 +667,8 @@ void DawBridge::tick()
             {
                 const auto added = addStemTracks (job->clip, job->trackId, job->result.files);
                 const auto seconds = (juce::Time::getMillisecondCounter() - job->splitStartedMs.load()) / 1000.0;
-                emit ("dawStems", (bool) added["ok"] ? object ({ { "state", "done" }, { "tracks", added["tracks"] }, { "seconds", seconds } })
+                emit ("dawStems", (bool) added["ok"] ? object ({ { "state", "done" }, { "tracks", added["tracks"] }, { "seconds", seconds },
+                                                                                                    { "gpu", job->gpu.load() }, { "note", job->note } })
                                                      : object ({ { "state", "error" }, { "error", added["error"] } }));
             }
         }
@@ -679,7 +682,7 @@ void DawBridge::tick()
         {
             static constexpr const char* phases[] { "downloading", "loading", "splitting" };
             emit ("dawStems", object ({ { "state", phases[juce::jlimit (0, 2, stemJob->phase.load())] },
-                                        { "progress", stemJob->progress.load() } }));
+                                        { "progress", stemJob->progress.load() }, { "gpu", stemJob->gpu.load() } }));
         }
     }
 
@@ -903,28 +906,51 @@ juce::var DawBridge::handleStems (const juce::var& args)
     {
         const auto progress = [job] (double p) { job->progress = p; return ! job->cancel.load(); };
         auto& result = job->result;
+        stems::Separator separator;
 
-        if (! model.existsAsFile() || stems::Model::verify (model).isNotEmpty())
+        // The GPU first, when its converted model is there (scripts/export_htdemucs_coreml.py).
+        if (const auto gpuModel = stems::GpuModel::getDefaultFile(); stems::GpuModel::isBuiltIn() && gpuModel.isDirectory())
         {
-            job->phase = StemJob::downloading;
-            if (const auto problem = stems::Model::download (model, progress); problem.isNotEmpty())
-            {
-                result.cancelled = job->cancel.load();
-                result.error = result.cancelled ? juce::String() : problem;
-                job->finished = true;
-                return;
-            }
+            job->phase = StemJob::loading;
+            juce::String problem;
+            separator = stems::GpuModel::load (gpuModel, problem);
+
+            if (separator != nullptr)
+                job->gpu = true;
+            else
+                job->note = "The GPU model didn't work (" + problem + "), so this split ran on the CPU.";
         }
 
-        job->phase = StemJob::loading;
-        job->progress = 0.0;
-        const auto separator = stems::Model::load (model, result.error);
+        if (separator == nullptr && ! job->cancel.load())
+        {
+            if (! model.existsAsFile() || stems::Model::verify (model).isNotEmpty())
+            {
+                job->phase = StemJob::downloading;
+                if (const auto problem = stems::Model::download (model, progress); problem.isNotEmpty())
+                {
+                    result.cancelled = job->cancel.load();
+                    result.error = result.cancelled ? juce::String() : problem;
+                    job->finished = true;
+                    return;
+                }
+            }
+
+            job->phase = StemJob::loading;
+            job->progress = 0.0;
+            separator = stems::Model::load (model, result.error);
+        }
 
         if (separator != nullptr && ! job->cancel.load())
         {
+            // The GPU takes one segment at a time; two workers keep it fed while the other
+            // prepares or finishes a segment. On the CPU every core works on its own chunk.
+            stems::Settings settings;
+            settings.threads = job->gpu ? 2 : 0;
+
             job->phase = StemJob::splitting;
+            job->progress = 0.0;
             job->splitStartedMs = (juce::int64) juce::Time::getMillisecondCounter();
-            result = stems::split (source, folder, name, separator, progress);
+            result = stems::split (source, folder, name, separator, progress, settings);
         }
 
         result.cancelled = result.cancelled || job->cancel.load();

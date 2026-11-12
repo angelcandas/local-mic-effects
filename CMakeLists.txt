@@ -92,6 +92,8 @@ set(MICFX_DSP_SOURCES
 set(MICFX_DEMUCS_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libs/demucs.cpp" CACHE PATH "demucs.cpp checkout")
 set(MICFX_EIGEN_DIR "${CMAKE_CURRENT_SOURCE_DIR}/libs/eigen" CACHE PATH "Eigen checkout")
 
+set(MICFX_HAS_COREML 0)
+
 if(EXISTS "${MICFX_DEMUCS_DIR}/src/model.hpp" AND EXISTS "${MICFX_EIGEN_DIR}/Eigen/Dense")
     file(GLOB MICFX_DEMUCS_LIB_SOURCES CONFIGURE_DEPENDS "${MICFX_DEMUCS_DIR}/src/*.cpp")
     add_library(MicFXDemucs STATIC ${MICFX_DEMUCS_LIB_SOURCES})
@@ -116,7 +118,17 @@ if(EXISTS "${MICFX_DEMUCS_DIR}/src/model.hpp" AND EXISTS "${MICFX_EIGEN_DIR}/Eig
         target_link_libraries(MicFXDemucs PUBLIC "-framework Accelerate")
     endif()
 
-    list(APPEND MICFX_DSP_SOURCES src/stems/DemucsSeparator.cpp)
+    list(APPEND MICFX_DSP_SOURCES src/stems/DemucsSeparator.cpp src/stems/DemucsPipeline.cpp src/stems/DemucsPipeline.h)
+
+    # On a Mac the network can also run on the GPU through Core ML (a model the user converts
+    # once with scripts/export_htdemucs_coreml.py). The Objective-C++ adapter needs the system
+    # frameworks, which every target that links the demucs library inherits.
+    if(APPLE)
+        list(APPEND MICFX_DSP_SOURCES src/stems/CoreMlSeparator.mm)
+        set_source_files_properties(src/stems/CoreMlSeparator.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(MicFXDemucs PUBLIC "-framework CoreML" "-framework Foundation")
+        set(MICFX_HAS_COREML 1)
+    endif()
     set(MICFX_DEMUCS_LIBRARY MicFXDemucs)
     set(MICFX_HAS_DEMUCS 1)
     message(STATUS "MicFX: stem splitting enabled (demucs.cpp)")
@@ -149,6 +161,7 @@ target_compile_definitions(MicFX
         # Where scripts/update.sh lives, for "Check for updates...".
         MICFX_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
         MICFX_HAS_DEMUCS=${MICFX_HAS_DEMUCS}
+        MICFX_HAS_COREML=${MICFX_HAS_COREML}
         # Debug builds load ui/ from disk so UI edits only need a page reload.
         $<$<CONFIG:Debug>:MICFX_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ui">
         $<$<CONFIG:Debug>:MICFX_JUCE_JS_FILE="${CMAKE_CURRENT_SOURCE_DIR}/libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js">)
@@ -198,6 +211,7 @@ if(MICFX_BUILD_TESTS)
         PRIVATE
             JucePlugin_Name="MicFX"
             MICFX_HAS_DEMUCS=${MICFX_HAS_DEMUCS}
+            MICFX_HAS_COREML=${MICFX_HAS_COREML}
             MICFX_TEST_SYNTH="$<GENEX_EVAL:$<TARGET_PROPERTY:MicFXTestSynth_VST3,JUCE_PLUGIN_ARTEFACT_FILE>>"
             JUCE_PLUGINHOST_VST3=1
             JUCE_PLUGINHOST_AU=1

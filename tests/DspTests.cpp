@@ -30,6 +30,9 @@
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
 #include "stems/StemSplitter.h"
+#if MICFX_HAS_DEMUCS
+ #include "stems/DemucsPipeline.h"
+#endif
 
 // The real editor needs the WebView; the tests only exercise the processor.
 juce::AudioProcessorEditor* PluginProcessor::createEditor() { return nullptr; }
@@ -4384,6 +4387,81 @@ static void testStems()
     folder.deleteRecursively();
 }
 
+#if MICFX_HAS_DEMUCS
+// The code round the network (spectrogram, normalising, segments, mask, inverse spectrogram,
+// crossfade), with a stand-in network that hands source 0 its own spectrogram back. If that
+// is all right, source 0 comes out as the input.
+static void testStemPipeline()
+{
+    std::cout << "\nStem splitter: the code round the network\n";
+
+    constexpr int F = stems::CoreNetwork::freqBins, T = stems::CoreNetwork::frames;
+    std::atomic<int> runs { 0 };
+
+    auto core = std::make_shared<stems::CoreNetwork>();
+    core->run = [&runs] (const float* x, const float*, float* xOut, float* xtOut)
+    {
+        ++runs;
+        std::fill (xOut, xOut + (size_t) stems::numStems * 4 * F * T, 0.0f);
+        std::copy_n (x, (size_t) 4 * F * T, xOut); // source 0, all four channels
+        std::fill (xtOut, xtOut + (size_t) stems::numStems * 2 * stems::CoreNetwork::segmentSamples, 0.0f);
+        return juce::String();
+    };
+
+    const auto separator = stems::makeSeparator (core);
+
+    // 21.3 s: three full segments' worth and a short last one. Different tones left and right.
+    const auto length = (int) (21.3 * stems::modelSampleRate);
+    juce::AudioBuffer<float> input (2, length);
+    for (int i = 0; i < length; ++i)
+    {
+        const auto t = i / stems::modelSampleRate;
+        input.setSample (0, i, 0.3f * (float) (std::sin (juce::MathConstants<double>::twoPi * 330.0 * t) + 0.5 * std::sin (juce::MathConstants<double>::twoPi * 1250.0 * t)));
+        input.setSample (1, i, 0.25f * (float) std::sin (juce::MathConstants<double>::twoPi * 550.0 * t));
+    }
+
+    const auto out = separator (input, [] (double) { return true; });
+    auto worst = 0.0f;
+    const auto edge = 4096; // the spectrogram's own edges are lossy, as in Demucs itself
+    if (out.size() == (size_t) stems::numStems && out[0].getNumSamples() == length)
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = edge; i < length - edge; ++i)
+                worst = std::max (worst, std::abs (out[0].getSample (ch, i) - input.getSample (ch, i)));
+
+    check (out.size() == (size_t) stems::numStems && worst < 2.0e-3f,
+           "a network that returns its input gives the song back, left and right in place (worst " + juce::String (worst, 5) + ")");
+    check (runs == 4, "21.3 s runs the network on four overlapping 7.8 s segments (" + juce::String (runs.load()) + ")");
+
+    // Cancelling between segments stops the work.
+    runs = 0;
+    std::atomic<int> asked { 0 };
+    const auto cancelled = separator (input, [&] (double) { return ++asked < 3; });
+    check (cancelled.empty() && runs < 4, "cancelling stops it between segments");
+
+    // A network that fails stops the split rather than returning silence.
+    auto broken = std::make_shared<stems::CoreNetwork>();
+    broken->run = [] (const float*, const float*, float*, float*) { return juce::String ("the GPU said no"); };
+    check (stems::makeSeparator (broken) (input, nullptr).empty(), "a failing network gives no stems");
+
+    // A silent song doesn't divide by zero.
+    juce::AudioBuffer<float> silence (2, 100000);
+    silence.clear();
+    const auto quiet = separator (silence, nullptr);
+    auto finite = quiet.size() == (size_t) stems::numStems;
+    for (const auto& stem : quiet)
+        for (int i = 0; i < stem.getNumSamples() && finite; ++i)
+            finite = std::isfinite (stem.getSample (0, i)) && std::isfinite (stem.getSample (1, i));
+    check (finite, "a silent song gives finite stems");
+
+    check (! stems::GpuModel::isBuiltIn() || stems::GpuModel::getDefaultFile().getFileName() == stems::GpuModel::fileName,
+           "the GPU model lives in the Models folder, next to the CPU one");
+    juce::String gpuError;
+    check (stems::GpuModel::load (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("no-such-model.mlpackage"), gpuError) == nullptr
+               && gpuError.isNotEmpty(),
+           "a missing GPU model fails with a message, so the CPU is used");
+}
+#endif
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juce;
@@ -4420,6 +4498,9 @@ int main()
     testLatency();
     testSmoothing();
     testStems();
+#if MICFX_HAS_DEMUCS
+    testStemPipeline();
+#endif
     testLiveMeters();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
