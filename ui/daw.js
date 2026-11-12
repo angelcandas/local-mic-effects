@@ -2563,7 +2563,7 @@ class DawScreen {
     const roles = () => Object.fromEntries([...panel.querySelectorAll(".automix-role select")].map((s) => [s.dataset.track, s.value]));
     const effects = () => Object.fromEntries([...panel.querySelectorAll(".automix-effects input")].map((c) => [c.name, c.checked]));
     this.autoMixEffects = effects;
-    const mode = () => ({ mode: $("[name=mode]").value, focus: Number($("[name=focus]").value) });
+    const mode = () => ({ mode: $("[name=mode]").value, focus: Number($("[name=focus]").value), masterLufs: Number($("[name=masterLufs]").value) });
     this.autoMixMode = mode;
     const planArgs = () => ({ style: style(), roles: roles(), effects: effects(), ...mode() });
 
@@ -2581,7 +2581,7 @@ class DawScreen {
       if (this.autoMix.plan?.kind === "mix") this.replanAutoMix(planArgs());
     });
     // Mix the song, fit one track into the backing, or clean one up: the plan follows.
-    for (const name of ["mode", "focus"])
+    for (const name of ["mode", "focus", "masterLufs"])
       $(`[name=${name}]`).addEventListener("change", () => {
         this.renderAutoMixMode();
         if (this.autoMix.plan?.kind === "mix") this.replanAutoMix(planArgs());
@@ -2638,15 +2638,19 @@ class DawScreen {
     for (const track of this.session?.tracks ?? []) focus.append(new Option(track.name, String(track.id)));
     focus.value = [...focus.options].some((o) => o.value === selected) ? selected : "0";
 
-    panel.querySelector(".automix-focus").hidden = mode === "mix";
+    panel.querySelector(".automix-focus").hidden = mode === "mix" || mode === "master";
+    panel.querySelector(".automix-target").hidden = mode !== "master";
     panel.classList.toggle("is-clean", mode === "clean");
+    panel.classList.toggle("is-master", mode === "master");
     const intro = panel.querySelector(".automix-mode-intro");
     intro.hidden = mode === "mix";
     intro.textContent = mode === "fit"
       ? "For a backing that's already mixed: this track gets its EQ, compression, space and level; the others only make room for it (a dip where they cover it, a little lower while it plays). The master stays as it is."
       : mode === "clean"
         ? "Cleans up this track only: rumble, mains hum, noise between phrases, mud, harshness, S's and uneven level. No reverb, no level changes, no other tracks."
-        : "";
+        : mode === "master"
+          ? "Masters the song as it plays now: a mastering EQ towards the balance of finished records, a gentle multiband, width with a mono low end, and a limiter up to the loudness you pick. Listen again after changing the mix."
+          : "";
   }
 
   // Before listening: what each track is, guessed from its name or tagged by you. A tag
@@ -2845,6 +2849,7 @@ class DawScreen {
       this.renderAutoMixMode();
       const focus = panel.querySelector("[name=focus]");
       if ([...focus.options].some((o) => o.value === String(event.focus ?? 0))) focus.value = String(event.focus ?? 0);
+      if (event.masterLufs) panel.querySelector("[name=masterLufs]").value = String(event.masterLufs);
     }
     for (const [name, on] of Object.entries(event.effects ?? {})) {
       const box = panel.querySelector(`.automix-effects [name=${name}]`);
@@ -2871,7 +2876,9 @@ class DawScreen {
       card.append(head, list);
       planBox.append(card);
     }
-    if (event.kind === "mix" && event.mode === "clean") {
+    if (event.kind === "mix" && event.mode === "master" && event.moves.length > 0)
+      planBox.append(html("div", "automix-summary", `Master about ${event.mixLufs.toFixed(1)} LUFS, peaks under -1 dB`));
+    else if (event.kind === "mix" && event.mode === "clean") {
       // No levels to sum up: it only cleaned one track.
     } else if (event.kind === "mix" && event.mode === "fit" && event.moves.length > 0)
       planBox.append(html("div", "automix-summary",

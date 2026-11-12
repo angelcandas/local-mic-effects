@@ -1052,12 +1052,12 @@ juce::String getStyleName (MixStyle style)
 
 const char* getModeKey (MixMode mode)
 {
-    return mode == MixMode::fit ? "fit" : mode == MixMode::clean ? "clean" : "mix";
+    return mode == MixMode::fit ? "fit" : mode == MixMode::clean ? "clean" : mode == MixMode::master ? "master" : "mix";
 }
 
 MixMode getModeFromKey (const juce::String& key)
 {
-    return key == "fit" ? MixMode::fit : key == "clean" ? MixMode::clean : MixMode::mix;
+    return key == "fit" ? MixMode::fit : key == "clean" ? MixMode::clean : key == "master" ? MixMode::master : MixMode::mix;
 }
 
 const char* getRoleKey (Role role)
@@ -1248,6 +1248,15 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
 
     const auto volumeOf = [&] (int id) { auto it = currentVolumes.find (id); return it != currentVolumes.end() ? it->second : 0.0f; };
     const auto roleOf = [&] (int id) { auto it = roles.find (id); return it != roles.end() ? it->second : Role::other; };
+
+    if (options.mode == MixMode::master)
+    {
+        if (! measured.mix.has_value())
+            plan.notes.add ("Listen again in Master mode: it measures the whole mix as it plays.");
+        else
+            plan = planMaster (*measured.mix, options.masterLufs, currentMasterVolume);
+        return plan;
+    }
 
     // Fit and clean work on one track: the one asked for, or else the voice that sings the most.
     int focus = 0;
@@ -1793,6 +1802,185 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
     return plan;
 }
 
+
+//==============================================================================
+MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVolume)
+{
+    MixPlan plan;
+    if (mix.getActiveSeconds() <= 0.0 || mix.integratedLufs <= -150.0f)
+    {
+        plan.notes.add ("The mix is silent.");
+        return plan;
+    }
+
+    const auto master = daw::Edit::masterId;
+    const auto add = [&plan, master] (fx::ModuleType type, std::map<juce::String, float> values) -> MixMove&
+    {
+        MixMove move;
+        move.trackId = master;
+        move.insert = type;
+        move.atEnd = true;
+        move.values = std::move (values);
+        plan.moves.push_back (move);
+        return plan.moves.back();
+    };
+
+    // Tonal balance: the mix's long-term spectrum against the average of finished
+    // commercial mixes (flat to 250 Hz, then falling about 4.5 dB an octave), levelled
+    // over 100 Hz - 10 kHz and smoothed over an octave; gentle moves, at most 3 dB.
+    const auto spectrum = mix.getAverageSpectrum();
+    const auto targetDb = [] (double hz)
+    {
+        static constexpr std::pair<double, double> points[] = { { 20.0, -10.0 }, { 50.0, -1.0 }, { 250.0, 0.0 }, { 1000.0, -9.0 },
+                                                                { 4000.0, -18.0 }, { 10000.0, -25.0 }, { 20000.0, -36.0 } };
+        if (hz <= points[0].first) return points[0].second;
+        for (size_t i = 1; i < std::size (points); ++i)
+            if (hz <= points[i].first)
+            {
+                const auto x = std::log (hz / points[i - 1].first) / std::log (points[i].first / points[i - 1].first);
+                return points[i - 1].second + x * (points[i].second - points[i - 1].second);
+            }
+        return points[std::size (points) - 1].second;
+    };
+
+    std::vector<double> difference ((size_t) numBands, 0.0);
+    {
+        double offset = 0.0;
+        int count = 0;
+        for (int b = 0; b < numBands; ++b)
+        {
+            difference[(size_t) b] = targetDb (getBandCentre (b)) - juce::jmax (spectrum[(size_t) b], -120.0f);
+            if (getBandCentre (b) >= 100.0 && getBandCentre (b) <= 10000.0)
+                offset += difference[(size_t) b], ++count;
+        }
+        offset /= juce::jmax (1, count);
+        auto raw = difference;
+        for (int b = 0; b < numBands; ++b)
+        {
+            double sum = 0.0;
+            int n = 0;
+            for (int k = juce::jmax (0, b - 1); k <= juce::jmin (numBands - 1, b + 1); ++k)
+                sum += raw[(size_t) k] - offset, ++n;
+            difference[(size_t) b] = sum / n;
+        }
+    }
+    const auto meanOver = [&] (double fromHz, double toHz)
+    {
+        double sum = 0.0;
+        int n = 0;
+        for (int b = 0; b < numBands; ++b)
+            if (getBandCentre (b) >= fromHz && getBandCentre (b) <= toHz)
+                sum += difference[(size_t) b], ++n;
+        return n > 0 ? sum / n : 0.0;
+    };
+    const auto gain = [] (double db, double limit) { return roundTo (juce::jlimit (-limit, limit, 0.6 * db), 0.5); };
+
+    const auto lowGain = gain (meanOver (40.0, 120.0), 3.0);
+    const auto highGain = gain (meanOver (6000.0, 12000.0), 3.0);
+    const auto airGain = juce::jmin (2.0f, gain (meanOver (12500.0, 18000.0), 3.0));
+    int midBand = -1;
+    for (int b = 0; b < numBands; ++b)
+        if (getBandCentre (b) >= 250.0 && getBandCentre (b) <= 5000.0
+            && (midBand < 0 || std::abs (difference[(size_t) b]) > std::abs (difference[(size_t) midBand])))
+            midBand = b;
+    const auto midHz = midBand >= 0 ? roundTo (getBandCentre (midBand), 10.0) : 1000.0f;
+    const auto midGain = midBand >= 0 ? gain (difference[(size_t) midBand], 3.0) : 0.0f;
+
+    auto& eq = add (fx::ModuleType::masterEq, { { "meqOn", 1.0f }, { "meqLowCut", 30.0f }, { "meqLowFreq", 100.0f }, { "meqLowGain", lowGain },
+                                                { "meqMidFreq", midHz }, { "meqMidGain", midGain }, { "meqHighFreq", 8000.0f },
+                                                { "meqHighGain", highGain }, { "meqAirGain", airGain } });
+    eq.reasons.add ("Low cut at 30 Hz: rumble nobody hears but the limiter would react to");
+    const auto describe = [&eq] (float db, const juce::String& what)
+    {
+        if (std::abs (db) >= 0.5f)
+            eq.reasons.add ((db > 0 ? "More " : "Less ") + what + ": " + (db > 0 ? "+" : "-") + formatDb (db));
+    };
+    describe (lowGain, "low end (100 Hz shelf)");
+    describe (midGain, "around " + formatHz (midHz));
+    describe (highGain, "top end (8 kHz shelf)");
+    describe (airGain, "air (16 kHz)");
+    if (eq.reasons.size() == 1)
+        eq.reasons.add ("The tonal balance is already close to a finished master");
+
+    // Loudness: the master fader goes to 0 dB (it comes after the limiter, so anything
+    // else would move the ceiling); the master chain's input gain brings the mix up (or
+    // down) to the target, less the limiter's drive, which is as much as this kind of
+    // master takes: 9 dB for loud, 5 for streaming, 2 for dynamic.
+    const auto eqDb = [&]
+    {
+        fx::ParametricEq::Settings s;
+        s.lowShelfHz = 100.0f; s.lowShelfDb = lowGain; s.highShelfHz = 8000.0f; s.highShelfDb = highGain + airGain * 0.5f;
+        s.bells[0] = { midHz, midGain, 0.7f };
+        s.bells[1].db = s.bells[2].db = 0.0f;
+        return fx::ParametricEq::getMagnitudeDb (s, bandCentres(), analysisRate);
+    }();
+    const auto loudness = mix.integratedLufs - currentMasterVolume + loudnessChangeDb (spectrum, eqDb); // with the fader at 0 dB
+    const auto gap = targetLufs - loudness;
+    const auto maxDrive = targetLufs >= -11.0f ? 9.0 : targetLufs <= -15.0f ? 2.0 : 5.0;
+    const auto drive = (float) maxDrive;
+    const auto trim = roundTo (juce::jlimit (-24.0, 24.0, gap - drive), 0.5);
+
+    // Glue: a gentle 2:1 on each band, from the level the band reaches its loudest fifth of the time.
+    {
+        std::array<std::vector<float>, 3> levels;
+        for (size_t i = 0; i < mix.bandsDb.size(); ++i)
+            if (mix.active[i])
+            {
+                std::array<double, 3> power {};
+                for (int b = 0; b < numBands; ++b)
+                    power[getBandCentre (b) < 200.0 ? 0 : getBandCentre (b) < 3000.0 ? 1 : 2] += dbToPower (mix.bandsDb[i][(size_t) b]);
+                for (size_t k = 0; k < 3; ++k)
+                    levels[k].push_back ((float) powerToDb (power[k]));
+            }
+        // Measured with the fader where it is now; the chain hears the mix at 0 dB plus the trim.
+        const auto offset = trim - currentMasterVolume;
+        const auto threshold = [&] (size_t k) { return juce::jlimit (-60.0f, 0.0f, roundTo (percentile (levels[k], 0.8) + 3.0 + offset, 1.0)); };
+        auto& mb = add (fx::ModuleType::multiband, { { "mbOn", 1.0f }, { "mbLowFreq", 200.0f }, { "mbHighFreq", 3000.0f },
+                                                     { "mbLowThreshold", threshold (0) }, { "mbMidThreshold", threshold (1) },
+                                                     { "mbHighThreshold", threshold (2) }, { "mbRatio", 2.0f }, { "mbAttack", 20.0f },
+                                                     { "mbRelease", 200.0f }, { "mbMakeup", 0.0f } });
+        mb.reasons.add ("Multiband 2:1 on the loudest moments of each band (lows " + juce::String (threshold (0), 0) + ", mids "
+                        + juce::String (threshold (1), 0) + ", highs " + juce::String (threshold (2), 0)
+                        + " dB): holds the mix together without squashing it");
+    }
+
+    // Width: a little wider, with a mono low end (what vinyl cutters and club systems want).
+    {
+        const auto width = targetLufs >= -11.0f ? 115.0f : targetLufs <= -15.0f ? 105.0f : 110.0f;
+        auto& imager = add (fx::ModuleType::imager, { { "imgOn", 1.0f }, { "imgWidth", width }, { "imgMonoBelow", 120.0f } });
+        imager.reasons.add ("Stereo width " + juce::String (width, 0) + "%, mono under 120 Hz: open on top, solid bass");
+    }
+
+    if (std::abs (currentMasterVolume) >= 0.05f)
+    {
+        MixMove move;
+        move.trackId = master;
+        move.values = { { "volume", 0.0f } };
+        move.reasons.add ("Master fader to 0 dB: it comes after the limiter, so the ceiling holds");
+        plan.moves.push_back (move);
+    }
+    if (std::abs (trim) >= 0.5f)
+    {
+        MixMove move;
+        move.trackId = master;
+        move.values = { { "inGain", trim } };
+        move.reasons.add ("Master input gain " + juce::String (trim > 0 ? "up " : "down ") + formatDb (trim)
+                          + ": the mix into the mastering chain at the level it works best with");
+        plan.moves.insert (plan.moves.begin(), move);
+    }
+
+    auto& limiter = add (fx::ModuleType::limiter, { { "limOn", 1.0f }, { "limDrive", drive }, { "limCeiling", -1.0f }, { "limRelease", 120.0f } });
+    limiter.reasons.add ("Limiter, ceiling -1 dB" + (drive > 0.0f ? ", " + formatDb (drive) + " of drive: up to "
+                                                                    + juce::String (targetLufs, 0) + " LUFS"
+                                                              : juce::String (": catches the peaks")));
+
+    auto& meter = add (fx::ModuleType::loudness, { { "loudOn", 1.0f }, { "loudTarget", targetLufs } });
+    meter.reasons.add ("Loudness meter at the end, aiming at " + juce::String (targetLufs, 0) + " LUFS: play the song to check it");
+
+    plan.mixLufs = (float) (loudness + trim + drive);
+    return plan;
+}
+
 //==============================================================================
 MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float currentMasterVolume)
 {
@@ -1986,7 +2174,9 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
         for (const auto& [valueId, value] : move.values)
         {
             auto scaled = value;
-            if (valueId == "gateThreshold")
+            if (valueId == "limDrive")
+                scaled = value * amount; // from no drive
+            else if (valueId == "gateThreshold")
                 scaled = -80.0f + (value + 80.0f) * amount; // from fully open
             else if (valueId.endsWith ("Gain") || valueId.endsWith ("Threshold") || valueId.endsWith ("Mix") || valueId == "exciterAmount")
                 scaled = value * amount; // from 0 dB: no boost or cut, no compression; from a dry mix
