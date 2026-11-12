@@ -47,6 +47,60 @@ namespace
             w = juce::jmin (w, (float) (to - i) / (float) (2 * overlap));
         return juce::jlimit (0.0f, 1.0f, w);
     }
+
+    // Downloads `url` to `part` (replacing it), reporting progress up to 99%. Empty on success;
+    // "cancelled" when progress asked to stop. Leaves no half file behind on failure.
+    juce::String downloadFile (const juce::String& url, const juce::File& part, juce::int64 approxBytes,
+                               const Progress& progress, const juce::String& what)
+    {
+        if (! part.getParentDirectory().createDirectory())
+            return "Couldn't create " + part.getParentDirectory().getFullPathName() + ".";
+
+        part.deleteFile();
+
+        int status = 0;
+        auto input = juce::URL (url).createInputStream (juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
+                                                            .withConnectionTimeoutMs (20000)
+                                                            .withNumRedirectsToFollow (10)
+                                                            .withStatusCode (&status));
+        if (input == nullptr || (status != 0 && status != 200))
+            return "Couldn't download " + what + " (" + (status != 0 ? "HTTP " + juce::String (status) : juce::String ("no connection"))
+                 + "). Check the internet connection and try again.";
+
+        const auto expected = input->getTotalLength() > 0 ? input->getTotalLength() : approxBytes;
+
+        std::unique_ptr<juce::FileOutputStream> output (part.createOutputStream());
+        if (output == nullptr)
+            return "Couldn't write " + part.getFullPathName() + ".";
+
+        juce::HeapBlock<char> block (1 << 16);
+        juce::int64 received = 0;
+
+        for (;;)
+        {
+            const auto n = input->read (block.get(), 1 << 16);
+            if (n <= 0)
+                break;
+
+            if (! output->write (block.get(), (size_t) n))
+            {
+                output.reset();
+                part.deleteFile();
+                return "Couldn't write " + part.getFullPathName() + " (is the disk full?).";
+            }
+
+            received += n;
+            if (progress != nullptr && ! progress (juce::jmin (0.99, (double) received / (double) expected)))
+            {
+                output.reset();
+                part.deleteFile();
+                return "cancelled";
+            }
+        }
+
+        output.reset();
+        return {};
+    }
 }
 
 //==============================================================================
@@ -257,53 +311,9 @@ juce::String Model::verify (const juce::File& file)
 
 juce::String Model::download (const juce::File& destination, const Progress& progress)
 {
-    if (! destination.getParentDirectory().createDirectory())
-        return "Couldn't create " + destination.getParentDirectory().getFullPathName() + ".";
-
     const auto part = destination.withFileExtension (".part");
-    part.deleteFile();
-
-    int status = 0;
-    auto input = juce::URL (downloadUrl).createInputStream (juce::URL::InputStreamOptions (juce::URL::ParameterHandling::inAddress)
-                                                                .withConnectionTimeoutMs (20000)
-                                                                .withNumRedirectsToFollow (10)
-                                                                .withStatusCode (&status));
-    if (input == nullptr || (status != 0 && status != 200))
-        return "Couldn't download the stem model (" + (status != 0 ? "HTTP " + juce::String (status) : juce::String ("no connection"))
-             + "). Check the internet connection and try again.";
-
-    const auto expected = input->getTotalLength() > 0 ? input->getTotalLength() : (juce::int64) approxMegabytes * 1000 * 1000;
-
-    {
-        std::unique_ptr<juce::FileOutputStream> output (part.createOutputStream());
-        if (output == nullptr)
-            return "Couldn't write " + part.getFullPathName() + ".";
-
-        juce::HeapBlock<char> block (1 << 16);
-        juce::int64 received = 0;
-
-        for (;;)
-        {
-            const auto n = input->read (block.get(), 1 << 16);
-            if (n <= 0)
-                break;
-
-            if (! output->write (block.get(), (size_t) n))
-            {
-                output.reset();
-                part.deleteFile();
-                return "Couldn't write " + part.getFullPathName() + " (is the disk full?).";
-            }
-
-            received += n;
-            if (progress != nullptr && ! progress (juce::jmin (0.99, (double) received / (double) expected)))
-            {
-                output.reset();
-                part.deleteFile();
-                return "cancelled";
-            }
-        }
-    }
+    if (const auto problem = downloadFile (downloadUrl, part, (juce::int64) approxMegabytes * 1000 * 1000, progress, "the stem model"); problem.isNotEmpty())
+        return problem;
 
     if (const auto problem = verify (part); problem.isNotEmpty())
     {
@@ -323,6 +333,44 @@ juce::String Model::download (const juce::File& destination, const Progress& pro
 juce::File GpuModel::getDefaultFile()
 {
     return Model::getDefaultFile().getSiblingFile (GpuModel::fileName);
+}
+
+juce::String GpuModel::install (const juce::File& zip, const juce::File& destination, const juce::String& expectedSha256)
+{
+    if (! zip.existsAsFile() || juce::SHA256 (zip).toHexString() != expectedSha256)
+        return "The GPU model download was incomplete or damaged. Try again.";
+
+    const auto unpack = destination.getSiblingFile (".gpu-model-unpack");
+    unpack.deleteRecursively();
+
+    juce::ZipFile archive (zip);
+    const auto extracted = archive.uncompressTo (unpack, true);
+    const auto inner = unpack.getChildFile (fileName);
+    if (extracted.failed() || ! inner.isDirectory())
+    {
+        unpack.deleteRecursively();
+        return "Couldn't unpack the GPU model.";
+    }
+
+    destination.deleteRecursively();
+    destination.withFileExtension (".mlmodelc").deleteRecursively(); // compiled from the old one
+    const auto moved = inner.moveFileTo (destination);
+    unpack.deleteRecursively();
+    return moved ? juce::String() : "Couldn't save the GPU model to " + destination.getFullPathName() + ".";
+}
+
+juce::String GpuModel::download (const juce::File& destination, const Progress& progress)
+{
+    const auto part = destination.withFileExtension (".zip.part");
+    if (const auto problem = downloadFile (downloadUrl, part, (juce::int64) approxMegabytes * 1000 * 1000, progress, "the GPU model"); problem.isNotEmpty())
+        return problem;
+
+    const auto problem = install (part, destination);
+    part.deleteFile();
+
+    if (problem.isEmpty() && progress != nullptr)
+        progress (1.0);
+    return problem;
 }
 
 #if ! MICFX_HAS_COREML

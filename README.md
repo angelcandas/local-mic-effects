@@ -185,19 +185,18 @@ up with the clip (same start, trim, gain and fades), and mutes the song's clip. 
 - The stems are 24-bit 44.1 kHz WAVs (`Song - Vocals.wav`, ...) in the project's `Audio` folder, or
   next to your recordings when no project is open.
 
-**On the Mac's GPU (optional, one-time).** Convert the network once and MicFX runs it with Core ML on
-the GPU, with the CPU as the fallback:
+**On the Mac's GPU (automatic).** On a Mac, the first split also downloads the network converted to
+Core ML (about 70 MB, checked against its SHA-256) next to the CPU model, and runs it on the GPU.
+The panel says "on the GPU"; if the download or the model fails, the CPU does the split and the
+finished message says why. Nothing to install.
 
-```
-# needs Python 3.12 (brew install python@3.12): PyTorch 2.7.0 has no build for 3.13 or newer
-/opt/homebrew/bin/python3.12 -m venv ~/micfx-export && source ~/micfx-export/bin/activate
-pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops "numpy<2.3" demucs==4.0.1
-python scripts/export_htdemucs_coreml.py
-```
-
-This writes `htdemucs-core.mlpackage` to the Models folder (it needs the Demucs weights from
-Meta's server, so run it on a machine with internet access). The panel says "on the GPU" when it is
-used; if the model is missing or fails to load, the finished message says why the CPU was used.
+The converted model is a release asset (`stem-model-v1`) made by the **Core ML stem model**
+workflow (Actions tab, Run workflow): it runs `scripts/export_htdemucs_coreml.py` on a GitHub Mac
+and prints the zip's SHA-256, which goes into `GpuModel::sha256` in `src/stems/StemSplitter.h`.
+To convert by hand instead, use Python 3.12 (PyTorch 2.7.0 has no build for newer):
+`/opt/homebrew/bin/python3.12 -m venv ~/micfx-export && source ~/micfx-export/bin/activate`, then
+`pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops "numpy<2.3" demucs==4.0.1` and
+`python scripts/export_htdemucs_coreml.py`.
 
 ### Song key
 
