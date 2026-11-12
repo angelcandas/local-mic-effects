@@ -6,6 +6,7 @@ import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 import { initDaw } from "./daw.js";
+import { LOOPER_KEYS, LoopPanel } from "./looper.js";
 
 // Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
 // builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
@@ -1301,6 +1302,8 @@ class Tracks {
 const recorderBar = new RecorderBar(document.querySelector(".recorder"));
 const tracks = new Tracks(document.querySelector(".studio"));
 
+const loopPanel = new LoopPanel(document.querySelector(".looper"), document.querySelector(".loop-toggle"));
+
 const meters = Object.fromEntries(
   [...document.querySelectorAll("[data-meter]")].map((element) => [element.dataset.meter, new Meter(element)]),
 );
@@ -1316,6 +1319,7 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   presetBar.syncFromHost(status.preset);
   recorderBar.update(status.recording);
   tracks.update(status.transport);
+  if (status.looper) loopPanel.update(status.looper);
 });
 
 let lastFrame = performance.now();
@@ -1386,7 +1390,7 @@ micCheckButton.addEventListener("click", () => {
 // The "?" overlay with the Live keys.
 const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["← / →", "Previous / next preset"],
                    ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"], ["M", "Mute the output (panic)"],
-                   ["Hold D", "Hear your voice without effects"], ["?", "This list"], ["Esc", "Close"]];
+                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ["?", "This list"], ["Esc", "Close"]];
 function toggleLiveKeys(show) {
   let overlay = document.querySelector(".live-keys");
   if (!overlay) {

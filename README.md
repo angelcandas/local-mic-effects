@@ -122,6 +122,30 @@ The panel at the bottom of the window is a small multi-track player:
 - Disk access and file decoding run on background threads, so they don't add load to the audio thread.
 - The session (which tracks are loaded) isn't saved yet when you quit.
 
+### Looper (Live mode)
+
+**Loop** in the top bar opens the looper above the transport. It stacks up to four layers of your
+processed voice (recorded after the effects, before the safety limiter) and plays them under what
+you sing.
+
+1. Press **Record loop** (or **L**) and sing. Press it again to close the loop: it plays back at once.
+2. Press **Overdub** (L) to sing another layer on top, and **End overdub** (L) to stop. An overdub
+   starts wherever the loop is, and every pass you leave it on adds to that layer.
+3. **↶ / ↷** (U / Shift+U) undo and redo the top layer; undo while overdubbing drops that layer.
+   **■** (K) stops the loop and **▶** plays it from the top. **Clear** needs a second click.
+
+- **Free** loops are exactly as long as you recorded (a quarter second to 60 s). **Bars** rounds the
+  first layer to whole bars at the tempo: type it or press **Tap** on the beat a few times. Closing a
+  little early keeps recording to the bar line; a little late trims the extra and plays on in time.
+- Each layer has a waveform, **M** (mute) and a level slider; **Loop** sets the volume of all of them.
+  Double-click a slider for 100%.
+- **Save WAV** writes each layer (one pass, 24-bit stereo) to the recordings folder. **Send to DAW**
+  (in the app) also puts each layer on its own DAW track, "Loop 1" and on, repeated from bar 1 as many
+  times as the **×** menu says, with each layer's level and mute. In Bars mode the project takes the
+  loop's tempo and time signature. One undo in the DAW takes it all back.
+- The loop is part of what **Record** captures, so a take holds your voice and your loops.
+- Tempo, Free/Bars and loop volume are remembered; the loop itself isn't saved when you quit.
+
 ### DAW mode (standalone app)
 
 Switch **Live / DAW** at the top of the window. DAW mode is a multitrack recorder built around
@@ -403,6 +427,7 @@ src/Presets.*           factory voice presets
 src/PluginProcessor.*   audio thread: input gain, the effect chain, output gain, limiter
 src/Recorder.*          WAV recording of the output (and dry mic) on a background thread
 src/Multitrack.*        backing track + takes: loading, resampling, timeline playback
+src/Looper.*            the Live looper: four layers, overdub, undo/redo, bar-locked length
 src/daw/                DAW mode: Edit (the session as an undoable ValueTree), AudioPool (decoded
                         clip audio), DawEngine (tracks + inserts + master bus, lock-free graph swap,
                         dry recording, metronome), Project (.micfx folders, autosave, recovery),
@@ -427,6 +452,7 @@ src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune
                         with input/output gain), FxMeter (lock-free levels and spectra for the UI)
 ui/modules.js           the effect catalog the UI is built from
 ui/app.js, styles.css   the interface (Live mode)
+ui/looper.js            the Live looper panel
 ui/daw.js, daw.css      the DAW screen: tracks, clips, inserts, mixer, transport
 ui/browser.js           the DAW screen's library sidebar (files, effects, instruments, presets)
 ui/widgets.js           helpers shared by both screens
