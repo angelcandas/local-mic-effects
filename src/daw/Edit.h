@@ -16,7 +16,8 @@
 //       INSERTS
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value
 //     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor, transpose,
-//            kind ("midi" for MIDI tracks; audio when missing)
+//            kind ("midi" for MIDI tracks; audio when missing), mixRole (Auto Mix's tag:
+//            "voice", "drums"... see analysis::getRoleKey; missing when not tagged)
 //       INSERTS ...
 //       INSTRUMENT  id, plugin, name, format, vendor, description, state   (MIDI tracks)
 //       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute,
@@ -57,7 +58,7 @@ namespace ids
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
-    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor)
+    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole)
 #undef MICFX_DAW_ID
 }
 
