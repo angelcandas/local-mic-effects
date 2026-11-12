@@ -28,6 +28,7 @@
 #include "daw/Warp.h"
 #include "daw/Quantize.h"
 #include "analysis/Beats.h"
+#include "DeviceFavourites.h"
 #include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
@@ -877,14 +878,14 @@ namespace
         // Only what it's allowed to add.
         analysis::MixOptions eqOnly;
         eqOnly.compressor = eqOnly.deEsser = eqOnly.reverb = false;
-        eqOnly.saturation = eqOnly.echo = eqOnly.exciter = eqOnly.width = false;
+        eqOnly.saturation = eqOnly.echo = eqOnly.exciter = eqOnly.width = eqOnly.dynamicEq = eqOnly.transients = false;
         const auto limited = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, eqOnly);
         bool onlyEq = true;
         for (const auto& move : limited.moves)
             onlyEq = onlyEq && (! move.insert.has_value() || *move.insert == fx::ModuleType::paraEq);
         analysis::MixOptions none;
         none.eq = none.compressor = none.deEsser = none.reverb = false;
-        none.saturation = none.echo = none.exciter = none.width = false;
+        none.saturation = none.echo = none.exciter = none.width = none.dynamicEq = none.transients = false;
         const auto volumesOnly = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, none);
         bool onlyVolumes = ! volumesOnly.moves.empty();
         for (const auto& move : volumesOnly.moves)
@@ -1609,6 +1610,148 @@ namespace
         for (const auto& move : analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options).moves)
             insert = insert || (move.trackId == voice && move.insert == fx::ModuleType::reverb);
         check (insert, "shared reverb off: a reverb insert on the voice");
+    }
+
+    void testDynamics()
+    {
+        std::cout << "\nTransient shaper and dynamic EQ\n";
+        const juce::dsp::ProcessSpec spec { sampleRate, 512, 2 };
+
+        // Drum-like hits: a 200 Hz tone that starts at once and decays over ~150 ms, every 0.5 s.
+        juce::AudioBuffer<float> hits (2, (int) (2.0 * sampleRate));
+        for (int i = 0; i < hits.getNumSamples(); ++i)
+        {
+            const auto t = std::fmod (i / sampleRate, 0.5);
+            const auto v = (float) (0.5 * std::exp (-t / 0.05) * std::sin (juce::MathConstants<double>::twoPi * 200.0 * t));
+            hits.setSample (0, i, v);
+            hits.setSample (1, i, v);
+        }
+        const auto shape = [&] (float attack, float sustain)
+        {
+            fx::modules::Transient shaper;
+            shaper.findValue ("tsOn")->store (1.0f);
+            shaper.findValue ("tsAttack")->store (attack);
+            shaper.findValue ("tsSustain")->store (sustain);
+            shaper.prepare (spec);
+            auto buffer = hits;
+            for (int start = 0; start < buffer.getNumSamples(); start += 512)
+            {
+                juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 2, (size_t) start,
+                                                    (size_t) juce::jmin (512, buffer.getNumSamples() - start));
+                shaper.process (fx::Module::Context (block));
+            }
+            // The second hit (from 0.5 s): its first 5 ms, and 100-150 ms in.
+            const auto at = [&] (double from, double to)
+            {
+                return buffer.getMagnitude (0, (int) ((0.5 + from) * sampleRate), (int) ((to - from) * sampleRate))
+                     / hits.getMagnitude (0, (int) ((0.5 + from) * sampleRate), (int) ((to - from) * sampleRate));
+            };
+            return std::pair { at (0.0, 0.005), at (0.1, 0.15) };
+        };
+        const auto snap = shape (100.0f, 0.0f), soft = shape (-100.0f, 0.0f), ring = shape (0.0f, 100.0f), flat = shape (0.0f, 0.0f);
+        std::cout << "        onset x" << snap.first << " / x" << soft.first << ", tail x" << ring.second << "\n";
+        check (snap.first > 1.4f && soft.first < 0.8f, "transient shaper: attack + makes each hit's start louder, - softer");
+        check (ring.second > 1.25f, "transient shaper: sustain + brings up the ring after the hit");
+        check (std::abs (flat.first - 1.0f) < 0.01f && std::abs (flat.second - 1.0f) < 0.01f, "transient shaper at 0/0 leaves the sound as it is");
+
+        // Dynamic EQ: cuts a loud 3 kHz tone by its range, leaves a quiet one and other bands.
+        const auto through = [&] (float hz, float amplitude)
+        {
+            fx::modules::DynamicEq eq;
+            eq.findValue ("deqOn")->store (1.0f);
+            eq.findValue ("deqFreq")->store (3000.0f);
+            eq.findValue ("deqThreshold")->store (-30.0f);
+            eq.findValue ("deqRange")->store (6.0f);
+            eq.prepare (spec);
+            juce::AudioBuffer<float> buffer (2, (int) sampleRate);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+                for (int ch = 0; ch < 2; ++ch)
+                    buffer.setSample (ch, i, amplitude * (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / sampleRate));
+            for (int start = 0; start < buffer.getNumSamples(); start += 512)
+            {
+                juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 2, (size_t) start,
+                                                    (size_t) juce::jmin (512, buffer.getNumSamples() - start));
+                eq.process (fx::Module::Context (block));
+            }
+            const auto n = (int) (0.2 * sampleRate);
+            return juce::Decibels::gainToDecibels (buffer.getRMSLevel (0, buffer.getNumSamples() - n, n) / (amplitude / std::sqrt (2.0f)));
+        };
+        const auto loud = through (3000.0f, 0.3f), quiet = through (3000.0f, 0.003f), other = through (300.0f, 0.3f);
+        std::cout << "        loud 3 kHz " << loud << " dB, quiet " << quiet << " dB, 300 Hz " << other << " dB\n";
+        check (std::abs (loud + 6.0f) < 0.7f, "dynamic EQ: a loud tone in its band is cut by the range (6 dB)");
+        check (std::abs (quiet) < 0.3f && std::abs (other) < 1.0f, "dynamic EQ: a quiet tone, and other bands, pass as they are");
+
+        // Auto Mix: a voice with piercing 3 kHz on some notes gets a dynamic EQ; rock drums a
+        // transient shaper with more attack, ballad drums softer hits.
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-dynamics");
+        folder.createDirectory();
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto file = folder.getChildFile (name + ".wav");
+            writeWav (file, audio, sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, file, 0.0, 12.0);
+            return id;
+        };
+        auto harsh = makeSungLine (12.0, 3.0, 1.5);
+        for (int i = 0; i < harsh.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            if (std::fmod (t, 3.0) > 1.5 || std::fmod (t, 0.75) > 0.25)
+                continue; // a piercing note now and then
+            const auto level = harsh.getSample (0, i) != 0.0f ? 0.06f : 0.0f;
+            for (int ch = 0; ch < 2; ++ch)
+                harsh.addSample (ch, i, level * (float) std::sin (juce::MathConstants<double>::twoPi * 3150.0 * t));
+        }
+        const auto voice = add ("Vocal", harsh);
+        const auto drums = add ("Drums", makeTones ({ { 12.0, 80.0, 0.2f, 0.2f } }));
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { drums, analysis::Role::drums } };
+        const std::map<int, float> volumes { { voice, 0.0f }, { drums, 0.0f } };
+
+        const auto find = [] (const analysis::MixPlan& plan, int track, fx::ModuleType type) -> const analysis::MixMove*
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == track && move.insert == type)
+                    return &move;
+            return nullptr;
+        };
+        const auto rock = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::rock);
+        const auto* dyn = find (rock, voice, fx::ModuleType::dynamicEq);
+        if (dyn != nullptr)
+            std::cout << "        " << dyn->reasons[0] << "\n";
+        check (dyn != nullptr && std::abs (dyn->values.at ("deqFreq") - 3150.0f) < 700.0f,
+               "Auto Mix: the voice's piercing notes get a dynamic EQ near 3 kHz");
+        const auto* snapMove = find (rock, drums, fx::ModuleType::transient);
+        const auto ballad = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad);
+        const auto* softMove = find (ballad, drums, fx::ModuleType::transient);
+        check (snapMove != nullptr && snapMove->values.at ("tsAttack") > 0.0f && softMove != nullptr && softMove->values.at ("tsAttack") < 0.0f,
+               "Auto Mix: rock drums get more attack, ballad drums softer hits");
+
+        analysis::MixOptions off;
+        off.dynamicEq = off.transients = false;
+        const auto plain = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::rock, off);
+        check (find (plain, voice, fx::ModuleType::dynamicEq) == nullptr && find (plain, drums, fx::ModuleType::transient) == nullptr,
+               "switched off: no dynamic EQ, no transient shaper");
+
+        // A steady voice (no piercing notes) gets none.
+        daw::Edit steadyEdit;
+        const auto steadyFile = folder.getChildFile ("steady.wav");
+        writeWav (steadyFile, makeSungLine (12.0, 3.0, 1.5), sampleRate);
+        const auto steady = (int) steadyEdit.addTrack ("Vocal")[daw::ids::id];
+        steadyEdit.addClip (steady, steadyFile, 0.0, 12.0);
+        const auto steadySource = analysis::SessionAnalyser (steadyEdit, analysis::SessionAnalyser::Point::source, false).run();
+        check (find (analysis::planMix (steadySource, { { steady, analysis::Role::voice } }, { { steady, 0.0f } }, 0.0f, analysis::MixStyle::rock),
+                     steady, fx::ModuleType::dynamicEq) == nullptr,
+               "a steady voice gets no dynamic EQ");
+
+        analysis::applyMix (edit, rock);
+        bool applied = false;
+        for (const auto& insert : daw::Edit::getInserts (edit.getTrack (drums)))
+            applied = applied || insert[daw::ids::type].toString() == "transient";
+        check (applied, "applied: the drums have a transient shaper insert");
+        folder.deleteRecursively();
     }
 
     void testEffectAutomation()
@@ -2776,6 +2919,150 @@ namespace
 
         folder.deleteRecursively();
     }
+    void testStereoInputs()
+    {
+        std::cout << "\nDAW inputs (pick interface inputs, stereo tracks, one take per input)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-daw-inputs");
+        folder.createDirectory();
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+
+        const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto piano = (int) edit.addTrack ("Piano")[daw::ids::id];
+        const auto pair = (int) edit.addTrack ("Room pair")[daw::ids::id];
+
+        check (daw::Edit::getTrackInput (edit.getTrack (vocal)) == daw::Edit::Input { 0, daw::Edit::noInput },
+               "a new track takes input 1, mono");
+
+        edit.setTrackInput (piano, { 1, 2 });
+        edit.setTrackInput (pair, { 3, 0 }); // two mics on any inputs, not only a neighbouring pair
+        check (daw::Edit::getTrackInput (edit.getTrack (piano)).isStereo()
+                   && daw::Edit::getTrackInput (edit.getTrack (pair)) == daw::Edit::Input { 3, 0 },
+               "a track can take a stereo pair, or any two inputs as left and right");
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.setTrackInput (pair, { 2, 2 });
+        check (! daw::Edit::getTrackInput (edit.getTrack (pair)).isStereo(), "the same input twice is mono");
+        edit.getUndoManager().undo();
+        check (daw::Edit::getTrackInput (edit.getTrack (pair)) == daw::Edit::Input { 3, 0 }, "changing the input can be undone");
+
+        // Four inputs, each a different tone.
+        const auto numInputs = 4;
+        std::vector<std::vector<float>> tones;
+        for (int i = 0; i < numInputs; ++i)
+            tones.push_back (makeVoice (150.0f + 110.0f * (float) i, 1.0, 0.1f + 0.1f * (float) i));
+
+        const auto playInputs = [&] (int blocks, std::function<void (const juce::AudioBuffer<float>&)> each = {})
+        {
+            juce::AudioBuffer<float> buffer (numInputs, blockSize);
+            for (int b = 0; b < blocks; ++b)
+            {
+                for (int i = 0; i < numInputs; ++i)
+                    buffer.copyFrom (i, 0, tones[(size_t) i].data() + b * blockSize, blockSize);
+                engine.process (buffer, 2, blockSize, buffer.getArrayOfReadPointers(), numInputs, nullptr);
+                if (each)
+                    each (buffer);
+            }
+        };
+
+        // Monitoring a stereo track: its left input on the left, its right on the right.
+        edit.setTrackMonitor (piano, true);
+        engine.rebuildNow();
+        playInputs (4);
+        float left = 0.0f, right = 0.0f;
+        playInputs (20, [&] (const auto& out) { left = std::max (left, out.getMagnitude (0, 0, blockSize));
+                                                right = std::max (right, out.getMagnitude (1, 0, blockSize)); });
+        // The inputs peak at 0.2 and 0.3: the same ratio comes out (the centre pan law scales both).
+        check (left > 0.1f && std::abs (right / left - 1.5f) < 0.02f,
+               "a monitored stereo track plays its inputs left and right (" + juce::String (left, 3) + ", " + juce::String (right, 3) + ")");
+
+        const auto [peakLeft, peakRight] = engine.takePeaks (daw::Edit::masterId);
+        check (peakLeft > 0.15f && peakRight > peakLeft, "the master meters left and right");
+        edit.setTrackMonitor (piano, false);
+
+        edit.setTrackMonitor (vocal, true);
+        edit.setTrackPan (vocal, -1.0f);
+        engine.rebuildNow();
+        playInputs (8);
+        engine.takePeaks (vocal);
+        playInputs (8);
+        const auto [vocalLeft, vocalRight] = engine.takePeaks (vocal);
+        check (vocalLeft > 0.05f && vocalRight < 0.001f, "a track panned hard left meters on the left only");
+        edit.setTrackMonitor (vocal, false);
+        edit.setTrackPan (vocal, 0.0f);
+
+        // Recording: one file per input, so each track gets what it listens to.
+        const auto doubled = (int) edit.addTrack ("Vocal double")[daw::ids::id]; // also input 1
+        for (const auto id : { vocal, piano, pair, doubled })
+            edit.setTrackArm (id, true);
+        engine.rebuildNow();
+
+        check (engine.startRecording (folder).isEmpty(), "records three inputs at once");
+        playInputs (30);
+        const auto take = engine.stopRecording();
+        engine.rebuildNow();
+
+        const auto clipFile = [&] (int trackId)
+        {
+            for (const auto& child : edit.getTrack (trackId))
+                if (child.hasType (daw::ids::CLIP))
+                    return juce::File (child[daw::ids::file].toString());
+            return juce::File();
+        };
+
+        double rate = 0.0;
+        const auto vocalTake = readWav (clipFile (vocal), rate);
+        const auto pianoTake = readWav (clipFile (piano), rate);
+        const auto pairTake = readWav (clipFile (pair), rate);
+        const auto length = 30 * blockSize;
+
+        check (clipFile (vocal) == clipFile (doubled) && clipFile (vocal) != clipFile (piano) && clipFile (piano) != clipFile (pair)
+                   && clipFile (vocal).getFileName().contains ("In 1") && clipFile (piano).getFileName().contains ("In 2-3"),
+               "tracks on the same input share a take; each other input has its own file, named for it");
+        check (vocalTake.getNumChannels() == 1 && pianoTake.getNumChannels() == 2 && pairTake.getNumChannels() == 2
+                   && vocalTake.getNumSamples() == length && pianoTake.getNumSamples() == length,
+               "a mono track records a mono file, a stereo track a stereo one");
+        check (maxDifference (vocalTake.getReadPointer (0), tones[0].data(), length) < 1.0e-6f
+                   && maxDifference (pianoTake.getReadPointer (0), tones[1].data(), length) < 1.0e-6f
+                   && maxDifference (pianoTake.getReadPointer (1), tones[2].data(), length) < 1.0e-6f
+                   && maxDifference (pairTake.getReadPointer (0), tones[3].data(), length) < 1.0e-6f
+                   && maxDifference (pairTake.getReadPointer (1), tones[0].data(), length) < 1.0e-6f,
+               "each take holds exactly its inputs, left and right");
+        check (take.file.existsAsFile() && ! take.droppedAudio, "the stop reports a take");
+
+        edit.getUndoManager().undo();
+        check (! clipFile (vocal).exists() && ! clipFile (piano).exists() && ! clipFile (pair).exists(),
+               "one undo removes every input's take");
+
+        // A track without an input records nothing; no armed input at all is refused.
+        for (const auto id : { vocal, piano, pair, doubled })
+        {
+            edit.setTrackArm (id, false);
+            edit.setTrackInput (id, { daw::Edit::noInput, daw::Edit::noInput });
+        }
+        edit.setTrackArm (vocal, true);
+        check (engine.startRecording (folder).isNotEmpty() && ! engine.isRecording(), "refuses to record when the armed tracks have no input");
+
+        // An input the interface doesn't have plays and records silence.
+        edit.setTrackInput (vocal, { 9, daw::Edit::noInput });
+        edit.setTrackMonitor (vocal, true);
+        engine.rebuildNow();
+        engine.takePeaks (vocal);
+        playInputs (8);
+        check (engine.takePeak (vocal) < 1.0e-6f, "an input the interface doesn't have is silent");
+
+        // The project file keeps each track's input.
+        daw::Edit copy;
+        copy.replaceState (edit.getState().createCopy());
+        check (daw::Edit::getTrackInput (copy.getTrack (vocal)) == daw::Edit::Input { 9, daw::Edit::noInput },
+               "inputs come back with the session");
+
+        folder.deleteRecursively();
+    }
+
     void testDawRecording()
     {
         std::cout << "\nDAW recording (dry takes, monitoring, metronome)\n";
@@ -5717,6 +6004,67 @@ namespace
 
     // Live readings for the UI: per-module levels and spectra, and the chain's own
     // input and output gain (DAW tracks) with its meters.
+    void testDeviceFavourites()
+    {
+        std::cout << "\nAudio device favourites\n";
+        using devfav::Entry;
+        const auto dev = [] (const char* name, double rate = 48000.0, int buffer = 256)
+        {
+            Entry e; e.type = "CoreAudio"; e.output = name; e.input = name; e.sampleRate = rate; e.bufferSize = buffer; e.bitDepth = 24;
+            return e;
+        };
+
+        devfav::Favourites f;
+        f.remember (dev ("Interface"));
+        f.remember (dev ("Earphones", 44100.0, 512));
+        f.remember (dev ("Speakers"));
+        check (f.list.size() == 3 && f.list[0].output == "Interface", "new devices are added in the order they were used");
+
+        f.remember (dev ("Earphones", 96000.0, 128));
+        check (f.list.size() == 3 && f.list[1].sampleRate == 96000.0 && f.list[1].bufferSize == 128,
+               "a known device keeps its place and gets its latest rate and buffer");
+
+        const auto reloaded = devfav::Favourites::fromString (f.toString());
+        check (reloaded.list.size() == 3 && reloaded.list[1].output == "Earphones" && reloaded.list[1].sampleRate == 96000.0
+                   && reloaded.list[1].bufferSize == 128 && reloaded.list[1].bitDepth == 24,
+               "the list survives saving and loading");
+
+        std::set<juce::String> present { "Interface", "Earphones", "Speakers" }, appeared;
+        const auto available = [&] (const Entry& e) { return present.count (e.output) > 0; };
+        const auto isNew = [&] (const Entry& e) { return appeared.count (e.output) > 0; };
+
+        auto current = dev ("Interface");
+        check (f.choose (&current, available, isNew) == -1, "the top favourite in use stays");
+
+        present.erase ("Interface");
+        check (f.choose (&current, available, isNew) == 1, "unplugging falls back to the next favourite");
+
+        current = dev ("Earphones");
+        present.erase ("Earphones");
+        check (f.choose (&current, available, isNew) == 2, "and on to the one after that");
+
+        present.erase ("Speakers");
+        check (f.choose (&current, available, isNew) == -1, "nothing available leaves the system choice alone");
+
+        present = { "Interface", "Earphones", "Speakers" };
+        current = dev ("Speakers");
+        appeared = { "Interface" };
+        check (f.choose (&current, available, isNew) == 0, "a favourite that reconnects takes over again");
+
+        appeared.clear();
+        current = dev ("Earphones");
+        check (f.choose (&current, available, isNew) == -1, "a lower pick made by hand is not overridden when nothing changed");
+
+        current = dev ("Built-in");
+        present.insert ("Built-in");
+        check (f.choose (&current, available, isNew) == 0, "a device that is not a favourite gives way to one");
+
+        f.move (2, 0);
+        check (f.list[0].output == "Speakers" && f.list[1].output == "Interface", "favourites can be reordered");
+        f.remove (0);
+        check (f.list.size() == 2 && f.list[0].output == "Interface", "and removed");
+    }
+
     void testLiveMeters()
     {
         std::cout << "\nLive effect readings and chain gains\n";
@@ -6150,6 +6498,7 @@ int main()
     testReturns();
     testMastering();
     testDawRecording();
+    testStereoInputs();
     testMidiTracks();
     testPluginHosting();
     testProjects();
@@ -6176,6 +6525,7 @@ int main()
     testAutoMixSynths();
     testAutoMixMaster();
     testAutoMixSends();
+    testDynamics();
     testEffectAutomation();
     testAnalysisSpeed();
     testLatency();
@@ -6186,6 +6536,7 @@ int main()
     testStemPipeline();
 #endif
     testLiveMeters();
+    testDeviceFavourites();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;

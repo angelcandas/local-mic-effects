@@ -155,6 +155,15 @@ export const MODULES = [
   { id: "loudness", name: "Loudness Meter", category: "master", power: "loudOn", dawOnly: true,
     description: "LUFS like streaming services measure it. Switch off and on to restart",
     controls: [{ type: "loudness" }, knob("loudTarget", "Target")] },
+
+  // Dynamics on part of the sound (DAW mode).
+  { id: "transient", name: "Transient Shaper", category: "cleanup", power: "tsOn", dawOnly: true,
+    description: "More or less snap at the start of each hit, and more or less ring after it",
+    controls: [bipolar("tsAttack", "Attack"), bipolar("tsSustain", "Sustain")] },
+
+  { id: "deq", name: "Dynamic EQ", category: "cleanup", power: "deqOn", dawOnly: true,
+    description: "A bell that cuts only while its band gets loud: harsh notes, a booming bass note",
+    controls: [knob("deqFreq", "Freq"), knob("deqQ", "Q"), knob("deqThreshold", "Threshold"), knob("deqRange", "Range")] },
 ];
 
 // Module key (C++ fx::getModuleKey) for each entry above, used by the DAW inserts and the
@@ -167,6 +176,7 @@ export const MODULE_KEYS = {
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
   echo: "echo", reverb: "reverb", width: "width",
   meq: "masterEq", mb: "multiband", imager: "imager", limiter: "limiter", loudness: "loudness",
+  transient: "transient", deq: "dynamicEq",
 };
 
 export const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];

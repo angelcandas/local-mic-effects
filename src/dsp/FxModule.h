@@ -16,10 +16,11 @@ enum class ModuleType
 {
     highPass, denoise, gate, pitch, eq, paraEq, compressor, deEsser, exciter, saturation, radio, bitcrusher,
     robot, filter, autoWah, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, width,
-    multiband, limiter, masterEq, imager, loudness // mastering (see Mastering.h)
+    multiband, limiter, masterEq, imager, loudness, // mastering (see Mastering.h)
+    transient, dynamicEq
 };
 
-inline constexpr int numModuleTypes = (int) ModuleType::loudness + 1;
+inline constexpr int numModuleTypes = (int) ModuleType::dynamicEq + 1;
 
 // A stable name for each type, for project files, parameter IDs and the UI.
 inline const char* getModuleKey (ModuleType type)
@@ -27,7 +28,7 @@ inline const char* getModuleKey (ModuleType type)
     static constexpr const char* keys[] = {
         "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "compressor", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
         "robot", "filter", "autoWah", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "width",
-        "multiband", "limiter", "masterEq", "imager", "loudness"
+        "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq"
     };
     static_assert (std::size (keys) == numModuleTypes);
     return keys[(size_t) type];

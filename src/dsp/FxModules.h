@@ -3,6 +3,7 @@
 #include "Effects.h"
 #include "ParametricEq.h"
 #include "FxModule.h"
+#include "Dynamics.h"
 #include "Mastering.h"
 #include "PitchEngine.h"
 #include "SpectralDenoiser.h"
@@ -722,6 +723,8 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::masterEq:   return std::make_unique<modules::MasterEq>();
         case ModuleType::imager:     return std::make_unique<modules::Imager>();
         case ModuleType::loudness:   return std::make_unique<modules::Loudness>();
+        case ModuleType::transient:  return std::make_unique<modules::Transient>();
+        case ModuleType::dynamicEq:  return std::make_unique<modules::DynamicEq>();
     }
 
     jassertfalse;

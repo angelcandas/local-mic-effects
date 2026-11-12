@@ -1647,3 +1647,25 @@ body.is-daw .app-project { color: var(--text); font-weight: 600; }
 .return-row .track-head-bottom { gap: 6px; }
 .strip:has(.strip-sends) .strip-inserts { flex-basis: 64px; min-height: 26px; }
 .strip:has(.strip-sends) .strip-fader { min-height: 56px; }
+
+/* Inputs: the strip's picker at the top, and the Effects panel's Input column. */
+.track-input { width: 100%; padding: 2px 4px; font-size: 10.5px; }
+.panel-input {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  width: 128px;
+  padding: 8px 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.input-pick { display: flex; flex-direction: column; gap: 6px; width: 100%; }
+.input-pick-row { display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--muted); }
+.input-pick-row .dropdown { width: 100%; padding: 2px 4px; font-size: 10.5px; }
+
+/* Stereo meters on the mixer strips: left and right side by side. */
+.stereo-meter { display: flex; gap: 2px; }
+.stereo-meter .level-meter.is-vertical { width: 5px; }

@@ -51,14 +51,14 @@ std::unique_ptr<Recorder::Writer> Recorder::createWriter (const juce::File& file
     return std::make_unique<Writer> (writer.release(), thread, (int) (sampleRate * 2.0));
 }
 
-juce::String Recorder::start (const juce::File& folder, bool includeDry)
+juce::String Recorder::start (const juce::File& folder, bool includeDry, const juce::String& label)
 {
     stop();
 
     if (const auto result = folder.createDirectory(); result.failed())
         return "Couldn't create the folder " + folder.getFullPathName() + ": " + result.getErrorMessage();
 
-    const auto name = "MicFX " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S");
+    const auto name = "MicFX " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S") + (label.isNotEmpty() ? " " + label : juce::String());
 
     Take take;
     take.file = folder.getChildFile (name + ".wav").getNonexistentSibling();
