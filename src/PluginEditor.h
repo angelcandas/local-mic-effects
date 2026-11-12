@@ -13,7 +13,7 @@
 // Native functions: getParameterDefaults, getPresets, loadPreset (index),
 //   getRecorderSettings, startRecording, stopRecording, chooseRecordingFolder,
 //   setRecordDry (bool), revealRecording, getTracks, loadBackingTrack, setTrack (id, { gain, muted }),
-//   removeTrack (id), transport (action, seconds), getParameterInfo, looper (action, args),
+//   removeTrack (id), transport (action, seconds), getParameterInfo, looper (action, args), midi (action, args),
 //   daw (command, args) for the DAW screen (see DawBridge),
 //   window (action): "fullScreen" toggles full screen; returns { available, fullScreen }.
 // Pushed events: "meters" { input, output, note, target, preset, recording, transport, looper } at 30 Hz
@@ -21,7 +21,8 @@
 // seconds), "tracks" when the track list changes, "trackError" (message), and the DAW
 // events "dawSession", "dawStatus" and "dawExport" (see DawBridge), "window" { available, fullScreen }
 // when the app window enters or leaves full screen, and "appMenu" (action) when an item of the
-// standalone app's menu bar is picked (see StandaloneApp.cpp).
+// standalone app's menu bar is picked (see StandaloneApp.cpp), "midiLearned" { target, name, midi }
+// when MIDI learn maps a control, and "midiAction" (name) for a mapped action the page runs.
 class PluginEditor final : public juce::AudioProcessorEditor,
                            private juce::Timer
 {
@@ -55,6 +56,7 @@ private:
     juce::var describeRecorderSettings();
     juce::var describeTracks();
     juce::var describeLooper (bool withOverview);
+    juce::var describeMidi();
     void saveLooperSettings();
     int looperTicks = 0;
     juce::var describeWindow() const;

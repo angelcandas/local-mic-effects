@@ -37,14 +37,8 @@ void Looper::prepare (double newRate)
         }
     }
 
-    publish();
-}
-
-bool Looper::send (Command command)
-{
-    // The first recording needs the layer memory. Until a loop has been recorded once,
-    // the audio thread never touches the layers, so they can be allocated here.
-    if (command == Command::main && ! allocated.load() && state.load() == State::empty)
+    // Audio is stopped here, so the memory a MIDI pedal needs can be (re)allocated.
+    if (memoryWanted.load() && ! allocated.load())
     {
         for (auto& layer : layers)
         {
@@ -53,6 +47,32 @@ bool Looper::send (Command command)
         }
         allocated = true;
     }
+
+    publish();
+}
+
+void Looper::prepareMemory()
+{
+    // Until a loop has been recorded once, the audio thread never touches the layers, so
+    // they can be allocated here.
+    memoryWanted = true;
+    if (allocated.load() || state.load() != State::empty || capacity <= 0)
+        return;
+
+    for (auto& layer : layers)
+    {
+        layer.audio.setSize (2, (int) capacity);
+        layer.audio.clear();
+    }
+    allocated = true;
+}
+
+bool Looper::send (Command command)
+{
+    // The first recording needs the layer memory. Until a loop has been recorded once,
+    // the audio thread never touches the layers, so they can be allocated here.
+    if (command == Command::main)
+        prepareMemory();
 
     const juce::SpinLock::ScopedLockType lock (sendLock);
     const auto scope = fifo.write (1);

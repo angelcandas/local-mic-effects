@@ -3,6 +3,7 @@
 // reads its state from the "meters" event (status.looper).
 import * as Juce from "./juce/index.js";
 import { clamp, html, svg } from "./widgets.js";
+import { markLearnable } from "./midilearn.js";
 
 const looper = Juce.getNativeFunction("looper");
 
@@ -68,6 +69,11 @@ export class LoopPanel {
     this.redo = tool("icon loop-redo", "↷", "Redo the layer (Shift+U)", () => this.send("redo"));
     this.clear = tool("loop-clear is-danger", "Clear", "Throw the whole loop away", () => this.onClear());
     controls.append(this.main, this.stop, this.undo, this.redo, this.clear);
+    markLearnable(this.main, "action:looper.main", "Loop (record / overdub / play)");
+    markLearnable(this.stop, "action:looper.stop", "Stop loop");
+    markLearnable(this.undo, "action:looper.undo", "Undo loop layer");
+    markLearnable(this.redo, "action:looper.redo", "Redo loop layer");
+    markLearnable(this.clear, "action:looper.clear", "Clear loop");
 
     // The loop's progress: a ring with the time (or bar and beat) inside, beat dots under it.
     const clock = html("div", "loop-clock");

@@ -44,6 +44,14 @@ public:
     // first if this is the first recording). Returns false if the queue was full.
     bool send (Command);
 
+    // Message thread. Allocates the layer memory now (if the looper is empty and hasn't
+    // yet), so a command from the audio thread can start the first recording.
+    void prepareMemory();
+
+    // Audio thread, before process(): runs a command at once (a MIDI pedal). Starting the
+    // first recording needs prepareMemory() to have run.
+    void handleOnAudioThread (Command command) noexcept { handle (command); publish(); }
+
     // Message thread (any thread is fine: they're atomics). Gains are linear.
     void setLayerGain (int layer, float gain) noexcept;
     void setLayerMuted (int layer, bool muted) noexcept;
@@ -112,7 +120,7 @@ private:
 
     double sampleRate = 48000.0;
     juce::int64 capacity = 0;
-    std::atomic<bool> allocated { false };
+    std::atomic<bool> allocated { false }, memoryWanted { false };
     std::array<Layer, maxLayers> layers;
 
     // Commands, message thread -> audio thread.
