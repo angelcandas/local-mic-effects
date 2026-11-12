@@ -76,8 +76,8 @@ public:
     bool isPlaying() const noexcept          { return playing.load(); }
     juce::int64 getPosition() const noexcept { return position.load(); }
     juce::int64 getLength() const noexcept   { return length.load(); } // end of the last clip
-    // While the Edit's loop is on, playback wraps from its end to its start (not while
-    // recording, which always runs straight on).
+    // While the Edit's loop is on, playback wraps from its end to its start (while
+    // recording too, when the recording started inside the loop: see startRecording).
 
     // Delay the inserts add (the slowest track's chain plus the master chain), in samples.
     int getLatencySamples() const noexcept   { return latency.load(); }
@@ -89,11 +89,19 @@ public:
     // the playhead (after the count-in, if any) and writes the dry inputs to new WAVs in
     // `folder`: one file per input the armed tracks use (mono, or stereo for a stereo
     // track). stopRecording() stops the transport and adds each armed track's take as
-    // a clip on it, in one undo step. Returns an error message, or empty.
+    // a clip on it, in one undo step (see Edit::addRecording: over audio already there,
+    // takes go into take lanes). Returns an error message, or empty.
+    // Starting inside the loop with the loop on, playback keeps wrapping while it records
+    // and every pass round the loop becomes a take.
     // Armed MIDI tracks record the MIDI input (no file): stopRecording() adds a MIDI clip
     // with what was played to each of them.
     juce::String startRecording (const juce::File& folder);
     Recorder::Take stopRecording();
+
+    // Where a recorded file goes on the timeline: one pass, or with loop recording one
+    // per time round the loop (a last pass shorter than this is dropped).
+    static constexpr double minLoopPassSeconds = 0.5;
+    std::vector<Edit::RecordedPass> getRecordedPasses (const Recorder::Take&, bool looped) const;
     bool isRecording() const noexcept { return recordingAudio.load() || countingIn.load() || recordingMidi.load(); }
     juce::int64 getRecordStart() const noexcept { return recordStart.load(); } // where the take begins
 
@@ -353,6 +361,7 @@ private:
     std::vector<float> silence = std::vector<float> (8192, 0.0f); // a missing input (prepare() makes it a block long)
     std::atomic<bool> countingIn { false };
     std::atomic<juce::int64> recordStart { 0 };
+    std::atomic<bool> loopRecording { false }; // recording inside the loop: playback wraps, each pass a take
     std::atomic<juce::int64> recordingLatency { 0 }, midiRecordingLatency { 0 };
 
     // MIDI recording: the audio thread pushes what's played (note on/off, sustain pedal)

@@ -1,5 +1,7 @@
 #include "DawBridge.h"
 
+#include "analysis/TakeComp.h"
+
 #include "daw/Quantize.h"
 #include "daw/ClipTools.h"
 
@@ -124,6 +126,16 @@ struct DawBridge::AutoMixJob
     juce::File reference;                     // set for a reference match
     analysis::SessionAnalyser::Result result; // the tracks, or (reference) the mix
     analysis::Profile referenceProfile;
+};
+
+struct DawBridge::TakeCompJob
+{
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> cancel { false }, finished { false };
+    std::vector<juce::ValueTree> tracks; // copies, taken when it started
+    std::vector<std::pair<int, analysis::CompPlan>> plans; // by track id
+    int keyTonic = -1;
+    bool keyMinor = false;
 };
 
 struct DawBridge::KeyJob
@@ -269,6 +281,8 @@ DawBridge::~DawBridge()
         stemJob->cancel = true;
     if (keyJob != nullptr)
         keyJob->cancel = true;
+    if (takeCompJob != nullptr)
+        takeCompJob->cancel = true;
 }
 
 bool DawBridge::isAvailable()
@@ -387,6 +401,33 @@ juce::var DawBridge::describeSession()
     const auto& state = edit.getState();
     juce::Array<juce::var> tracks;
 
+    // An audio clip as the page draws it (in a track's comp or in a take lane).
+    const auto describeAudioClip = [this] (const juce::ValueTree& clip)
+    {
+            const juce::File file (clip[ids::file].toString());
+            const auto warpSettings = daw::Edit::getWarpSettings (clip);
+            const auto audio = engine.getAudioPool().get (file, warpSettings);
+
+            juce::Array<juce::var> markers;
+            for (const auto& m : daw::Edit::getShownWarp (clip))
+                markers.add (juce::Array<juce::var> { m.source, m.target });
+
+            // Typed explicitly: the page does arithmetic on these, and text ("0.0") breaks it.
+            return object ({ { "id", (int) clip[ids::id] }, { "name", clip[ids::name].toString() }, { "file", file.getFullPathName() },
+                           { "start", number (clip, ids::start) }, { "offset", number (clip, ids::offset) },
+                           { "length", number (clip, ids::length) }, { "gain", number (clip, ids::gain) },
+                           { "fadeIn", number (clip, ids::fadeIn) }, { "fadeOut", number (clip, ids::fadeOut) },
+                           { "mute", (bool) clip.getProperty (ids::mute, false) },
+                           { "transpose", number (clip, ids::transpose) }, { "warp", markers },
+                           { "stretch", daw::warp::getAlgorithmKey (warpSettings.algorithm) }, { "formant", warpSettings.formant },
+                           { "musical", daw::Edit::isMusical (clip) }, { "clipTempo", daw::Edit::getClipTempo (clip) },
+                           // The audio the clip plays (its file, or a rendered copy): the page keys waveforms on it.
+                           { "audioKey", warpSettings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, warpSettings) },
+                           { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
+                           { "missing", ! file.existsAsFile() },
+                           { "take", (int) clip.getProperty (ids::take, -1) } });
+    };
+
     for (const auto& track : edit.getTracks())
     {
         juce::Array<juce::var> clips;
@@ -406,27 +447,7 @@ juce::var DawBridge::describeSession()
                 continue;
             }
 
-            const juce::File file (clip[ids::file].toString());
-            const auto warpSettings = daw::Edit::getWarpSettings (clip);
-            const auto audio = engine.getAudioPool().get (file, warpSettings);
-
-            juce::Array<juce::var> markers;
-            for (const auto& m : daw::Edit::getShownWarp (clip))
-                markers.add (juce::Array<juce::var> { m.source, m.target });
-
-            // Typed explicitly: the page does arithmetic on these, and text ("0.0") breaks it.
-            clips.add (object ({ { "id", (int) clip[ids::id] }, { "name", clip[ids::name].toString() }, { "file", file.getFullPathName() },
-                                 { "start", number (clip, ids::start) }, { "offset", number (clip, ids::offset) },
-                                 { "length", number (clip, ids::length) }, { "gain", number (clip, ids::gain) },
-                                 { "fadeIn", number (clip, ids::fadeIn) }, { "fadeOut", number (clip, ids::fadeOut) },
-                                 { "mute", (bool) clip.getProperty (ids::mute, false) },
-                                 { "transpose", number (clip, ids::transpose) }, { "warp", markers },
-                                 { "stretch", daw::warp::getAlgorithmKey (warpSettings.algorithm) }, { "formant", warpSettings.formant },
-                                 { "musical", daw::Edit::isMusical (clip) }, { "clipTempo", daw::Edit::getClipTempo (clip) },
-                                 // The audio the clip plays (its file, or a rendered copy): the page keys waveforms on it.
-                                 { "audioKey", warpSettings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, warpSettings) },
-                                 { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
-                                 { "missing", ! file.existsAsFile() } }));
+            clips.add (describeAudioClip (clip));
         }
 
         tracks.add (object ({ { "id", (int) track[ids::id] }, { "name", track[ids::name].toString() }, { "colour", track[ids::colour].toString() },
@@ -447,6 +468,23 @@ juce::var DawBridge::describeSession()
                                     return list;
                                 }() },
                               { "kind", daw::Edit::isMidiTrack (track) ? "midi" : "audio" },
+                              { "takes", [&]
+                                {
+                                    juce::Array<juce::var> takes;
+                                    for (const auto& take : track)
+                                    {
+                                        if (! take.hasType (ids::TAKE))
+                                            continue;
+                                        juce::Array<juce::var> takeClips;
+                                        for (const auto& clip : take)
+                                            if (clip.hasType (ids::CLIP) && ! daw::Edit::isMidiClip (clip))
+                                                takeClips.add (describeAudioClip (clip));
+                                        takes.add (object ({ { "id", (int) take[ids::id] }, { "name", take[ids::name].toString() }, { "clips", takeClips } }));
+                                    }
+                                    return takes;
+                                }() },
+                              { "takesShown", (bool) track.getProperty (ids::takesShown, false) },
+                              { "listenTake", daw::Edit::getListenTake (track) },
                               { "instrument", describeInstrument (track) } }));
     }
 
@@ -806,6 +844,14 @@ void DawBridge::tick()
             emit ("dawStems", object ({ { "state", phases[juce::jlimit (0, 2, stemJob->phase.load())] },
                                         { "progress", stemJob->progress.load() }, { "gpu", stemJob->gpu.load() } }));
         }
+    }
+
+    if (takeCompJob != nullptr)
+    {
+        if (takeCompJob->finished)
+            finishTakeComp();
+        else
+            emit ("dawTakeComp", object ({ { "state", "analysing" }, { "progress", takeCompJob->progress.load() } }));
     }
 
     if (keyJob != nullptr)
@@ -1655,6 +1701,135 @@ juce::var DawBridge::handleKey (const juce::var& args)
     }
 
     return error ("Unknown key action: " + action);
+}
+
+//==============================================================================
+// "takes" { action, ... }: take lanes and comping.
+//   show      { track, on }        unfold (or fold) the track's take lanes
+//   listen    { track, take }      hear one take instead of the comp (take -1: the comp)
+//   comp      { take, start, end } comp a range from a take
+//   compAt    { take, time }       comp the stretch of the comp at a time -> { ok, start, end }
+//   rename    { take, name }
+//   remove    { take }
+//   fromClip  { clip }             a copy of a clip as a new take lane -> { ok, take }
+//   auto      { track }            Auto Comp: pick the best takes (track -1: every track
+//                                  with two or more takes); answers come as "dawTakeComp"
+//   cancel
+juce::var DawBridge::handleTakes (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+    const auto trackId = arg (args, "track", -1), takeId = arg (args, "take", -1);
+
+    if (action == "show")   { edit.setTakesShown (trackId, arg (args, "on", true)); return error ({}); }
+    if (action == "listen") { edit.setListenTake (trackId, takeId); return error ({}); }
+    if (action == "rename") { edit.setTakeName (takeId, args["name"].toString()); return error ({}); }
+    if (action == "remove") { edit.removeTake (takeId); return error ({}); }
+
+    if (action == "comp")
+    {
+        if (! edit.getTake (takeId).isValid())
+            return error ("That take is gone.");
+        edit.compTake (takeId, arg (args, "start", 0.0), arg (args, "end", 0.0));
+        return error ({});
+    }
+
+    if (action == "compAt")
+    {
+        const auto [start, end] = edit.compTakeAt (takeId, arg (args, "time", 0.0));
+        if (end <= start)
+            return error ("This take has no audio there.");
+        return object ({ { "ok", true }, { "start", start }, { "end", end } });
+    }
+
+    if (action == "fromClip")
+    {
+        const auto take = edit.addTakeFromClip (arg (args, "clip", -1));
+        if (! take.isValid())
+            return error ("Only an audio clip on a track can become a take.");
+        edit.setTakesShown ((int) daw::Edit::getOwnerTrack (take)[ids::id], true);
+        return object ({ { "ok", true }, { "take", (int) take[ids::id] } });
+    }
+
+    if (action == "cancel")
+    {
+        if (takeCompJob != nullptr)
+            takeCompJob->cancel = true;
+        return error ({});
+    }
+
+    if (action == "auto")
+    {
+        if (takeCompJob != nullptr)
+            return error ("Already listening to the takes.");
+
+        auto job = std::make_shared<TakeCompJob>();
+        for (const auto& track : edit.getTracks())
+            if ((trackId < 0 || (int) track[ids::id] == trackId) && edit.getTakes ((int) track[ids::id]).size() >= 2)
+                job->tracks.push_back (track.createCopy());
+
+        if (job->tracks.empty())
+            return error (trackId < 0 ? "No track has two or more takes to choose from."
+                                      : "This track needs two or more takes to choose from.");
+
+        job->keyTonic = edit.getKey();
+        job->keyMinor = edit.isKeyMinor();
+        takeCompJob = job;
+
+        juce::Thread::launch ([job]
+        {
+            const auto keepGoing = [job] { return ! job->cancel.load(); };
+            for (size_t i = 0; i < job->tracks.size() && keepGoing(); ++i)
+            {
+                auto input = analysis::measureTakes (job->tracks[i], keepGoing);
+                input.keyTonic = job->keyTonic;
+                input.keyMinor = job->keyMinor;
+                if (keepGoing())
+                    job->plans.emplace_back ((int) job->tracks[i][ids::id], analysis::planComp (input));
+                job->progress = (double) (i + 1) / (double) job->tracks.size();
+            }
+            job->finished = true;
+        });
+
+        emit ("dawTakeComp", object ({ { "state", "analysing" }, { "progress", 0.0 } }));
+        return error ({});
+    }
+
+    return error ("Unknown takes action: " + action);
+}
+
+void DawBridge::finishTakeComp()
+{
+    auto job = std::move (takeCompJob);
+
+    if (job->cancel)
+    {
+        emit ("dawTakeComp", object ({ { "state", "cancelled" } }));
+        return;
+    }
+
+    // One undo step for the whole comp, so Ctrl+Z puts the old one back.
+    edit.getUndoManager().beginNewTransaction ("Auto Comp");
+    juce::Array<juce::var> tracks;
+
+    for (const auto& [trackId, plan] : job->plans)
+    {
+        juce::Array<juce::var> picks;
+        for (const auto& pick : plan.picks)
+        {
+            if (! edit.getTake (pick.takeId).isValid())
+                continue; // deleted while it listened
+            edit.compTake (pick.takeId, pick.start, pick.end);
+            picks.add (object ({ { "start", pick.start }, { "end", pick.end }, { "take", pick.takeId }, { "name", pick.takeName },
+                                 { "score", pick.score }, { "reason", pick.reason } }));
+        }
+        if (! plan.picks.empty())
+            edit.setTakesShown (trackId, true);
+
+        tracks.add (object ({ { "track", trackId }, { "picks", picks }, { "summary", plan.summary } }));
+    }
+
+    edit.getUndoManager().beginNewTransaction();
+    emit ("dawTakeComp", object ({ { "state", "done" }, { "tracks", tracks } }));
 }
 
 void DawBridge::finishKeyDetection()
@@ -2583,6 +2758,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                          return error ({});
                      },
                      complete);
+        return;
+    }
+
+    if (command == "takes")
+    {
+        complete (handleTakes (args));
         return;
     }
 
