@@ -132,6 +132,22 @@ def main():
     parser.add_argument("--no-check", action="store_true", help="skip comparing the converted model with the original")
     args = parser.parse_args()
 
+    missing = []
+    for module, package in (("numpy", "numpy<2.3"), ("torch", "torch==2.7.0"), ("torchaudio", "torchaudio==2.7.0"),
+                            ("coremltools", "coremltools==9.0"), ("einops", "einops"), ("demucs", "demucs==4.0.1")):
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(package)
+    if missing:
+        sys.exit("Some Python packages this script needs aren't installed in this Python (" + sys.executable + ").\n"
+                 "Set up a virtual environment once, then run the script from it:\n\n"
+                 "    python3 -m venv ~/micfx-export\n"
+                 "    source ~/micfx-export/bin/activate\n"
+                 "    pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops \"numpy<2.3\" demucs==4.0.1\n"
+                 "    python scripts/export_htdemucs_coreml.py\n\n"
+                 "Missing: " + ", ".join(missing))
+
     import numpy as np
     import torch
     import coremltools as ct

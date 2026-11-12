@@ -189,7 +189,7 @@ up with the clip (same start, trim, gain and fades), and mutes the song's clip. 
 the GPU, with the CPU as the fallback:
 
 ```
-python3 -m venv stems-env && source stems-env/bin/activate
+python3 -m venv ~/micfx-export && source ~/micfx-export/bin/activate
 pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops "numpy<2.3" demucs==4.0.1
 python scripts/export_htdemucs_coreml.py
 ```
