@@ -190,6 +190,16 @@ target_compile_definitions(MicFX
         $<$<CONFIG:Debug>:MICFX_UI_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/ui">
         $<$<CONFIG:Debug>:MICFX_JUCE_JS_FILE="${CMAKE_CURRENT_SOURCE_DIR}/libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js">)
 
+# JUCE's recommended warnings include a few that only add noise here: -Wfloat-equal fires on
+# deliberate "did this parameter change?" caches and smoother snaps (exact compares of stored
+# values, not computed ones), -Wmissing-field-initializers on partly filled Spec structs and
+# -Wshadow on lambda/member names. Linked after the JUCE flags so these win.
+add_library(micfx_quiet_warnings INTERFACE)
+if(NOT MSVC)
+    target_compile_options(micfx_quiet_warnings INTERFACE
+        -Wno-float-equal -Wno-missing-field-initializers -Wno-shadow)
+endif()
+
 target_link_libraries(MicFX
     PRIVATE
         MicFX_WebUI
@@ -200,7 +210,8 @@ target_link_libraries(MicFX
     PUBLIC
         juce::juce_recommended_config_flags
         juce::juce_recommended_lto_flags
-        juce::juce_recommended_warning_flags)
+        juce::juce_recommended_warning_flags
+        micfx_quiet_warnings)
 
 # Each instrument as a VST3 (and AU on macOS) plugin of its own: "MicFX Grand", "MicFX Nova"...
 #   cmake --build build/debug --target MicFXInstruments
@@ -233,7 +244,7 @@ if(MICFX_BUILD_INSTRUMENT_PLUGINS)
             PRIVATE MICFX_INSTRUMENT_KEY="${key}")
         target_link_libraries(${target}
             PRIVATE juce::juce_audio_utils
-            PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags)
+            PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags micfx_quiet_warnings)
         add_dependencies(MicFXInstruments ${target}_All)
     endfunction()
 
@@ -294,7 +305,8 @@ if(MICFX_BUILD_TESTS)
             ${MICFX_DEMUCS_LIBRARY}
         PUBLIC
             juce::juce_recommended_config_flags
-            juce::juce_recommended_warning_flags)
+            juce::juce_recommended_warning_flags
+            micfx_quiet_warnings)
 
     # JUCE_PLUGINHOST_AU=1 pulls in AUGenericView, which lives in CoreAudioKit.
     if(APPLE)
