@@ -286,7 +286,7 @@ namespace
 
         const auto result = runProcessor (processor, voice);
         check (result.finite && result.peak <= 1.0f,
-               "all 24 effects: peak " + juce::String (result.peak, 3) + ", cpu "
+               "every effect: peak " + juce::String (result.peak, 3) + ", cpu "
                    + juce::String (result.realtimeFactor * 100.0, 2) + "% of real time");
 
         std::cout << "\n  Worst preset CPU: " << juce::String (worstFactor * 100.0, 2) << "% of one core\n";
@@ -5301,6 +5301,348 @@ namespace
         float g = 0.0f;
     };
 
+    //==========================================================================
+    std::vector<float> makeNoise (double seconds, float levelDb, int seed = 1)
+    {
+        juce::Random random (seed);
+        std::vector<float> samples ((size_t) (seconds * sampleRate));
+        const auto peak = juce::Decibels::decibelsToGain (levelDb) * std::sqrt (3.0f); // uniform: rms = peak / sqrt 3
+
+        for (auto& sample : samples)
+            sample = peak * (2.0f * random.nextFloat() - 1.0f);
+
+        return samples;
+    }
+
+    std::vector<float> mixSignals (const std::vector<float>& a, const std::vector<float>& b)
+    {
+        auto result = a;
+        for (size_t i = 0; i < result.size() && i < b.size(); ++i)
+            result[i] += b[i];
+        return result;
+    }
+
+    float levelDb (const std::vector<float>& signal, size_t from, size_t to)
+    {
+        double sum = 0.0;
+        to = std::min (to, signal.size());
+        for (auto i = from; i < to; ++i)
+            sum += (double) signal[i] * signal[i];
+        return juce::Decibels::gainToDecibels ((float) std::sqrt (sum / (double) juce::jmax ((size_t) 1, to - from)), -200.0f);
+    }
+
+    // Level of the output minus the (latency-aligned) reference, relative to the reference.
+    float differenceDb (const std::vector<float>& output, const std::vector<float>& reference, int latency, size_t from)
+    {
+        std::vector<float> error (output.size(), 0.0f);
+        for (auto i = from; i < output.size(); ++i)
+            error[i] = output[i] - reference[i - (size_t) latency];
+
+        return levelDb (error, from, output.size()) - levelDb (reference, from - (size_t) latency, output.size() - (size_t) latency);
+    }
+
+    // A sung phrase: syllables (300 ms on, 100 ms between) of a 12-harmonic tone with
+    // vibrato, from `start` seconds on.
+    std::vector<float> makePhrase (double seconds, double start = 0.0, float peak = 0.15f)
+    {
+        std::vector<float> samples ((size_t) (seconds * sampleRate), 0.0f);
+        double phase = 0.0;
+
+        for (auto i = (size_t) (start * sampleRate); i < samples.size(); ++i)
+        {
+            const auto t = (double) i / sampleRate;
+            phase += juce::MathConstants<double>::twoPi * 200.0 * std::exp2 (0.3 / 12.0 * std::sin (juce::MathConstants<double>::twoPi * 5.5 * t)) / sampleRate;
+
+            const auto inSyllable = std::fmod (t - start, 0.4);
+            const auto envelope = inSyllable < 0.3 ? std::sin (juce::MathConstants<double>::pi * inSyllable / 0.3) : 0.0;
+
+            double value = 0.0;
+            for (int h = 1; h <= 12; ++h)
+                value += std::sin (phase * h) / h;
+            samples[i] = (float) (value * envelope * peak);
+        }
+
+        return samples;
+    }
+
+    struct DenoiseSettings { float reduction = 20.0f, threshold = 0.0f; bool adaptive = true; double learnSeconds = 0.0; };
+
+    // Runs a mono signal through a Denoise module in 256-sample blocks (switched on). With
+    // learnSeconds > 0, Learn is held on for that long from the start.
+    std::vector<float> runDenoise (fx::modules::Denoise& module, const std::vector<float>& input, const DenoiseSettings& settings,
+                                   bool prepare = true)
+    {
+        module.on.store (1.0f);
+        module.reduction.store (settings.reduction);
+        module.threshold.store (settings.threshold);
+        module.adaptive.store (settings.adaptive ? 1.0f : 0.0f);
+
+        if (prepare)
+            module.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+
+        auto output = input;
+        const auto learnSamples = (size_t) (settings.learnSeconds * sampleRate);
+
+        for (size_t start = 0; start < output.size(); start += blockSize)
+        {
+            module.learn.store (start < learnSamples ? 1.0f : 0.0f);
+
+            const auto length = std::min ((size_t) blockSize, output.size() - start);
+            float* channels[] = { output.data() + start };
+            juce::dsp::AudioBlock<float> block (channels, 1, length);
+            module.process (fx::Module::Context (block));
+        }
+
+        return output;
+    }
+
+    std::vector<float> runDenoise (const std::vector<float>& input, const DenoiseSettings& settings)
+    {
+        fx::modules::Denoise module;
+        return runDenoise (module, input, settings);
+    }
+
+    void testDenoise()
+    {
+        std::cout << "\nDenoise (spectral noise reduction)\n";
+
+        fx::modules::Denoise probe;
+        probe.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+        check (probe.getLatencySamples() == 0, "no delay while it's off");
+        probe.on.store (1.0f);
+        const auto latency = probe.getLatencySamples();
+        check (latency == 512, "on, it delays by one 512-sample frame at 48 kHz (" + juce::String (latency * 1000.0 / sampleRate, 1) + " ms)");
+
+        {
+            fx::modules::Denoise fast;
+            fast.prepare ({ 96000.0, (juce::uint32) blockSize, 2 });
+            fast.on.store (1.0f);
+            check (fast.getLatencySamples() == 1024, "at 96 kHz the frame doubles so it stays ~11 ms");
+        }
+
+        // With no reduction allowed, the STFT must give the input back exactly (delayed).
+        {
+            const auto input = mixSignals (makeVoice (180.0f, 1.0), makeNoise (1.0, -40.0f));
+            const auto output = runDenoise (input, { 0.0f });
+            const auto error = differenceDb (output, input, latency, (size_t) latency * 2);
+            check (error < -80.0f, "0 dB reduction is a clean delay (difference " + juce::String (error, 1) + " dB)");
+        }
+
+        const auto seconds = 4.0;
+        const auto length = (size_t) (seconds * sampleRate);
+        const auto tail = length - (size_t) (2.0 * sampleRate); // the last 2 s, once the estimate has settled
+
+        // Steady hiss on its own is pushed down to (almost) the reduction floor.
+        {
+            const auto noise = makeNoise (seconds, -50.0f);
+            const auto output = runDenoise (noise, { 20.0f });
+            const auto reduction = levelDb (noise, tail, length) - levelDb (output, tail, length);
+            check (reduction > 15.0f, "hiss alone reduced by " + juce::String (reduction, 1) + " dB (floor 20 dB)");
+
+            const auto soon = levelDb (noise, 36000, 48000) - levelDb (output, 36000, 48000);
+            check (soon > 12.0f, "... and by " + juce::String (soon, 1) + " dB straight after the first half second");
+        }
+
+        // Mains hum (50 Hz and harmonics) is tonal but stationary, so it's noise too.
+        {
+            std::vector<float> hum (length, 0.0f);
+            for (size_t i = 0; i < length; ++i)
+                for (int h = 1; h <= 6; ++h)
+                    hum[i] += 0.004f / (float) h * std::sin (juce::MathConstants<float>::twoPi * 50.0f * (float) h * (float) i / (float) sampleRate);
+
+            const auto output = runDenoise (hum, { 20.0f });
+            const auto reduction = levelDb (hum, tail, length) - levelDb (output, tail, length);
+            check (reduction > 10.0f, "50 Hz hum reduced by " + juce::String (reduction, 1) + " dB");
+        }
+
+        // Voice over hiss, after a second of room noise (switched on before singing): the
+        // noise goes, the voice stays. The difference is measured against the clean voice,
+        // so it counts both leftover noise and any damage to the voice.
+        {
+            const auto voice = makePhrase (seconds, 1.0);
+            const auto noise = makeNoise (seconds, -45.0f);
+            const auto input = mixSignals (voice, noise);
+            const auto output = runDenoise (input, { 20.0f });
+
+            const auto before = differenceDb (input, voice, 0, tail);
+            const auto after = differenceDb (output, voice, latency, tail);
+            check (before - after > 6.0f, "voice + hiss: noise-to-voice " + juce::String (before, 1) + " dB -> " + juce::String (after, 1) + " dB");
+
+            const auto change = levelDb (output, tail, length) - levelDb (voice, tail - (size_t) latency, length - (size_t) latency);
+            check (std::abs (change) < 1.0f, "voice level kept (" + juce::String (change, 2) + " dB)");
+        }
+
+        // Switched on in the middle of a phrase (a DAW track that starts singing at once):
+        // the starting profile comes from the quietest moments, not the voice.
+        {
+            const auto voice = makePhrase (seconds, 0.0);
+            const auto input = mixSignals (voice, makeNoise (seconds, -45.0f, 3));
+            const auto output = runDenoise (input, { 20.0f });
+
+            const auto change = levelDb (output, tail, length) - levelDb (voice, tail - (size_t) latency, length - (size_t) latency);
+            check (std::abs (change) < 1.5f, "starting mid-phrase keeps the voice (" + juce::String (change, 2) + " dB)");
+
+            const auto before = differenceDb (input, voice, 0, tail);
+            const auto after = differenceDb (output, voice, latency, tail);
+            check (before - after > 4.0f, "... and still takes the hiss out: " + juce::String (before, 1) + " dB -> " + juce::String (after, 1) + " dB");
+        }
+
+        // A note held for 7 s (with vibrato, like a singer) mustn't be mistaken for noise.
+        {
+            const auto longSeconds = 8.0;
+            const auto longLength = (size_t) (longSeconds * sampleRate);
+            std::vector<float> voice (longLength, 0.0f);
+            double phase = 0.0;
+
+            for (auto i = (size_t) sampleRate; i < longLength; ++i)
+            {
+                const auto t = (double) i / sampleRate;
+                phase += juce::MathConstants<double>::twoPi * 220.0 * std::exp2 (0.3 / 12.0 * std::sin (juce::MathConstants<double>::twoPi * 5.5 * t)) / sampleRate;
+
+                double value = 0.0;
+                for (int h = 1; h <= 12; ++h)
+                    value += std::sin (phase * h) / h;
+                voice[i] = (float) (value * 0.15);
+            }
+
+            const auto output = runDenoise (mixSignals (voice, makeNoise (longSeconds, -50.0f)), { 20.0f });
+            const auto from = longLength - (size_t) sampleRate;
+            const auto change = levelDb (output, from, longLength) - levelDb (voice, from - (size_t) latency, longLength - (size_t) latency);
+            check (std::abs (change) < 1.5f, "a sustained note is still at " + juce::String (change, 2) + " dB after 7 s");
+        }
+
+        // Digital silence first (a DAW track before its clip): it doesn't set a zero profile.
+        {
+            auto input = makeNoise (seconds, -50.0f, 5);
+            std::fill (input.begin(), input.begin() + (long) sampleRate, 0.0f);
+            const auto output = runDenoise (input, { 20.0f });
+            const auto reduction = levelDb (input, tail, length) - levelDb (output, tail, length);
+            check (reduction > 15.0f, "after a second of silence, hiss is still reduced by " + juce::String (reduction, 1) + " dB");
+        }
+
+        // Learn: 1 s of room noise, then voice with Adaptive off uses the learnt profile.
+        {
+            const auto noise = makeNoise (seconds + 1.0, -45.0f, 7);
+            const auto voice = makePhrase (seconds + 1.0, 1.0);
+            const auto input = mixSignals (voice, noise);
+
+            fx::modules::Denoise module;
+            const auto output = runDenoise (module, input, { 20.0f, 0.0f, false, 1.0 });
+            check (module.getDenoiser().getLearnedFrames() > 300, "learn: profile built from " + juce::String (module.getDenoiser().getLearnedFrames()) + " frames");
+
+            const auto start = (size_t) (2.0 * sampleRate);
+            const auto before = differenceDb (input, voice, 0, start);
+            const auto after = differenceDb (output, voice, latency, start);
+            check (before - after > 6.0f, "learnt profile: noise-to-voice " + juce::String (before, 1) + " dB -> " + juce::String (after, 1) + " dB");
+
+            // Switching it off and on keeps what it learnt (no new half second of warm-up).
+            module.on.store (0.0f);
+            const auto silence = std::vector<float> ((size_t) blockSize, 0.0f);
+            runDenoise (module, silence, { 20.0f, 0.0f, false }, false);
+            const auto noiseOnly = makeNoise (0.5, -45.0f, 9);
+            const auto again = runDenoise (module, noiseOnly, { 20.0f, 0.0f, false }, false);
+            const auto reduction = levelDb (noiseOnly, 6000, 18000) - levelDb (again, 6000 + (size_t) latency, 18000 + (size_t) latency);
+            check (reduction > 12.0f, "off and on again, the profile is kept (hiss down " + juce::String (reduction, 1) + " dB at once)");
+
+            const auto readings = std::make_unique<juce::DynamicObject>();
+            module.addReadings (*readings);
+            const auto* bands = readings->getProperty ("noise").getArray();
+            check (bands != nullptr && bands->size() == fx::SpectralDenoiser::numBands && (float) (*bands)[10] > -100.0f
+                       && readings->getProperty ("reduction").getArray() != nullptr,
+                   "the card gets the noise profile and the reduction per band");
+        }
+
+        // A new module (a DAW track's chain rebuilt) carries over the profile.
+        {
+            fx::modules::Denoise first;
+            runDenoise (first, makeNoise (2.0, -45.0f, 11), { 20.0f });
+
+            fx::modules::Denoise fresh, carried;
+            carried.carryStateFrom (first);
+            const auto noise = makeNoise (0.5, -45.0f, 12);
+            const auto withoutProfile = runDenoise (fresh, noise, { 20.0f });
+            const auto withProfile = runDenoise (carried, noise, { 20.0f });
+            const auto early = [&] (const std::vector<float>& output) { return levelDb (noise, 2000, 12000) - levelDb (output, 2000 + (size_t) latency, 12000 + (size_t) latency); };
+            check (early (withoutProfile) < 3.0f && early (withProfile) > 12.0f,
+                   "a rebuilt chain starts from the old profile (first 0.25 s: " + juce::String (early (withoutProfile), 1) + " dB fresh, "
+                       + juce::String (early (withProfile), 1) + " dB carried over)");
+        }
+
+        // Stereo: both sides get the same gains, so a centred voice stays centred.
+        {
+            fx::modules::Denoise module;
+            module.on.store (1.0f);
+            module.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            const auto left = mixSignals (makePhrase (2.0, 0.5), makeNoise (2.0, -45.0f, 1));
+            const auto right = mixSignals (makePhrase (2.0, 0.5), makeNoise (2.0, -45.0f, 2));
+            auto l = left, r = right;
+            for (size_t start = 0; start + blockSize <= l.size(); start += blockSize)
+            {
+                float* channels[] = { l.data() + start, r.data() + start };
+                juce::dsp::AudioBlock<float> block (channels, 2, (size_t) blockSize);
+                module.process (fx::Module::Context (block));
+            }
+            const auto balance = levelDb (l, 48000, 90000) - levelDb (r, 48000, 90000);
+            check (std::abs (balance) < 0.5f, "stereo: left and right stay balanced (" + juce::String (balance, 2) + " dB)");
+        }
+
+        // The plugin reports the delay to the host only while Denoise is on.
+        {
+            PluginProcessor processor;
+            processor.prepareToPlay (sampleRate, blockSize);
+            const auto off = processor.getLatencySamples();
+
+            processor.getState().getParameter ("denoiseOn")->setValueNotifyingHost (1.0f);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            buffer.clear();
+            juce::MidiBuffer midi;
+            processor.processBlock (buffer, midi);
+            processor.updateLatency();
+            check (off == 0 && processor.getLatencySamples() == latency,
+                   "plugin latency: " + juce::String (off) + " samples off, " + juce::String (processor.getLatencySamples()) + " on");
+            processor.getState().getParameter ("denoiseOn")->setValueNotifyingHost (0.0f);
+        }
+
+        // DAW: a Denoise insert keeps its profile when the track's other inserts change.
+        {
+            const auto folder = juce::File::createTempFile ("micfx-denoise");
+            folder.createDirectory();
+            const auto hiss = makeNoise (6.0, -45.0f, 21);
+            juce::AudioBuffer<float> audio (2, (int) hiss.size());
+            for (int ch = 0; ch < 2; ++ch)
+                audio.copyFrom (ch, 0, hiss.data(), (int) hiss.size());
+            const auto file = folder.getChildFile ("hiss.wav");
+            writeWav (file, audio, sampleRate);
+
+            daw::Edit edit;
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+            engine.getAudioPool().loadNow (file);
+            const auto track = (int) edit.addTrack ("Vocal")[daw::ids::id];
+            edit.addClip (track, file, 0.0, 6.0);
+            const auto denoise = (int) edit.addInsert (track, fx::ModuleType::denoise)[daw::ids::id];
+            edit.setInsertValue (denoise, "denoiseOn", 1.0f);
+            edit.setInsertValue (denoise, "denoiseReduction", 20.0f);
+            engine.rebuildNow();
+
+            engine.play();
+            render (engine, 3.0); // long enough to settle on the hiss
+            engine.stop();
+
+            edit.addInsert (track, fx::ModuleType::eq); // a new chain for the track
+            engine.rebuildNow();
+            engine.seek (0);
+            engine.play();
+            const auto out = render (engine, 0.5);
+            engine.stop();
+
+            const auto start = (size_t) latency + 2000, end = (size_t) latency + 12000;
+            const auto reduction = levelDb (hiss, 2000, 12000) - levelDb (out[0], start, end);
+            check (reduction > 12.0f, "DAW: adding an insert keeps the noise profile (hiss down " + juce::String (reduction, 1) + " dB from the start)");
+            folder.deleteRecursively();
+        }
+    }
+
     void testSmoothing()
     {
         std::cout << "\nSmooth knob changes\n";
@@ -5835,6 +6177,7 @@ int main()
     testEffectAutomation();
     testAnalysisSpeed();
     testLatency();
+    testDenoise();
     testSmoothing();
     testStems();
 #if MICFX_HAS_DEMUCS

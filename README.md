@@ -8,18 +8,18 @@ Builds as a **standalone app**, plus **AU** and **VST3** plugins from the same c
 
 ## What's inside
 
-**25 effects**, processed in this order (each can be switched on/off):
+**26 effects**, processed in this order (each can be switched on/off):
 
 | Category | Effects |
 | --- | --- |
-| Clean-up | High-pass · Noise Gate · EQ · **Parametric EQ** · Compressor · De-esser |
+| Clean-up | High-pass · **Denoise** · Noise Gate · EQ · **Parametric EQ** · Compressor · De-esser |
 | Pitch | **Autotune** · Pitch Shift (with formant) · Harmonizer (2 voices) |
 | Character | Exciter · Saturation · Radio · Bitcrusher · Robot · Filter · Auto-wah |
 | Modulation | Tremolo · Vibrato · Chorus · Flanger · Phaser |
 | Space | Doubler · Echo (ping-pong) · Reverb · Stereo Width |
 
 ```
-mic → input gain → high-pass → gate → autotune/pitch/harmonizer → EQ → parametric EQ → compressor → de-esser
+mic → input gain → high-pass → denoise → gate → autotune/pitch/harmonizer → EQ → parametric EQ → compressor → de-esser
     → exciter → saturation → radio → bitcrusher → robot → filter → auto-wah → tremolo → vibrato
     → chorus → flanger → phaser → doubler → echo → reverb → width → output gain → limiter (−1 dB)
 ```
@@ -43,6 +43,27 @@ They also appear as programs in DAWs.
 
 The Pitch Shift and Harmonizer use the same engine, so they're tuned too when Autotune is on.
 Chromatic works for any song. Pick the song's key and scale for a tighter, more musical tune.
+
+### Denoise
+
+A spectral noise reducer, in the spirit of iZotope's Voice De-noise. Unlike the gate, which only
+mutes the gaps between words, it removes steady noise (hiss, hum, fans, air conditioning) from every
+frequency band separately, including while you sing or speak. It's in Live mode (after the high-pass)
+and in Add effect on any DAW track.
+
+- The signal is split into ~250 frequency bins (short-time FFT, 75% overlap).
+- **Adaptive** (on by default): the noise in each bin is tracked statistically. Bins that sit well above
+  their recent minimum are treated as voice and leave the estimate alone (MCRA), so it follows a changing
+  room without learning your voice, or a long held note, as noise. With nothing learnt yet, the first half
+  second sets a starting profile from the quietest moments of every band.
+- **Learn noise**: switch it on during a few seconds of room noise only (no voice), then off. That profile
+  is kept; with Adaptive on it's the starting point, with Adaptive off it's used as is. Switching the
+  effect off and on, or changing a DAW track's other inserts, keeps it.
+- **Reduction** is how far noise is turned down at most (8-12 dB is natural, 25+ dB is aggressive).
+  **Threshold** above 0 dB treats more of the signal as noise, below 0 dB less.
+- The card shows the noise profile per band and, from the top, how much each band is turned down.
+- Added latency is one FFT frame: 10.7 ms at 48 kHz (11.6 ms at 44.1 kHz), only while it's on. MicFX
+  reports it to the host, and DAW mode lines the other tracks up with it.
 
 ### Parametric EQ
 

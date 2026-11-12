@@ -363,6 +363,10 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
     strip->id = id;
     strip->insertLayout = layout;
 
+    // The chain this one replaces, if any: inserts that stay hand over what they've learnt.
+    const auto previous = strips.find (id);
+    const auto* previousModules = previous != strips.end() ? &previous->second->modulesByInsertId : nullptr;
+
     for (const auto& insert : inserts)
     {
         const auto type = Edit::moduleTypeFromKey (insert[ids::type].toString());
@@ -374,6 +378,10 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
         for (int v = 0; v < module.getNumValues(); ++v)
             if (const auto& value = insert[juce::Identifier (module.getValueId (v))]; ! value.isVoid())
                 module.getValue (v).store ((float) value);
+
+        if (previousModules != nullptr)
+            if (const auto it = previousModules->find ((int) insert[ids::id]); it != previousModules->end() && it->second->getType() == *type)
+                module.carryStateFrom (*it->second);
 
         strip->modulesByInsertId[(int) insert[ids::id]] = &module;
     }

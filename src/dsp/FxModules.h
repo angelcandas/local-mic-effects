@@ -5,6 +5,7 @@
 #include "FxModule.h"
 #include "Mastering.h"
 #include "PitchEngine.h"
+#include "SpectralDenoiser.h"
 
 #include <memory>
 
@@ -33,6 +34,74 @@ private:
     void render (const Context& c) noexcept override { filter.process (c); }
 
     juce::dsp::StateVariableTPTFilter<float> filter;
+};
+
+// Spectral noise reduction (SpectralDenoiser.h): hiss, hum and room noise taken out
+// band by band, also under the voice. Learn is a choice rather than a switch: it doesn't
+// turn the module on, it makes it average what it hears into the noise profile.
+class Denoise final : public Module
+{
+public:
+    Denoise() : Module (ModuleType::denoise) {}
+
+    Value& on        = addSwitch ("denoiseOn");
+    Value& reduction = addValue ("denoiseReduction", 12.0f);
+    Value& threshold = addValue ("denoiseThreshold", 0.0f);
+    Value& adaptive  = addChoice ("denoiseAdaptive", 1.0f);
+    Value& learn     = addChoice ("denoiseLearn", 0.0f);
+
+    // One FFT frame while it's on.
+    int getLatencySamples() const noexcept override { return flag (on) ? latency.load (std::memory_order_relaxed) : 0; }
+
+    const SpectralDenoiser& getDenoiser() const noexcept { return denoiser; }
+
+    // noise: the profile per band (dB, 60 Hz..16 kHz log-spaced), reduction: what each
+    // band is turned down by right now (dB), learning: seconds learnt while Learn is on.
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        juce::Array<juce::var> noise, cut;
+
+        for (int b = 0; b < SpectralDenoiser::numBands; ++b)
+        {
+            noise.add (std::round (denoiser.noiseBandsDb[(size_t) b].load (std::memory_order_relaxed) * 10.0f) / 10.0f);
+            cut.add (std::round (denoiser.reductionBandsDb[(size_t) b].load (std::memory_order_relaxed) * 10.0f) / 10.0f);
+        }
+
+        readings.setProperty ("noise", noise);
+        readings.setProperty ("reduction", cut);
+
+        if (flag (learn))
+            readings.setProperty ("learning", std::round (denoiser.getLearnedSeconds() * 10.0) / 10.0);
+    }
+
+    void carryStateFrom (const Module& previous) override
+    {
+        if (auto* other = dynamic_cast<const Denoise*> (&previous))
+        {
+            std::vector<float> profile;
+            if (other->denoiser.copyProfile (profile))
+                denoiser.seedProfile (std::move (profile));
+        }
+    }
+
+private:
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override
+    {
+        denoiser.prepare (spec);
+        latency.store (denoiser.getLatencySamples(), std::memory_order_relaxed);
+    }
+
+    void resetModule() override { denoiser.reset(); }
+
+    void update() noexcept override
+    {
+        denoiser.setParameters (get (reduction), get (threshold), flag (adaptive), flag (learn));
+    }
+
+    void render (const Context& c) noexcept override { denoiser.process (c); }
+
+    SpectralDenoiser denoiser;
+    std::atomic<int> latency { SpectralDenoiser::getFrameSize (48000.0) };
 };
 
 class Gate final : public Module
@@ -625,6 +694,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
     switch (type)
     {
         case ModuleType::highPass:   return std::make_unique<modules::HighPass>();
+        case ModuleType::denoise:    return std::make_unique<modules::Denoise>();
         case ModuleType::gate:       return std::make_unique<modules::Gate>();
         case ModuleType::pitch:      return std::make_unique<modules::Pitch>();
         case ModuleType::eq:         return std::make_unique<modules::Eq>();
