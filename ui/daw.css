@@ -10,7 +10,7 @@ body.is-daw .chip--live { display: none; }
 .mode-switch button { padding: 5px 14px; font-weight: 600; }
 
 .daw {
-  --head: 210px;   /* HEAD_WIDTH in daw.js */
+  --head: 244px;   /* HEAD_WIDTH in daw.js (resizable) */
   --row: 84px;   /* rowHeight in daw.js (vertical zoom) */
   --clip: 76px;
   position: relative;
@@ -860,9 +860,6 @@ body.is-daw .chip--live { display: none; }
 .hslider-text { position: relative; z-index: 1; display: block; color: var(--text); font: 600 10px/14px var(--mono); text-align: center; pointer-events: none; }
 .hslider:hover, .hslider:focus-visible { border-color: var(--line-strong); outline: none; }
 
-.rows-medium .track-head-mix { display: none; }
-.rows-small .track-head-bottom { display: none; }
-.rows-small .level-meter { display: none; }
 
 /* ---------- Recording ---------- */
 
@@ -1924,3 +1921,116 @@ body:not(.is-daw) .daw-project-actions { display: none; }
   background-size: var(--bar) 100%;
 }
 .arrange-inner.tempo-varies .take-lane { background-image: var(--grid-image); background-size: var(--grid-width) 100%; background-repeat: no-repeat; }
+
+/* ---------- Track headers: sections, stereo meter, own height and fold ---------- */
+
+.track-row .track-head { flex-direction: row; align-items: stretch; justify-content: flex-start; gap: 6px; padding: 4px 4px 4px 0; }
+.track-row .track-head .track-swatch { align-self: stretch; }
+.track-head-body { display: flex; flex: 1; flex-direction: column; justify-content: center; gap: 3px; min-width: 0; }
+.th-line { display: flex; align-items: center; gap: 5px; min-width: 0; height: 22px; flex: none; }
+.th-name .track-name { flex: 1; }
+.th-fold { flex: none; width: 14px; height: 18px; padding: 0; border: 0; background: none; color: var(--faint); font-size: 10px; cursor: pointer; }
+.th-fold:hover { color: var(--text); }
+.th-mix .track-toggles { flex: none; }
+.th-mix .hslider { flex: 1 1 auto; min-width: 40px; }
+.th-mix .hslider.is-pan { flex: 0 0 44px; min-width: 44px; }
+.th-routing select.dropdown { flex: 1 1 0; min-width: 0; height: 20px; padding: 0 18px 0 6px; font-size: 10.5px; background-position: right 5px center; }
+.th-routing .instrument-chip { flex: 1 1 0; }
+.th-arrow { flex: none; color: var(--faint); font-size: 11px; }
+.th-sends { gap: 3px; overflow: hidden; }
+.track-row.is-folded .th-name .fx-count { display: none; }
+.track-row .tt-monitor { width: auto; min-width: 24px; padding: 0 4px; }
+.track-row .tt-monitor[data-mode="auto"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 30%, #0d1016); color: var(--text); }
+
+/* The meter down the right edge of the header: left and right, clip lights on top. */
+.head-meter { display: flex; flex: none; gap: 1px; align-self: stretch; margin: 1px 0; }
+.head-meter .level-meter.is-vertical { width: 4px; border-radius: 2px; }
+.head-meter .clip-light { top: 0; left: 0; right: 0; width: auto; height: 3px; border-radius: 1px; }
+
+/* Drag a track's bottom edge for its own height. */
+.th-resize { position: absolute; left: 0; right: 0; bottom: -3px; z-index: 4; height: 7px; cursor: ns-resize; }
+.th-resize:hover { background: linear-gradient(transparent 3px, var(--accent) 3px, var(--accent) 4px, transparent 4px); }
+.track-row .track-head { overflow: visible; }
+.track-row .track-head-body { overflow: hidden; }
+
+/* The header column's right edge: drag to resize it. */
+.corner { position: sticky; }
+.corner-gap { flex: 1; }
+.head-switch { height: 20px; padding: 0 6px; border-radius: 5px; font-size: 10px; }
+.head-resizer { position: absolute; top: 0; right: -4px; bottom: 0; z-index: 6; width: 8px; cursor: col-resize; }
+.head-resizer:hover { background: linear-gradient(90deg, transparent 3px, var(--accent) 3px, var(--accent) 5px, transparent 5px); }
+
+/* A send level box. */
+.send-box {
+  position: relative;
+  display: inline-flex;
+  flex: 0 1 52px;
+  align-items: center;
+  gap: 3px;
+  min-width: 34px;
+  height: 18px;
+  padding: 0 4px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #0d1016;
+  color: var(--faint);
+  font: 600 10px/1 var(--mono);
+  cursor: ns-resize;
+  touch-action: none;
+}
+.send-box::before { content: ""; position: absolute; left: 0; bottom: 0; height: 2px; width: calc(var(--level, 0) * 100%); background: var(--send-color, var(--accent)); }
+.send-box.is-on { color: var(--text); border-color: color-mix(in srgb, var(--send-color) 45%, var(--line)); }
+.send-box:hover, .send-box:focus-visible { border-color: var(--line-strong); outline: none; }
+.send-box-letter { color: var(--send-color, var(--accent)); }
+.send-box:not(.is-on) .send-box-letter { opacity: 0.55; }
+
+/* Typing a value over a control. */
+.value-entry {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  width: 100%;
+  min-width: 48px;
+  height: 100%;
+  padding: 0 4px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: #0d1016;
+  color: var(--text);
+  font: 600 11px var(--mono);
+  text-align: center;
+  outline: none;
+}
+.knob .readout, .hslider, .fader { position: relative; }
+
+/* ---------- Returns and master, pinned under the tracks ---------- */
+
+.pinned-rows { position: sticky; bottom: 0; z-index: 5; border-top: 1px solid var(--line-strong); background: var(--bg, #0b0d12); box-shadow: 0 -6px 14px rgba(0, 0, 0, 0.35); }
+.pinned-rows .track-row.bus-row { height: 30px; }
+.pinned-rows.is-folded .track-row.bus-row { height: 22px; }
+.bus-row .track-head { padding-top: 2px; padding-bottom: 2px; }
+.bus-row .th-name .hslider { flex: 0 1 72px; min-width: 44px; }
+.bus-row .th-name .hslider.is-pan { flex: 0 0 38px; min-width: 38px; }
+.pinned-rows.is-folded .th-line { height: 18px; }
+.bus-row .lane { background: rgba(255, 255, 255, 0.015); }
+.return-row .lane { background: color-mix(in srgb, var(--track-color) 4%, transparent); }
+.return-row .track-head { background: color-mix(in srgb, var(--track-color) 5%, var(--panel)); }
+.bus-row .track-name.is-static { flex: 1; padding: 0 2px; cursor: default; user-select: none; }
+.bus-row .th-mix .hslider { flex: 1; }
+.bus-tag { flex: none; padding: 0 5px; border-radius: 4px; background: color-mix(in srgb, var(--accent-2) 20%, transparent); color: var(--accent-2); font: 700 9.5px/16px var(--mono); }
+.bus-row .return-letter { display: inline-grid; place-items: center; flex: none; width: 16px; height: 16px; border-radius: 4px; background: var(--track-color); color: #0b0d12; font: 700 10px var(--mono); }
+.pinned-add { position: sticky; left: 0; display: flex; align-items: center; width: var(--head); height: 22px; padding: 0 8px 0 12px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.pinned-add select { height: 18px; padding: 0 18px 0 8px; font-size: 10.5px; }
+.pinned-rows.is-folded .pinned-add { display: none; }
+
+/* Wider hit areas for clip edges, without changing how they look. */
+.trim-start, .trim-end { width: 10px; }
+.clip:hover .trim-start { background: linear-gradient(90deg, rgba(255, 255, 255, 0.12) 7px, transparent 7px); }
+.clip:hover .trim-end { background: linear-gradient(270deg, rgba(255, 255, 255, 0.12) 7px, transparent 7px); }
+.clip .fade-in::before, .clip .fade-out::before { content: ""; position: absolute; inset: -4px; }
+.fade-in { left: 10px; }
+.fade-out { right: 10px; }
+.bus-row .th-name .track-name.is-static { flex: 1 1 auto; min-width: 64px; }
+.bus-row .th-name .hslider { flex: 0 1 64px; min-width: 36px; }
+.bus-row .th-name .track-toggles { flex: none; }

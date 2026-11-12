@@ -418,7 +418,24 @@ void Edit::setChainGain (int trackId, bool output, float decibels)
 
 // Arm and monitor are recording state, not edits: not undoable.
 void Edit::setTrackArm (int trackId, bool arm)          { getTrack (trackId).setProperty (ids::arm, arm, nullptr); }
-void Edit::setTrackMonitor (int trackId, bool monitor)  { getTrack (trackId).setProperty (ids::monitor, monitor, nullptr); }
+void Edit::setTrackMonitor (int trackId, bool monitor)
+{
+    auto track = getTrack (trackId);
+    track.setProperty (ids::monitorAuto, false, nullptr);
+    track.setProperty (ids::monitor, monitor, nullptr);
+}
+
+void Edit::setTrackMonitorMode (int trackId, const juce::String& mode)
+{
+    auto track = getTrack (trackId);
+    track.setProperty (ids::monitorAuto, mode == "auto", nullptr);
+    track.setProperty (ids::monitor, mode == "in", nullptr);
+}
+
+juce::String Edit::getTrackMonitorMode (const juce::ValueTree& track)
+{
+    return (bool) track[ids::monitor] ? "in" : (bool) track.getProperty (ids::monitorAuto, false) ? "auto" : "off";
+}
 
 void Edit::setTrackInput (int trackId, Input input)
 {

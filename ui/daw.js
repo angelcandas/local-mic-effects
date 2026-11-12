@@ -15,7 +15,9 @@ import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, 
 
 const nativeDaw = Juce.getNativeFunction("daw");
 
-const HEAD_WIDTH = 210;           // track header column, px (matches daw.css)
+const HEAD_WIDTH = 244;           // track header column, px, by default (--head in daw.css); resizable
+const MIN_HEAD = 170, MAX_HEAD = 420;
+const FOLDED_ROW = 28;             // a folded track's height, px
 const MIN_ROW = 44, MAX_ROW = 200; // track height range, px (vertical zoom)
 const MIN_ZOOM = 4, MAX_ZOOM = 2000; // pixels per second
 const METER_FLOOR_DB = -60;
@@ -52,6 +54,7 @@ async function daw(command, args = {}) {
 }
 
 const REDUCED_MOTION = window.matchMedia?.("(prefers-reduced-motion: reduce)") ?? { matches: false };
+const monitorMode = (track) => track.monitorMode ?? (track.monitor ? "in" : "off");
 const isTyping = (event) => Boolean(event.target.closest?.("input:not([type=range]):not([type=checkbox]), select, textarea, [contenteditable]"));
 const trackColour = (track, index) => track.colour || TRACK_COLOURS[(track.id ?? index) % TRACK_COLOURS.length];
 
@@ -260,9 +263,79 @@ function spokenDuration(seconds) {
   return total < 60 ? `${total} s` : `${Math.floor(total / 60)} min ${total % 60} s`;
 }
 
+//==============================================================================
+// Control precision helpers (knobs, faders, sliders, send boxes).
+
+// Scroll-wheel safety: a control takes the wheel only once the mouse has rested on it
+// for 300 ms, or while it has focus, so scrolling a panel past it changes nothing.
+function wheelReady(element) {
+  let since = 0;
+  element.addEventListener("pointerenter", () => { since = performance.now(); });
+  element.addEventListener("pointerleave", () => { since = 0; });
+  return () => document.activeElement === element || (since > 0 && performance.now() - since >= 300);
+}
+
+// Joins quick changes to one control (wheel ticks, arrow keys) into one undo step: it
+// says "first" only when the last change was over half a second ago.
+function stepper() {
+  let last = 0;
+  return () => {
+    const now = performance.now(), first = now - last > 500;
+    last = now;
+    return first;
+  };
+}
+
+// The number in typed text ("2.5 dB", "−3", "120ms"), or NaN.
+function parseNumber(text) {
+  const match = String(text).replace(/[−–]/g, "-").replace(",", ".").match(/-?\d*\.?\d+/);
+  return match ? Number(match[0]) : NaN;
+}
+
+// Pan typed as "30L", "30 R", "C", "-30" or "0.3".
+function parsePan(text) {
+  const t = String(text).trim().toUpperCase();
+  if (t === "C" || t === "CENTER" || t === "CENTRE") return 0;
+  const n = parseNumber(t);
+  if (Number.isNaN(n)) return NaN;
+  const amount = Math.abs(n) > 1 ? n / 100 : n;
+  return clamp(t.endsWith("L") ? -Math.abs(amount) : t.endsWith("R") ? Math.abs(amount) : amount, -1, 1);
+}
+
+// A send level typed: "off", "-inf" or a number of dB.
+const parseSend = (text) => (/off|inf|∞/i.test(String(text)) ? -100 : parseNumber(text));
+
+// Type a value in place: a small box over `anchor` with the current text selected.
+// Enter or leaving it commits, Escape cancels. onCommit gets the text.
+function typeValue(anchor, text, onCommit) {
+  if (anchor.querySelector(":scope > .value-entry")) return;
+  const input = html("input", "value-entry");
+  Object.assign(input, { value: text, spellcheck: false });
+  input.setAttribute("aria-label", "Type a value");
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    const value = input.value;
+    input.remove();
+    if (commit) onCommit(value);
+    (anchor.closest("[tabindex]") ?? anchor).focus?.({ preventScroll: true });
+  };
+  input.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") finish(true);
+    else if (event.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(true));
+  for (const type of ["pointerdown", "dblclick", "click", "wheel"]) input.addEventListener(type, (event) => event.stopPropagation());
+  anchor.append(input);
+  input.focus();
+  input.select();
+}
+
 class ValueKnob {
-  constructor({ label, min, max, skew = 1, step = 0, unit = "", value, defaultValue, bipolar = false, format, onChange }) {
-    Object.assign(this, { min, max, skew, step, unit, bipolar, onChange, format });
+  constructor({ label, min, max, skew = 1, step = 0, unit = "", value, defaultValue, bipolar = false, format, parse = parseNumber, onChange }) {
+    Object.assign(this, { min, max, skew, step, unit, bipolar, onChange, format, parse });
     this.defaultValue = defaultValue ?? value;
     this.value = value;
     this.dragging = false;
@@ -279,9 +352,15 @@ class ValueKnob {
     this.element.tabIndex = 0;
     this.element.setAttribute("role", "slider");
     this.element.setAttribute("aria-label", label);
-    this.element.title = "Drag or scroll · Shift for fine control · Double-click to reset";
+    this.element.title = "Drag or scroll · Shift for fine control · Double-click to reset · Double-click the value (or Enter) to type it";
+    const wheelOk = wheelReady(this.element), joined = stepper();
 
+    this.readout.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      this.typeValue();
+    });
     this.element.addEventListener("pointerdown", (event) => {
+      if (event.target.closest(".value-entry")) return;
       this.element.focus();
       let start = this.normalised, first = true;
       this.dragging = true;
@@ -291,19 +370,32 @@ class ValueKnob {
       }, () => { this.dragging = false; });
     });
     this.element.addEventListener("wheel", (event) => {
+      if (!wheelOk()) return; // let the panel scroll
       event.preventDefault();
-      this.set(this.fromNormalised(clamp(this.normalised - event.deltaY * (event.shiftKey ? 0.0004 : 0.002))), true);
+      this.set(this.fromNormalised(clamp(this.normalised - event.deltaY * (event.shiftKey ? 0.0004 : 0.002))), joined());
     }, { passive: false });
     this.element.addEventListener("keydown", (event) => {
-      const step = event.shiftKey ? 0.002 : 0.02;
-      const delta = { ArrowUp: step, ArrowRight: step, ArrowDown: -step, ArrowLeft: -step }[event.key];
+      if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        return this.typeValue();
+      }
+      const size = event.shiftKey ? 0.002 : 0.02;
+      const delta = { ArrowUp: size, ArrowRight: size, ArrowDown: -size, ArrowLeft: -size }[event.key];
       if (delta === undefined) return;
       event.preventDefault();
       event.stopPropagation();
-      this.set(this.fromNormalised(clamp(this.normalised + delta)), true);
+      this.set(this.fromNormalised(clamp(this.normalised + delta)), joined());
     });
     this.element.addEventListener("dblclick", () => this.set(this.defaultValue, true));
     this.render();
+  }
+
+  typeValue() {
+    typeValue(this.readout, this.readout.textContent, (text) => {
+      const value = this.parse(text);
+      if (Number.isFinite(value)) this.set(clamp(value, this.min, this.max), true);
+    });
   }
 
   get normalised() {
@@ -354,7 +446,8 @@ class Fader {
     this.element.tabIndex = 0;
     this.element.setAttribute("role", "slider");
     this.element.setAttribute("aria-label", "Volume");
-    this.element.title = "Drag to set the volume · Double-click for 0 dB";
+    this.element.title = "Drag to set the volume · Double-click for 0 dB · Enter to type a value";
+    const wheelOk = wheelReady(this.element), step = stepper();
     this.thumb = html("div", "fader-thumb");
     this.element.append(html("div", "fader-track"), this.thumb);
 
@@ -369,9 +462,27 @@ class Fader {
     });
     this.element.addEventListener("dblclick", () => this.set(0, true));
     this.element.addEventListener("wheel", (event) => {
+      if (!wheelOk()) return;
       event.preventDefault();
-      this.set(Fader.toDecibels(clamp(Fader.toPosition(this.value) - event.deltaY * 0.001)), true);
+      this.set(Fader.toDecibels(clamp(Fader.toPosition(this.value) - event.deltaY * 0.001)), step());
     }, { passive: false });
+    this.element.addEventListener("keydown", (event) => {
+      if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        typeValue(this.element, dbText(this.value), (text) => {
+          const db = /inf/i.test(text) ? FADER_MIN_DB : parseNumber(text);
+          if (Number.isFinite(db)) this.set(clamp(db, FADER_MIN_DB, FADER_MAX_DB), true);
+        });
+        return;
+      }
+      const size = event.shiftKey ? 0.004 : 0.03;
+      const delta = { ArrowUp: size, ArrowRight: size, ArrowDown: -size, ArrowLeft: -size }[event.key];
+      if (delta === undefined) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.set(Fader.toDecibels(clamp(Fader.toPosition(this.value) + delta)), step());
+    });
     this.render();
   }
 
@@ -457,11 +568,12 @@ class StereoLevel {
 // A small horizontal slider for the track headers (volume, pan). Click or drag to
 // set, double-click to reset. onChange (value, first) like the knobs.
 class HSlider {
-  constructor({ value, defaultValue, toPosition, fromPosition, format, title, bipolar = false, onChange }) {
-    Object.assign(this, { value, defaultValue, toPosition, fromPosition, format, bipolar, onChange });
+  constructor({ value, defaultValue, toPosition, fromPosition, format, parse = parseNumber, title, bipolar = false, onChange }) {
+    Object.assign(this, { value, defaultValue, toPosition, fromPosition, format, parse, bipolar, onChange });
     this.dragging = false;
     this.element = html("div", bipolar ? "hslider is-bipolar" : "hslider");
-    this.element.title = `${title} · Drag to change · Shift for fine · Double-click to reset`;
+    this.element.title = `${title} · Drag to change · Shift for fine · Double-click to type · Ctrl+click to reset`;
+    const wheelOk = wheelReady(this.element), step = stepper();
     this.element.setAttribute("role", "slider");
     this.element.setAttribute("aria-label", title);
     this.element.tabIndex = 0;
@@ -471,6 +583,11 @@ class HSlider {
 
     this.element.addEventListener("pointerdown", (event) => {
       event.stopPropagation();
+      if (event.button !== 0 || event.target.closest(".value-entry")) return;
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+        return this.set(this.defaultValue, true);
+      }
       const box = this.element.getBoundingClientRect();
       const start = this.toPosition(this.value);
       let first = true;
@@ -480,17 +597,44 @@ class HSlider {
         first = false;
       }, (moved, e) => {
         this.dragging = false;
-        if (!moved) this.set(this.fromPosition(clamp((e.clientX - box.left) / box.width)), true);
+        if (!moved) {
+          // A click sets the value there; remembered briefly in case it starts a double-click.
+          if (this.beforeClick === undefined) this.beforeClick = this.value;
+          clearTimeout(this.clickTimer);
+          this.clickTimer = setTimeout(() => { this.beforeClick = undefined; }, 400);
+          this.set(this.fromPosition(clamp((e.clientX - box.left) / box.width)), true);
+        }
       });
     });
-    this.element.addEventListener("dblclick", () => this.set(this.defaultValue, true));
+    // A click sets the value where it lands, so the double-click's first click moved it:
+    // put it back before typing.
+    this.element.addEventListener("dblclick", () => {
+      if (this.beforeClick !== undefined) this.set(this.beforeClick, false);
+      this.typeValue();
+    });
+    this.element.addEventListener("wheel", (event) => {
+      if (!wheelOk()) return;
+      event.preventDefault();
+      const delta = (event.deltaX || -event.deltaY) * (event.shiftKey ? 0.0001 : 0.0005);
+      this.set(this.fromPosition(clamp(this.toPosition(this.value) + delta)), step());
+    }, { passive: false });
     this.element.addEventListener("keydown", (event) => {
-      const step = event.shiftKey ? 0.005 : 0.03;
-      const delta = { ArrowRight: step, ArrowUp: step, ArrowLeft: -step, ArrowDown: -step }[event.key];
+      if (event.key === "Enter") {
+        event.preventDefault();
+        event.stopPropagation();
+        return this.typeValue();
+      }
+      if (event.key === "Delete" || event.key === "Backspace") {
+        event.preventDefault();
+        event.stopPropagation();
+        return this.set(this.defaultValue, true);
+      }
+      const size = event.shiftKey ? 0.005 : 0.03;
+      const delta = { ArrowRight: size, ArrowUp: size, ArrowLeft: -size, ArrowDown: -size }[event.key];
       if (delta === undefined) return;
       event.preventDefault();
       event.stopPropagation();
-      this.set(this.fromPosition(clamp(this.toPosition(this.value) + delta)), true);
+      this.set(this.fromPosition(clamp(this.toPosition(this.value) + delta)), step());
     });
     this.render();
   }
@@ -500,6 +644,14 @@ class HSlider {
     this.value = value;
     this.render();
     this.onChange(value, first);
+  }
+
+  typeValue() {
+    typeValue(this.element, this.text.textContent, (text) => {
+      const value = this.parse(text);
+      const ends = [this.fromPosition(0), this.fromPosition(1)];
+      if (Number.isFinite(value)) this.set(clamp(value, Math.min(...ends), Math.max(...ends)), true);
+    });
   }
 
   update(value) {
@@ -520,6 +672,92 @@ class HSlider {
     }
     this.text.textContent = this.format(this.value);
     this.element.setAttribute("aria-valuetext", this.text.textContent);
+  }
+}
+
+//==============================================================================
+// A send level in a small box: the return's letter and the level. Drag up or down (Shift
+// for fine), wheel after resting on it, arrow keys, double-click to type ("off", "-12"),
+// Ctrl+click or Delete for off. onChange (dB, first): -100 is off.
+class SendBox {
+  static MIN = -60;
+  static MAX = 6;
+  static toPosition(db) { return db <= SendBox.MIN + 0.5 ? 0 : Math.pow(clamp((db - SendBox.MIN) / (SendBox.MAX - SendBox.MIN)), 2.2); }
+  static toDecibels(position) {
+    if (position <= 0.001) return -100;
+    const db = SendBox.MIN + (SendBox.MAX - SendBox.MIN) * Math.pow(clamp(position), 1 / 2.2);
+    return Math.abs(db) < 0.3 ? 0 : Math.round(db * 10) / 10;
+  }
+
+  constructor({ letter, name, colour, value, onChange }) {
+    Object.assign(this, { onChange, value });
+    this.dragging = false;
+    this.element = html("div", "send-box");
+    this.element.style.setProperty("--send-color", colour);
+    this.element.tabIndex = 0;
+    this.element.setAttribute("role", "slider");
+    this.element.setAttribute("aria-label", `Send to ${name}`);
+    this.element.title = `Send to ${letter} · ${name}\nDrag up or down · Double-click to type · Ctrl+click: off`;
+    this.text = html("span", "send-box-value");
+    this.element.append(html("span", "send-box-letter", letter), this.text);
+    const wheelOk = wheelReady(this.element), step = stepper();
+
+    this.element.addEventListener("pointerdown", (event) => {
+      event.stopPropagation();
+      if (event.button !== 0 || event.target.closest(".value-entry")) return;
+      this.element.focus();
+      if (event.ctrlKey || event.metaKey) { event.preventDefault(); return this.set(-100, true); }
+      const start = SendBox.toPosition(this.value);
+      let first = true;
+      this.dragging = true;
+      drag(event, (dx, dy, e) => {
+        this.set(SendBox.toDecibels(clamp(start + (dx - dy) / (e.shiftKey ? 600 : 150))), first);
+        first = false;
+      }, () => { this.dragging = false; });
+    });
+    this.element.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      typeValue(this.element, this.value <= -59.5 ? "off" : String(this.value), (text) => {
+        const db = parseSend(text);
+        if (Number.isFinite(db)) this.set(db <= SendBox.MIN ? -100 : clamp(db, SendBox.MIN, SendBox.MAX), true);
+      });
+    });
+    this.element.addEventListener("wheel", (event) => {
+      if (!wheelOk()) return;
+      event.preventDefault();
+      this.set(SendBox.toDecibels(clamp(SendBox.toPosition(this.value) - event.deltaY * (event.shiftKey ? 0.0004 : 0.002))), step());
+    }, { passive: false });
+    this.element.addEventListener("keydown", (event) => {
+      if (event.key === "Delete" || event.key === "Backspace") { event.preventDefault(); event.stopPropagation(); return this.set(-100, true); }
+      const size = event.shiftKey ? 0.004 : 0.03;
+      const delta = { ArrowUp: size, ArrowRight: size, ArrowDown: -size, ArrowLeft: -size }[event.key];
+      if (delta === undefined) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.set(SendBox.toDecibels(clamp(SendBox.toPosition(this.value) + delta)), step());
+    });
+    this.render();
+  }
+
+  set(db, first) {
+    if (db === this.value) return;
+    this.value = db;
+    this.render();
+    this.onChange(db, first);
+  }
+
+  update(db) {
+    if (this.dragging || db === this.value) return;
+    this.value = db;
+    this.render();
+  }
+
+  render() {
+    const on = this.value > -59.5;
+    this.text.textContent = on ? sendText(this.value) : "off";
+    this.element.classList.toggle("is-on", on);
+    this.element.style.setProperty("--level", SendBox.toPosition(this.value));
+    this.element.setAttribute("aria-valuetext", on ? `${dbText(this.value)} dB` : "off");
   }
 }
 
@@ -817,7 +1055,13 @@ class DawScreen {
     this.session = null;
     this.status = { position: 0, length: 0, playing: false, recording: false, tracks: {} };
     this.zoom = 20;            // pixels per second (horizontal zoom)
-    this.rowHeight = 84;       // track height, px (vertical zoom)
+    this.rowHeight = 84;       // track height, px (vertical zoom): tracks without their own
+    this.trackHeights = new Map(); // track id -> its own height, px (dragged at its bottom edge)
+    this.folded = new Set();   // track ids folded to one line
+    this.headWidth = HEAD_WIDTH; // the track header column, px (dragged at its right edge)
+    this.showRouting = false;  // header sections, per project (view state)
+    this.showSends = false;
+    this.pinnedFolded = false; // the return and master rows folded to one line each
     this.follow = true;        // scroll the view with the playhead while playing
     this.tool = "select";      // "select" | "cut" | "gain"
     this.clipboard = null;     // a copied clip
@@ -990,7 +1234,7 @@ class DawScreen {
         drag(event, (dx, dy, e) => {
           time = this.snapTime(marker.time + dx / this.zoom, e);
           flag.style.left = `${time * this.zoom}px`;
-          line.style.left = `${HEAD_WIDTH + time * this.zoom}px`;
+          line.style.left = `${this.headWidth + time * this.zoom}px`;
         }, (moved) => {
           if (moved) daw("setMarker", { id: marker.id, time });
           else this.seek(marker.time);
@@ -1021,7 +1265,7 @@ class DawScreen {
         input.select();
       });
       const line = html("div", "marker-line");
-      line.style.left = `${HEAD_WIDTH + marker.time * this.zoom}px`;
+      line.style.left = `${this.headWidth + marker.time * this.zoom}px`;
       this.ruler.append(flag);
       this.inner.append(line);
     }
@@ -1432,9 +1676,31 @@ class DawScreen {
     const rulerRow = html("div", "ruler-row");
     const corner = html("div", "corner");
     this.clearButton = button("tool clear-mute-solo", "Clear M/S", "Turn every mute and solo off", () => this.run("clearMuteSolo"));
+    // Which header sections every track shows (kept per project), and the column's width.
+    const section = (text, title, key) => {
+      const b = button("toggle head-switch", text, title, () => {
+        this[key] = !this[key];
+        b.setAttribute("aria-pressed", String(this[key]));
+        this.rememberView();
+        this.renderArrange();
+      });
+      b.dataset.key = key;
+      return b;
+    };
+    this.headSwitches = [section("I/O", "Routing: show each track's input, monitoring and output", "showRouting"),
+                         section("Sends", "Sends: show each track's send levels to the returns", "showSends")];
+    const resizer = html("div", "head-resizer");
+    resizer.title = "Drag to widen or narrow the track headers · Double-click: default width";
+    resizer.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.stopPropagation();
+      const start = this.headWidth;
+      drag(event, (dx) => this.setHeadWidth(start + dx), () => this.rememberView());
+    });
+    resizer.addEventListener("dblclick", () => { this.setHeadWidth(HEAD_WIDTH); this.rememberView(); });
     corner.append(button("tool", "+ Track", "Add an audio track (Ctrl+T)", () => this.addTrack()),
                   button("tool", "+ MIDI", "Add a MIDI track with a built-in synth (Ctrl+Shift+T). Pick another instrument in the library.", () => this.addMidiTrack()),
-                  this.clearButton);
+                  this.clearButton, html("span", "corner-gap"), ...this.headSwitches, resizer);
     this.ruler = html("div", "ruler");
     this.ruler.title = "Click to move the playhead · Drag to mark a loop";
     this.loopBand = html("div", "loop-band");
@@ -1452,8 +1718,11 @@ class DawScreen {
     this.tempoRow.hidden = true;
 
     this.rows = html("div", "track-rows");
+    // The returns and the master, pinned to the bottom of the view (sticky).
+    this.pinned = html("div", "pinned-rows");
     this.returnRows = html("div", "return-rows");
-    this.masterRow = html("div", "track-row master-row");
+    this.masterRow = html("div", "master-slot");
+    this.pinned.append(this.returnRows, this.masterRow);
     this.loopShade = html("div", "loop-shade");
     this.playhead = html("div", "daw-playhead");
     this.emptyHint = html("div", "arrange-empty");
@@ -1461,7 +1730,7 @@ class DawScreen {
 
     this.cutGuide = html("div", "cut-guide");
     this.cutGuide.hidden = true;
-    this.inner.append(rulerRow, this.tempoRow, this.rows, this.returnRows, this.masterRow, this.loopShade, this.playhead, this.cutGuide);
+    this.inner.append(rulerRow, this.tempoRow, this.rows, this.pinned, this.loopShade, this.playhead, this.cutGuide);
 
     // Scrolling by hand while playing switches Follow off, so you can look around
     // (and edit) elsewhere while the song keeps playing.
@@ -1500,7 +1769,7 @@ class DawScreen {
       if (!event.ctrlKey && !event.metaKey) return;
       event.preventDefault();
       const box = this.arrange.getBoundingClientRect();
-      const anchor = event.clientX - box.left - HEAD_WIDTH;
+      const anchor = event.clientX - box.left - this.headWidth;
       const seconds = (this.arrange.scrollLeft + anchor) / this.zoom;
       this.beginZoom();
       this.zoom = clamp(this.zoom * Math.exp(-event.deltaY * 0.002), MIN_ZOOM, MAX_ZOOM);
@@ -1515,9 +1784,9 @@ class DawScreen {
       this.cutGuide.hidden = !clip;
       if (!clip) return;
       const box = this.inner.getBoundingClientRect();
-      const time = this.snapTime((event.clientX - box.left - HEAD_WIDTH) / this.zoom, event);
+      const time = this.snapTime((event.clientX - box.left - this.headWidth) / this.zoom, event);
       const clipBox = clip.getBoundingClientRect();
-      this.cutGuide.style.left = `${HEAD_WIDTH + time * this.zoom}px`;
+      this.cutGuide.style.left = `${this.headWidth + time * this.zoom}px`;
       this.cutGuide.style.top = `${clipBox.top - box.top}px`;
       this.cutGuide.style.height = `${clipBox.height}px`;
     });
@@ -1530,7 +1799,7 @@ class DawScreen {
     this.beginZoom();
     this.zoom = clamp(zoom, MIN_ZOOM, MAX_ZOOM);
     this.rememberView();
-    const visible = this.arrange.clientWidth - HEAD_WIDTH;
+    const visible = this.arrange.clientWidth - this.headWidth;
     const playheadX = this.status.position * before - this.arrange.scrollLeft;
     const anchor = playheadX >= 0 && playheadX <= visible ? playheadX : 0;
     const seconds = (this.arrange.scrollLeft + anchor) / before;
@@ -1546,6 +1815,12 @@ class DawScreen {
     this.zooming = true;
     clearTimeout(this.zoomTimer);
     this.zoomTimer = setTimeout(() => { this.zooming = false; this.redrawWaves(); }, 160);
+  }
+
+  setHeadWidth(width) {
+    this.headWidth = Math.round(clamp(width, MIN_HEAD, MAX_HEAD));
+    this.root.style.setProperty("--head", `${this.headWidth}px`);
+    this.renderArrange();
   }
 
   setRowHeight(height) {
@@ -1581,7 +1856,7 @@ class DawScreen {
     let end = this.status.length || 0;
     for (const track of this.session?.tracks ?? [])
       for (const clip of track.clips) end = Math.max(end, clip.start + clip.length);
-    const visible = Math.max(0, this.arrange.clientWidth - HEAD_WIDTH) / this.zoom;
+    const visible = Math.max(0, this.arrange.clientWidth - this.headWidth) / this.zoom;
     return Math.max(end + 30, this.status.position + 10, visible, 60);
   }
 
@@ -1630,7 +1905,7 @@ class DawScreen {
     if (box.top < arrange.top + 30 || box.bottom > arrange.bottom) row.scrollIntoView({ block: "nearest" });
     if (reveal.start !== undefined) {
       const x = reveal.start * this.zoom, left = this.arrange.scrollLeft;
-      if (x < left || x > left + this.arrange.clientWidth - HEAD_WIDTH - 40) this.scrollTo(x - 40);
+      if (x < left || x > left + this.arrange.clientWidth - this.headWidth - 40) this.scrollTo(x - 40);
     }
   }
 
@@ -1644,15 +1919,16 @@ class DawScreen {
       (session.returns ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
       session.master.volume, session.master.inserts.length, session.tempo, session.tempoMap, this.showTempo, session.loop, session.beatsPerBar, session.markers,
       this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight, this.takes.version,
+      this.headWidth, [...this.trackHeights], [...this.folded],
+      this.showRouting, this.showSends, this.pinnedFolded, session.master.pan,
     ]);
     if (!force && signature === this.arrangeSignature) return this.movePlayhead();
     this.arrangeSignature = signature;
 
-    this.inner.style.width = `${HEAD_WIDTH + width}px`;
+    this.inner.style.width = `${this.headWidth + width}px`;
     this.root.style.setProperty("--row", `${this.rowHeight}px`);
+    this.root.style.setProperty("--head", `${this.headWidth}px`);
     this.root.style.setProperty("--clip", `${this.rowHeight - 8}px`);
-    this.inner.classList.toggle("rows-medium", this.rowHeight < 76);
-    this.inner.classList.toggle("rows-small", this.rowHeight < 58);
     this.inner.style.setProperty("--bar", `${this.bar * this.zoom}px`);
     this.inner.style.setProperty("--beat", `${this.beat * this.zoom}px`);
     this.inner.classList.toggle("dense", this.beat * this.zoom < 8);
@@ -1675,8 +1951,7 @@ class DawScreen {
       for (const canvas of this.rows.querySelectorAll("canvas.clip-wave"))
         if (canvas.clip && canvas.drawn) this.oldWaves.set(canvas.clip.id, canvas);
     this.updateTrackRows(force);
-    this.renderReturnRows();
-    this.renderMasterRow();
+    this.renderPinnedRows(force);
     this.emptyHint.hidden = session.tracks.some((track) => track.clips.length > 0);
     this.clearButton.hidden = ![...session.tracks, ...(session.returns ?? [])].some((track) => track.mute || track.solo);
     this.scrollTo(scroll);
@@ -1691,7 +1966,8 @@ class DawScreen {
   // input, kind...). A view change (zoom, height, tempo, tool) or `force` rebuilds all.
   updateTrackRows(force) {
     const session = this.session;
-    const viewKey = JSON.stringify([this.zoom, this.rowHeight, session.tempo, session.tempoMap, session.beatsPerBar, this.snap, this.tool, session.inputs]);
+    const viewKey = JSON.stringify([this.zoom, this.rowHeight, session.tempo, session.tempoMap, session.beatsPerBar, this.snap, this.tool, session.inputs,
+                                     this.showRouting, this.showSends, (session.returns ?? []).map((b) => [b.id, b.name, b.colour])]);
     const rebuild = force || viewKey !== this.rowsViewKey;
     this.rowsViewKey = viewKey;
     const existing = new Map(rebuild ? [] : [...this.rows.querySelectorAll(":scope > .track-row")].map((row) => [row.dataset.track, row]));
@@ -1747,31 +2023,60 @@ class DawScreen {
       element.style.width = `${(loop.end - loop.start) * this.zoom}px`;
     }
     this.loopBand.style.left = `${loop.start * this.zoom}px`;
-    this.loopShade.style.left = `${HEAD_WIDTH + loop.start * this.zoom}px`;
+    this.loopShade.style.left = `${this.headWidth + loop.start * this.zoom}px`;
+  }
+
+  // A track's height on screen: folded, its own (dragged), or the global height.
+  trackHeight(id) {
+    if (this.folded.has(id)) return FOLDED_ROW;
+    return this.trackHeights.get(id) ?? this.rowHeight;
   }
 
   // Everything a track row draws apart from what update() can change in place: when
-  // this differs, the row is built again. Volume, pan, the switches, the name and the
-  // selection are left out, so moving a fader or selecting a track keeps the row (and
-  // its focus, hover and the control under the mouse).
+  // this differs, the row is built again. Volume, pan, the switches, the monitor mode,
+  // the name, sends, output and the selection are left out, so moving a fader or a send
+  // or selecting a track keeps the row (and its focus, hover and the control under the
+  // mouse).
   trackRowKey(track) {
-    const { volume, pan, mute, solo, arm, monitor, name, inserts, ...rest } = track;
+    const { volume, pan, mute, solo, arm, monitor, monitorMode, name, inserts, sends, output, ...rest } = track;
     const links = track.link ? this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name) : null;
-    return JSON.stringify([rest, inserts.length, links]); // the colour comes from the id, not the index
+    // The colour comes from the id, not the index.
+    return JSON.stringify([rest, inserts.length, links, this.trackHeight(track.id), this.folded.has(track.id)]);
   }
 
+  // Which header lines fit a row of this height, in order: name, mix, routing, sends.
+  headerLines(height, kind = "audio") {
+    const fit = Math.max(1, 1 + Math.floor((height - 10 - 22) / 25));
+    const lines = ["name"];
+    if (fit >= 2) lines.push("mix");
+    if (this.showRouting && lines.length < fit) lines.push("routing");
+    if (this.showSends && (this.session.returns ?? []).length && lines.length < fit) lines.push("sends");
+    if (kind === "midi" && !lines.includes("routing") && lines.length < fit) lines.push("routing"); // the instrument
+    return lines;
+  }
+
+  // A track's header: its name, then the mix (M, S, arm, monitor, volume, pan), then the
+  // routing (input or instrument, output) and the sends when their switches are on and
+  // the row is tall enough; a stereo meter down the right edge.
   createTrackRow(track, index) {
     const row = html("div", "track-row");
     row.dataset.track = track.id;
     row.track = track; // the latest session's copy, see update below
-    row.style.setProperty("--track-color", trackColour(track, index));
+    const colour = trackColour(track, index);
+    row.style.setProperty("--track-color", colour);
+    const height = this.trackHeight(track.id);
+    row.style.setProperty("--row", `${height}px`);
+    row.style.setProperty("--clip", `${height - 8}px`);
+    const folded = this.folded.has(track.id);
+    row.classList.toggle("is-folded", folded);
     const current = () => row.track;
+    const isMidi = track.kind === "midi";
+    row.classList.toggle("is-midi", isMidi);
 
     const head = html("div", "track-head");
     head.addEventListener("pointerdown", (event) => {
-      if (!event.target.closest("button, input, .hslider")) this.select(track.id, null);
+      if (!event.target.closest("button, input, select, .hslider, .send-box")) this.select(track.id, null);
     });
-
     head.addEventListener("contextmenu", (event) => {
       if (event.target.closest("input")) return;
       event.preventDefault();
@@ -1779,11 +2084,25 @@ class DawScreen {
       this.openTrackMenu(current(), event.clientX, event.clientY);
     });
 
+    // Name line: fold, name, link, effects.
+    const fold = button("th-fold", folded ? "▸" : "▾", folded ? "Unfold the track" : "Fold the track to one line", () => this.toggleFold(track.id));
     const name = html("input", "track-name");
     Object.assign(name, { value: track.name, spellcheck: false, title: "Rename the track" });
     name.addEventListener("change", () => daw("setTrack", { id: track.id, name: name.value.trim() || current().name }));
     name.addEventListener("keydown", (event) => { if (event.key === "Enter") name.blur(); });
+    const nameLine = html("div", "th-line th-name");
+    nameLine.append(fold, name);
+    if (track.link) {
+      // Linked tracks warp as one (Pitch & time → Linked tracks).
+      const others = this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name);
+      const chain = html("span", "track-link", `⛓${track.link}`);
+      chain.title = `Linked with ${others.join(", ") || "no other track"}: warping and quantizing apply to all of them, in phase`;
+      nameLine.append(chain);
+    }
+    const fx = button("fx-count", track.inserts.length ? `${track.inserts.length} fx` : "+ fx", "Effects on this track", () => this.select(track.id, null, true, !track.inserts.length));
+    nameLine.append(fx);
 
+    // Mix line: M, S, arm, monitor, volume, pan.
     const toggles = html("div", "track-toggles");
     const switches = {};
     const toggle = (key, text, title) => {
@@ -1791,48 +2110,36 @@ class DawScreen {
       switches[key] = b;
       return b;
     };
-    const isMidi = track.kind === "midi";
-    row.classList.toggle("is-midi", isMidi);
-    toggles.append(toggle("mute", "M", "Mute"), toggle("solo", "S", "Solo (Alt+click: solo only this track)"),
-                   toggle("arm", "●", isMidi ? "Arm to record from your MIDI keyboard (you hear it while armed)" : "Arm for recording"),
-                   toggle("monitor", "In", isMidi ? "Play this track's instrument from your MIDI keyboard" : `Hear the input (${inputText(track.input, this.session.inputs)}) through this track's effects`));
+    toggles.append(toggle("mute", "M", "Mute (0)"), toggle("solo", "S", "Solo (S) · Alt+click: solo only this track"),
+                   toggle("arm", "●", isMidi ? "Arm to record from your MIDI keyboard (you hear it while armed)" : "Arm for recording (A)"));
+    const monitor = isMidi
+      ? toggle("monitor", "In", "Play this track's instrument from your MIDI keyboard")
+      : button("tt tt-monitor", "Off", "", () => {
+          const next = { off: "in", in: "auto", auto: "off" }[monitorMode(current())];
+          daw("setTrack", { id: track.id, monitorMode: next });
+        });
+    toggles.append(monitor);
     const takesToggle = this.takes.createToggle(track);
     if (takesToggle) toggles.append(takesToggle);
     row.classList.toggle("has-takes", Boolean(takesToggle && track.takesShown));
-    if (track.link) {
-      // Linked tracks warp as one (Pitch & time → Linked tracks).
-      const others = this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name);
-      const chain = html("span", "track-link", `⛓${track.link}`);
-      chain.title = `Linked with ${others.join(", ") || "no other track"}: warping and quantizing apply to all of them, in phase`;
-      toggles.append(chain);
-    }
-
-    const meter = new Level(false, track.id);
-    row.meter = meter;
-
-    const fx = button("fx-count", track.inserts.length ? `${track.inserts.length} fx` : "+ fx", "Effects on this track", () => this.select(track.id, null));
-    const remove = button("mini is-danger track-remove", "×", "Delete the track", async () => {
-      const gone = current();
-      await daw("removeTrack", { id: gone.id });
-      if (gone.clips.length > 0) toast(`Deleted "${gone.name}".`, "", "undo");
-    });
 
     const send = (key) => (value, first) => daw("setTrack", { id: track.id, [key]: value, continue: !first });
     const volume = new HSlider({ value: track.volume, defaultValue: 0, toPosition: Fader.toPosition, fromPosition: Fader.toDecibels,
+                                 parse: (t) => (/inf/i.test(t) ? FADER_MIN_DB : parseNumber(t)),
                                  format: (v) => `${dbText(v)} dB`, title: "Volume", onChange: send("volume") });
     const pan = new HSlider({ value: track.pan, defaultValue: 0, toPosition: (v) => (v + 1) / 2,
                               fromPosition: (p) => (Math.abs(p - 0.5) < 0.01 ? 0 : Math.round((p * 2 - 1) * 100) / 100),
-                              format: panText, title: "Pan", bipolar: true, onChange: send("pan") });
+                              parse: parsePan, format: panText, title: "Pan", bipolar: true, onChange: send("pan") });
     pan.element.classList.add("is-pan");
-    const top = html("div", "track-head-top");
-    const duplicate = button("mini track-duplicate", "⧉", "Duplicate the track with its clips and effects (Ctrl+Shift+D)", () => this.duplicateTrack(track.id));
-    top.append(html("span", "track-swatch"), name, duplicate, remove);
-    const bottom = html("div", "track-head-bottom");
-    bottom.append(toggles, fx);
-    let chip = null;
+    const mixLine = html("div", "th-line th-mix");
+    mixLine.append(toggles, volume.element, pan.element);
+
+    // Routing line: where the sound comes from (input, or the instrument) and where it goes.
+    const routingLine = html("div", "th-line th-routing");
+    let input = null;
     if (isMidi) {
       const instrument = track.instrument ?? {};
-      chip = button("instrument-chip", `${instrument.error ? "⚠ " : "♫ "}${instrument.name || "Instrument"}`,
+      const chip = button("instrument-chip", `${instrument.error ? "⚠ " : "♫ "}${instrument.name || "Instrument"}`,
         instrument.error ? instrument.error
           : instrument.hasWindow ? `${instrument.name}: open its window` : `${instrument.name} (built-in). Drag another instrument here from the library to swap it.`,
         () => {
@@ -1842,10 +2149,33 @@ class DawScreen {
           else toast("Double-click the lane to add a MIDI clip; pick another instrument in the library or the piano roll.");
         });
       chip.classList.toggle("has-error", Boolean(instrument.error));
+      routingLine.append(chip);
+    } else {
+      input = this.createInputPicker(track);
+      routingLine.append(input.element);
     }
-    const mix = html("div", "track-head-mix");
-    mix.append(volume.element, pan.element);
-    head.append(top, ...(chip ? [chip] : []), bottom, mix, meter.element);
+    const output = this.createOutputPicker(track);
+    routingLine.append(html("span", "th-arrow", "→"), output.element);
+
+    // Sends line: one box per return.
+    const sendsLine = html("div", "th-line th-sends");
+    const sendBoxes = new Map();
+    (this.session.returns ?? []).forEach((bus, i) => {
+      const box = new SendBox({ letter: returnLetter(i), name: bus.name, colour: returnColour(bus, i), value: -100,
+        onChange: (db, first) => daw("setSend", { id: track.id, target: bus.id, level: db, continue: !first }) });
+      sendBoxes.set(bus.id, box);
+      sendsLine.append(box.element);
+    });
+
+    const lines = { name: nameLine, mix: mixLine, routing: routingLine, sends: sendsLine };
+    const body = html("div", "track-head-body");
+    body.append(...this.headerLines(height, track.kind).map((key) => lines[key]));
+
+    const meter = new StereoLevel(track.id);
+    meter.element.classList.add("head-meter");
+    row.meter = meter;
+
+    head.append(html("span", "track-swatch"), body, meter.element, this.createHeightHandle(row, track.id));
 
     // Clicking a lane selects the track; it only moves the playhead while stopped, so
     // you can click around while a take plays back. (The ruler always moves it.)
@@ -1869,7 +2199,7 @@ class DawScreen {
       });
     }
 
-    for (const clip of track.clips) lane.append(this.createClip(clip, track));
+    for (const clip of track.clips) lane.append(this.createClip(clip, track, height));
     if (track.ride?.length) lane.append(this.createRide(track.ride));
     for (const automation of track.automation ?? []) lane.append(this.createAutomation(automation));
 
@@ -1882,9 +2212,23 @@ class DawScreen {
       row.classList.toggle("is-muted", Boolean(latest.mute));
       row.classList.toggle("is-armed", Boolean(latest.arm));
       for (const [key, b] of Object.entries(switches)) b.setAttribute("aria-pressed", String(Boolean(latest[key])));
+      if (!isMidi) {
+        const mode = monitorMode(latest);
+        monitor.textContent = { in: "In", auto: "Auto", off: "Off" }[mode];
+        monitor.dataset.mode = mode;
+        monitor.setAttribute("aria-pressed", String(mode !== "off"));
+        monitor.title = `Monitor: ${{ in: "In: always hear the input", auto: "Auto: hear the input while the track is armed", off: "Off: don't hear the input" }[mode]}`
+          + ` (${inputText(latest.input, this.session.inputs)}, through this track's effects). Click: In → Auto → Off.`;
+      }
       if (document.activeElement !== name) name.value = latest.name;
       volume.update(latest.volume);
       pan.update(latest.pan);
+      input?.update(latest);
+      output.update(latest);
+      for (const [target, box] of sendBoxes) {
+        const s = (latest.sends ?? []).find((x) => x.target === target);
+        box.update(s ? s.level : -100);
+      }
       for (const clip of lane.querySelectorAll(":scope > .clip"))
         clip.classList.toggle("is-selected", String(this.selectedClip) === clip.dataset.clip);
     };
@@ -1892,7 +2236,60 @@ class DawScreen {
     return row;
   }
 
+  // Where a track plays: the master, or into a return (a group bus).
+  createOutputPicker(track) {
+    const returns = this.session.returns ?? [];
+    const element = html("select", "dropdown track-output");
+    element.title = "Output: where this track plays, the master or into a return (a group bus)";
+    element.append(new Option("Master", "0"));
+    returns.forEach((bus, index) => element.append(new Option(`${returnLetter(index)} · ${bus.name}`, String(bus.id))));
+    element.addEventListener("change", () => daw("setOutput", { id: track.id, output: Number(element.value) }));
+    const update = (t) => { if (document.activeElement !== element) element.value = String(t.output ?? 0); };
+    update(track);
+    return { element, update };
+  }
 
+  // The bottom edge of a track's header: drag to set that track's height, double-click
+  // to give it the global height back.
+  createHeightHandle(row, id) {
+    const handle = html("div", "th-resize");
+    handle.title = "Drag to change this track's height · Double-click: back to the global height";
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      event.stopPropagation();
+      const start = this.trackHeight(id);
+      let height = start;
+      this.dragging = true;
+      drag(event, (dx, dy) => {
+        height = Math.round(clamp(start + dy, MIN_ROW, MAX_ROW));
+        row.style.setProperty("--row", `${height}px`);
+        row.style.setProperty("--clip", `${height - 8}px`);
+      }, (moved) => {
+        this.dragging = false;
+        if (moved) {
+          this.folded.delete(id);
+          this.trackHeights.set(id, height);
+          this.rememberView();
+        }
+        this.flushSession();
+      });
+    });
+    handle.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      this.trackHeights.delete(id);
+      this.folded.delete(id);
+      this.rememberView();
+      this.renderArrange();
+    });
+    return handle;
+  }
+
+  toggleFold(id) {
+    if (this.folded.has(id)) this.folded.delete(id);
+    else this.folded.add(id);
+    this.rememberView();
+    this.renderArrange();
+  }
 
   // A track's volume ride (automation), drawn over its clips: the middle is 0 dB, the
   // top and bottom ±12 dB. It holds its last value after the last point.
@@ -1936,54 +2333,99 @@ class DawScreen {
     return wrap;
   }
 
-  // Return tracks under the tracks: no clips, just their name, level and effects.
-  renderReturnRows() {
-    const returns = this.session.returns ?? [];
-    this.returnRows.replaceChildren(...returns.map((bus, index) => {
-      const row = html("div", "track-row master-row return-row");
-      row.dataset.track = bus.id;
-      row.style.setProperty("--track-color", returnColour(bus, index));
-      const head = html("div", "track-head");
-      head.addEventListener("pointerdown", (event) => { if (!event.target.closest("button")) this.select(bus.id, null); });
-      const meter = new Level(false, bus.id);
-      this.meters.set(bus.id, meter);
-      const top = html("div", "track-head-top");
-      top.append(html("span", "track-swatch return-letter", returnLetter(index)), html("span", "track-name is-static", bus.name),
-                 html("span", "master-volume", `${dbText(bus.volume)} dB`));
+  // The return and master rows, pinned under the tracks so they never scroll away: name,
+  // M and S (returns), effects, volume, pan and a stereo meter. "+ Return" after them;
+  // double-clicking a name folds or unfolds them all. Updated in place like the tracks.
+  renderPinnedRows(force) {
+    const session = this.session;
+    const returns = session.returns ?? [];
+    const key = JSON.stringify([force ? Math.random() : 0, this.pinnedFolded, returns.map((b) => [b.id, b.name, b.colour, b.inserts.length]),
+                                session.master.inserts.length]);
+    if (key !== this.pinnedKey) {
+      this.pinnedKey = key;
+      this.busRows = [...returns.map((bus, index) => this.createBusRow(bus, index, "return")), this.createBusRow(session.master, 0, "master")];
+      const add = html("div", "pinned-add");
+      const pick = html("select", "dropdown add-return");
+      pick.title = "Add a return track: a shared effect every track can send to";
+      pick.append(new Option("+ Return", ""));
+      for (const [effect, name] of RETURN_EFFECTS) pick.append(new Option(name, effect));
+      pick.addEventListener("change", () => {
+        const effect = pick.value;
+        pick.value = "";
+        if (effect !== "") this.addReturn(effect === "none" ? "" : effect);
+      });
+      add.append(pick);
+      this.returnRows.replaceChildren(...this.busRows.slice(0, -1), add);
+      this.masterRow.replaceChildren(this.busRows.at(-1));
+      this.pinned.classList.toggle("is-folded", this.pinnedFolded);
+    }
+    returns.forEach((bus, i) => this.busRows[i].update(bus));
+    this.busRows.at(-1).update(session.master);
+    for (const row of this.busRows) this.meters.set(row.busId, row.meter);
+  }
+
+  createBusRow(bus, index, kind) {
+    const isMaster = kind === "master";
+    const id = isMaster ? 0 : bus.id;
+    const row = html("div", `track-row bus-row ${isMaster ? "master-row" : "return-row"}`);
+    row.dataset.track = id;
+    row.busId = id;
+    if (!isMaster) row.style.setProperty("--track-color", returnColour(bus, index));
+    const head = html("div", "track-head");
+    head.addEventListener("pointerdown", (event) => { if (!event.target.closest("button, .hslider, select")) this.select(id, null); });
+    const nameText = isMaster ? "Master" : bus.name;
+    const name = html("span", "track-name is-static", nameText);
+    name.title = `${isMaster ? "All tracks sum here" : `Return ${returnLetter(index)}: tracks send to it`} · Double-click to fold or unfold the returns and master`;
+    name.addEventListener("dblclick", () => {
+      this.pinnedFolded = !this.pinnedFolded;
+      this.rememberView();
+      this.renderArrange();
+    });
+    const nameLine = html("div", "th-line th-name");
+    nameLine.append(isMaster ? html("span", "bus-tag", "Main") : html("span", "return-letter", returnLetter(index)), name);
+    const switches = {};
+    if (!isMaster) {
       const toggles = html("div", "track-toggles");
       for (const [key, text, title] of [["mute", "M", "Mute this return"], ["solo", "S", "Solo this return"]]) {
-        const b = button(`tt tt-${key}`, text, title, (event) => this.toggleTrackKey(bus, key, !bus[key], event));
-        b.setAttribute("aria-pressed", String(Boolean(bus[key])));
+        const b = button(`tt tt-${key}`, text, title, (event) => this.toggleTrackKey(row.bus, key, !row.bus[key], event));
+        switches[key] = b;
         toggles.append(b);
       }
-      const fx = button("fx-count", bus.inserts.length ? `${bus.inserts.length} fx` : "+ fx", "Effects on this return", () => this.select(bus.id, null));
-      const bottom = html("div", "track-head-bottom");
-      bottom.append(html("span", "track-caption", "Return"), toggles, fx);
-      head.append(top, bottom, meter.element);
-      row.classList.toggle("is-selected", this.selectedTrack === bus.id);
-      row.append(head, html("div", "lane"));
-      return row;
-    }));
+      nameLine.append(toggles);
+    }
+
+    const send = (key) => (value, first) => daw(isMaster ? "setMaster" : "setTrack", { ...(isMaster ? {} : { id }), [key]: value, continue: !first });
+    const volume = new HSlider({ value: bus.volume, defaultValue: 0, toPosition: Fader.toPosition, fromPosition: Fader.toDecibels,
+                                 parse: (t) => (/inf/i.test(t) ? FADER_MIN_DB : parseNumber(t)),
+                                 format: (v) => `${dbText(v)} dB`, title: isMaster ? "Master volume" : "Return volume", onChange: send("volume") });
+    const pan = new HSlider({ value: bus.pan ?? 0, defaultValue: 0, toPosition: (v) => (v + 1) / 2,
+                              fromPosition: (p) => (Math.abs(p - 0.5) < 0.01 ? 0 : Math.round((p * 2 - 1) * 100) / 100),
+                              parse: parsePan, format: panText, title: isMaster ? "Master balance" : "Pan", bipolar: true, onChange: send("pan") });
+    pan.element.classList.add("is-pan");
+    if (!this.pinnedFolded) nameLine.append(volume.element, pan.element);
+    nameLine.title = `${bus.inserts.length} effect${bus.inserts.length === 1 ? "" : "s"}: click to show ${bus.inserts.length ? "them" : "the effects panel"}`;
+
+    const body = html("div", "track-head-body");
+    body.append(nameLine);
+    const meter = new StereoLevel(id);
+    meter.element.classList.add("head-meter");
+    row.meter = meter;
+    head.append(html("span", "track-swatch"), body, meter.element);
+    row.append(head, html("div", "lane"));
+
+    row.update = (latest) => {
+      row.bus = latest;
+      row.classList.toggle("is-selected", this.selectedTrack === id);
+      row.classList.toggle("is-muted", Boolean(latest.mute));
+      for (const [key, b] of Object.entries(switches)) b.setAttribute("aria-pressed", String(Boolean(latest[key])));
+      volume.update(latest.volume);
+      pan.update(latest.pan ?? 0);
+    };
+    row.update(bus);
+    return row;
   }
 
-  renderMasterRow() {
-    const master = this.session.master;
-    const head = html("div", "track-head");
-    head.addEventListener("pointerdown", () => this.select(0, null));
-    const meter = new Level(false, 0);
-    this.meters.set(0, meter);
-    const top = html("div", "track-head-top");
-    top.append(html("span", "track-swatch"), html("span", "track-name is-static", "Master"),
-               html("span", "master-volume", `${dbText(master.volume)} dB`));
-    const fx = button("fx-count", master.inserts.length ? `${master.inserts.length} fx` : "+ fx", "Effects on the master bus", () => this.select(0, null));
-    const bottom = html("div", "track-head-bottom");
-    bottom.append(html("span", "track-caption", "All tracks sum here"), fx);
-    head.append(top, bottom, meter.element);
-    this.masterRow.classList.toggle("is-selected", this.selectedTrack === 0);
-    this.masterRow.replaceChildren(head, html("div", "lane"));
-  }
-
-  createClip(clip, track) {
+  createClip(clip, track, height = this.trackHeight(track.id)) {
     const element = html("div", "clip");
     element.dataset.clip = clip.id;
     element.classList.toggle("is-selected", this.selectedClip === clip.id);
@@ -2004,6 +2446,7 @@ class DawScreen {
     const canvas = kept ?? html("canvas", "clip-wave");
     canvas.dataset.color = trackColour(track, this.session.tracks.indexOf(track));
     canvas.clip = clip;
+    canvas.laneHeight = height - 8; // the track's own height (tracks can differ)
     if (kept) {
       const scale = this.zoom / (kept.zoomAt || this.zoom);
       kept.style.left = `${kept.cssLeft * scale}px`;
@@ -2056,7 +2499,7 @@ class DawScreen {
 
       if (this.tool === "cut") {
         const box = this.inner.getBoundingClientRect();
-        const time = this.snapTime((event.clientX - box.left - HEAD_WIDTH) / this.zoom, event);
+        const time = this.snapTime((event.clientX - box.left - this.headWidth) / this.zoom, event);
         if (time > clip.start + 0.01 && time < clip.start + clip.length - 0.01) daw("split", { id: clip.id, time });
         return;
       }
@@ -2152,7 +2595,7 @@ class DawScreen {
     if (this.zooming && canvas.drawn) return; // keep the stretched picture until zooming stops
 
     const zoom = this.zoom;
-    const view = Math.max(1, this.arrange.clientWidth - HEAD_WIDTH) / zoom;
+    const view = Math.max(1, this.arrange.clientWidth - this.headWidth) / zoom;
     const left = this.arrange.scrollLeft / zoom;
     const s0 = Math.max(clip.start, left - view / 2);
     const s1 = Math.min(clip.start + clip.length, left + view * 1.5);
@@ -2226,7 +2669,7 @@ class DawScreen {
     const ratio = window.devicePixelRatio || 1;
     const cssWidth = Math.min(Math.max(2, clip.length * zoom), 16000 / ratio);
     const width = Math.max(1, Math.round(cssWidth * ratio));
-    const height = Math.max(1, Math.round((this.rowHeight - 8) * ratio));
+    const height = Math.max(1, Math.round((canvas.laneHeight ?? this.rowHeight - 8) * ratio));
     const visible = clip.notes.filter((n) => n.time < clip.offset + clip.length && n.time + n.length > clip.offset);
     const key = ["midi", cssWidth, width, height, clip.offset, canvas.dataset.color, visible.map((n) => `${n.pitch}:${n.time}:${n.length}`).join(",")].join();
     if (canvas.drawn === key) return;
@@ -2299,13 +2742,13 @@ class DawScreen {
 
   movePlayhead(force = false) {
     if (!this.tempoMap.steady) this.showTempoValue();
-    const x = HEAD_WIDTH + Math.max(0, this.status.position) * this.zoom;
+    const x = this.headWidth + Math.max(0, this.status.position) * this.zoom;
     this.playhead.style.transform = `translateX(${x}px)`;
 
     // With Follow on, page along with the playhead while playing.
     if ((this.status.playing || force) && this.follow && !this.dragging && this.view === "arrange") {
       const left = this.arrange.scrollLeft, visible = this.arrange.clientWidth;
-      if (x > left + visible - 40 || x < left + HEAD_WIDTH) this.scrollTo(x - HEAD_WIDTH - 40);
+      if (x > left + visible - 40 || x < left + this.headWidth) this.scrollTo(x - this.headWidth - 40);
     }
   }
 
@@ -2335,7 +2778,7 @@ class DawScreen {
       const canvas = region.firstChild;
       const ratio = window.devicePixelRatio || 1;
       const width = Math.max(1, Math.round(Math.min(length * this.zoom, 16000 / ratio) * ratio));
-      const height = Math.max(1, Math.round((this.rowHeight - 8) * ratio));
+      const height = Math.max(1, Math.round(((row.offsetHeight || this.rowHeight) - 9) * ratio));
       if (canvas.width !== width) canvas.width = width;
       if (canvas.height !== height) canvas.height = height;
       const context = canvas.getContext("2d");
@@ -2603,6 +3046,8 @@ class DawScreen {
       zoom: this.zoom, rowHeight: this.rowHeight, left: Math.round(this.arrange.scrollLeft), top: Math.round(this.arrange.scrollTop),
       track: this.selectedTrack, view: this.view, follow: this.follow, grid: this.grid, snap: this.snap,
       dock: { hidden: this.root.classList.contains("dock-hidden"), height: this.dockHeight, tab: this.dockTab },
+      head: this.headWidth, heights: Object.fromEntries(this.trackHeights), folded: [...this.folded],
+      routing: this.showRouting, sends: this.showSends, pinnedFolded: this.pinnedFolded,
     };
   }
 
@@ -2622,6 +3067,11 @@ class DawScreen {
     let state = null;
     try { state = text ? JSON.parse(text) : null; } catch { state = null; }
     this.savedView = text || "";
+    // Another project: its own heights, folds and sections (none saved: the defaults).
+    this.trackHeights = new Map();
+    this.folded = new Set();
+    this.showRouting = this.showSends = this.pinnedFolded = false;
+    this.headSwitches.forEach((b) => b.setAttribute("aria-pressed", "false"));
     if (!state || typeof state !== "object") return null;
     this.restoringView = true;
     const num = (value, fallback) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
@@ -2634,6 +3084,14 @@ class DawScreen {
       this.selectedTrack = state.track;
       this.selectedClip = null;
     }
+    this.headWidth = Math.round(clamp(num(state.head, HEAD_WIDTH), MIN_HEAD, MAX_HEAD));
+    this.trackHeights = new Map(Object.entries(state.heights && typeof state.heights === "object" ? state.heights : {})
+      .map(([id, h]) => [Number(id), Math.round(clamp(num(h, this.rowHeight), MIN_ROW, MAX_ROW))]));
+    this.folded = new Set(Array.isArray(state.folded) ? state.folded.map(Number) : []);
+    this.showRouting = Boolean(state.routing);
+    this.showSends = Boolean(state.sends);
+    this.pinnedFolded = Boolean(state.pinnedFolded);
+    this.headSwitches.forEach((b) => b.setAttribute("aria-pressed", String(this[b.dataset.key])));
     if (state.view === "arrange" || state.view === "mixer") {
       this.view = state.view;
       this.root.classList.toggle("show-mixer", this.view === "mixer");
@@ -3676,7 +4134,7 @@ class DawScreen {
     this.clockTime.textContent = formatDuration(status.position);
     this.loading = status.loading;
 
-    const neededWidth = HEAD_WIDTH + this.timelineSeconds() * this.zoom;
+    const neededWidth = this.headWidth + this.timelineSeconds() * this.zoom;
     if ((lengthChanged || neededWidth > this.inner.offsetWidth + 1) && !this.dragging) this.renderArrange();
     else this.movePlayhead();
     if (status.recording || this.rows.querySelector(".rec-region")) this.updateRecording();
@@ -3685,7 +4143,8 @@ class DawScreen {
 
   tickMeters(elapsed) {
     const level = (id) => (id === 0 ? this.status.master : this.status.tracks?.[id]);
-    for (const [id, meter] of this.meters) meter.push(level(id), elapsed);
+    const stereo = (id) => this.status.stereo?.[id] ?? [level(id), level(id)];
+    for (const [id, meter] of this.meters) meter.push(meter instanceof StereoLevel ? stereo(id) : level(id), elapsed);
     this.inputMeter.push(this.status.input, elapsed);
     if (this.status.input !== undefined) {
       this.inputPeak = Math.max(this.status.input, (this.inputPeak ?? -100) - elapsed * 0.01);
@@ -3698,7 +4157,6 @@ class DawScreen {
       this.chainGains.output.meter.push(chain?.out, elapsed);
       this.status.chains = undefined;
     }
-    const stereo = (id) => this.status.stereo?.[id] ?? [level(id), level(id)];
     if (this.view === "mixer") for (const [id, strip] of this.strips) strip.meter.push(stereo(id), elapsed);
     this.status.master = undefined;
     if (this.status.tracks) this.status.tracks = {};
@@ -3718,7 +4176,8 @@ class DawScreen {
     ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["Ctrl+Shift+T", "New MIDI track"], ["Ctrl+Shift+D", "Duplicate the selected track"],
                 ["Ctrl+R", "Rename the selected track"], ["Ctrl+Delete", "Delete the selected track"],
                 ["0", "Mute the selected track"], ["S", "Solo the selected track"], ["Alt+click S", "Solo only that track"],
-                ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track"],
+                ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track (In / Off; the header button also has Auto)"],
+                ["Double-click a value / Enter", "Type a value (volume, pan, sends, knobs)"], ["Ctrl+click a slider", "Reset it"],
                 ["Q / Ctrl+U", "Quantize the selected clip (or track), with the Pitch & time settings"]]],
     ["Computer keyboard piano", [["M", "Turn the computer keyboard into a MIDI keyboard on / off (toolbar piano button)"],
                                  ["A S D F G H J K", "White keys, C to C (; adds one more)"], ["W E T Y U O P", "Black keys"],
@@ -3797,7 +4256,7 @@ class DawScreen {
     const next = index < 0 ? clips[step > 0 ? 0 : clips.length - 1] : clips[clamp(index + step, 0, clips.length - 1)];
     this.select(track.id, next.id);
     const x = next.start * this.zoom, left = this.arrange.scrollLeft;
-    if (x < left || x > left + this.arrange.clientWidth - HEAD_WIDTH - 40) this.scrollTo(x - 40);
+    if (x < left || x > left + this.arrange.clientWidth - this.headWidth - 40) this.scrollTo(x - 40);
   }
 
   //============================================================================ computer keyboard as MIDI
@@ -4085,7 +4544,7 @@ class DawScreen {
 
   // Zooms so start..end fills the view, with a little room on both sides.
   zoomToRange(start, end) {
-    const visible = Math.max(100, this.arrange.clientWidth - HEAD_WIDTH);
+    const visible = Math.max(100, this.arrange.clientWidth - this.headWidth);
     const span = Math.max(0.05, end - start);
     this.zoom = clamp((visible * 0.92) / span, MIN_ZOOM, MAX_ZOOM);
     this.renderArrange(true);
