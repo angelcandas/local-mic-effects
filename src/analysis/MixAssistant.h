@@ -140,6 +140,10 @@ struct MixOptions
     bool sends = true;
     int reverbReturn = 0;
 
+    // Echo throws: on the lead's echo, its mix rises on the last word of each phrase and
+    // falls back as the next one starts (effect automation), so the tail fills the gap.
+    bool throws = true;
+
     // Insert types each track already has (by track id). A voice that already has a
     // reverb or an echo keeps its own space: Auto Mix doesn't add or change one.
     std::map<int, std::vector<fx::ModuleType>> existingInserts;
@@ -174,6 +178,9 @@ struct MixMove
     bool atEnd = false;              // a new insert goes after the track's own effects (reverb)
     int instance = 0;                // which insert of that type (0: the first; 1: a second one, added if missing)
     int sendTo = 0;                  // a return's id: values {"send": dB}, the track's send to it (no insert)
+    // Effect automation on the insert: automation[valueId] = (seconds, value) points
+    // (applyMix scales them from the value set in `values` by the amount).
+    std::map<juce::String, std::vector<std::pair<double, float>>> automation;
     std::map<juce::String, float> values; // insert values by ID, or "volume" in dB
     std::vector<std::pair<double, float>> ride; // volume automation (seconds, dB), when not empty (no insert, no values)
     juce::StringArray reasons;       // one line per change, for the UI

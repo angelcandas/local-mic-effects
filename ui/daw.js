@@ -1518,6 +1518,7 @@ class DawScreen {
 
     for (const clip of track.clips) lane.append(this.createClip(clip, track));
     if (track.ride?.length) lane.append(this.createRide(track.ride));
+    for (const automation of track.automation ?? []) lane.append(this.createAutomation(automation));
 
     row.append(head, lane);
     return row;
@@ -1537,6 +1538,29 @@ class DawScreen {
     const most = Math.max(...points.map(([, db]) => Math.abs(db)));
     const label = html("span", "lane-ride-label", `ride ±${most.toFixed(1)} dB`);
     label.title = "Volume ride (automation) on top of the fader. Right-click the track's name to clear it.";
+    const wrap = html("div", "lane-ride-wrap");
+    wrap.append(box, label);
+    return wrap;
+  }
+
+  // An effect value's automation, drawn over the clips like a ride: bottom to top is the
+  // lowest to the highest value it reaches (and 0 for a mix).
+  createAutomation({ type, value, points }) {
+    const width = Math.max(1, (points[points.length - 1][0] + 4) * this.zoom);
+    const values = points.map(([, v]) => v);
+    const low = Math.min(0, ...values), high = Math.max(...values, low + 1e-6);
+    const y = (v) => 96 - (v - low) / (high - low) * 80;
+    const coords = points.map(([t, v]) => `${(t * this.zoom).toFixed(1)},${y(v).toFixed(2)}`);
+    coords.push(`${width.toFixed(1)},${y(values[values.length - 1]).toFixed(2)}`);
+    const box = svg("svg", { class: "lane-ride lane-automation", viewBox: `0 0 ${width.toFixed(1)} 100`, preserveAspectRatio: "none" });
+    box.style.width = `${width}px`;
+    box.append(svg("polyline", { points: coords.join(" ") }));
+    const name = value.replace(/^delay/, "echo ").replace(/^reverb/, "reverb ").replace(/^chorus/, "chorus ").toLowerCase();
+    const label = html("span", "lane-ride-label lane-automation-label", `${name} ${Math.round(low)}–${Math.round(high)}`);
+    label.title = `Effect automation (${type}). Right-click the track's name to clear it.`;
+    // Where it first moves, clear of the clip's name at its start.
+    const moves = points.findIndex(([, v], i) => i > 0 && v !== points[0][1]);
+    label.style.left = `${Math.max(4, (moves > 0 ? points[moves][0] : 0) * this.zoom + 6)}px`;
     const wrap = html("div", "lane-ride-wrap");
     wrap.append(box, label);
     return wrap;
@@ -3442,6 +3466,7 @@ class DawScreen {
     rule();
     item("Add effect…", () => { this.select(track.id, null); this.setDockTab?.("effects"); toast("Pick an effect from Add effect, or drag one from the library."); });
     item("Clear volume ride", () => daw("setTrack", { id: track.id, clearRide: true }), { disabled: !track.ride?.length });
+    item("Clear effect automation", () => daw("setTrack", { id: track.id, clearAutomation: true }), { disabled: !track.automation?.length });
     item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
     item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
     if (track.kind !== "midi")

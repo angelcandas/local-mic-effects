@@ -198,10 +198,13 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
 
     if (tree.hasType (ids::INSERT))
     {
-        if (property == ids::type)
+        // A new type, or automation added, changed or removed (or a value under
+        // automation, whose own setting the lanes go back to): a rebuild.
+        if (property == ids::type || property == ids::automation || tree.hasProperty (ids::automation))
         {
             triggerAsyncUpdate();
-            return;
+            if (property == ids::type || property == ids::automation)
+                return;
         }
 
         // An insert value: straight into the running module, no rebuild.
@@ -476,6 +479,22 @@ void DawEngine::rebuild()
 
         for (const auto& point : Edit::getVolumeRide (trackTree))
             track.ride.emplace_back ((juce::int64) std::llround (point.time * sampleRate), point.db);
+
+        for (const auto& insert : Edit::getInserts (trackTree))
+            for (const auto& [valueId, points] : Edit::getInsertAutomation (insert))
+            {
+                const auto module = track.strip->modulesByInsertId.find ((int) insert[ids::id]);
+                if (module == track.strip->modulesByInsertId.end())
+                    continue;
+                Track::Lane lane;
+                lane.value = module->second->findValue (valueId);
+                if (lane.value == nullptr)
+                    continue;
+                lane.base = (float) insert.getProperty (juce::Identifier (valueId), 0.0f);
+                for (const auto& point : points)
+                    lane.points.emplace_back ((juce::int64) std::llround (point.time * sampleRate), point.value);
+                track.lanes.push_back (std::move (lane));
+            }
 
         for (const auto& clipTree : trackTree)
         {
@@ -1104,6 +1123,19 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         {
             strip.buffer.addFrom (0, 0, input, numSamples);
             strip.buffer.addFrom (1, 0, input, numSamples);
+        }
+
+        // Effect automation: each value where the timeline is (knob values glide, so a
+        // block-rate update doesn't click); back to the insert's own when stopped.
+        if (! track.lanes.empty())
+        {
+            if (isPlaying)
+                for (auto& lane : track.lanes)
+                    lane.value->store (rideDbAt (lane.points, blockStart), std::memory_order_relaxed);
+            else if (track.automating)
+                for (auto& lane : track.lanes)
+                    lane.value->store (lane.base, std::memory_order_relaxed);
+            track.automating = isPlaying;
         }
 
         auto block = juce::dsp::AudioBlock<float> (strip.buffer).getSubBlock (0, (size_t) numSamples);

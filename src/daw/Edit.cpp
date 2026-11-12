@@ -733,6 +733,80 @@ void Edit::setVolumeRide (int trackId, const std::vector<RidePoint>& points)
     track.setProperty (ids::ride, parts.joinIntoString (";"), undoTarget);
 }
 
+void Edit::setInsertAutomation (int insertId, const juce::String& valueId, const std::vector<AutomationPoint>& points)
+{
+    auto insert = getInsert (insertId);
+    if (! insert.isValid() || ! insert.hasProperty (juce::Identifier (valueId)))
+        return;
+
+    auto lanes = getInsertAutomation (insert);
+    if (points.empty())
+        lanes.erase (valueId);
+    else
+    {
+        auto sorted = points;
+        std::stable_sort (sorted.begin(), sorted.end(), [] (const auto& a, const auto& b) { return a.time < b.time; });
+        lanes[valueId] = sorted;
+    }
+
+    if (lanes.empty())
+    {
+        insert.removeProperty (ids::automation, undoTarget);
+        return;
+    }
+
+    juce::StringArray text;
+    for (const auto& [id, lane] : lanes)
+    {
+        juce::StringArray parts;
+        for (const auto& point : lane)
+            parts.add (juce::String (juce::jmax (0.0, point.time), 3) + ":" + juce::String (point.value, 3));
+        text.add (id + "=" + parts.joinIntoString (";"));
+    }
+    insert.setProperty (ids::automation, text.joinIntoString ("|"), undoTarget);
+}
+
+Edit::Automation Edit::getInsertAutomation (const juce::ValueTree& insert)
+{
+    Automation lanes;
+    for (const auto& lane : juce::StringArray::fromTokens (insert[ids::automation].toString(), "|", ""))
+    {
+        const auto id = lane.upToFirstOccurrenceOf ("=", false, false).trim();
+        if (id.isEmpty() || ! lane.containsChar ('='))
+            continue;
+        std::vector<AutomationPoint> points;
+        for (const auto& part : juce::StringArray::fromTokens (lane.fromFirstOccurrenceOf ("=", false, false), ";", ""))
+            if (part.containsChar (':'))
+                points.push_back ({ juce::jmax (0.0, part.upToFirstOccurrenceOf (":", false, false).getDoubleValue()),
+                                    (float) part.fromFirstOccurrenceOf (":", false, false).getDoubleValue() });
+        std::stable_sort (points.begin(), points.end(), [] (const auto& a, const auto& b) { return a.time < b.time; });
+        if (! points.empty())
+            lanes[id] = points;
+    }
+    return lanes;
+}
+
+float Edit::getAutomationValueAt (const std::vector<AutomationPoint>& points, double time)
+{
+    if (points.empty())
+        return 0.0f;
+    if (time <= points.front().time)
+        return points.front().value;
+    if (time >= points.back().time)
+        return points.back().value;
+    const auto next = std::upper_bound (points.begin(), points.end(), time, [] (double t, const AutomationPoint& p) { return t < p.time; });
+    const auto prev = next - 1;
+    const auto x = (time - prev->time) / juce::jmax (1.0e-9, next->time - prev->time);
+    return (float) (prev->value + x * (next->value - prev->value));
+}
+
+void Edit::clearTrackAutomation (int trackId)
+{
+    for (auto insert : getInserts (getChannel (trackId)))
+        if (insert.hasProperty (ids::automation))
+            insert.removeProperty (ids::automation, undoTarget);
+}
+
 std::vector<Edit::RidePoint> Edit::getVolumeRide (const juce::ValueTree& track)
 {
     std::vector<RidePoint> points;

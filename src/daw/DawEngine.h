@@ -239,6 +239,17 @@ private:
         std::vector<MidiEvent> midiEvents; // MIDI tracks, in time order
         std::vector<std::pair<juce::int64, float>> ride; // volume automation: timeline sample, dB (Edit::RidePoint)
 
+        // Effect automation (Edit::setInsertAutomation): each lane drives one value of one
+        // of the strip's modules while playing, and puts back `base` when playback stops.
+        struct Lane
+        {
+            fx::Module::Value* value = nullptr;
+            std::vector<std::pair<juce::int64, float>> points; // timeline sample, value
+            float base = 0.0f;
+        };
+        std::vector<Lane> lanes;
+        bool automating = false;
+
         // Latency compensation, before the inserts (audio thread).
         Delay delay;
     };
