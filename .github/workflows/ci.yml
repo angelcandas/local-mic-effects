@@ -95,7 +95,6 @@ jobs:
 
   macos:
     name: macOS build + tests
-    if: github.event_name != 'pull_request'
     runs-on: macos-15
     timeout-minutes: 60
     steps:
