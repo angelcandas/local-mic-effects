@@ -1556,6 +1556,9 @@ class DawScreen {
     const name = value.replace(/^delay/, "echo ").replace(/^reverb/, "reverb ").replace(/^chorus/, "chorus ").toLowerCase();
     const label = html("span", "lane-ride-label lane-automation-label", `${name} ${Math.round(low)}–${Math.round(high)}`);
     label.title = `Effect automation (${type}). Right-click the track's name to clear it.`;
+    // Where it first moves, clear of the clip's name at its start.
+    const moves = points.findIndex(([, v], i) => i > 0 && v !== points[0][1]);
+    label.style.left = `${Math.max(4, (moves > 0 ? points[moves][0] : 0) * this.zoom + 6)}px`;
     const wrap = html("div", "lane-ride-wrap");
     wrap.append(box, label);
     return wrap;
