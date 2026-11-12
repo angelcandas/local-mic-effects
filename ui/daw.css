@@ -2207,3 +2207,24 @@ body.is-daw .library-hint { display: none; }
 
 /* ---------- Selection: a box drawn on empty lane space ---------- */
 .select-box { position: absolute; z-index: 6; border: 1px solid var(--accent); border-radius: 3px; background: color-mix(in srgb, var(--accent) 12%, transparent); pointer-events: none; }
+
+/* ---------- Group tracks: a foldable header over its tracks ---------- */
+
+.group-row .track-head { background: color-mix(in srgb, var(--track-color) 9%, var(--panel)); }
+.group-row .track-name { font-weight: 600; }
+.group-row .th-name { gap: 4px; }
+.group-row .th-name .track-name { flex: 1 1 auto; min-width: 40px; }
+.group-row .fx-count { white-space: nowrap; }
+.group-row .th-mix .hslider { flex: 1 1 auto; min-width: 40px; }
+.group-row .th-mix .hslider.is-pan { flex: 0 0 44px; min-width: 44px; }
+.group-row .lane { background: color-mix(in srgb, var(--track-color) 5%, transparent); }
+.group-clip { position: absolute; top: 30%; height: 40%; border-radius: 2px; background: color-mix(in srgb, var(--track-color) 55%, transparent); pointer-events: none; }
+.group-row.is-muted .group-clip { opacity: 0.4; }
+
+/* The tracks of a group: a bar of the group's colour down the left, and hidden while the group is folded. */
+.track-row.in-group .track-head { box-shadow: inset 5px 0 0 var(--group-color, var(--accent-2)); }
+.track-row.in-group .track-swatch { margin-left: 10px; }
+.in-folded-group { display: none !important; }
+
+.strip.is-group .strip-name { color: var(--text); font-weight: 600; }
+.strip.is-group { background: color-mix(in srgb, var(--track-color) 6%, var(--panel)); }
