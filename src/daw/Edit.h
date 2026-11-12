@@ -31,6 +31,8 @@
 //             transpose (semitones), warp (warp::Map as text),
 //             stretch (warp::Algorithm key; mix when missing), formant (keep formants),
 //             musical (follows the tempo map), clipTempo (the file's own tempo, BPM)
+//             pitchNotes (the sung notes and their edits, see analysis::pitch::toString;
+//                         missing when the take's notes aren't edited)
 //             take (the TAKE this piece of the comp came from; missing when none)
 //       CLIP  kind "midi", id, name, start, offset, length, mute          (MIDI clips)
 //         NOTE  id, pitch (0..127), time, length, velocity (1..127)
@@ -96,6 +98,7 @@ namespace ids
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns) MICFX_DAW_ID (group) MICFX_DAW_ID (folded)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
+    MICFX_DAW_ID (pitchNotes)
     MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight)
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
 #undef MICFX_DAW_ID
@@ -289,6 +292,12 @@ public:
     // transpose keeps the voice's formants.
     void setClipStretch (int clipId, warp::Algorithm);
     void setClipFormant (int clipId, bool);
+
+    // The note pitch editor: the take's sung notes with their edits (in the file's time, see
+    // analysis/Pitch.h). One undo step; no edited note removes them. Every clip showing the
+    // same take renders with them. Ignored on linked clips.
+    void setClipNotes (int clipId, const std::vector<analysis::pitch::Note>&);
+    static std::vector<analysis::pitch::Note> getClipNotes (const juce::ValueTree& clip);
     void setTrackTranspose (int trackId, double semitones);
 
     //==============================================================================

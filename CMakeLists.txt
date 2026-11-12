@@ -79,6 +79,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/MixAssistant.h
     src/analysis/Beats.cpp
     src/analysis/Beats.h
+    src/analysis/Pitch.cpp
+    src/analysis/Pitch.h
     src/analysis/TakeComp.cpp
     src/analysis/TakeComp.h
     src/Parameters.cpp

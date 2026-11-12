@@ -27,6 +27,7 @@
 #include "daw/PluginHost.h"
 #include "daw/Project.h"
 #include "daw/Warp.h"
+#include "analysis/Pitch.h"
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
 #include "daw/Quantize.h"
@@ -4377,6 +4378,35 @@ namespace
             const auto grooved = run ("quantize", args ({ { "track", voiceTrack }, { "groove", drumsTrack }, { "steps", 1.0 }, { "strength", 0.8 } }));
             check (ok (grooved) && (int) grooved["moved"] == 5, "quantize to the leading track's groove");
 
+            // The note pitch editor's commands: the view arrives off the message thread, and
+            // edits go on the clip (and show in the session).
+            {
+                juce::var view;
+                bridge.handle ("pitchNotes", args ({ { "id", voiceClip } }), [&] (juce::var r) { view = r; });
+                for (int i = 0; i < 500 && view.isVoid(); ++i)
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+                check (ok (view) && view["notes"].isArray() && view["times"].size() == view["pitch"].size() && view["times"].size() > 10
+                           && ! (bool) view["edited"],
+                       "pitchNotes describes a clip's notes and pitch line");
+                auto* note = new juce::DynamicObject();
+                note->setProperty ("start", 0.1);
+                note->setProperty ("end", 0.4);
+                note->setProperty ("pitch", 60.0);
+                note->setProperty ("shift", 1.0);
+                check (ok (run ("setPitchNotes", args ({ { "id", voiceClip }, { "notes", juce::Array<juce::var> { juce::var (note) } } }))),
+                       "setPitchNotes stores edits");
+                auto described = false;
+                const auto sessionNow = lastSession();
+                if (const auto* list = sessionNow["tracks"].getArray())
+                    for (const auto& t : *list)
+                        if (const auto* clips = t["clips"].getArray())
+                            for (const auto& c : *clips)
+                                described = described || ((int) c["id"] == voiceClip && (bool) c["pitchEdited"]);
+                check (described, "and the session says the clip's notes are edited");
+                run ("setPitchNotes", args ({ { "id", voiceClip }, { "notes", juce::Array<juce::var>() } }));
+                check (! edit.getClip (voiceClip).hasProperty (daw::ids::pitchNotes), "no notes takes the edits off");
+            }
+
             check (ok (run ("clearWarp", args ({ { "clips", juce::Array<juce::var> { voiceClip } } })))
                        && ! edit.getClip (voiceClip).hasProperty (daw::ids::warp), "clearWarp puts the clip back as recorded");
 
@@ -5205,6 +5235,178 @@ namespace
         check (daw::Edit::getLinkedClips (edit.getClip (c1)).isEmpty() && ! daw::Edit::getClipWarp (edit.getClip (c2)).isIdentity(),
                "unlinking keeps each clip's warp as it was");
 
+        folder.deleteRecursively();
+    }
+
+    // A sung line for the note pitch editor: harmonic tones on A3, B3 (legato), a rest, then
+    // C4 with vibrato (5.5 Hz, half a semitone each way).
+    juce::AudioBuffer<float> makeMelody()
+    {
+        juce::AudioBuffer<float> out (1, (int) (2.1 * sampleRate));
+        out.clear();
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+        double phase = 0.0;
+        for (int i = 0; i < out.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            double midi = 0.0, level = 0.0;
+            if (t >= 0.1 && t < 0.6)        midi = 57.0, level = 1.0;
+            else if (t >= 0.6 && t < 1.1)   midi = 59.0, level = 1.0;
+            else if (t >= 1.25 && t < 1.95) midi = 60.0 + 0.5 * std::sin (twoPi * 5.5 * (t - 1.25)), level = 1.0;
+            if (level == 0.0)
+                continue;
+            // 10 ms fades at the ends of the phrases
+            const auto edge = juce::jmin (std::abs (t - 0.1), std::abs (t - 1.1), std::abs (t - 1.25), std::abs (t - 1.95));
+            level *= juce::jmin (1.0, edge / 0.01);
+            phase += twoPi * 440.0 * std::pow (2.0, (midi - 69.0) / 12.0) / sampleRate;
+            double value = 0.0;
+            for (int h = 1; h <= 10; ++h)
+                value += std::sin (phase * h) / h;
+            out.setSample (0, i, (float) (0.2 * level * value));
+        }
+        return out;
+    }
+
+    void testPitchNotes()
+    {
+        std::cout << "\nNote pitch editor (sung notes, per-note edits)\n";
+        namespace pitch = analysis::pitch;
+        const auto melody = makeMelody();
+        const auto track = pitch::analyse (melody, sampleRate);
+        const auto notes = pitch::findNotes (track);
+
+        juce::String found;
+        for (const auto& n : notes)
+            found << juce::String (n.start, 2) << "-" << juce::String (n.end, 2) << " @" << juce::String (n.pitch, 2) << "  ";
+        check (notes.size() == 3, "three sung notes found (" + found + ")");
+        if (notes.size() != 3)
+            return;
+        check (std::abs (notes[0].pitch - 57.0f) < 0.1f && std::abs (notes[1].pitch - 59.0f) < 0.1f && std::abs (notes[2].pitch - 60.0f) < 0.15f,
+               "each at the pitch sung, vibrato or not");
+        check (std::abs (notes[0].start - 0.1) < 0.03 && std::abs (notes[1].start - 0.6) < 0.04 && std::abs (notes[2].start - 1.25) < 0.03
+                   && std::abs (notes[2].end - 1.95) < 0.03,
+               "and where it was sung: legato notes split at the pitch change, the rest leaves a gap");
+
+        auto edited = notes;
+        edited[1].shift = -2.0f;
+        edited[1].transition = 0.08f;
+        check (pitch::fromString (pitch::toString (edited)).size() == 3
+                   && std::abs (pitch::fromString (pitch::toString (edited))[1].shift + 2.0f) < 1e-3f
+                   && std::abs (pitch::fromString (pitch::toString (edited))[1].transition - 0.08f) < 1e-3f,
+               "notes and their edits save to text and back");
+
+        // Rendered: the moved note sings two semitones lower, its neighbours stay.
+        daw::warp::Settings settings;
+        settings.notes = edited;
+        check (! settings.isNeutral() && settings.getKey() != daw::warp::Settings().getKey(), "edited notes need a rendered copy of their own");
+        const auto out = daw::warp::render (melody, sampleRate, settings);
+        const auto after = pitch::analyse (out, sampleRate);
+        const auto p1 = pitch::getPitch (after, 0.15, 0.55), p2 = pitch::getPitch (after, 0.7, 1.05), p3 = pitch::getPitch (after, 1.3, 1.9);
+        check (out.getNumSamples() == melody.getNumSamples(), "same length");
+        check (std::abs (p2 - 57.0f) < 0.15f, "the moved note is two semitones down (" + juce::String (p2, 2) + ")");
+        check (std::abs (p1 - 57.0f) < 0.15f && std::abs (p3 - 60.0f) < 0.2f,
+               "the notes around it stay (" + juce::String (p1, 2) + ", " + juce::String (p3, 2) + ")");
+
+        // Vibrato off, then the level of the first note down 6 dB.
+        const auto spread = [] (const pitch::Track& t, double a, double b)
+        {
+            double sum = 0.0, squares = 0.0;
+            int count = 0;
+            for (int i = t.frameAt (a); i <= t.frameAt (b); ++i)
+                if (const auto m = t.midi[(size_t) i]; m > 0.0f)
+                    sum += m, squares += m * m, ++count;
+            return count > 1 ? std::sqrt (juce::jmax (0.0, squares / count - (sum / count) * (sum / count))) : 0.0;
+        };
+        auto calm = notes;
+        calm[2].vibrato = 0.0f;
+        calm[0].gain = -6.0f;
+        daw::warp::Settings calmSettings;
+        calmSettings.notes = calm;
+        const auto calmOut = daw::warp::render (melody, sampleRate, calmSettings);
+        const auto calmTrack = pitch::analyse (calmOut, sampleRate);
+        const auto wobbleBefore = spread (track, 1.35, 1.85), wobbleAfter = spread (calmTrack, 1.35, 1.85);
+        check (wobbleAfter < 0.35 * wobbleBefore, "vibrato taken out (" + juce::String (wobbleBefore, 2) + " -> " + juce::String (wobbleAfter, 2) + " st)");
+        check (std::abs (pitch::getPitch (calmTrack, 1.3, 1.9) - 60.0f) < 0.15f, "and the note stays on its pitch");
+        const auto level = [] (const juce::AudioBuffer<float>& b, double from, double to)
+        {
+            return b.getRMSLevel (0, (int) (from * sampleRate), (int) ((to - from) * sampleRate));
+        };
+        const auto drop = juce::Decibels::gainToDecibels (level (calmOut, 0.2, 0.5) / level (melody, 0.2, 0.5));
+        const auto kept = juce::Decibels::gainToDecibels (level (calmOut, 0.7, 1.0) / level (melody, 0.7, 1.0));
+        check (std::abs (drop + 6.0f) < 0.75f && std::abs (kept) < 0.75f,
+               "a note's level moves just that note (" + juce::String (drop, 1) + " dB, next " + juce::String (kept, 1) + " dB)");
+
+        // A formant shift brightens just that note's character; its pitch stays.
+        {
+            const auto brightness = [] (const juce::AudioBuffer<float>& audio, double from)
+            {
+                constexpr int order = 13, size = 1 << order;
+                juce::dsp::FFT fft (order);
+                std::vector<float> data ((size_t) size * 2, 0.0f);
+                const auto start = (int) (from * sampleRate);
+                for (int i = 0; i < size; ++i)
+                    data[(size_t) i] = audio.getSample (0, start + i) * (0.5f - 0.5f * (float) std::cos (juce::MathConstants<double>::twoPi * i / size));
+                fft.performFrequencyOnlyForwardTransform (data.data());
+                double sum = 0.0, weighted = 0.0;
+                for (int k = 1; k < size / 2; ++k)
+                    if (const auto f = k * sampleRate / size; f > 200.0 && f < 8000.0)
+                        sum += data[(size_t) k], weighted += data[(size_t) k] * f;
+                return sum > 0.0 ? weighted / sum : 0.0;
+            };
+            // A vowel-like buzz: G3 with a resonance around 700 Hz, then the same a semitone up.
+            juce::AudioBuffer<float> vowel (1, (int) (1.6 * sampleRate));
+            for (int i = 0; i < vowel.getNumSamples(); ++i)
+            {
+                const auto t = i / sampleRate;
+                const auto f0 = t < 0.8 ? 196.0 : 207.65;
+                double value = 0.0;
+                for (int h = 1; f0 * h < 5000.0; ++h)
+                    value += std::exp (-std::pow ((f0 * h - 700.0) / 350.0, 2.0)) * std::sin (juce::MathConstants<double>::twoPi * f0 * h * t);
+                vowel.setSample (0, i, (float) (0.2 * value));
+            }
+            auto vowelNotes = pitch::findNotes (pitch::analyse (vowel, sampleRate));
+            check (vowelNotes.size() == 2, "a vowel sung on two notes");
+            if (vowelNotes.size() == 2)
+            {
+                vowelNotes[0].formant = 4.0f;
+                daw::warp::Settings brightSettings;
+                brightSettings.notes = vowelNotes;
+                const auto brightOut = daw::warp::render (vowel, sampleRate, brightSettings);
+                const auto before = brightness (vowel, 0.3), afterShift = brightness (brightOut, 0.3);
+                check (afterShift > before * 1.12 && std::abs (pitch::getPitch (pitch::analyse (brightOut, sampleRate), 0.1, 0.7) - 55.0f) < 0.15f,
+                       "a formant shift moves the note's character (" + juce::String (before, 0) + " -> " + juce::String (afterShift, 0) + " Hz), not its pitch");
+                check (std::abs (brightness (brightOut, 1.2) / brightness (vowel, 1.2) - 1.0) < 0.04, "and leaves the next note alone");
+            }
+        }
+
+        {
+            juce::AudioBuffer<float> minute (2, (int) (60.0 * sampleRate));
+            for (int at = 0; at < minute.getNumSamples(); at += melody.getNumSamples())
+                for (int ch = 0; ch < 2; ++ch)
+                    minute.copyFrom (ch, at, melody, 0, 0, juce::jmin (melody.getNumSamples(), minute.getNumSamples() - at));
+            const auto started = juce::Time::getMillisecondCounterHiRes();
+            const auto longTrack = pitch::analyse (minute, sampleRate);
+            const auto found = pitch::findNotes (longTrack).size();
+            std::cout << "  INFO  a minute of stereo: pitch and " << found << " notes in "
+                      << juce::String ((juce::Time::getMillisecondCounterHiRes() - started) / 1000.0, 2) << " s\n";
+        }
+
+        // In a project: stored on the clip, undoable, and only while something is edited.
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-notes");
+        folder.createDirectory();
+        const auto file = folder.getChildFile ("melody.wav");
+        writeWav (file, melody, sampleRate);
+        const auto trackId = (int) edit.addTrack ("Voice")[daw::ids::id];
+        const auto clip = (int) edit.addClip (trackId, file, 0.0, 2.0)[daw::ids::id];
+        edit.setClipNotes (clip, notes);
+        check (! edit.getClip (clip).hasProperty (daw::ids::pitchNotes), "unedited notes aren't stored");
+        edit.getUndoManager().beginNewTransaction();
+        edit.setClipNotes (clip, edited);
+        const auto settingsNow = daw::Edit::getWarpSettings (edit.getClip (clip));
+        check (settingsNow.notes.size() == 3 && ! settingsNow.isNeutral(), "edited notes go into the clip's render settings");
+        edit.getUndoManager().undo();
+        check (! edit.getClip (clip).hasProperty (daw::ids::pitchNotes), "and undo");
         folder.deleteRecursively();
     }
 
@@ -7066,6 +7268,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=notes: just the note pitch editor.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "notes")
+    {
+        testPitchNotes();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     testPitchDetector();
     testPitchShift();
     testAutotune();
@@ -7093,6 +7303,7 @@ int main()
     testMusicalMode();
     testLinkedTracks();
     testWarp();
+    testPitchNotes();
     testRhythm();
     testTrackTools();
     testDawBridge();
