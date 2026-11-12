@@ -5,7 +5,7 @@ namespace micfx::inst
 {
 std::vector<const Spec*> getAllSpecs()
 {
-    return { &getGrandSpec(), &getNovaSpec() };
+    return { &getGrandSpec(), &getNovaSpec(), &getTinesSpec(), &getDrawbarSpec() };
 }
 
 const Spec* findSpec (const juce::String& key)

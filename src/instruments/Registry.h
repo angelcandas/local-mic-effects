@@ -7,6 +7,8 @@ namespace micfx::inst
 {
 const Spec& getGrandSpec();
 const Spec& getNovaSpec();
+const Spec& getTinesSpec();
+const Spec& getDrawbarSpec();
 
 // In the order the library lists them.
 std::vector<const Spec*> getAllSpecs();

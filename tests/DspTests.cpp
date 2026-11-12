@@ -3928,6 +3928,16 @@ namespace
         engine.rebuildNow();
 
         check (engine.getInstrument (keys) != nullptr && engine.getInstrumentError (keys).isEmpty(), "the engine makes the instrument");
+
+        // These checks time notes and measure pitch exactly: a plain, dry, quickly damped Keys.
+        if (auto* tines = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (keys).get()))
+        {
+            for (const auto* id : { "tremDepth", "chorus", "room", "drive", "release", "tone", "bark", "bell" })
+                if (auto* parameter = tines->getState().getParameter (id))
+                    parameter->setValueNotifyingHost (0.0f);
+            engine.captureInstrumentStates();
+            engine.rebuildNow();
+        }
         check (engine.getLength() == (juce::int64) (1.5 * sampleRate), "a MIDI clip counts towards the song's length");
 
         engine.play();
@@ -6950,8 +6960,10 @@ namespace
             check (sounding == presets && clean == presets && quietAfter == presets,
                    spec->name + ": all " + juce::String (presets) + " presets play cleanly and end" + problems);
 
-            // In tune.
+            // In tune (the organ on a registration without its sub-octave 16' bar).
             instrument.setCurrentProgram (0);
+            if (spec->key == "drawbar")
+                instrument.loadPreset ("Soft Ballad");
             instrument.reset();
             const auto a4 = playInstrument (instrument, chord ({ 69 }, 0.0, 1.0), 1.0);
             const auto f = estimateFrequency (a4[0], (size_t) (0.2 * sampleRate), (size_t) (0.6 * sampleRate));
@@ -7018,7 +7030,7 @@ namespace
             auto* nova = dynamic_cast<micfx::inst::InstrumentProcessor*> (pad.get());
             check (nova != nullptr && nova->getSpec().key == "nova" && nova->getPresetName() == "Warm Pad"
                        && daw::instruments::hasWindow ("builtin:pad") && daw::instruments::hasWindow ("builtin:grand")
-                       && ! daw::instruments::hasWindow ("builtin:keys"),
+                       && daw::instruments::hasWindow ("builtin:keys") && ! daw::instruments::hasWindow ("builtin:nothing"),
                    "a project's \"builtin:pad\" opens on Nova's Warm Pad, with a window");
         }
     }

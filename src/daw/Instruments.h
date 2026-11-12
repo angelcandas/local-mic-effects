@@ -7,8 +7,8 @@
 #include <memory>
 
 // Instruments for MIDI tracks: the MicFX instruments (src/instruments: Grand, Nova, ...)
-// and a couple of simple synths built in, so a MIDI track makes sound without any
-// plugin, and VST3/AU instrument plugins through PluginHost.
+// built in, so a MIDI track makes sound without any plugin, and VST3/AU instrument
+// plugins through PluginHost.
 //
 // An instrument is a juce::AudioProcessor: MIDI in, stereo out. The engine makes one per
 // MIDI track from the track's INSTRUMENT tree (see Edit.h) and restores its saved state.
