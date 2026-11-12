@@ -2295,7 +2295,7 @@ class DawScreen {
       ? toggle("monitor", "In", "Play this track's instrument from your MIDI keyboard")
       : button("tt tt-monitor", "Off", "", () => {
           const next = { off: "in", in: "auto", auto: "off" }[monitorMode(current())];
-          daw("setTrack", { id: track.id, monitorMode: next });
+          this.eachStep(this.tracksFor(track.id), (id, more) => daw("setTrack", { id, monitorMode: next, continue: more }));
         });
     toggles.append(monitor);
     const takesToggle = this.takes.createToggle(track);
@@ -3271,7 +3271,8 @@ class DawScreen {
         // In / Auto / Off, as on the track header.
         const monitor = button("tt tt-monitor", "Off", "Monitor: In → Auto → Off", () => {
           const latest = this.session.tracks.find((t) => t.id === track.id) ?? track;
-          daw("setTrack", { id: track.id, monitorMode: { off: "in", in: "auto", auto: "off" }[monitorMode(latest)] });
+          const next = { off: "in", in: "auto", auto: "off" }[monitorMode(latest)];
+          this.eachStep(this.tracksFor(track.id), (id, more) => daw("setTrack", { id, monitorMode: next, continue: more }));
         });
         buttons.append(monitor);
         continue;
