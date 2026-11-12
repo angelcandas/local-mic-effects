@@ -157,6 +157,8 @@ juce::String Settings::getKey() const
         key << "|" << getAlgorithmKey (algorithm);
     if (formant)
         key << "|formant";
+    if (linked.size() > 1)
+        key << "|linked " << juce::String::toHexString (linked.joinIntoString ("\n").hashCode64());
     return key;
 }
 
@@ -702,5 +704,48 @@ juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& source, double 
     }
 
     return vocode (source, sampleRate, map, ratio, outLength, options, shouldContinue);
+}
+
+std::vector<juce::AudioBuffer<float>> renderLinked (const std::vector<const juce::AudioBuffer<float>*>& sources, double sampleRate,
+                                                    const Settings& settings, const std::function<bool()>& shouldContinue)
+{
+    int channels = 0, longest = 0;
+    for (const auto* source : sources)
+    {
+        channels += source != nullptr ? source->getNumChannels() : 0;
+        longest = juce::jmax (longest, source != nullptr ? source->getNumSamples() : 0);
+    }
+
+    juce::AudioBuffer<float> together (juce::jmax (1, channels), longest);
+    together.clear();
+    int channel = 0;
+    for (const auto* source : sources)
+        if (source != nullptr)
+            for (int ch = 0; ch < source->getNumChannels(); ++ch)
+                together.copyFrom (channel++, 0, *source, ch, 0, source->getNumSamples());
+
+    auto rendered = render (together, sampleRate, settings, shouldContinue);
+
+    std::vector<juce::AudioBuffer<float>> parts;
+    channel = 0;
+    for (const auto* source : sources)
+    {
+        if (source == nullptr || rendered.getNumSamples() == 0)
+        {
+            parts.emplace_back();
+            continue;
+        }
+
+        const auto length = settings.isNeutral()
+                                ? source->getNumSamples()
+                                : (int) juce::jmax (0.0, std::round (settings.map.toTarget (source->getNumSamples() / sampleRate) * sampleRate));
+        juce::AudioBuffer<float> part (source->getNumChannels(), length);
+        part.clear();
+        for (int ch = 0; ch < source->getNumChannels(); ++ch)
+            part.copyFrom (ch, 0, rendered, channel++, 0, juce::jmin (length, rendered.getNumSamples()));
+        parts.push_back (std::move (part));
+    }
+
+    return parts;
 }
 }

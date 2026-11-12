@@ -1453,6 +1453,13 @@ class DawScreen {
     toggles.append(toggle("mute", "M", "Mute"), toggle("solo", "S", "Solo (Alt+click: solo only this track)"),
                    toggle("arm", "●", isMidi ? "Arm to record from your MIDI keyboard (you hear it while armed)" : "Arm for recording"),
                    toggle("monitor", "In", isMidi ? "Play this track's instrument from your MIDI keyboard" : "Hear the mic through this track's effects"));
+    if (track.link) {
+      // Linked tracks warp as one (Pitch & time → Linked tracks).
+      const others = this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name);
+      const chain = html("span", "track-link", `⛓${track.link}`);
+      chain.title = `Linked with ${others.join(", ") || "no other track"}: warping and quantizing apply to all of them, in phase`;
+      toggles.append(chain);
+    }
 
     const meter = new Level(false, track.id);
     this.meters.set(track.id, meter);

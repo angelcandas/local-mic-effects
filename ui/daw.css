@@ -457,6 +457,7 @@ body.is-daw .chip--live { display: none; }
 .clip-wave { opacity: 0.85; }
 .clip-fades path { fill: rgba(8, 10, 14, 0.55); stroke: var(--text); stroke-width: 1; vector-effect: non-scaling-stroke; }
 
+.track-link { align-self: center; margin-left: 2px; color: var(--accent-2); font: 600 10px var(--mono); }
 .clip-musical { margin-right: 4px; color: var(--accent-2); font-weight: 700; }
 
 .clip-name {
