@@ -262,6 +262,7 @@ private:
         Delay directDelay;
         int blockSize = 512; // the strips' buffer size: the most one chunk can render
         bool fresh = true;   // not played yet: notes from the previous graph get their note-offs
+        TempoMap tempo;      // for the click
     };
 
     // ValueTree::Listener
@@ -291,7 +292,7 @@ private:
     void recordMidi (const juce::MidiBuffer&, int midiOffset, int numSamples, juce::int64 blockStart) noexcept;
     void drainRecordedMidi();
     static void buildMidiEvents (Track&, const juce::ValueTree& trackTree, double sampleRate, juce::int64& end);
-    void renderClick (juce::AudioBuffer<float>&, int offset, int numChannels, int numSamples, juce::int64 blockStart) noexcept;
+    void renderClick (const TempoMap&, juce::AudioBuffer<float>&, int offset, int numChannels, int numSamples, juce::int64 blockStart) noexcept;
     void updateTempo();
     void updateLoop();
 
@@ -345,7 +346,6 @@ private:
 
     std::atomic<bool> metronome { false };
     std::atomic<int> countInBars { 0 };
-    std::atomic<double> samplesPerBeat { 24000.0 };
     std::atomic<int> beatsPerBar { 4 };
     std::atomic<float> metronomeVolume { 1.0f };
     float clickPhase = 0.0f, clickIncrement = 0.0f, clickLevel = 0.0f, clickDecay = 0.0f; // audio thread

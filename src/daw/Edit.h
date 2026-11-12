@@ -3,6 +3,7 @@
 #include <juce_data_structures/juce_data_structures.h>
 
 #include "dsp/FxModule.h"
+#include "TempoMap.h"
 #include "Warp.h"
 
 #include <optional>
@@ -10,7 +11,7 @@
 // The DAW session as a ValueTree, so every change can be undone and the whole thing
 // saves to a file as it is:
 //
-//   PROJECT  version, tempo, beatsPerBar, loopOn, loopStart, loopEnd
+//   PROJECT  version, tempo, tempoChanges, beatsPerBar, loopOn, loopStart, loopEnd
 //     MARKER  id, name, time
 //     MASTER  volume (dB)
 //       INSERTS
@@ -48,6 +49,9 @@
 // of its file (see Warp.h); its offset and length are then measured in that copy. The
 // file itself is never changed.
 //
+// `tempo` is the tempo at the start; `tempoChanges` the tempo points after it (see
+// TempoMap::changesToString; missing when the tempo is steady).
+//
 // Times are in seconds, so a project survives a sample-rate change. Insert values use
 // the plugin parameter IDs (see Parameters.cpp) in real units, as presets do.
 //
@@ -72,7 +76,7 @@ namespace ids
     MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (ride)
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns)
-    MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant)
+    MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges)
 #undef MICFX_DAW_ID
 }
 
@@ -152,8 +156,17 @@ public:
     void setTrackArm (int trackId, bool);
     void setTrackMonitor (int trackId, bool);
 
+    // The tempo at the start of the song (the whole song while it's steady).
     void setTempo (double bpm);
     double getTempo() const { return state.getProperty (ids::tempo, 120.0); }
+
+    // The tempo over the song: points with steps or ramps (see TempoMap). Setting one
+    // replaces the start tempo and every change, as one undoable edit.
+    TempoMap getTempoMap() const;
+    void setTempoMap (const TempoMap&);
+
+    // Sets the tempo of the point in force at a time (the start tempo while it's steady).
+    void setTempoAt (double seconds, double bpm);
 
     // Time signature: beats in a bar (2..12), for the click's accent, bar numbers and
     // the count-in. The tempo counts these beats.
@@ -249,7 +262,7 @@ public:
     // clip's start), each with short fades. For strip silence. Returns the new clip ids.
     juce::Array<int> keepClipParts (int clipId, const std::vector<std::pair<double, double>>& parts, double fadeSeconds = 0.01);
 
-    // The nearest grid line at the project tempo, `beats` apart (1 = quarter notes,
+    // The nearest grid line on the tempo map, `beats` apart (1 = quarter notes,
     // 4 = bars in 4/4, 0.5 = eighths).
     double snapToGrid (double seconds, double beats) const;
 

@@ -44,6 +44,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/fxpresets.js
         ui/daw.js
         ui/rhythm.js
+        ui/tempo.js
         ui/browser.js
         ui/pianoroll.js
         ui/daw.css
@@ -73,6 +74,7 @@ set(MICFX_DSP_SOURCES
     src/daw/Quantize.cpp
     src/daw/Quantize.h
     src/daw/Warp.cpp
+    src/daw/TempoMap.cpp
     src/daw/Warp.h
     src/dsp/Biquad.h
     src/dsp/Effects.h
