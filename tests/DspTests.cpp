@@ -15,6 +15,7 @@
 #include "DawBridge.h"
 #include "PluginProcessor.h"
 #include "analysis/Analysis.h"
+#include "dsp/Biquad.h"
 #include "analysis/Key.h"
 #include "analysis/MixAssistant.h"
 #include "Presets.h"
@@ -3048,6 +3049,14 @@ namespace
                        && std::abs ((double) clip["fileLength"] - (songSeconds + 0.5)) < 0.01
                        && peaks["peaks"].isArray(),
                    "the session shows the warp, both transposes and the rendered length (" + clip["fileLength"].toString() + " s)");
+            check (ok (run ("setClip", args ({ { "id", clipId }, { "stretch", "solo" }, { "formant", true } }))),
+                   "setClip takes a stretch algorithm and formants");
+            const auto chosen = lastSession()["tracks"][0]["clips"][0];
+            check (chosen["stretch"].toString() == "solo" && (bool) chosen["formant"]
+                       && chosen["audioKey"].toString() != clip["audioKey"].toString(),
+                   "the session shows them, and the clip plays another rendered copy");
+            run ("undo");
+            check (lastSession()["tracks"][0]["clips"][0]["stretch"].toString() == "mix", "and they undo");
             run ("undo"); run ("undo"); run ("undo");
             check (! edit.getClip (clipId).hasProperty (daw::ids::warp), "and each undoes");
         }
@@ -3697,6 +3706,100 @@ namespace
         const auto firstHit = findPeak (nudged, 0.3, 0.8), secondHit = findPeak (nudged, 0.9, 1.4);
         check (std::abs (firstHit - 0.5) < 0.01 && std::abs (secondHit - 1.1) < 0.01,
                "a hit moved from 1.0 s to 1.1 s lands there (" + juce::String (firstHit, 3) + " s, " + juce::String (secondHit, 3) + " s)");
+
+        // Every algorithm: a stretch keeps the length (and the pitch, except varispeed), and
+        // a moved hit lands where its marker says.
+        for (const auto& key : daw::warp::getAlgorithmKeys())
+        {
+            const auto algorithm = daw::warp::algorithmFromKey (key);
+            check (daw::warp::getAlgorithmKey (algorithm) == key, key + ": its key reads back");
+
+            daw::warp::Settings longer;
+            longer.map = Map ({ { 0.0, 0.0 }, { 1.0, 2.0 } });
+            longer.algorithm = algorithm;
+            const auto out = daw::warp::render (sine, sampleRate, longer);
+            const auto pitch = measureFrequency (out, 0.3, 1.7);
+            const auto expected = algorithm == daw::warp::Algorithm::varispeed ? 220.0 : 440.0;
+            const auto level = rms (std::vector<float> (out.getReadPointer (0), out.getReadPointer (0) + out.getNumSamples()),
+                                    (size_t) (0.3 * sampleRate), (size_t) (1.7 * sampleRate));
+            if (algorithm != daw::warp::Algorithm::slice) // slicing leaves the stretched part's end silent
+                check (out.getNumSamples() == (int) (3.0 * sampleRate) && std::abs (pitch - expected) < expected * 0.005 && level > 0.3f,
+                       key + ": stretched 2x, " + juce::String (pitch, 1) + " Hz (expected " + juce::String (expected, 0)
+                           + "), level " + juce::String (level, 2));
+
+            daw::warp::Settings moved;
+            moved.map = Map ({ { 0.5, 0.5 }, { 1.0, 1.1 } });
+            moved.algorithm = algorithm;
+            const auto hitsOut = daw::warp::render (hits, sampleRate, moved);
+            const auto a = findPeak (hitsOut, 0.3, 0.8), b = findPeak (hitsOut, 0.9, 1.4);
+            check (std::abs (a - 0.5) < 0.01 && std::abs (b - 1.1) < 0.01,
+                   key + ": a hit moved to 1.1 s lands there (" + juce::String (a, 3) + " s, " + juce::String (b, 3) + " s)");
+        }
+
+        // Slice and efficient move audio that only slides without touching it.
+        for (const auto algorithm : { daw::warp::Algorithm::slice, daw::warp::Algorithm::efficient })
+        {
+            daw::warp::Settings slideOnly = slide;
+            slideOnly.algorithm = algorithm;
+            const auto out = daw::warp::render (source, sampleRate, slideOnly);
+            double error = 0.0;
+            for (int i = offset + 2048; i < (int) (2.0 * sampleRate); ++i)
+                error = std::max (error, (double) std::abs (out.getSample (1, i) - source.getSample (1, i - offset)));
+            check (error < 1.0e-4, daw::warp::getAlgorithmKey (algorithm) + ": a slide comes through unchanged (worst " + juce::String (error, 6) + ")");
+        }
+
+        // Formants: a buzz through a resonance at 1 kHz, up 5 semitones. Without formants the
+        // resonance moves up with the pitch; with them it stays near 1 kHz.
+        {
+            juce::AudioBuffer<float> buzz (1, (int) (2.0 * sampleRate));
+            fx::Biquad resonance, second;
+            resonance.setup (fx::Biquad::Type::bandPass, sampleRate, 1000.0, 4.0);
+            second.setup (fx::Biquad::Type::bandPass, sampleRate, 1000.0, 4.0);
+            const auto period = sampleRate / 140.0;
+            double phase = 0.0;
+            for (int i = 0; i < buzz.getNumSamples(); ++i)
+            {
+                phase += 1.0;
+                auto x = 0.0f;
+                if (phase >= period) { phase -= period; x = 1.0f; }
+                buzz.setSample (0, i, 2.0f * second.process (0, resonance.process (0, x)));
+            }
+
+            // Where the spectrum's energy sits, 300 Hz..5 kHz.
+            const auto centroid = [&] (const juce::AudioBuffer<float>& audio)
+            {
+                constexpr int order = 15, size = 1 << order;
+                juce::dsp::FFT fft (order);
+                std::vector<float> data ((size_t) size * 2, 0.0f);
+                const auto start = (int) (0.4 * sampleRate);
+                for (int i = 0; i < size && start + i < audio.getNumSamples(); ++i)
+                    data[(size_t) i] = audio.getSample (0, start + i) * (0.5f - 0.5f * (float) std::cos (juce::MathConstants<double>::twoPi * i / size));
+                fft.performFrequencyOnlyForwardTransform (data.data());
+                double sum = 0.0, weighted = 0.0;
+                for (int k = 1; k < size / 2; ++k)
+                    if (const auto f = k * sampleRate / size; f > 300.0 && f < 5000.0)
+                    {
+                        const auto e = (double) data[(size_t) k] * data[(size_t) k];
+                        sum += e;
+                        weighted += e * f;
+                    }
+                return weighted / juce::jmax (1.0e-12, sum);
+            };
+
+            const auto original = centroid (buzz);
+            for (const auto algorithm : { daw::warp::Algorithm::mix, daw::warp::Algorithm::solo })
+            {
+                daw::warp::Settings plain, kept;
+                plain.semitones = kept.semitones = 5.0;
+                plain.algorithm = kept.algorithm = algorithm;
+                kept.formant = true;
+                const auto moved = centroid (daw::warp::render (buzz, sampleRate, plain));
+                const auto stayed = centroid (daw::warp::render (buzz, sampleRate, kept));
+                check (moved > original * 1.15 && std::abs (stayed / original - 1.0) < 0.08,
+                       daw::warp::getAlgorithmKey (algorithm) + ": +5 st moves the resonance to " + juce::String (moved, 0)
+                           + " Hz, with formants kept it stays at " + juce::String (stayed, 0) + " Hz (from " + juce::String (original, 0) + ")");
+            }
+        }
 
         // Speed (for information: use the release build for real numbers).
         {

@@ -373,6 +373,7 @@ juce::var DawBridge::describeSession()
                                  { "fadeIn", number (clip, ids::fadeIn) }, { "fadeOut", number (clip, ids::fadeOut) },
                                  { "mute", (bool) clip.getProperty (ids::mute, false) },
                                  { "transpose", number (clip, ids::transpose) }, { "warp", markers },
+                                 { "stretch", daw::warp::getAlgorithmKey (warpSettings.algorithm) }, { "formant", warpSettings.formant },
                                  // The audio the clip plays (its file, or a rendered copy): the page keys waveforms on it.
                                  { "audioKey", warpSettings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, warpSettings) },
                                  { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
@@ -1901,6 +1902,8 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         if (args.hasProperty ("name")) edit.setClipName (id, args["name"].toString());
         if (args.hasProperty ("mute")) edit.setClipMute (id, args["mute"]);
         if (args.hasProperty ("transpose")) edit.setClipTranspose (id, args["transpose"]);
+        if (args.hasProperty ("stretch")) edit.setClipStretch (id, daw::warp::algorithmFromKey (args["stretch"].toString()));
+        if (args.hasProperty ("formant")) edit.setClipFormant (id, args["formant"]);
         ok();
         return;
     }
