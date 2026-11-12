@@ -1075,7 +1075,7 @@ body.is-dry .chain { opacity: 0.45; filter: grayscale(0.7); transition: opacity 
   font: 600 11px var(--mono);
   text-align: center;
 }
-body.is-daw .dry-button, body.is-daw .keys-button, body.is-daw .loop-toggle, body.is-daw .midi-button { display: none; }
+body.is-daw .dry-button, body.is-daw .keys-button, body.is-daw .loop-toggle, body.is-daw .midi-button, body.is-daw .setlist-button { display: none; }
 
 /* ---------- Per-effect presets and in/out gain (card footer; DAW inserts use the same parts) ---------- */
 
@@ -1293,3 +1293,140 @@ body.is-learning [data-learn].is-mapped:not(.power)::after {
   white-space: nowrap;
   pointer-events: none;
 }
+
+/* ---------- Scenes ---------- */
+
+.scene-bar {
+  position: sticky;
+  z-index: 4;
+  top: -12px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: -12px -12px 12px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(15, 18, 25, 0.96);
+}
+.scene-label { color: var(--muted); font-size: 10.5px; font-weight: 700; letter-spacing: 0.8px; text-transform: uppercase; }
+.scene-list { display: flex; flex: 1 1 auto; gap: 6px; min-width: 0; overflow-x: auto; scrollbar-width: none; }
+.scene-list::-webkit-scrollbar { display: none; }
+.scene-hint { overflow: hidden; color: var(--faint); font-size: 11.5px; white-space: nowrap; text-overflow: ellipsis; }
+.scene-bar .tool { height: 26px; font-size: 11.5px; }
+.scene-step { width: 26px; padding: 0; font-size: 15px; }
+.scene {
+  flex: none;
+  max-width: 140px;
+  height: 26px;
+  padding: 0 12px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel);
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 600;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.scene:hover { color: var(--text); border-color: var(--line-strong); }
+.scene.is-active { border-color: var(--accent-2); background: rgba(63, 217, 198, 0.12); color: var(--text); }
+.scene.is-modified::after { content: " \2022"; color: var(--warn); }
+.scene-rename { width: 120px; height: 26px; padding: 0 10px; border: 1px solid var(--accent); border-radius: 999px; background: #0d1016; color: var(--text); font: inherit; font-size: 11.5px; }
+.scene-save[hidden] { display: none; }
+.scene-save { border-color: color-mix(in srgb, var(--warn) 60%, transparent); color: var(--warn); }
+.scene-glide-label { display: inline-flex; align-items: center; gap: 5px; color: var(--muted); font-size: 11px; }
+.scene-bar select.scene-glide { min-width: 0; height: 26px; padding-top: 0; padding-bottom: 0; font-size: 11.5px; }
+.scene-menu {
+  position: absolute;
+  z-index: 20;
+  display: flex;
+  flex-direction: column;
+  min-width: 200px;
+  padding: 4px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.45);
+}
+.scene-menu[hidden] { display: none; }
+.scene-menu button { padding: 6px 10px; border: 0; border-radius: 7px; background: none; text-align: left; font-size: 12px; cursor: pointer; }
+.scene-menu button:hover { background: var(--line); }
+.scene-menu button.is-danger:hover { color: var(--hot); }
+
+/* ---------- Setlist (standalone) ---------- */
+
+.setlist-button[hidden] { display: none; }
+.setlist-button[aria-pressed="true"] { color: var(--text); border-color: var(--accent); }
+.setlist-drawer {
+  position: fixed;
+  z-index: 30;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: min(420px, 100vw);
+  padding: 14px;
+  overflow-y: auto;
+  border-left: 1px solid var(--line-strong);
+  background: var(--panel-raised);
+  box-shadow: -12px 0 40px rgba(0, 0, 0, 0.45);
+}
+.setlist-drawer[hidden] { display: none; }
+body.is-daw .setlist-drawer, body.is-daw .stage-view { display: none; }
+.setlist-head { display: flex; align-items: center; gap: 8px; }
+.setlist-title { flex: 1 1 auto; overflow: hidden; font-size: 15px; white-space: nowrap; text-overflow: ellipsis; }
+.setlist-dirty { color: var(--warn); }
+.setlist-files, .setlist-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+.setlist-files .tool, .setlist-actions .tool { height: 28px; font-size: 12px; }
+.setlist-recent { min-width: 0; height: 28px; font-size: 12px; }
+.setlist-songs { display: flex; flex-direction: column; gap: 4px; margin: 0; padding: 0; list-style: none; }
+.setlist-song { display: flex; align-items: center; gap: 6px; padding: 4px 6px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel); }
+.setlist-song.is-selected { border-color: var(--line-strong); }
+.setlist-song.is-current { border-color: var(--accent-2); background: rgba(63, 217, 198, 0.1); }
+.setlist-number { width: 20px; color: var(--muted); font-size: 11px; text-align: right; }
+.setlist-song-name { display: flex; flex: 1 1 auto; flex-direction: column; min-width: 0; padding: 2px 4px; border: 0; background: none; color: var(--text); text-align: left; font: inherit; font-size: 13px; font-weight: 600; cursor: pointer; }
+.setlist-song-name small { color: var(--muted); font-size: 11px; font-weight: 400; }
+.setlist-drawer .mini:disabled { opacity: 0.3; cursor: default; }
+.setlist-empty { padding: 12px; color: var(--muted); font-size: 12px; }
+.setlist-editor { display: flex; flex-direction: column; gap: 8px; padding-top: 10px; border-top: 1px solid var(--line); }
+.setlist-editor[hidden] { display: none; }
+.setlist-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.setlist-field { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 11px; }
+.setlist-label { color: var(--muted); font-size: 11px; }
+.setlist-input, .setlist-lyrics, .setlist-notes { padding: 5px 8px; border: 1px solid var(--line); border-radius: 7px; background: #0d1016; color: var(--text); font: inherit; font-size: 12.5px; }
+.setlist-tempo { width: 72px; }
+.setlist-lyrics, .setlist-notes { resize: vertical; }
+.setlist-backing { flex: 1 1 auto; overflow: hidden; color: var(--text); font-size: 12px; white-space: nowrap; text-overflow: ellipsis; }
+.setlist-scenes { margin: 0; color: var(--muted); font-size: 11.5px; }
+
+.stage-view {
+  position: fixed;
+  z-index: 40;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 20px 28px;
+  background: var(--bg);
+}
+.stage-view[hidden] { display: none; }
+.stage-top { display: flex; align-items: baseline; gap: 16px; }
+.stage-count { color: var(--muted); font-size: 14px; }
+.stage-title { flex: 1 1 auto; margin: 0; font-size: clamp(22px, 4vw, 40px); }
+.stage-info { color: var(--accent-2); font-size: 16px; font-weight: 600; }
+.stage-lyrics { flex: 1 1 auto; margin: 16px 0; overflow-y: auto; font-size: clamp(22px, 3.4vw, 42px); font-weight: 600; line-height: 1.35; }
+.stage-line { margin: 0 0 0.25em; color: var(--muted); transition: color 0.2s; }
+.stage-line.is-plain { color: var(--text); }
+.stage-line.is-past { color: var(--faint); }
+.stage-line.is-now { color: var(--text); }
+.stage-notes { margin: 0 0 12px; color: var(--warn); font-size: 16px; }
+.stage-notes:empty { display: none; }
+.stage-bottom { display: flex; justify-content: space-between; gap: 12px; }
+.stage-nav { min-width: 200px; height: 64px; padding: 0 20px; border: 1px solid var(--line-strong); border-radius: 14px; background: var(--panel); color: var(--text); font: inherit; font-size: 18px; font-weight: 700; cursor: pointer; }
+.stage-nav.is-next { border-color: var(--accent-2); }
+.stage-nav:disabled { opacity: 0.35; cursor: default; }
+.setlist-drawer .mini { width: 24px; height: 24px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-raised); color: var(--muted); font-size: 13px; cursor: pointer; }
+.setlist-drawer .mini:hover:not(:disabled) { color: var(--text); border-color: var(--line-strong); }

@@ -58,6 +58,12 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
             setCurrentProgram (((currentPreset.load() + delta) % count + count) % count);
     };
     midiMap.onMuteToggle = [this] { outputMuted = ! outputMuted.load(); };
+    midiMap.onScene = [this] (const juce::String& action)
+    {
+        if (action == "scene.next")          scenes.step (1);
+        else if (action == "scene.previous") scenes.step (-1);
+        else                                 scenes.recall (action.fromFirstOccurrenceOf ("scene.", false, false).getIntValue() - 1);
+    };
 
     // Saves and backups keep the instruments' current settings (plugin knobs, sounds).
     dawProject.onBeforeWrite = [this] { dawEngine.captureInstrumentStates(); };

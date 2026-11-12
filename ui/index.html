@@ -57,6 +57,7 @@
       <button class="chip loop-toggle" type="button" aria-pressed="false" title="Show or hide the looper">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 6.2A5 5 0 1 0 13 9" /><path d="M13.2 3.2v3.3H9.9" /></svg>Loop
       </button>
+      <button class="chip setlist-button" type="button" hidden aria-pressed="false" title="The setlist: the songs of the show, each with its sound, scenes, tempo, key, backing track and lyrics">Setlist</button>
       <button class="chip midi-button" type="button" aria-pressed="false" title="MIDI learn: map pedals, knobs and keys to controls">
         <span class="midi-dot"></span>MIDI
       </button>
@@ -80,6 +81,7 @@
     </nav>
 
     <main class="chain" aria-label="Active effects">
+      <div class="scene-bar" aria-label="Scenes"></div>
       <div class="chain-grid"></div>
       <div class="chain-empty" hidden>
         <p class="big">Your chain is empty</p>
