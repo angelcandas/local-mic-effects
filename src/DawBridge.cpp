@@ -223,7 +223,7 @@ namespace
         {
             static const std::pair<const char*, const char*> keys[] {
                 { "volume", "Volume" }, { "pan", "Pan" }, { "mute", "Mute" }, { "solo", "Solo" }, { "arm", "Arm" },
-                { "monitor", "Monitor" }, { "name", "Rename track" }, { "colour", "Track colour" }, { "input", "Track input" },
+                { "monitor", "Monitor" }, { "monitorMode", "Monitor" }, { "name", "Rename track" }, { "colour", "Track colour" }, { "input", "Track input" },
                 { "inGain", "Input gain" }, { "outGain", "Output gain" }, { "transpose", "Track key" },
                 { "clearRide", "Clear volume ride" }, { "clearAutomation", "Clear effect automation" } };
             for (const auto& [key, name] : keys)
@@ -494,6 +494,7 @@ juce::var DawBridge::describeSession()
                               { "inGain", number (track, ids::inGain) }, { "outGain", number (track, ids::outGain) },
                               { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
+                              { "monitorMode", daw::Edit::getTrackMonitorMode (track) },
                               { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) }, { "automation", describeAutomation (track) },
                               { "link", daw::Edit::getLink (track) },
                               { "inserts", describeInserts (track) }, { "clips", clips },
@@ -2212,6 +2213,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("solo"))    edit.setTrackSolo (id, args["solo"]);
             if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
             if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
+            if (args.hasProperty ("monitorMode")) edit.setTrackMonitorMode (id, args["monitorMode"].toString());
             if (args.hasProperty ("input"))   // [left] mono, [left, right] stereo, [] none
             {
                 const auto* list = args["input"].getArray();

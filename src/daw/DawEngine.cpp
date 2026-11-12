@@ -273,7 +273,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     if (tree.hasType (ids::TRACK) || tree.hasType (ids::MASTER) || tree.hasType (ids::RETURN))
     {
         if (property == ids::volume || property == ids::pan || property == ids::mute || property == ids::solo
-            || property == ids::monitor || property == ids::arm || property == ids::inGain || property == ids::outGain
+            || property == ids::monitor || property == ids::monitorAuto || property == ids::arm || property == ids::inGain || property == ids::outGain
             || property == ids::inputLeft || property == ids::inputRight)
             updateMix();
         else if (property == ids::kind)
@@ -333,7 +333,8 @@ void DawEngine::updateMix()
             setStripTargets (*it->second, track, audible, false);
             it->second->targetDirect = Edit::getTrackOutput (track) != Edit::masterId || ! anyReturnSolo || (bool) track[ids::solo] ? 1.0f : 0.0f;
             // MIDI tracks play the MIDI input when armed too, so you hear what you record.
-            it->second->monitoring = (bool) track[ids::monitor] || (Edit::isMidiTrack (track) && (bool) track[ids::arm]);
+            // Auto monitoring hears the input only while the track is armed.
+            it->second->monitoring = (bool) track[ids::monitor] || ((bool) track[ids::arm] && (Edit::isMidiTrack (track) || (bool) track.getProperty (ids::monitorAuto, false)));
             const auto input = Edit::getTrackInput (track);
             it->second->inputLeft = input.left;
             it->second->inputRight = input.right;

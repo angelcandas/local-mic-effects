@@ -80,6 +80,7 @@ namespace ids
     MICFX_DAW_ID (monitor) MICFX_DAW_ID (type) MICFX_DAW_ID (file) MICFX_DAW_ID (start) MICFX_DAW_ID (offset)
     MICFX_DAW_ID (length) MICFX_DAW_ID (gain) MICFX_DAW_ID (fadeIn) MICFX_DAW_ID (fadeOut)
     MICFX_DAW_ID (loopOn) MICFX_DAW_ID (loopStart) MICFX_DAW_ID (loopEnd)
+    MICFX_DAW_ID (monitorAuto) // monitor mode Auto: hear the input while armed
     MICFX_DAW_ID (viewState) // the page's view of the project (zoom, scroll...), JSON; not an edit
     MICFX_DAW_ID (beatsPerBar) MICFX_DAW_ID (MARKER) MICFX_DAW_ID (time)
     MICFX_DAW_ID (transpose) MICFX_DAW_ID (warp)
@@ -170,6 +171,9 @@ public:
     // Recording: armed tracks get the take; monitored tracks hear the mic live.
     void setTrackArm (int trackId, bool);
     void setTrackMonitor (int trackId, bool);
+    // "in" (always hear the input), "auto" (while armed) or "off". Not undoable, like arm.
+    void setTrackMonitorMode (int trackId, const juce::String& mode);
+    static juce::String getTrackMonitorMode (const juce::ValueTree& track);
 
     // Which audio interface inputs feed an audio track (what it records and monitors),
     // counted from 0. Mono: one input (right is noInput). Stereo: a left and a right,
