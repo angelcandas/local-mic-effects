@@ -92,6 +92,11 @@ struct Settings
     Algorithm algorithm = Algorithm::mix;
     bool formant = false;   // keep the voice's character (its formants) when transposing
 
+    // Files rendered together as one (full paths, sorted, this clip's own among them):
+    // linked tracks, such as the mics of one drum kit. Every channel of every file gets the
+    // same timing and phase decisions, so the mics stay in phase with each other.
+    juce::StringArray linked;
+
     bool isNeutral() const noexcept { return map.isIdentity() && std::abs (semitones) < 1.0e-4; }
 
     // Identifies the rendered copy (with the file's path) in the AudioPool's cache.
@@ -99,6 +104,11 @@ struct Settings
 
     static constexpr double maxSemitones = 24.0;
 };
+
+// Several files warped as one (see Settings::linked): the channels of all of them go
+// through render() together, and each comes back at its own length.
+std::vector<juce::AudioBuffer<float>> renderLinked (const std::vector<const juce::AudioBuffer<float>*>& sources, double sampleRate,
+                                                    const Settings&, const std::function<bool()>& shouldContinue = {});
 
 // The file's audio warped and transposed with the settings' algorithm. Its length is the map's target for the file's
 // end (silence where the map starts the audio later than 0). `shouldContinue` is polled

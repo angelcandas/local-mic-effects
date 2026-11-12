@@ -79,6 +79,9 @@ AudioPool::Audio AudioPool::get (const juce::File& file, const warp::Settings& s
     if (const auto it = warps.find (key); it != warps.end())
         return it->second;
 
+    if (settings.linked.size() > 1)
+        return getLinked (file, settings);
+
     const auto source = get (file);
     if (source == nullptr || warpsPending.count (key) > 0)
         return {}; // the decode's onLoaded brings us back here
@@ -122,6 +125,25 @@ AudioPool::Audio AudioPool::loadNow (const juce::File& file, const warp::Setting
     if (const auto it = warps.find (key); it != warps.end())
         return it->second;
 
+    if (settings.linked.size() > 1)
+    {
+        std::vector<Audio> sources;
+        std::vector<const juce::AudioBuffer<float>*> pointers;
+        for (const auto& path : settings.linked)
+        {
+            sources.push_back (loadNow (juce::File (path)));
+            pointers.push_back (sources.back().get());
+        }
+
+        auto parts = warp::renderLinked (pointers, sampleRate, settings);
+        for (int i = 0; i < settings.linked.size(); ++i)
+            if (sources[(size_t) i] != nullptr)
+                installWarp (getWarpKey (juce::File (settings.linked[i]), settings), std::move (parts[(size_t) i]));
+
+        const auto it = warps.find (key);
+        return it != warps.end() ? it->second : Audio();
+    }
+
     const auto source = loadNow (file);
     if (source == nullptr)
         return {};
@@ -130,6 +152,70 @@ AudioPool::Audio AudioPool::loadNow (const juce::File& file, const warp::Setting
     warps[key] = audio;
     warpOrder.push_back (key);
     return audio;
+}
+
+void AudioPool::installWarp (const juce::String& key, juce::AudioBuffer<float>&& audio)
+{
+    if (warps.count (key) == 0)
+        warpOrder.push_back (key);
+    warps[key] = std::make_shared<const juce::AudioBuffer<float>> (std::move (audio));
+}
+
+AudioPool::Audio AudioPool::getLinked (const juce::File& file, const warp::Settings& settings)
+{
+    // Every file decoded first; each decode's onLoaded brings us back here.
+    std::vector<Audio> sources;
+    auto ready = true;
+    for (const auto& path : settings.linked)
+    {
+        sources.push_back (get (juce::File (path)));
+        ready = ready && (sources.back() != nullptr || errors.count (path) > 0);
+    }
+
+    const auto key = getWarpKey (file, settings);
+    if (! ready || warpsPending.count (key) > 0)
+        return {};
+
+    // One render makes every file's copy: all their keys are pending until it lands.
+    juce::StringArray keys;
+    for (const auto& path : settings.linked)
+    {
+        keys.add (getWarpKey (juce::File (path), settings));
+        warpsPending.insert (keys.strings.getLast());
+    }
+
+    const auto rate = sampleRate;
+    loader.addJob ([this, sources, settings, keys, rate, weak = std::weak_ptr<bool> (alive)]
+    {
+        std::vector<const juce::AudioBuffer<float>*> pointers;
+        for (const auto& source : sources)
+            pointers.push_back (source.get());
+
+        auto parts = std::make_shared<std::vector<juce::AudioBuffer<float>>> (warp::renderLinked (pointers, rate, settings, [weak]
+        {
+            auto flag = weak.lock();
+            return flag != nullptr && *flag;
+        }));
+
+        juce::MessageManager::callAsync ([this, keys, rate, parts, sources, weak]
+        {
+            if (auto flag = weak.lock(); flag == nullptr || ! *flag)
+                return;
+
+            for (const auto& k : keys)
+                warpsPending.erase (k);
+            if (! juce::exactlyEqual (rate, sampleRate))
+                return;
+
+            for (int i = 0; i < keys.size() && i < (int) parts->size(); ++i)
+                if (sources[(size_t) i] != nullptr)
+                    installWarp (keys[i], std::move ((*parts)[(size_t) i]));
+            if (onLoaded)
+                onLoaded();
+        });
+    });
+
+    return {};
 }
 
 void AudioPool::releaseUnusedWarps (const std::set<juce::String>& keysInUse)

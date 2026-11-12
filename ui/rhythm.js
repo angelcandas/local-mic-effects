@@ -206,9 +206,23 @@ export function createRhythmPanel(screen, track, clip, ui) {
   musicalRow.append(musical, clipTempoLabel);
   const musicalInfo = html("p", "panel-caption");
 
+  // Linked tracks: recorded together (drum mics, a split stereo pair), warped as one.
+  const linkSelect = html("select", "dropdown");
+  linkSelect.title = "Link this track with another recorded at the same time: their clips warp and quantize together, in phase";
+  const linkInfo = html("p", "panel-caption");
+  const unlink = button("tool", "Unlink", "Warp this track on its own again", () => daw("unlinkTrack", { track: track.id }));
+  linkSelect.addEventListener("change", async () => {
+    const other = Number(linkSelect.value);
+    linkSelect.value = "";
+    if (other) await daw("linkTracks", { tracks: [track.id, other] });
+  });
+  const linkRow = html("div", "panel-actions");
+  linkRow.append(linkSelect, unlink);
+
   const warpInfo = html("p", "panel-caption rhythm-warp-info");
   sections.append(section("quantize", "Quantize", true, grid, steps, quantizeKnobs, quantizeOptions, quantizeRow, warpInfo),
-                  section("tempo", "Tempo", true, tempoRow, musicalRow, musicalInfo));
+                  section("tempo", "Tempo", true, tempoRow, musicalRow, musicalInfo),
+                  section("link", "Linked tracks", false, linkRow, linkInfo));
 
   const update = (t, c) => {
     updateTrack(t.transpose);
@@ -224,6 +238,15 @@ export function createRhythmPanel(screen, track, clip, ui) {
                                                     : "Transpose a voice without the chipmunk or giant sound: its character stays where it was";
     formantBox.disabled = formantBox.disabled || algorithm.value === "efficient";
     if (c && updateClip) updateClip(c.transpose);
+    const linked = screen.session.tracks.filter((o) => t.link && o.link === t.link && o.id !== t.id);
+    const candidates = screen.session.tracks.filter((o) => o.id !== t.id && o.kind !== "midi" && !(t.link && o.link === t.link));
+    linkSelect.replaceChildren(new Option(linked.length ? "Link another track…" : "Link with track…", ""),
+                               ...candidates.map((o) => new Option(o.name, o.id)));
+    linkSelect.disabled = t.kind === "midi" || !candidates.length;
+    unlink.hidden = !t.link;
+    linkInfo.textContent = linked.length
+      ? `Linked with ${linked.map((o) => o.name).join(", ")}. Clips that start together warp as one, rendered together so the mics stay in phase.`
+      : "For tracks recorded at the same time, like drum mics: warp one and the others follow, sample for sample.";
     musicalBox.disabled = clipTempo.disabled = !c || !!c.midi;
     musicalBox.checked = !!c?.musical;
     if (document.activeElement !== clipTempo) clipTempo.value = c?.clipTempo ? String(Math.round(c.clipTempo * 100) / 100) : "";

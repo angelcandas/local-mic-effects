@@ -607,6 +607,9 @@ void Edit::moveClip (int clipId, double newStart, int toTrackId)
     if (! clip.isValid())
         return;
 
+    const auto delta = juce::jmax (0.0, newStart) - (double) clip[ids::start];
+    forPartners (clipId, [&] (int partner) { moveClip (partner, (double) getClip (partner)[ids::start] + delta); });
+
     if (isMusical (clip))
     {
         // Keep its length in beats where it lands (the tempo may differ there).
@@ -686,6 +689,7 @@ void Edit::setClipTranspose (int clipId, double semitones)
 
 void Edit::setClipStretch (int clipId, warp::Algorithm algorithm)
 {
+    forPartners (clipId, [&] (int partner) { setClipStretch (partner, algorithm); });
     if (auto clip = getClip (clipId); clip.isValid())
     {
         if (algorithm == warp::Algorithm::mix)
@@ -697,6 +701,7 @@ void Edit::setClipStretch (int clipId, warp::Algorithm algorithm)
 
 void Edit::setClipFormant (int clipId, bool keep)
 {
+    forPartners (clipId, [&] (int partner) { setClipFormant (partner, keep); });
     if (auto clip = getClip (clipId); clip.isValid())
     {
         if (keep)
@@ -844,6 +849,17 @@ void Edit::setClipWarp (int clipId, const warp::Map& map)
     if (! clip.isValid())
         return;
 
+    // Partners get the same timing: the same free warp when they're musical alike,
+    // otherwise the same whole map.
+    forPartners (clipId, [&] (int partnerId)
+    {
+        const auto partner = getClip (partnerId);
+        if (isMusical (partner) == isMusical (clip) && (! isMusical (clip) || juce::approximatelyEqual (getClipTempo (partner), getClipTempo (clip))))
+            setClipWarp (partnerId, map);
+        else
+            setEffectiveWarp (partnerId, isMusical (clip) ? warp::compose (map, getMusicalMap (clip)) : map);
+    });
+
     const auto text = map.toString();
     if (text.isEmpty())
         clip.removeProperty (ids::warp, undoTarget);
@@ -960,6 +976,8 @@ void Edit::setClipMusical (int clipId, bool on, double clipTempo)
     if (! clip.isValid() || isMidiClip (clip))
         return;
 
+    forPartners (clipId, [&] (int partner) { setClipMusical (partner, on, clipTempo > 0.0 ? clipTempo : getClipTempo (clip)); });
+
     const auto before = getEffectiveWarp (clip);
     const auto bpm = clipTempo > 0.0 ? juce::jlimit (minClipTempo, maxClipTempo, clipTempo) : getClipTempo (clip);
 
@@ -973,6 +991,77 @@ void Edit::setClipMusical (int clipId, bool on, double clipTempo)
     keepWindow (clip, before);
 }
 
+//==============================================================================
+void Edit::linkTracks (const juce::Array<int>& trackIds)
+{
+    auto group = 0, highest = 0;
+    for (const auto& track : getTracks())
+    {
+        highest = juce::jmax (highest, getLink (track));
+        if (group == 0 && trackIds.contains ((int) track[ids::id]))
+            group = getLink (track);
+    }
+
+    if (group == 0)
+        group = highest + 1;
+
+    for (auto id : trackIds)
+        if (auto track = getTrack (id); track.isValid() && ! isMidiTrack (track))
+            track.setProperty (ids::link, group, undoTarget);
+}
+
+void Edit::unlinkTrack (int trackId)
+{
+    if (auto track = getTrack (trackId); track.isValid())
+        track.removeProperty (ids::link, undoTarget);
+}
+
+juce::Array<juce::ValueTree> Edit::getLinkedClips (const juce::ValueTree& clip)
+{
+    juce::Array<juce::ValueTree> partners;
+    const auto track = clip.getParent();
+    const auto group = getLink (track);
+    const auto project = track.getParent();
+    if (group == 0 || isMidiClip (clip) || ! project.isValid())
+        return partners;
+
+    const auto start = (double) clip[ids::start], end = start + (double) clip[ids::length];
+    const auto anchor = start - (double) clip[ids::offset];
+
+    for (const auto& other : project)
+    {
+        if (! other.hasType (ids::TRACK) || other == track || getLink (other) != group)
+            continue;
+
+        for (const auto& candidate : other)
+        {
+            if (! candidate.hasType (ids::CLIP) || isMidiClip (candidate))
+                continue;
+            const auto otherStart = (double) candidate[ids::start], otherEnd = otherStart + (double) candidate[ids::length];
+            const auto otherAnchor = otherStart - (double) candidate[ids::offset];
+            if (std::abs (otherAnchor - anchor) < 0.001 && otherStart < end && otherEnd > start)
+                partners.add (candidate);
+        }
+    }
+
+    return partners;
+}
+
+void Edit::forPartners (int clipId, const std::function<void (int)>& apply)
+{
+    if (propagating)
+        return;
+
+    const auto partners = getLinkedClips (getClip (clipId));
+    if (partners.isEmpty())
+        return;
+
+    propagating = true;
+    for (const auto& partner : partners)
+        apply ((int) partner[ids::id]);
+    propagating = false;
+}
+
 warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
 {
     warp::Settings settings;
@@ -981,6 +1070,17 @@ warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
     settings.semitones = juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, settings.semitones);
     settings.algorithm = warp::algorithmFromKey (clip[ids::stretch].toString());
     settings.formant = (bool) clip.getProperty (ids::formant, false);
+
+    // Linked: rendered with its partners' files, so they all stay in phase.
+    if (! settings.isNeutral())
+        if (const auto partners = getLinkedClips (clip); ! partners.isEmpty())
+        {
+            settings.linked.add (clip[ids::file].toString());
+            for (const auto& partner : partners)
+                settings.linked.addIfNotAlreadyThere (partner[ids::file].toString());
+            settings.linked.sort (false);
+        }
+
     return settings;
 }
 

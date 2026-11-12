@@ -4442,6 +4442,125 @@ namespace
         folder.deleteRecursively();
     }
 
+    void testLinkedTracks()
+    {
+        std::cout << "\nLinked tracks (multi-mic warping stays in phase)\n";
+
+        // Two mics of one kit: each hears its own drum and the other one's bleed.
+        const auto seconds = 3.0;
+        const auto n = (int) (seconds * sampleRate);
+        juce::AudioBuffer<float> kick (1, n), snare (1, n);
+        kick.clear();
+        snare.clear();
+        juce::Random random (7);
+        for (int hit = 0; hit < 6; ++hit)
+        {
+            const auto at = (int) ((0.2 + hit * 0.5) * sampleRate);
+            for (int i = 0; i < (int) (0.15 * sampleRate) && at + i < n; ++i)
+            {
+                const auto env = (float) std::exp (-i / (0.03 * sampleRate));
+                kick.setSample (0, at + i, 0.7f * env * (float) std::sin (juce::MathConstants<double>::twoPi * (60.0 + 80.0 * std::exp (-i / (0.01 * sampleRate))) * i / sampleRate));
+                snare.setSample (0, at + i + (int) (0.25 * sampleRate) < n ? at + i + (int) (0.25 * sampleRate) : at + i,
+                                 0.4f * env * (random.nextFloat() * 2.0f - 1.0f));
+            }
+        }
+        juce::AudioBuffer<float> mic1 (1, n), mic2 (1, n), both (1, n);
+        for (int i = 0; i < n; ++i)
+        {
+            mic1.setSample (0, i, kick.getSample (0, i) + 0.5f * (i >= 48 ? snare.getSample (0, i - 48) : 0.0f)); // bleed arrives 1 ms late
+            mic2.setSample (0, i, snare.getSample (0, i) + 0.5f * (i >= 48 ? kick.getSample (0, i - 48) : 0.0f));
+            both.setSample (0, i, mic1.getSample (0, i) + mic2.getSample (0, i));
+        }
+
+        daw::warp::Settings settings;
+        settings.map = daw::warp::Map ({ { 0.0, 0.0 }, { 1.0, 1.25 }, { 2.0, 2.1 } });
+        settings.linked = { "a", "b" };
+
+        // The two mics summed after warping, against the whole kit warped with the same
+        // decisions (a faint copy of it rendered alongside them): linked, they match, so the
+        // mics are still in phase with each other. Warped one by one, they drift apart.
+        const auto mismatch = [&] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b,
+                                   const juce::AudioBuffer<float>& reference, float scale)
+        {
+            double diff = 0.0, energy = 1.0e-12;
+            for (int i = 0; i < reference.getNumSamples(); ++i)
+            {
+                const auto x = (double) a.getSample (0, i) + b.getSample (0, i), y = (double) reference.getSample (0, i) / scale;
+                diff += (x - y) * (x - y);
+                energy += y * y;
+            }
+            return 10.0 * std::log10 (diff / energy + 1.0e-20);
+        };
+
+        juce::AudioBuffer<float> faint (both);
+        faint.applyGain (1.0e-3f);
+
+        for (const auto& key : { "mix", "solo", "drums", "efficient" })
+        {
+            settings.algorithm = daw::warp::algorithmFromKey (key);
+            const auto parts = daw::warp::renderLinked ({ &mic1, &mic2, &faint }, sampleRate, settings);
+            const auto linked = mismatch (parts[0], parts[1], parts[2], 1.0e-3f);
+            auto alone = settings;
+            alone.linked.clear();
+            const auto separate = mismatch (daw::warp::render (mic1, sampleRate, alone), daw::warp::render (mic2, sampleRate, alone),
+                                            daw::warp::render (both, sampleRate, alone), 1.0f);
+            check (parts.size() == 3 && parts[0].getNumSamples() == parts[1].getNumSamples() && linked < -60.0 && linked < separate - 6.0,
+                   juce::String (key) + ": linked mics stay in phase (" + juce::String (linked, 1) + " dB off the kit; warped apart "
+                       + juce::String (separate, 1) + " dB)");
+        }
+
+        // In the project: link the tracks, warp one clip, and its partner follows.
+        const auto folder = juce::File::createTempFile ("micfx-linked");
+        folder.createDirectory();
+        const auto file1 = folder.getChildFile ("kick.wav"), file2 = folder.getChildFile ("snare.wav");
+        writeWav (file1, mic1, sampleRate);
+        writeWav (file2, mic2, sampleRate);
+
+        daw::Edit edit;
+        daw::AudioPool pool;
+        pool.setSampleRate (sampleRate);
+        const auto t1 = (int) edit.addTrack ("Kick")[daw::ids::id], t2 = (int) edit.addTrack ("Snare")[daw::ids::id];
+        const auto c1 = (int) edit.addClip (t1, file1, 1.0, seconds)[daw::ids::id];
+        const auto c2 = (int) edit.addClip (t2, file2, 1.0, seconds)[daw::ids::id];
+        check (daw::Edit::getLinkedClips (edit.getClip (c1)).isEmpty(), "unlinked tracks have no partners");
+
+        edit.linkTracks ({ t1, t2 });
+        check (daw::Edit::getLink (edit.getTrack (t1)) != 0 && daw::Edit::getLink (edit.getTrack (t1)) == daw::Edit::getLink (edit.getTrack (t2))
+                   && daw::Edit::getLinkedClips (edit.getClip (c1)).size() == 1,
+               "linked tracks: clips that start together are partners");
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.setClipWarp (c1, settings.map);
+        check (daw::Edit::getClipWarp (edit.getClip (c2)) == settings.map, "warping one clip warps its partner the same way");
+        edit.getUndoManager().undo();
+        check (daw::Edit::getClipWarp (edit.getClip (c2)).isIdentity(), "and undoes for both");
+
+        edit.setClipWarp (c1, settings.map);
+        edit.setClipStretch (c1, daw::warp::Algorithm::drums);
+        const auto s1 = daw::Edit::getWarpSettings (edit.getClip (c1)), s2 = daw::Edit::getWarpSettings (edit.getClip (c2));
+        check (s1.linked.size() == 2 && s1.linked == s2.linked && s2.algorithm == daw::warp::Algorithm::drums,
+               "partners render together, with the same algorithm");
+        const auto r1 = pool.loadNow (file1, s1);
+        const auto r2 = pool.loadNow (file2, s2);
+        check (r1 != nullptr && r2 != nullptr && r1->getNumSamples() == r2->getNumSamples(), "the pool renders both copies in one go");
+
+        edit.moveClip (c1, 2.0);
+        check (std::abs ((double) edit.getClip (c2)[daw::ids::start] - 2.0) < 1e-9, "moving a clip moves its partner");
+
+        // Quantize hears both mics.
+        edit.setClipWarp (c1, {});
+        const auto grid = analysis::rhythm::makeGrid (120.0, 0.5, 0.0, 8.0);
+        const auto result = daw::rhythm::quantizeClips (edit, pool, { c1 }, grid, {});
+        check (result.onsets >= 10 && daw::Edit::getClipWarp (edit.getClip (c1)) == daw::Edit::getClipWarp (edit.getClip (c2)),
+               "quantizing one clip finds the notes of both mics and warps both (" + juce::String (result.onsets) + " onsets)");
+
+        edit.unlinkTrack (t2);
+        check (daw::Edit::getLinkedClips (edit.getClip (c1)).isEmpty() && ! daw::Edit::getClipWarp (edit.getClip (c2)).isIdentity(),
+               "unlinking keeps each clip's warp as it was");
+
+        folder.deleteRecursively();
+    }
+
     void testWarp()
     {
         std::cout << "\nTime warp and transpose (clips stay dry)\n";
@@ -5696,6 +5815,7 @@ int main()
     testClipTools();
     testTempoMap();
     testMusicalMode();
+    testLinkedTracks();
     testWarp();
     testRhythm();
     testTrackTools();
