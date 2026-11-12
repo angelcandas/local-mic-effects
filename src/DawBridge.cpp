@@ -1163,11 +1163,11 @@ void DawBridge::startAutoMix (const juce::File& reference)
 
     autoMixJob = job;
 
-    juce::Thread::launch ([analyser, job]
+    juce::Thread::launch ([analyser, job, cache = profileCache]
     {
         const auto reading = job->reference != juce::File();
         const auto progress = [job, reading] (double p) { job->progress = reading ? 0.5 * p : p; return ! job->cancel.load(); };
-        job->result = analyser->run (progress);
+        job->result = analyser->run (progress, cache.get());
 
         if (reading && ! job->result.cancelled)
         {
@@ -1427,9 +1427,9 @@ juce::var DawBridge::handleKey (const juce::var& args)
                                                                      engine.getSampleRate());
         keyJob = job;
 
-        juce::Thread::launch ([analyser, job]
+        juce::Thread::launch ([analyser, job, cache = profileCache]
         {
-            job->result = analyser->run ([job] (double p) { job->progress = p; return ! job->cancel.load(); });
+            job->result = analyser->run ([job] (double p) { job->progress = p; return ! job->cancel.load(); }, cache.get());
             job->finished = true;
         });
 

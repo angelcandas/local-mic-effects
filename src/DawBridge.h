@@ -147,6 +147,9 @@ private:
     struct AutoMixJob;
     std::shared_ptr<AutoMixJob> autoMixJob;
     std::optional<analysis::SessionAnalyser::Result> autoMixAnalysis;
+    // Track profiles already measured (Auto Mix and key detection share them), so
+    // listening again only renders the tracks whose audio changed.
+    std::shared_ptr<analysis::ProfileCache> profileCache = std::make_shared<analysis::ProfileCache>();
     std::map<int, analysis::Role> autoMixRoles;
     analysis::MixStyle autoMixStyle = analysis::MixStyle::pop;
     analysis::MixPlan autoMixPlan;
