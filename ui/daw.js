@@ -9,6 +9,7 @@ import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
+import { decorateAiPanels } from "./aiviews.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createRhythmPanel, drawHitpoints, drawWarpMarkers, savedQuantizeArgs, startWarpDrag } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
@@ -849,6 +850,7 @@ class DawScreen {
     this.buildStems();
     this.buildLibrary();
     this.buildKeyPanel();
+    decorateAiPanels(this.root);
 
     this.takes = new TakeLanes(this, { daw, toast: (...args) => toast(...args) });
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
