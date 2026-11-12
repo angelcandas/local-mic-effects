@@ -1323,6 +1323,14 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("split", autoMixSplit);
 }
 
+void DawBridge::readAutoMixMode (const juce::var& args)
+{
+    if (args.hasProperty ("mode"))
+        autoMixOptions.mode = analysis::getModeFromKey (args["mode"].toString());
+    if (args.hasProperty ("focus"))
+        autoMixOptions.focusTrackId = (int) args["focus"];
+}
+
 // Every track's tag before Auto Mix listens: the one you picked (tagged), or the guess
 // from its name ("" when the name says nothing, and the sound decides).
 juce::var DawBridge::describeAutoMixTags() const
@@ -1370,7 +1378,8 @@ juce::var DawBridge::describeAutoMix() const
     {
         juce::String effect = ! move.ride.empty() ? "Volume ride" : move.values.count ("inGain") > 0 ? "Normalize" : "Volume";
         if (move.insert.has_value())
-            effect = *move.insert == fx::ModuleType::paraEq     ? "Parametric EQ"
+            effect = *move.insert == fx::ModuleType::paraEq     ? (move.instance > 0 ? "Parametric EQ (hum)" : "Parametric EQ")
+                   : *move.insert == fx::ModuleType::gate       ? "Noise gate"
                    : *move.insert == fx::ModuleType::compressor ? "Compressor"
                    : *move.insert == fx::ModuleType::deEsser    ? "De-esser"
                    : *move.insert == fx::ModuleType::reverb     ? "Reverb"
@@ -1398,7 +1407,8 @@ juce::var DawBridge::describeAutoMix() const
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
-                     { "style", styleKey (autoMixStyle) }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
+                     { "style", styleKey (autoMixStyle) }, { "mode", analysis::getModeKey (autoMixOptions.mode) },
+                     { "focus", autoMixOptions.focusTrackId }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
                      { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs } });
 }
 
@@ -1592,7 +1602,10 @@ int DawBridge::setAutotunesToKey()
 //   tags                which role each track has before listening (describeAutoMixTags)
 //   tag {track, role}   tag a track: a role key (analysis::getRoleKey), or "auto" to guess
 //                       from its name and sound again. Saved with the project.
-//   replan {style, effects, roles: {trackId: role key}}  (also saved as the tracks' tags)
+//   replan {style, mode, focus, effects, roles: {trackId: role key}}  (roles also saved as the tracks' tags)
+//                       mode: "mix" (the whole song), "fit" (focus into the backing) or "clean"
+//                       (clean & polish focus only); focus: a track id (0: the lead voice).
+//                       analyse takes mode and focus too.
 //                       effects: {eq, compressor, deEsser, reverb, saturation, echo, exciter,
 //                       width}, the effects it may add; normalize, split (see MixOptions)
 //   apply {amount, replace}  write the plan as one undo step ("Auto Mix"); with replace,
@@ -1623,6 +1636,7 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
         if (args.hasProperty ("style"))
             autoMixStyle = styleFromKey (args["style"].toString());
         readAutoMixEffects (args["effects"]);
+        readAutoMixMode (args);
 
         if (action == "analyse")
         {
@@ -1650,6 +1664,7 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
         if (args.hasProperty ("style"))
             autoMixStyle = styleFromKey (args["style"].toString());
         readAutoMixEffects (args["effects"]);
+        readAutoMixMode (args);
 
         // A role picked here is also the track's tag, for next time.
         if (auto* roles = args["roles"].getDynamicObject())

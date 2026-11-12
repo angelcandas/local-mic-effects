@@ -96,6 +96,7 @@ private:
     bool startAutoMixSplit();
     void replanAutoMix();
     void readAutoMixEffects (const juce::var& effects);
+    void readAutoMixMode (const juce::var& args); // mode, focus
     juce::var describeAutoMix() const;
     juce::var describeAutoMixTags() const;
 

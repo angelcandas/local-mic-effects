@@ -1218,6 +1218,160 @@ namespace
 
     // Volume automation: the Edit's ride, the engine playing it, and Auto Mix writing
     // a vocal ride and a dip on the backing while the voice sings.
+    void testAutoMixModes()
+    {
+        std::cout << "\nAuto Mix modes (fit into backing, clean & polish)\n";
+
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-modes");
+        folder.createDirectory();
+
+        // A voice recorded with 50 Hz mains hum (and its 2nd and 3rd harmonics) and some
+        // hiss, heard between the phrases; a backing that plays all through.
+        auto sung = makeSungLine (15.0, 3.0, 1.5);
+        {
+            juce::Random random (7);
+            const auto twoPi = juce::MathConstants<double>::twoPi;
+            for (int i = 0; i < sung.getNumSamples(); ++i)
+            {
+                const auto t = i / sampleRate;
+                const auto noise = 0.002 * std::sin (twoPi * 50.0 * t) + 0.0015 * std::sin (twoPi * 100.0 * t)
+                                 + 0.001 * std::sin (twoPi * 150.0 * t) + 0.002 * (random.nextFloat() * 2.0 - 1.0);
+                for (int ch = 0; ch < 2; ++ch)
+                    sung.addSample (ch, i, (float) noise);
+            }
+        }
+        const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav");
+        writeWav (voiceFile, sung, sampleRate);
+        writeWav (backingFile, makeBacking (15.0), sampleRate);
+        const auto voice = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Backing")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 15.0);
+        edit.addClip (backing, backingFile, 0.0, 15.0);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const auto& voiceProfile = source.tracks[0].second;
+        const auto& backingProfile = source.tracks[1].second;
+        check (juce::exactlyEqual (voiceProfile.humHz, 50.0f) && voiceProfile.humHarmonicsDb[0] > 15.0f,
+               "hum found on the voice: " + juce::String (voiceProfile.humHz, 0) + " Hz, lines "
+                   + juce::String (voiceProfile.humHarmonicsDb[0], 0) + " / " + juce::String (voiceProfile.humHarmonicsDb[1], 0) + " / "
+                   + juce::String (voiceProfile.humHarmonicsDb[2], 0) + " dB over the hiss");
+        check (backingProfile.humHz <= 0.0f, "no hum on the backing (its 110 Hz note is near 100 Hz, but not on it)");
+
+        const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { backing, analysis::Role::backing } };
+        const std::map<int, float> volumes { { voice, 0.0f }, { backing, 0.0f } };
+        const auto print = [] (const analysis::MixPlan& plan)
+        {
+            for (const auto& move : plan.moves)
+                for (const auto& reason : move.reasons)
+                    std::cout << "        " << move.trackId << (move.insert ? juce::String (" ") + fx::getModuleKey (*move.insert) : juce::String())
+                              << ": " << reason << "\n";
+            for (const auto& note : plan.notes)
+                std::cout << "        note: " << note << "\n";
+        };
+
+        // Clean & polish the voice (the lead, when no track is picked).
+        analysis::MixOptions clean;
+        clean.mode = analysis::MixMode::clean;
+        const auto cleanPlan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, clean);
+        print (cleanPlan);
+
+        bool onlyVoice = true, levels = false, space = false;
+        const analysis::MixMove* hum = nullptr;
+        const analysis::MixMove* gate = nullptr;
+        for (const auto& move : cleanPlan.moves)
+        {
+            onlyVoice = onlyVoice && move.trackId == voice;
+            levels = levels || ! move.insert.has_value();
+            space = space || move.insert == fx::ModuleType::reverb || move.insert == fx::ModuleType::echo;
+            if (move.insert == fx::ModuleType::paraEq && move.instance == 1) hum = &move;
+            if (move.insert == fx::ModuleType::gate) gate = &move;
+        }
+        check (onlyVoice && ! levels && ! space, "clean: only the voice, no volume, ride or space");
+        check (hum != nullptr && hum->values.count ("peqBell1Freq") > 0 && juce::exactlyEqual (hum->values.at ("peqBell1Freq"), 50.0f)
+                   && hum->values.at ("peqBell1Gain") <= -6.0f && juce::exactlyEqual (hum->values.at ("peqBell2Freq"), 100.0f)
+                   && juce::exactlyEqual (hum->values.at ("peqBell3Freq"), 150.0f),
+               "clean: narrow cuts at 50, 100 and 150 Hz in a second EQ");
+        check (gate != nullptr && gate->values.at ("gateThreshold") > -60.0f && gate->values.at ("gateThreshold") < -35.0f,
+               "clean: a gate over the noise between phrases ("
+                   + (gate != nullptr ? juce::String (gate->values.at ("gateThreshold"), 0) : juce::String ("none")) + " dB)");
+
+        // Applied: the gate first, the hum EQ right after the voice's own EQ.
+        analysis::applyMix (edit, cleanPlan);
+        {
+            juce::StringArray chain;
+            for (const auto& insert : daw::Edit::getInserts (edit.getTrack (voice)))
+                chain.add (insert[daw::ids::type].toString());
+            std::cout << "        chain: " << chain.joinIntoString (", ") << "\n";
+            check (chain.size() >= 3 && chain[0] == "gate" && chain[1] == "paraEq" && chain[2] == "paraEq", "clean: gate, the EQ, then the hum EQ");
+
+            const auto stem = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+            const auto breath = voiceProfile.rmsDb[22], after = stem.tracks[0].second.rmsDb[22]; // 2.2 s: between lines
+            check (after < breath - 15.0f, "clean: the breaths go quiet (" + juce::String (breath, 0) + " dB, then " + juce::String (after, 0) + ")");
+        }
+        edit.getUndoManager().undo();
+
+        // Without the gate, the hum EQ alone takes the hum lines down.
+        {
+            auto humOnly = cleanPlan;
+            humOnly.moves.erase (std::remove_if (humOnly.moves.begin(), humOnly.moves.end(),
+                                                 [] (const analysis::MixMove& m) { return m.insert != fx::ModuleType::paraEq || m.instance != 1; }),
+                                 humOnly.moves.end());
+            analysis::applyMix (edit, humOnly);
+            const auto stem = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+            const auto& p = stem.tracks[0].second;
+            check (p.getHumProminenceDb() < voiceProfile.getHumProminenceDb() - 6.0f,
+                   "clean: the hum lines come down (" + juce::String (voiceProfile.getHumProminenceDb(), 0) + " dB over the hiss, then "
+                       + juce::String (p.getHumProminenceDb(), 0) + ")");
+            edit.getUndoManager().undo();
+        }
+
+        // Fit the voice into the backing: the voice gets its treatment and level, the
+        // backing only makes room, the master stays.
+        analysis::MixOptions fit;
+        fit.mode = analysis::MixMode::fit;
+        fit.focusTrackId = voice;
+        const auto fitPlan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, fit);
+        print (fitPlan);
+        bool master = false, voiceVolume = false, backingOnlyRoom = true;
+        for (const auto& move : fitPlan.moves)
+        {
+            master = master || move.trackId == daw::Edit::masterId;
+            voiceVolume = voiceVolume || (move.trackId == voice && ! move.insert.has_value() && move.values.count ("volume") > 0);
+            if (move.trackId == backing)
+                backingOnlyRoom = backingOnlyRoom && (! move.ride.empty() || move.insert == fx::ModuleType::paraEq);
+        }
+        check (! master && voiceVolume && backingOnlyRoom, "fit: the voice's level, only a dip and a ride on the backing, the master stays");
+
+        // An instrument in focus: it gets the level (under the backing), the voice is left alone.
+        {
+            const auto guitarFile = folder.getChildFile ("guitar.wav");
+            writeWav (guitarFile, makeTones ({ { 15.0, 196.0, 0.1f, 0.1f } }), sampleRate);
+            const auto guitar = (int) edit.addTrack ("Guitar")[daw::ids::id];
+            edit.addClip (guitar, guitarFile, 0.0, 15.0);
+            const auto withGuitar = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+            auto guitarRoles = roles;
+            guitarRoles[guitar] = analysis::Role::guitar;
+            auto guitarVolumes = volumes;
+            guitarVolumes[guitar] = 0.0f;
+            fit.focusTrackId = guitar;
+            const auto guitarPlan = analysis::planMix (withGuitar, guitarRoles, guitarVolumes, 0.0f, analysis::MixStyle::pop, fit);
+            print (guitarPlan);
+            bool guitarVolume = false, voiceLevel = false, masterMove = false;
+            for (const auto& move : guitarPlan.moves)
+            {
+                guitarVolume = guitarVolume || (move.trackId == guitar && ! move.insert.has_value() && move.values.count ("volume") > 0);
+                voiceLevel = voiceLevel || (move.trackId == voice && ! move.insert.has_value() && move.ride.empty());
+                masterMove = masterMove || move.trackId == daw::Edit::masterId;
+            }
+            check (guitarVolume && ! voiceLevel && ! masterMove, "fit, guitar in focus: its level; the voice's and the master's stay");
+        }
+
+        check (analysis::getModeFromKey (analysis::getModeKey (analysis::MixMode::clean)) == analysis::MixMode::clean
+                   && analysis::getModeFromKey ("nonsense") == analysis::MixMode::mix,
+               "mode keys round-trip");
+    }
+
     void testAutoMixRides()
     {
         std::cout << "\nVolume rides (automation)\n";
@@ -4594,6 +4748,7 @@ int main()
     testAutoMixEffects();
     testAutoMixRoles();
     testAutoMixRides();
+    testAutoMixModes();
     testAnalysisSpeed();
     testLatency();
     testSmoothing();
