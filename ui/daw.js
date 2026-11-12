@@ -1454,9 +1454,29 @@ class DawScreen {
     }
 
     for (const clip of track.clips) lane.append(this.createClip(clip, track));
+    if (track.ride?.length) lane.append(this.createRide(track.ride));
 
     row.append(head, lane);
     return row;
+  }
+
+  // A track's volume ride (automation), drawn over its clips: the middle is 0 dB, the
+  // top and bottom ±12 dB. It holds its last value after the last point.
+  createRide(points) {
+    const width = Math.max(1, (points[points.length - 1][0] + 4) * this.zoom);
+    const y = (db) => 50 - Math.max(-12, Math.min(12, db)) / 12 * 46;
+    const coords = points.map(([t, db]) => `${(t * this.zoom).toFixed(1)},${y(db).toFixed(2)}`);
+    coords.push(`${width.toFixed(1)},${y(points[points.length - 1][1]).toFixed(2)}`);
+    const box = svg("svg", { class: "lane-ride", viewBox: `0 0 ${width.toFixed(1)} 100`, preserveAspectRatio: "none" });
+    box.style.width = `${width}px`;
+    box.append(svg("line", { class: "lane-ride-zero", x1: 0, x2: width.toFixed(1), y1: 50, y2: 50 }),
+               svg("polyline", { points: coords.join(" ") }));
+    const most = Math.max(...points.map(([, db]) => Math.abs(db)));
+    const label = html("span", "lane-ride-label", `ride ±${most.toFixed(1)} dB`);
+    label.title = "Volume ride (automation) on top of the fader. Right-click the track's name to clear it.";
+    const wrap = html("div", "lane-ride-wrap");
+    wrap.append(box, label);
+    return wrap;
   }
 
   renderMasterRow() {
@@ -3157,6 +3177,7 @@ class DawScreen {
     item("Move down", () => daw("moveTrack", { id: track.id, index: index + 1 }), { disabled: index >= tracks.length - 1 });
     rule();
     item("Add effect…", () => { this.select(track.id, null); this.setDockTab?.("effects"); toast("Pick an effect from Add effect, or drag one from the library."); });
+    item("Clear volume ride", () => daw("setTrack", { id: track.id, clearRide: true }), { disabled: !track.ride?.length });
     item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
     item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
     if (track.kind !== "midi")

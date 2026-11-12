@@ -17,7 +17,8 @@
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value
 //     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor, transpose,
 //            kind ("midi" for MIDI tracks; audio when missing), mixRole (Auto Mix's tag:
-//            "voice", "drums"... see analysis::getRoleKey; missing when not tagged)
+//            "voice", "drums"... see analysis::getRoleKey; missing when not tagged),
+//            ride (volume automation, see RidePoint; missing when none)
 //       INSERTS ...
 //       INSTRUMENT  id, plugin, name, format, vendor, description, state   (MIDI tracks)
 //       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute,
@@ -58,7 +59,7 @@ namespace ids
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
-    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole)
+    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (ride)
 #undef MICFX_DAW_ID
 }
 
@@ -184,6 +185,17 @@ public:
     // setting one keeps the clip's window where it is, so the audio moves under it.
     void setClipTranspose (int clipId, double semitones);
     void setTrackTranspose (int trackId, double semitones);
+
+    //==============================================================================
+    // Volume automation ("ride"): a gain in dB over time, on top of the track's fader,
+    // after its inserts. Straight lines between the points (seconds, in time order);
+    // before the first and after the last, their values hold. Stored on the TRACK as
+    // text "time:dB;time:dB...". An empty list removes it. One undo step.
+    struct RidePoint { double time = 0.0; float db = 0.0f; };
+    static constexpr float maxRideDb = 24.0f;
+    void setVolumeRide (int trackId, const std::vector<RidePoint>&);
+    static std::vector<RidePoint> getVolumeRide (const juce::ValueTree& track);
+    static float getRideDbAt (const std::vector<RidePoint>&, double time);
     void setClipWarp (int clipId, const warp::Map&);
     static warp::Map getClipWarp (const juce::ValueTree& clip);
 

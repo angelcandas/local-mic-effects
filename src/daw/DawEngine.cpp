@@ -4,6 +4,20 @@ namespace daw
 {
 namespace
 {
+    // A volume ride's level at a timeline sample (dB), straight lines between points.
+    float rideDbAt (const std::vector<std::pair<juce::int64, float>>& ride, juce::int64 at) noexcept
+    {
+        if (at <= ride.front().first) return ride.front().second;
+        if (at >= ride.back().first)  return ride.back().second;
+        const auto next = std::upper_bound (ride.begin(), ride.end(), at, [] (juce::int64 t, const auto& p) { return t < p.first; });
+        const auto& [t1, d1] = *next;
+        const auto& [t0, d0] = *(next - 1);
+        return t1 > t0 ? d0 + (d1 - d0) * (float) ((double) (at - t0) / (double) (t1 - t0)) : d1;
+    }
+}
+
+namespace
+{
     constexpr double smoothingSeconds = 0.02;
 
     float volumeToGain (const juce::var& decibels)
@@ -218,7 +232,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         return;
     }
 
-    if (tree.hasType (ids::TRACK) && property == ids::transpose)
+    if (tree.hasType (ids::TRACK) && (property == ids::transpose || property == ids::ride))
     {
         triggerAsyncUpdate(); // its clips play other rendered copies
         return;
@@ -379,6 +393,9 @@ void DawEngine::rebuild()
 
         if (track.strip->isMidi)
             buildMidiEvents (track, trackTree, sampleRate, end);
+
+        for (const auto& point : Edit::getVolumeRide (trackTree))
+            track.ride.emplace_back ((juce::int64) std::llround (point.time * sampleRate), point.db);
 
         for (const auto& clipTree : trackTree)
         {
@@ -972,6 +989,16 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         {
             left[i] *= strip.left.getNextValue();
             right[i] *= strip.right.getNextValue();
+        }
+
+        // Volume automation, while playing: a straight ramp over the block (points are a
+        // tenth of a second apart or more, blocks a few milliseconds).
+        if (isPlaying && ! track.ride.empty())
+        {
+            const auto from = juce::Decibels::decibelsToGain (rideDbAt (track.ride, blockStart));
+            const auto to = juce::Decibels::decibelsToGain (rideDbAt (track.ride, blockStart + numSamples));
+            strip.buffer.applyGainRamp (0, 0, numSamples, from, to);
+            strip.buffer.applyGainRamp (1, 0, numSamples, from, to);
         }
 
         updatePeak (strip.peak, strip.buffer.getMagnitude (0, numSamples));

@@ -160,6 +160,15 @@ namespace
     }
 
     constexpr const char* autoMixUndoName = "Auto Mix";
+
+    // A track's volume ride for the page: [[seconds, dB], ...].
+    juce::var describeRide (const juce::ValueTree& track)
+    {
+        juce::Array<juce::var> points;
+        for (const auto& point : daw::Edit::getVolumeRide (track))
+            points.add (juce::Array<juce::var> { point.time, point.db });
+        return points;
+    }
 }
 
 //==============================================================================
@@ -373,7 +382,7 @@ juce::var DawBridge::describeSession()
                               { "inGain", number (track, ids::inGain) }, { "outGain", number (track, ids::outGain) },
                               { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
-                              { "transpose", number (track, ids::transpose) },
+                              { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) },
                               { "inserts", describeInserts (track) }, { "clips", clips },
                               { "kind", daw::Edit::isMidiTrack (track) ? "midi" : "audio" },
                               { "instrument", describeInstrument (track) } }));
@@ -1263,6 +1272,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("exciter", autoMixOptions.exciter);
     read ("width", autoMixOptions.width);
     read ("normalize", autoMixOptions.normalize);
+    read ("rides", autoMixOptions.rides);
     read ("split", autoMixSplit);
 }
 
@@ -1311,7 +1321,7 @@ juce::var DawBridge::describeAutoMix() const
 
     for (const auto& move : autoMixPlan.moves)
     {
-        juce::String effect = move.values.count ("inGain") > 0 ? "Normalize" : "Volume";
+        juce::String effect = ! move.ride.empty() ? "Volume ride" : move.values.count ("inGain") > 0 ? "Normalize" : "Volume";
         if (move.insert.has_value())
             effect = *move.insert == fx::ModuleType::paraEq     ? "Parametric EQ"
                    : *move.insert == fx::ModuleType::compressor ? "Compressor"
@@ -1337,6 +1347,7 @@ juce::var DawBridge::describeAutoMix() const
                                    { "deEsser", autoMixOptions.deEsser }, { "reverb", autoMixOptions.reverb },
                                    { "saturation", autoMixOptions.saturation }, { "echo", autoMixOptions.echo },
                                    { "exciter", autoMixOptions.exciter }, { "width", autoMixOptions.width },
+                                   { "rides", autoMixOptions.rides },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
@@ -1730,6 +1741,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
             if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
             if (args.hasProperty ("transpose")) edit.setTrackTranspose (id, args["transpose"]);
+            if (arg (args, "clearRide", false)) edit.setVolumeRide (id, {});
             if (args.hasProperty ("inGain"))  edit.setChainGain (id, false, args["inGain"]);
             if (args.hasProperty ("outGain")) edit.setChainGain (id, true, args["outGain"]);
         }

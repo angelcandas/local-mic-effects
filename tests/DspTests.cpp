@@ -1145,6 +1145,122 @@ namespace
         folder.deleteRecursively();
     }
 
+    // Volume automation: the Edit's ride, the engine playing it, and Auto Mix writing
+    // a vocal ride and a dip on the backing while the voice sings.
+    void testAutoMixRides()
+    {
+        std::cout << "\nVolume rides (automation)\n";
+
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-rides");
+        folder.createDirectory();
+
+        // The Edit: points in time order, straight lines between them, holds at the ends.
+        const auto tone = (int) edit.addTrack ("Tone")[daw::ids::id];
+        edit.getUndoManager().beginNewTransaction();
+        edit.setVolumeRide (tone, { { 2.0, -12.0f }, { 0.0, 0.0f }, { 1.0, 0.0f } });
+        const auto ride = daw::Edit::getVolumeRide (edit.getTrack (tone));
+        check (ride.size() == 3 && juce::exactlyEqual (ride[1].time, 1.0) && juce::exactlyEqual (daw::Edit::getRideDbAt (ride, 1.5), -6.0f)
+                   && juce::exactlyEqual (daw::Edit::getRideDbAt (ride, 9.0), -12.0f),
+               "ride: sorted, straight lines, holds after the last point");
+        edit.getUndoManager().undo();
+        check (edit.getTrack (tone).isValid() && ! edit.getTrack (tone).hasProperty (daw::ids::ride), "ride: one undo step");
+        edit.setVolumeRide (tone, { { 0.0, 0.0f }, { 1.0, 0.0f }, { 2.0, -12.0f } });
+
+        // The engine plays it (offline, like an export).
+        const auto toneFile = folder.getChildFile ("tone.wav");
+        writeWav (toneFile, makeTones ({ { 4.0, 440.0, 0.3f, 0.3f } }), sampleRate);
+        edit.addClip (tone, toneFile, 0.0, 4.0);
+        {
+            const auto played = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+            const auto& rms = played.tracks.front().second.rmsDb;
+            const auto drop = rms[5] - rms[30];
+            check (std::abs (drop - 12.0f) < 0.5f, "the engine plays the ride (" + juce::String (drop, 1) + " dB down after 2 s)");
+
+            const auto raw = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+            const auto& rawRms = raw.tracks.front().second.rmsDb;
+            check (std::abs (rawRms[5] - rawRms[30]) < 0.5f, "Auto Mix measures the tracks without their rides");
+        }
+        edit.removeTrack (tone);
+
+        // Auto Mix: a voice singing 1.5 s lines with 1.5 s breaths, loud and soft lines in
+        // turn, over a backing that plays all through.
+        const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav");
+        writeWav (voiceFile, makeSungLine (15.0, 3.0, 1.5), sampleRate);
+        writeWav (backingFile, makeBacking (15.0), sampleRate);
+        const auto voice = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Backing")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 15.0);
+        edit.addClip (backing, backingFile, 0.0, 15.0);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { backing, analysis::Role::backing } };
+        const std::map<int, float> volumes { { voice, 0.0f }, { backing, 0.0f } };
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop);
+
+        const analysis::MixMove* voiceRide = nullptr;
+        const analysis::MixMove* duck = nullptr;
+        for (const auto& move : plan.moves)
+        {
+            if (! move.ride.empty() && move.trackId == voice) voiceRide = &move;
+            if (! move.ride.empty() && move.trackId == backing) duck = &move;
+            if (! move.ride.empty())
+                for (const auto& reason : move.reasons)
+                    std::cout << "        " << (move.trackId == voice ? "voice: " : "backing: ") << reason << "\n";
+        }
+        check (voiceRide != nullptr && voiceRide->ride.size() >= 4, "a ride on the voice");
+        check (duck != nullptr, "a dip on the backing while the voice sings");
+
+        analysis::MixOptions noRides;
+        noRides.rides = false;
+        bool none = true;
+        for (const auto& move : analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, noRides).moves)
+            none = none && move.ride.empty();
+        check (none, "no rides when they're off");
+
+        // Applied: the soft lines come up towards the loud ones, and the backing is lower
+        // while the voice sings than in the breaths.
+        const auto lineSpread = [] (const analysis::Profile& p)
+        {
+            // Mean level of each 1.5 s line (0.3 .. 1.2 s into each 3 s period).
+            std::vector<float> lines;
+            for (int line = 0; line < 5; ++line)
+            {
+                double sum = 0.0;
+                for (int f = line * 30 + 3; f < line * 30 + 12; ++f) sum += p.rmsDb[(size_t) f];
+                lines.push_back ((float) (sum / 9.0));
+            }
+            return *std::max_element (lines.begin(), lines.end()) - *std::min_element (lines.begin(), lines.end());
+        };
+
+        analysis::MixOptions ridesOnly;
+        ridesOnly.eq = ridesOnly.compressor = ridesOnly.deEsser = ridesOnly.reverb = false;
+        ridesOnly.saturation = ridesOnly.echo = ridesOnly.exciter = ridesOnly.width = false;
+        const auto ridePlan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, ridesOnly);
+        const auto before = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+        analysis::applyMix (edit, ridePlan);
+        const auto after = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+        const auto spreadBefore = lineSpread (before.tracks[0].second), spreadAfter = lineSpread (after.tracks[0].second);
+        check (spreadAfter < spreadBefore - 3.0f, "the voice's lines even out: " + juce::String (spreadBefore, 1) + " dB apart, then "
+                                                     + juce::String (spreadAfter, 1));
+
+        const auto& backingRms = after.tracks[1].second.rmsDb;
+        const auto singingLevel = backingRms[36], breathLevel = backingRms[52]; // 3.6 s (singing), 5.2 s (breath)
+        const auto dip = breathLevel - singingLevel;
+        const auto target = analysis::getTargets (analysis::MixStyle::pop).duckDb;
+        check (std::abs (dip - target) < 0.4f, "the backing dips " + juce::String (dip, 1) + " dB while the voice sings (target "
+                                                  + juce::String (target, 1) + ")");
+
+        // Half the amount: half the ride.
+        edit.getUndoManager().undo();
+        analysis::applyMix (edit, ridePlan, 0.5f);
+        const auto half = daw::Edit::getVolumeRide (edit.getTrack (backing));
+        const auto lowest = std::min_element (half.begin(), half.end(), [] (auto& a, auto& b) { return a.db < b.db; });
+        check (lowest != half.end() && std::abs (lowest->db + target / 2.0f) < 0.06f, "amount 50% halves the rides");
+
+        folder.deleteRecursively();
+    }
+
     // Chords (MIDI notes) played one after another, each note a soft harmonic tone,
     // `cents` away from A = 440 Hz tuning. Optional noise bursts on every beat stand in
     // for drums.
@@ -4300,6 +4416,7 @@ int main()
     testDawKey();
     testAutoMixEffects();
     testAutoMixRoles();
+    testAutoMixRides();
     testLatency();
     testSmoothing();
     testStems();

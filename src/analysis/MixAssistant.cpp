@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <numeric>
 
 namespace analysis
 {
@@ -248,6 +249,197 @@ namespace
             for (auto& v : bands) shift (v);
     }
 
+    //==========================================================================
+    // Volume automation.
+    using Curve = std::vector<std::pair<double, float>>; // seconds, dB
+
+    double frameTime (size_t frame) { return ((double) frame + 0.5) * Profile::hopSeconds; }
+
+    // A per-hop curve (dB) as few points: one wherever it has moved half a dB from the
+    // last (no closer than 0.3 s), with the frame before it so holds stay flat, and both ends.
+    Curve toPoints (const std::vector<float>& curve)
+    {
+        Curve points;
+        if (curve.empty())
+            return points;
+
+        const auto add = [&points] (double t, float db)
+        {
+            db = roundTo (db, 0.1);
+            if (points.empty() || points.back().first < t - 1.0e-6)
+                points.emplace_back (t, db);
+        };
+
+        add (0.0, curve.front());
+        size_t last = 0;
+        for (size_t i = 1; i < curve.size(); ++i)
+        {
+            if (std::abs (curve[i] - curve[last]) < 0.5f || frameTime (i) - points.back().first < 0.3)
+                continue;
+            if (i - 1 > last)
+                add (frameTime (i - 1), curve[i - 1]);
+            add (frameTime (i), curve[i]);
+            last = i;
+        }
+        add (frameTime (curve.size() - 1), curve.back());
+        return points;
+    }
+
+    // The change a gain curve makes to a signal's loudness (dB), over its active frames.
+    double rideLoudnessChange (const Profile& profile, const std::vector<float>& curve, const std::vector<bool>* mask = nullptr)
+    {
+        double before = 0.0, after = 0.0;
+        for (size_t i = 0; i < profile.momentaryLufs.size() && i < curve.size(); ++i)
+            if ((mask != nullptr ? (i < mask->size() && (*mask)[i]) : (bool) profile.active[i]) && profile.momentaryLufs[i] > -150.0f)
+            {
+                before += dbToPower (profile.momentaryLufs[i]);
+                after += dbToPower (profile.momentaryLufs[i] + curve[i]);
+            }
+        return before > 0.0 ? powerToDb (after) - powerToDb (before) : 0.0;
+    }
+
+    // A vocal rider: evens out the level from phrase to phrase (over ~1.5 s, after the EQ
+    // and compressor), up to the style's range. Leaves `move` without a ride when the
+    // phrases are already even. Returns the change to the voice's loudness.
+    double planVoiceRide (MixMove& move, const Profile& voice, double eqChange, const MixMove& compressor, const MixTargets& targets)
+    {
+        const auto n = voice.rmsDb.size();
+        const auto hasComp = compressor.values.count ("compThreshold") > 0;
+        const auto threshold = hasComp ? compressor.values.at ("compThreshold") : 0.0f;
+        const auto ratio = hasComp ? compressor.values.at ("compRatio") : 1.0f;
+
+        std::vector<float> level (n, -200.0f);
+        for (size_t i = 0; i < n; ++i)
+            if (voice.active[i] && voice.rmsDb[i] > -150.0f)
+            {
+                const auto l = voice.rmsDb[i] + (float) eqChange;
+                level[i] = l - (hasComp ? juce::jmax (0.0f, l + 3.0f - threshold) * (1.0f - 1.0f / ratio) : 0.0f);
+            }
+
+        std::vector<float> smoothed (n, -200.0f), active;
+        for (size_t i = 0; i < n; ++i)
+        {
+            if (level[i] <= -150.0f)
+                continue;
+            double p = 0.0;
+            int count = 0;
+            for (size_t k = i >= 7 ? i - 7 : 0; k < juce::jmin (n, i + 8); ++k)
+                if (level[k] > -150.0f)
+                    p += dbToPower (level[k]), ++count;
+            smoothed[i] = (float) powerToDb (p / juce::jmax (1, count));
+            active.push_back (smoothed[i]);
+        }
+
+        if (active.size() < 10)
+            return 0.0;
+
+        const auto target = percentile (active, 0.5);
+        std::vector<float> curve (n, 0.0f);
+        for (size_t i = 0; i < n; ++i)
+            if (smoothed[i] > -150.0f)
+                curve[i] = juce::jlimit (-targets.rideRangeDb, targets.rideRangeDb, 0.8f * (target - smoothed[i]));
+
+        // Between phrases it holds, then sets itself for the next phrase before it starts.
+        std::optional<float> next;
+        for (size_t i = n; i-- > 0;)
+        {
+            if (smoothed[i] > -150.0f) next = curve[i];
+            else if (next.has_value()) curve[i] = *next;
+        }
+        // After the last phrase it stays where it was.
+        for (size_t i = n; i-- > 0;)
+            if (smoothed[i] > -150.0f)
+            {
+                for (auto k = i + 1; k < n; ++k)
+                    curve[k] = curve[i];
+                break;
+            }
+
+        const auto most = std::accumulate (curve.begin(), curve.end(), 0.0f, [] (float m, float v) { return juce::jmax (m, std::abs (v)); });
+        if (most < 1.0f)
+            return 0.0;
+
+        std::vector<float> after;
+        for (size_t i = 0; i < n; ++i)
+            if (smoothed[i] > -150.0f)
+                after.push_back (smoothed[i] + curve[i]);
+
+        move.ride = toPoints (curve);
+        move.reasons.add ("Volume ride, up to " + formatDb (most) + " up or down: evens out your phrases ("
+                          + formatDb (percentile (active, 0.9) - percentile (active, 0.1)) + " apart before, "
+                          + formatDb (percentile (after, 0.9) - percentile (after, 0.1)) + " after), "
+                          + juce::String ((int) move.ride.size()) + " points you can see on the track");
+        return rideLoudnessChange (voice, curve);
+    }
+
+    // A dip on an instrument while the lead sings (with 0.3 s to get there), back up in
+    // the gaps of a second or more between lines, so the band fills them. Nothing when
+    // the instrument doesn't play in any gap (the dip would be a fader move).
+    // `whileSinging` gets the change while the lead sings; returns the overall change.
+    double planDuck (MixMove& move, const Profile& track, const Profile& lead, const MixTargets& targets, double& whileSinging)
+    {
+        whileSinging = 0.0;
+        const auto n = juce::jmin (track.active.size(), lead.active.size());
+        if (targets.duckDb <= 0.0f || n == 0)
+            return 0.0;
+
+        // Singing, with a short hangover; gaps under a second count as singing.
+        std::vector<bool> singing (n, false);
+        for (size_t i = 0; i < n; ++i)
+            for (size_t k = i >= 2 ? i - 2 : 0; k < juce::jmin (n, i + 3) && ! singing[i]; ++k)
+                singing[i] = lead.active[k];
+
+        int gaps = 0;
+        for (size_t i = 0; i < n;)
+        {
+            if (singing[i]) { ++i; continue; }
+            auto end = i;
+            while (end < n && ! singing[end]) ++end;
+            const auto between = i > 0 && end < n;
+            if (between && end - i < 10)
+                for (auto k = i; k < end; ++k) singing[k] = true;
+            else
+            {
+                bool plays = false;
+                for (auto k = i; k < end && ! plays; ++k) plays = track.active[k];
+                gaps += plays ? 1 : 0;
+            }
+            i = end;
+        }
+
+        if (gaps == 0)
+            return 0.0;
+
+        std::vector<float> curve (n, 0.0f);
+        Curve points;
+        const auto dip = -targets.duckDb;
+        points.emplace_back (0.0, singing[0] ? dip : 0.0f);
+        for (size_t i = 1; i < n; ++i)
+        {
+            curve[i] = singing[i] ? dip : 0.0f;
+            if (singing[i] == singing[i - 1])
+                continue;
+            const auto t = i * Profile::hopSeconds;
+            if (singing[i]) // into a line: down by the time it starts
+            {
+                points.emplace_back (juce::jmax (points.back().first + 0.01, t - 0.3), 0.0f);
+                points.emplace_back (juce::jmax (points.back().first + 0.01, t), dip);
+            }
+            else // out of it: back up over 0.4 s
+            {
+                points.emplace_back (juce::jmax (points.back().first + 0.01, t), dip);
+                points.emplace_back (t + 0.4, 0.0f);
+            }
+        }
+        curve[0] = singing[0] ? dip : 0.0f;
+
+        move.ride = points;
+        move.reasons.add ("Volume ride: down " + formatDb (targets.duckDb) + " while you sing, back up in "
+                          + juce::String (gaps) + (gaps == 1 ? " gap" : " gaps") + " between lines: room for the voice, the full band in between");
+        whileSinging = dip;
+        return rideLoudnessChange (track, curve);
+    }
+
     bool hasAny (const MixOptions& options, int trackId, std::initializer_list<fx::ModuleType> types)
     {
         const auto it = options.existingInserts.find (trackId);
@@ -262,7 +454,8 @@ namespace
     //==========================================================================
     struct VoicePlan
     {
-        MixMove eq, compressor, deEsser, saturation, exciter, echo, reverb, width;
+        MixMove eq, compressor, deEsser, saturation, exciter, echo, reverb, width, ride;
+        double eqChange = 0.0;       // what the EQ does to its loudness
         double loudnessChange = 0.0; // what the EQ and compressor do to its loudness
         double peakChange = 0.0;     // roughly, to the peak
     };
@@ -518,6 +711,7 @@ namespace
             }
         }
 
+        plan.eqChange = eqChange;
         plan.loudnessChange = eqChange + compChange;
         plan.peakChange += eqChange + juce::jmax (0.0, *std::max_element (eqDb.begin(), eqDb.end()) - eqChange);
         return plan;
@@ -538,20 +732,22 @@ MixTargets getTargets (MixStyle style)
         case MixStyle::ballad:
             t = { 2.5f, 0.0f, 1.5f, -14.0f, 20.0f, 65.0f, 7.0f };
             t.exciterAmount = 10.0f; t.echoMix = 12.0f; t.echoBeats = 1.0f; t.echoFeedback = 30.0f; t.widthAmount = 110.0f;
+            t.rideRangeDb = 5.0f; t.duckDb = 2.0f;
             break;
         case MixStyle::rock:
             t = { 0.0f, 1.0f, -1.0f, -14.0f, 9.0f, 35.0f, 5.0f };
-            t.voiceSaturationDb = 6.0f; t.bassSaturationDb = 6.0f; t.widthAmount = 120.0f;
+            t.voiceSaturationDb = 6.0f; t.bassSaturationDb = 6.0f; t.widthAmount = 120.0f; t.duckDb = 1.0f;
             t.drumsLufs = -19.0f; t.guitarLufs = -21.0f;
             break;
         case MixStyle::coaching: // the voice up front and dry, so every detail of it can be heard
             t = { 4.0f, 1.5f, 0.0f, -14.0f, 0.0f, 50.0f, 9.0f };
+            t.rideRangeDb = 3.0f; t.duckDb = 3.0f;
             break;
         case MixStyle::hipHop:
             t = { 2.5f, 2.5f, 0.5f, -13.0f, 6.0f, 30.0f, 6.0f };
             t.voiceSaturationDb = 4.0f; t.bassSaturationDb = 4.0f; t.exciterAmount = 25.0f;
             t.echoMix = 8.0f; t.echoBeats = 0.5f; t.echoFeedback = 20.0f; t.widthAmount = 110.0f;
-            t.drumsLufs = -19.0f; t.bassLufs = -19.5f;
+            t.drumsLufs = -19.0f; t.bassLufs = -19.5f; t.duckDb = 2.0f;
             break;
         case MixStyle::rnb:
             t = { 2.0f, 1.5f, 1.5f, -14.0f, 16.0f, 55.0f, 6.0f };
@@ -566,16 +762,16 @@ MixTargets getTargets (MixStyle style)
             t = { 1.0f, 2.5f, -0.5f, -12.0f, 14.0f, 60.0f, 5.0f };
             t.voiceSaturationDb = 3.0f; t.bassSaturationDb = 3.0f; t.exciterAmount = 30.0f;
             t.echoMix = 15.0f; t.echoBeats = 0.75f; t.echoFeedback = 35.0f; t.widthAmount = 140.0f;
-            t.drumsLufs = -19.0f; t.bassLufs = -20.0f;
+            t.drumsLufs = -19.0f; t.bassLufs = -20.0f; t.duckDb = 2.0f;
             break;
         case MixStyle::jazz:
             t = { 1.0f, 0.0f, 1.0f, -18.0f, 18.0f, 55.0f, 8.0f };
-            t.voiceSaturationDb = 2.0f; t.pianoLufs = -21.0f; t.drumsLufs = -23.0f;
+            t.voiceSaturationDb = 2.0f; t.pianoLufs = -21.0f; t.drumsLufs = -23.0f; t.rideRangeDb = 3.0f; t.duckDb = 1.0f;
             break;
         case MixStyle::lofi:
             t = { 0.5f, -2.0f, 2.0f, -14.0f, 15.0f, 45.0f, 6.0f };
             t.voiceSaturationDb = 8.0f; t.bassSaturationDb = 5.0f; t.echoMix = 10.0f; t.echoBeats = 0.5f; t.echoFeedback = 30.0f;
-            t.widthAmount = 90.0f;
+            t.widthAmount = 90.0f; t.rideRangeDb = 3.0f; t.duckDb = 1.0f;
             break;
     }
     t.style = style;
@@ -783,7 +979,7 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             MixMove move;
             move.trackId = id;
             move.values = { { "inGain", trim } };
-            move.reasons.add ("Input gain " + juce::String (trim > 0 ? "+" : "") + juce::String (trim, 1) + " dB: normalized to "
+            move.reasons.add ("Input gain " + juce::String (trim > 0 ? "up " : "down ") + formatDb (trim) + ": normalized to "
                               + juce::String (level, 0) + " LUFS, the level for " + getRoleName (role).toLowerCase() + " in "
                               + getStyleName (style) + (forPeak < forLevel ? " (held back so its peaks stay under -1 dB)" : ""));
             plan.moves.push_back (move);
@@ -825,6 +1021,15 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
     for (auto id : backgroundVocals)
         voicePlans[id] = planVoice (id, *findProfile (analysis, id), targets, options, plan.notes,
                                     options.trackNames.count (id) > 0 ? options.trackNames.at (id) : "The background vocals", true);
+
+    // Rides on the voices: phrase to phrase, after the EQ and compressor.
+    if (options.rides)
+        for (auto id : voices)
+        {
+            auto& vp = voicePlans[id];
+            vp.ride.trackId = id;
+            vp.loudnessChange += planVoiceRide (vp.ride, *findProfile (analysis, id), vp.eqChange, vp.compressor, targets);
+        }
 
     // The lead is the voice that sings the most; the others are balanced like it.
     const auto lead = *std::max_element (voices.begin(), voices.end(), [&] (int a, int b)
@@ -962,6 +1167,22 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
         }
 
         finalLoudness[id] += eqChange;
+
+        // A dip while the lead sings, up between lines (not bass and drums: the groove
+        // stays steady).
+        if (options.rides && role != Role::bass && role != Role::drums)
+        {
+            MixMove duck;
+            duck.trackId = id;
+            double whileSinging = 0.0;
+            const auto overall = planDuck (duck, profile, leadProfile, targets, whileSinging);
+            if (! duck.ride.empty())
+            {
+                plan.moves.push_back (duck);
+                change += whileSinging;
+                finalLoudness[id] += overall;
+            }
+        }
     }
 
     for (const auto& move : pendingWidth)
@@ -969,8 +1190,8 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
 
     for (const auto& [id, vp] : voicePlans)
     {
-        for (auto* move : { &vp.eq, &vp.compressor, &vp.deEsser, &vp.saturation, &vp.exciter, &vp.echo, &vp.reverb, &vp.width })
-            if (! move->values.empty())
+        for (auto* move : { &vp.eq, &vp.compressor, &vp.deEsser, &vp.saturation, &vp.exciter, &vp.echo, &vp.reverb, &vp.width, &vp.ride })
+            if (! move->values.empty() || ! move->ride.empty())
                 plan.moves.push_back (*move);
     }
 
@@ -1193,6 +1414,7 @@ MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float 
 //==============================================================================
 void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
 {
+    // Volume rides are written whole (a new ride replaces one the track had).
     amount = juce::jlimit (0.0f, 1.0f, amount);
     edit.getUndoManager().beginNewTransaction ("Auto Mix"); // DawBridge looks for this name
 
@@ -1204,10 +1426,20 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
         if (! owner.isValid())
             continue;
 
+        if (! move.ride.empty())
+        {
+            std::vector<daw::Edit::RidePoint> points;
+            for (const auto& [time, db] : move.ride)
+                points.push_back ({ time, db * amount });
+            edit.setVolumeRide (move.trackId, points);
+            continue;
+        }
+
         if (! move.insert.has_value() && move.values.count ("inGain") > 0)
         {
+            // A change from the input gain it was measured with.
             const auto current = (float) owner.getProperty (daw::ids::inGain, 0.0f);
-            edit.setChainGain (move.trackId, false, current + (move.values.at ("inGain") - current) * amount);
+            edit.setChainGain (move.trackId, false, current + move.values.at ("inGain") * amount);
             continue;
         }
 
