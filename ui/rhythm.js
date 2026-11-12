@@ -7,6 +7,7 @@
 // in the background and the recording stays as it was (see src/daw/Warp.h).
 import { NOTE_NAMES } from "./modules.js";
 import { clamp, html } from "./widgets.js";
+import { createNoteEditor } from "./pitchedit.js";
 
 // How clips are stretched and transposed (see src/daw/Warp.h), best use first.
 export const ALGORITHMS = [
@@ -175,9 +176,22 @@ export function createClipEditor(screen, track, clip, ui) {
   const clipTempoLabel = html("label", "tempo");
   clipTempoLabel.append(clipTempo, html("span", "", "BPM"));
 
-  const fit = button("tool", "Fit", "Show the whole clip", () => { view = null; draw(); });
+  const fit = button("tool", "Fit", "Show the whole clip", () => { if (mode === "notes") notesView?.fit(); else { view = null; draw(); } });
   const status = html("span", "clip-editor-status");
-  bar.append(quantize, unwarp, musical, clipTempoLabel, status, fit);
+
+  // Two views of the clip: its waveform (timing) and its sung notes (pitch, note by note).
+  let mode = prefs.get("view", "wave");
+  const views = html("div", "segmented clip-editor-views");
+  views.setAttribute("role", "tablist");
+  const viewButton = (key, text, title) => {
+    const b = button("segment", text, title, () => setMode(key));
+    b.setAttribute("role", "tab");
+    views.append(b);
+    return b;
+  };
+  const waveTab = viewButton("wave", "Wave", "The clip's waveform: warp its timing");
+  const notesTab = viewButton("notes", "Notes", "The clip's sung notes: move, straighten and shape each one (a single voice or instrument line)");
+  bar.append(views, quantize, unwarp, musical, clipTempoLabel, status, fit);
 
   const wave = html("div", "clip-editor-wave");
   wave.title = "Drag a note start (faint line) to move just that note, or anywhere to stretch. Double-click a marker to remove it. Ctrl/Cmd + scroll to zoom";
@@ -187,6 +201,25 @@ export function createClipEditor(screen, track, clip, ui) {
   const hint = html("p", "panel-caption clip-editor-hint");
   main.append(bar, wave, hint);
   element.append(side, main);
+
+  let notesView = null;
+  const setMode = (key) => {
+    mode = key === "notes" ? "notes" : "wave";
+    prefs.set("view", mode);
+    waveTab.classList.toggle("is-selected", mode === "wave");
+    notesTab.classList.toggle("is-selected", mode === "notes");
+    waveTab.setAttribute("aria-selected", String(mode === "wave"));
+    notesTab.setAttribute("aria-selected", String(mode === "notes"));
+    const notes = mode === "notes";
+    if (notes && !notesView) {
+      notesView = createNoteEditor({ screen, daw, toast, getClip: () => current, getTrack: () => owner, setStatus: (text) => setStatus(text) });
+      main.append(notesView.element);
+    }
+    for (const item of [quantize, unwarp, musical, clipTempoLabel, wave, hint]) item.hidden = notes;
+    if (notesView) notesView.element.hidden = !notes;
+    element.classList.toggle("is-notes", notes);
+    if (notes) notesView.shown(); else requestAnimationFrame(draw);
+  };
 
   // The view: a stretch of the clip's rendered time (offset .. offset + length).
   let view = null; // null: the whole clip
@@ -420,6 +453,8 @@ export function createClipEditor(screen, track, clip, ui) {
     hint.textContent = count ? `${count} warp markers. Drag a note start or a marker to move it; double-click a marker to remove it.`
                              : "Drag a note start (faint line) to move just that note, or anywhere in the clip to stretch it.";
     if (t.colour) element.style.setProperty("--wave", t.colour);
+    notesTab.classList.toggle("has-edits", Boolean(c.pitchEdited));
+    if (mode === "notes") notesView.update();
     const shape = `${c.audioKey}|${c.offset}|${c.length}|${c.gain}|${JSON.stringify(c.warp ?? [])}`;
     if (shape !== lastShape) {
       lastShape = shape;
@@ -427,13 +462,14 @@ export function createClipEditor(screen, track, clip, ui) {
       fetchHits();
     }
   };
+  setMode(mode);
   update(track, clip);
   requestAnimationFrame(draw); // sizes are known once it's on screen
 
   return {
     element,
     update,
-    dispose: () => { disposed = true; clearTimeout(retry); resize.disconnect(); },
+    dispose: () => { disposed = true; clearTimeout(retry); resize.disconnect(); notesView?.dispose(); },
   };
 }
 
