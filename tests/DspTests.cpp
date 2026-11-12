@@ -1723,7 +1723,8 @@ namespace
         check (dyn != nullptr && std::abs (dyn->values.at ("deqFreq") - 3150.0f) < 700.0f,
                "Auto Mix: the voice's piercing notes get a dynamic EQ near 3 kHz");
         const auto* snapMove = find (rock, drums, fx::ModuleType::transient);
-        const auto* softMove = find (analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad), drums, fx::ModuleType::transient);
+        const auto ballad = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad);
+        const auto* softMove = find (ballad, drums, fx::ModuleType::transient);
         check (snapMove != nullptr && snapMove->values.at ("tsAttack") > 0.0f && softMove != nullptr && softMove->values.at ("tsAttack") < 0.0f,
                "Auto Mix: rock drums get more attack, ballad drums softer hits");
 
