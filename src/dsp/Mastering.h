@@ -625,8 +625,8 @@ private:
             sides += side * side;
         }
 
-        midPower.fetch_add (mids, std::memory_order_relaxed);
-        sidePower.fetch_add (sides, std::memory_order_relaxed);
+        addTo (midPower, mids);
+        addTo (sidePower, sides);
     }
 
     double rate = 48000.0;
@@ -634,6 +634,13 @@ private:
     float amount = 1.2f;
     bool monoOn = true;
     std::atomic<float> midPower { 0.0f }, sidePower { 0.0f };
+
+    // std::atomic<float>::fetch_add is missing from Apple's libc++.
+    static void addTo (std::atomic<float>& total, float value) noexcept
+    {
+        auto old = total.load (std::memory_order_relaxed);
+        while (! total.compare_exchange_weak (old, old + value, std::memory_order_relaxed)) {}
+    }
 };
 
 //==============================================================================
