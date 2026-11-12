@@ -1,5 +1,5 @@
 // The standalone app: JUCE's default StandaloneFilterApp, plus "Check for updates..." in the
-// window's Options menu, a maximise button, and a File / Edit / View / Transport menu bar (the
+// window's Options menu, a maximise button, and a File / Edit / Audio / View / Transport menu bar (the
 // macOS menu bar at the top of the screen, or a bar under the title on Windows and Linux).
 // Built with JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP (see CMakeLists.txt).
 
@@ -282,6 +282,16 @@ namespace
                 { "", "", "", false },
                 { "autoMix",   "Auto Mix...",            "",             true },
                 { "songKey",   "Song key...",            "",             true },
+            } },
+            // Offline processes that change a clip's audio (not live effects or settings).
+            { "Audio", {
+                { "normaliseClip",      "Normalise clip",                     "",  true },
+                { "", "", "", false },
+                { "stripSilenceQuiet",  "Strip silence: quiet room (-55 dB)", "",  true },
+                { "stripSilenceNormal", "Strip silence: normal (-45 dB)",     "",  true },
+                { "stripSilenceNoisy",  "Strip silence: noisy (-35 dB)",      "",  true },
+                { "", "", "", false },
+                { "splitStems",         "Split into stems...",                "",  true },
             } },
             { "View", {
                 { "mode:live", "Live",                   "",             false },

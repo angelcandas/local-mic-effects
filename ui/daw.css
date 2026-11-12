@@ -1670,6 +1670,143 @@ body.is-daw .app-project { color: var(--text); font-weight: 600; }
 .stereo-meter { display: flex; gap: 2px; }
 .stereo-meter .level-meter.is-vertical { width: 5px; }
 
+/* ---------- Toolbar: one row, three zones (song / transport / work and view) ---------- */
+
+.daw-transport {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 0;
+  overflow: hidden;
+}
+.tb-zone { display: flex; align-items: center; gap: 6px; }
+.daw-transport [hidden] { display: none !important; }
+.tb-zone { flex: none; }
+.tb-zone.zone-transport { gap: 10px; }
+/* The gaps between the zones share the free room, so the transport sits near the middle. */
+.tb-spacer { flex: 1 1 0; min-width: 18px; }
+/* Buttons inside one control touch: the joined edges lose their rounding. */
+.tb-joined { position: relative; display: inline-flex; align-items: center; }
+.tb-joined > :not(:last-child):not(.tb-popover) { border-top-right-radius: 0; border-bottom-right-radius: 0; }
+.tb-joined > :not(:first-child) { margin-left: -1px; border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.tb-joined .tempo { height: 30px; padding: 0 2px 0 4px; border: 1px solid var(--line); border-radius: 9px; background: #0d1016; }
+.tb-joined .tempo-input { border: 0; background: transparent; }
+.tb-joined > .tap-tempo { border-top-left-radius: 0; border-bottom-left-radius: 0; }
+.tb-arrow { position: relative; display: inline-flex; align-items: center; gap: 2px; width: auto; padding: 0 6px; }
+.tb-arrow svg { width: 10px; height: 10px; fill: none; stroke: currentColor; stroke-width: 1.6; }
+.tb-badge { font: 600 10px var(--mono); color: var(--accent-2); }
+.tb-badge:empty { display: none; }
+.snap-group select.grid-size { height: 30px; }
+.ib.has-label { width: auto; padding: 0 9px 0 7px; gap: 5px; }
+.ib-text { font-size: 11.5px; font-weight: 600; }
+.automix-button { color: var(--text); }
+
+/* The transport is the biggest thing in the bar. */
+.daw .zone-transport .daw-transport-buttons { display: flex; align-items: center; gap: 6px; }
+.daw .zone-transport .transport-button { width: 36px; height: 36px; }
+.daw .zone-transport .transport-button svg { width: 15px; height: 15px; }
+.daw .zone-transport .play-button { width: 42px; height: 42px; border-color: color-mix(in srgb, var(--accent-2) 45%, var(--line-strong)); }
+.daw .zone-transport .play-button svg { width: 17px; height: 17px; }
+.daw .zone-transport .record-button { height: 36px; }
+.daw .zone-transport .daw-clock { min-width: 92px; padding: 3px 12px; font-size: 17px; }
+.daw .play-button { position: relative; }
+.return-dot { position: absolute; right: 1px; bottom: 1px; width: 7px; height: 7px; border: 1.5px solid var(--panel); border-radius: 50%; background: var(--accent-2); display: none; }
+.daw .play-button.returns-on-stop .return-dot { display: block; }
+
+/* Pop-overs under a toolbar control (click settings, running jobs). */
+.tb-popover {
+  position: absolute;
+  top: calc(100% + 6px);
+  left: 0;
+  z-index: 40;
+  display: grid;
+  gap: 8px;
+  min-width: 210px;
+  padding: 10px 12px;
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--panel-raised);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55);
+}
+.tb-popover[hidden] { display: none; }
+.tb-popover-row { white-space: nowrap; display: flex; align-items: center; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
+.tb-popover-row .click-volume { width: 110px; }
+.daw-transport { overflow: visible; }
+
+/* Folding for narrow windows (foldToolbar): text labels go first, then whole controls. */
+.daw-transport[data-fold="1"] .ib-text,
+.daw-transport[data-fold="2"] .ib-text,
+.daw-transport[data-fold="3"] .ib-text,
+.daw-transport[data-fold="4"] .ib-text,
+.daw-transport[data-fold="5"] .ib-text,
+.daw-transport[data-fold="6"] .ib-text { display: none; }
+.daw-transport:not([data-fold="0"]) .ib.has-label { width: 30px; padding: 0; }
+.daw-transport:not([data-fold="0"]) .mic-label { display: none; }
+.daw-transport .is-folded { display: none !important; }
+.daw-transport[data-fold="6"] .mic-meter { display: none; }
+
+/* Header: the project menu, Save, Export and undo beside the project name (DAW only). */
+.daw-project-actions { display: flex; align-items: center; gap: 4px; margin-left: 10px; }
+body:not(.is-daw) .daw-project-actions { display: none; }
+.daw-project-actions .tool { height: 28px; }
+.daw-project-actions .ib { width: 28px; }
+.project-menu-button { padding: 0 10px; }
+.project-menu-button::after { content: ""; display: inline-block; width: 5px; height: 5px; margin: 0 0 3px 7px; border: solid currentColor; border-width: 0 1.5px 1.5px 0; transform: rotate(45deg); }
+.daw-project-actions .tb-sep { height: 18px; align-self: center; }
+
+/* The timeline's view (Follow, fit, zoom, height) at the right of the bar above the bottom panel. */
+.timeline-tools { display: flex; align-items: center; gap: 4px; margin-left: auto; }
+.timeline-tools[hidden] { display: none; }
+.timeline-tools .ib, .timeline-tools .toggle { width: 22px; height: 18px; padding: 0; border-radius: 5px; }
+.timeline-tools .ib .ico { width: 13px; height: 13px; }
+.timeline-tools .zoom-slider { font-size: 11px; }
+.timeline-tools .zoom-slider input { width: 64px; height: 12px; }
+.timeline-tools + .dock-toggle { margin-left: 6px; }
+
+/* Running jobs. */
+.activity { position: relative; }
+.activity-button { display: inline-flex; align-items: center; gap: 6px; padding: 0 9px; color: var(--text); }
+.activity-button[hidden] { display: none; }
+.activity-spinner { width: 12px; height: 12px; border: 2px solid var(--line-strong); border-top-color: var(--accent-2); border-radius: 50%; animation: activity-spin 0.9s linear infinite; }
+@keyframes activity-spin { to { transform: rotate(360deg); } }
+.activity-count { font: 600 11px var(--mono); }
+.activity-list { left: auto; right: 0; min-width: 260px; }
+.activity-job { display: grid; grid-template-columns: 1fr auto; align-items: center; gap: 4px 8px; }
+.activity-job .export-bar { grid-column: 1; margin: 0; visibility: visible; }
+.activity-job .activity-cancel { grid-column: 2; grid-row: 1 / span 2; }
+.activity-name { padding: 0; border: 0; background: none; color: var(--text); font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.activity-name:hover { color: var(--accent-2); }
+.export-bar.is-indeterminate div { width: 30%; animation: activity-slide 1.2s ease-in-out infinite alternate; }
+@keyframes activity-slide { from { margin-left: 0; } to { margin-left: 70%; } }
+
+/* Menus: a check column, shortcut chips, headings. */
+.track-menu-item { display: flex; align-items: center; gap: 6px; }
+.track-menu-check { flex: none; width: 12px; color: var(--accent-2); }
+.track-menu-label { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.track-menu-item.is-indented .track-menu-label { padding-left: 6px; }
+.track-menu-heading { padding: 6px 10px 2px 28px; color: var(--faint); font-size: 10.5px; font-weight: 700; letter-spacing: 0.6px; text-transform: uppercase; }
+.track-menu { max-width: 340px; max-height: calc(100vh - 8px); overflow-y: auto; }
+.key-chip { flex: none; margin-left: 14px; padding: 0 5px; border: 1px solid var(--line-strong); border-radius: 4px; color: var(--muted); font: 10.5px/16px var(--mono); }
+
+/* A toast with an action (Undo). */
+.daw-toast.has-action.is-visible { pointer-events: auto; }
+.toast-action { margin-left: 12px; padding: 2px 10px; border: 1px solid var(--accent-2); border-radius: 6px; background: transparent; color: var(--accent-2); font: inherit; font-weight: 600; cursor: pointer; }
+.toast-action:hover { background: rgba(63, 217, 198, 0.12); }
+
+.clip-tools-hint { margin: 2px 0 0; color: var(--faint); font-size: 11px; line-height: 1.4; }
+
+/* Reduced motion: no transitions or looping animations (meters still show the level). */
+@media (prefers-reduced-motion: reduce) {
+  .daw *, .daw *::before, .daw *::after, .daw-toast, .track-menu { transition: none !important; animation: none !important; }
+}
+.tb-zone.zone-work, .tb-zone.zone-song { gap: 4px; }
+.daw-transport .segmented .ib, .daw-transport .view-tabs .ib { padding: 5px 7px; }
+.daw .zone-transport .mic-meter { margin-left: 0; gap: 4px; }
+.daw .zone-transport .mic-meter .level-meter { width: 52px; }
+.daw .zone-transport .daw-clock { min-width: 84px; }
+.daw .zone-transport .daw-transport-buttons { gap: 4px; }
+.daw-transport .tb-sep { margin: 3px 4px; }
+.daw-transport.is-wrapped { flex-wrap: wrap; row-gap: 8px; }
+.daw-transport.is-wrapped .tb-spacer { min-width: 8px; }
 /* ---------- Take lanes (ui/takes.js) ---------- */
 
 .tt-takes { display: inline-flex; align-items: center; gap: 3px; width: auto; min-width: 24px; padding: 0 5px; white-space: nowrap; }

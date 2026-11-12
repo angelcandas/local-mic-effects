@@ -121,7 +121,7 @@ private:
     void withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
                       std::function<juce::var (const juce::File&)> action, Complete);
 
-    void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override { sessionChanged = true; }
+    void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier& property) override { if (property != daw::ids::viewState) sessionChanged = true; }
     void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree&) override            { sessionChanged = true; }
     void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree&, int) override     { sessionChanged = true; }
     void valueTreeChildOrderChanged (juce::ValueTree&, int, int) override             { sessionChanged = true; }
