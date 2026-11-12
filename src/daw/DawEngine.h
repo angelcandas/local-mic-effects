@@ -195,6 +195,7 @@ private:
         std::shared_ptr<Strip> strip;
         std::vector<Clip> clips;
         std::vector<MidiEvent> midiEvents; // MIDI tracks, in time order
+        std::vector<std::pair<juce::int64, float>> ride; // volume automation: timeline sample, dB (Edit::RidePoint)
 
         // Latency compensation, before the inserts (audio thread).
         juce::AudioBuffer<float> delayBuffer;

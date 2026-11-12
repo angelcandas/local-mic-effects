@@ -155,7 +155,8 @@ class SessionAnalyser
 public:
     enum class Point
     {
-        source, // each track's clips alone: no inserts, unity volume, centre pan
+        source, // each track's clips alone: no inserts, unity volume, centre pan, no volume ride
+                // (its chain's input gain still counts)
         stem    // each track through its inserts, volume and pan (like an exported stem)
     };
 

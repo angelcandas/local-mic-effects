@@ -28,6 +28,8 @@ namespace daw { class Edit; }
 //   Backing:    a parametric EQ dip where it covers the words most.
 //   Balance:    the voice's volume so it sits a style's number of LU over everything else.
 //   Master:  volume towards a loudness target, kept below clipping.
+//   Rides:   volume automation on the voices (phrase to phrase) and the instruments
+//            (down while the lead sings, up between lines).
 //
 // Plain computation: plan() runs anywhere; apply() on the message thread.
 namespace analysis
@@ -47,7 +49,10 @@ juce::String getRoleName (Role);            // "Voice", "Background vocals"...
 // The roles played by one instrument (guitar, piano, bass, drums, other instrument).
 bool isInstrument (Role) noexcept;
 
-enum class MixStyle { pop, ballad, rock, coaching };
+enum class MixStyle { pop, ballad, rock, coaching, hipHop, rnb, acoustic, electronic, jazz, lofi };
+
+inline constexpr MixStyle allStyles[] = { MixStyle::pop, MixStyle::ballad, MixStyle::rock, MixStyle::coaching, MixStyle::hipHop,
+                                          MixStyle::rnb, MixStyle::acoustic, MixStyle::electronic, MixStyle::jazz, MixStyle::lofi };
 
 struct MixTargets
 {
@@ -58,12 +63,46 @@ struct MixTargets
     float reverbMix = 0.0f;    // % of reverb on a dry voice (0: none)
     float reverbSize = 50.0f;  // % room size
     float backingVocalUnderLeadLu = 6.0f; // background vocals sit this far under the lead
+
+    // Character, each 0 for none:
+    float voiceSaturationDb = 0.0f; // saturation drive on the voice (mixed in at 35%)
+    float bassSaturationDb = 0.0f;  // and on the bass, so it's heard on small speakers
+    float exciterAmount = 0.0f;     // % exciter on the voice above 4 kHz (air)
+    float echoMix = 0.0f;           // % tempo-synced echo on the lead voice
+    float echoBeats = 0.5f;         // its time in beats (0.5 = an eighth note)
+    float echoFeedback = 25.0f;     // %
+    float widthAmount = 100.0f;     // % stereo width on instruments and background vocals (100 = as is)
+
+    // Automation ("volume rides"):
+    float rideRangeDb = 4.0f;       // the most the vocal ride moves a phrase up or down
+    float duckDb = 1.5f;            // instruments dip this much while the lead sings (0: no dip)
+
+    // Levels for "normalize" (LUFS each track is brought to before the rest is planned).
+    // The voices sit at voiceLufs; the others by role.
+    float voiceLufs = -18.0f;
+    float instrumentalLufs = -18.0f, drumsLufs = -20.0f, bassLufs = -21.0f, guitarLufs = -23.0f,
+          pianoLufs = -23.0f, otherInstrumentLufs = -24.0f;
+
+    MixStyle style = MixStyle::pop; // set by getTargets (its name goes in the reasons)
 };
 
 // Which effects Auto Mix may add. Volumes are always planned.
 struct MixOptions
 {
     bool eq = true, compressor = true, deEsser = true, reverb = true;
+    bool saturation = true, echo = true, exciter = true, width = true; // used when the style asks for them
+
+    // Volume automation: a ride on each voice that evens out its phrases (what a
+    // compressor leaves), and on the instruments a dip while the lead sings, back up
+    // between lines.
+    bool rides = true;
+
+    // Normalize: first bring every track (voices, instruments) to a level that fits its
+    // role in the style, with the chain's input gain ("inGain" moves); the rest of the
+    // plan follows from those levels. Tracks left as they are keep theirs.
+    bool normalize = false;
+
+    double tempo = 120.0; // BPM, for the echo's time
 
     // Insert types each track already has (by track id). A voice that already has a
     // reverb or an echo keeps its own space: Auto Mix doesn't add or change one.
@@ -90,9 +129,11 @@ Role guessRole (const juce::String& trackName, const Profile&, double songSecond
 struct MixMove
 {
     int trackId = 0;                 // daw::Edit::masterId for the master bus
-    std::optional<fx::ModuleType> insert; // empty: the track's (or master's) volume
+    std::optional<fx::ModuleType> insert; // empty: the track's (or master's) "volume", or a change
+                                          // to its chain's input gain "inGain" (dB, normalize)
     bool atEnd = false;              // a new insert goes after the track's own effects (reverb)
     std::map<juce::String, float> values; // insert values by ID, or "volume" in dB
+    std::vector<std::pair<double, float>> ride; // volume automation (seconds, dB), when not empty (no insert, no values)
     juce::StringArray reasons;       // one line per change, for the UI
 };
 

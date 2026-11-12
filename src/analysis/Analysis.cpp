@@ -549,6 +549,7 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress)
                 {
                     child.setProperty (daw::ids::volume, 0.0f, nullptr);
                     child.setProperty (daw::ids::pan, 0.0f, nullptr);
+                    child.removeProperty (daw::ids::ride, nullptr);
                     daw::Edit::getInserts (child).removeAllChildren (nullptr);
                 }
             }

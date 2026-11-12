@@ -445,6 +445,58 @@ void Edit::setTrackTranspose (int trackId, double semitones)
         track.setProperty (ids::transpose, juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, semitones), &undoManager);
 }
 
+void Edit::setVolumeRide (int trackId, const std::vector<RidePoint>& points)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid())
+        return;
+
+    if (points.empty())
+    {
+        track.removeProperty (ids::ride, &undoManager);
+        return;
+    }
+
+    auto sorted = points;
+    std::stable_sort (sorted.begin(), sorted.end(), [] (const RidePoint& a, const RidePoint& b) { return a.time < b.time; });
+
+    juce::StringArray parts;
+    for (const auto& point : sorted)
+        parts.add (juce::String (juce::jmax (0.0, point.time), 3) + ":" + juce::String (juce::jlimit (-maxRideDb, maxRideDb, point.db), 2));
+    track.setProperty (ids::ride, parts.joinIntoString (";"), &undoManager);
+}
+
+std::vector<Edit::RidePoint> Edit::getVolumeRide (const juce::ValueTree& track)
+{
+    std::vector<RidePoint> points;
+    for (const auto& part : juce::StringArray::fromTokens (track[ids::ride].toString(), ";", ""))
+    {
+        if (! part.containsChar (':'))
+            continue;
+        const auto time = part.upToFirstOccurrenceOf (":", false, false).getDoubleValue();
+        const auto db = (float) part.fromFirstOccurrenceOf (":", false, false).getDoubleValue();
+        points.push_back ({ juce::jmax (0.0, time), juce::jlimit (-maxRideDb, maxRideDb, db) });
+    }
+    std::stable_sort (points.begin(), points.end(), [] (const RidePoint& a, const RidePoint& b) { return a.time < b.time; });
+    return points;
+}
+
+float Edit::getRideDbAt (const std::vector<RidePoint>& points, double time)
+{
+    if (points.empty())
+        return 0.0f;
+    if (time <= points.front().time)
+        return points.front().db;
+    if (time >= points.back().time)
+        return points.back().db;
+
+    const auto next = std::upper_bound (points.begin(), points.end(), time, [] (double t, const RidePoint& p) { return t < p.time; });
+    const auto& b = *next;
+    const auto& a = *(next - 1);
+    const auto span = b.time - a.time;
+    return span > 0.0 ? a.db + (b.db - a.db) * (float) ((time - a.time) / span) : b.db;
+}
+
 void Edit::setClipWarp (int clipId, const warp::Map& map)
 {
     auto clip = getClip (clipId);
