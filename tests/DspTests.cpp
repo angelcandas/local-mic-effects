@@ -3463,8 +3463,10 @@ namespace
             host.setExtraFolders ({ plugins.getFullPathName() });
             host.startScan();
 
-            for (int i = 0; i < 600 && host.isScanning(); ++i)
-                juce::Thread::sleep (50);
+            // Keep the message loop running: on macOS, Audio Units are made on the message
+            // thread, so the scan waits for it.
+            for (int i = 0; i < 1200 && host.isScanning(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
 
             juce::Optional<daw::Edit::InstrumentInfo> found;
             for (const auto& info : host.getInstruments())
