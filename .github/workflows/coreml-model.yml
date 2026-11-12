@@ -26,12 +26,19 @@ jobs:
           python-version: "3.12"
       - name: Install the pinned conversion tools
         run: pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops "numpy<2.3" demucs==4.0.1
-      - name: Use an up-to-date certificate bundle
-        # python.org's macOS Python ships an old one; downloading the Demucs weights failed with
-        # "certificate has expired".
+      - name: Show the weights server's certificate
+        # Downloading the Demucs weights failed with "certificate has expired" even with certifi's bundle.
         run: |
-          pip install certifi
-          echo "SSL_CERT_FILE=$(python -m certifi)" >> "$GITHUB_ENV"
+          echo | openssl s_client -connect dl.fbaipublicfiles.com:443 -servername dl.fbaipublicfiles.com -showcerts 2>/dev/null \
+            | openssl x509 -noout -subject -issuer -dates || true
+          curl -sSI https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/ | head -3 || true
+      - name: Make Python trust the system's certificates
+        # Verification stays on; this just uses macOS's trust store instead of python.org's.
+        run: |
+          pip install truststore
+          mkdir -p "$RUNNER_TEMP/sitecustomize"
+          printf 'import truststore\ntruststore.inject_into_ssl()\n' > "$RUNNER_TEMP/sitecustomize/sitecustomize.py"
+          echo "PYTHONPATH=$RUNNER_TEMP/sitecustomize" >> "$GITHUB_ENV"
       - name: Convert the network
         run: python scripts/export_htdemucs_coreml.py --out "$RUNNER_TEMP/model/htdemucs-core.mlpackage"
       - name: Zip it
