@@ -635,8 +635,10 @@ void DawBridge::tick()
                 for (const auto& [id, profile] : autoMixAnalysis->tracks)
                 {
                     const auto track = edit.getTrack (id);
+                    const auto byInstrument = guessRoleFromTrack (track);
                     roles[id] = track.hasProperty (ids::mixRole) ? analysis::getRoleFromKey (track[ids::mixRole].toString())
-                                                                 : analysis::guessRole (track[ids::name].toString(), profile, songSeconds);
+                              : byInstrument.has_value() ? *byInstrument
+                                                         : analysis::guessRole (track[ids::name].toString(), profile, songSeconds);
                 }
 
                 autoMixRoles = roles;
@@ -1290,6 +1292,8 @@ void DawBridge::replanAutoMix()
     {
         const auto id = (int) track[ids::id];
         options.trackNames[id] = track[ids::name].toString();
+        if (daw::Edit::isMidiTrack (track))
+            options.midiTracks.insert (id);
         for (const auto& insert : daw::Edit::getInserts (track))
             for (int type = 0; type < fx::numModuleTypes; ++type)
                 if (insert[ids::type].toString() == fx::getModuleKey ((fx::ModuleType) type))
@@ -1320,6 +1324,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("width", autoMixOptions.width);
     read ("normalize", autoMixOptions.normalize);
     read ("rides", autoMixOptions.rides);
+    read ("colour", autoMixOptions.colour);
     read ("split", autoMixSplit);
 }
 
@@ -1333,13 +1338,24 @@ void DawBridge::readAutoMixMode (const juce::var& args)
 
 // Every track's tag before Auto Mix listens: the one you picked (tagged), or the guess
 // from its name ("" when the name says nothing, and the sound decides).
+// A track's role from its name, or a MIDI track's from its instrument.
+std::optional<analysis::Role> DawBridge::guessRoleFromTrack (const juce::ValueTree& track)
+{
+    if (const auto byName = analysis::guessRoleFromName (track[ids::name].toString()))
+        return byName;
+    if (! daw::Edit::isMidiTrack (track))
+        return std::nullopt;
+    const auto instrument = track.getChildWithName (ids::INSTRUMENT);
+    return analysis::guessRoleFromInstrument (instrument[ids::plugin].toString(), instrument[ids::name].toString());
+}
+
 juce::var DawBridge::describeAutoMixTags() const
 {
     juce::Array<juce::var> tracks, roles;
     for (const auto& track : edit.getTracks())
     {
         const auto tagged = track.hasProperty (ids::mixRole);
-        const auto guess = analysis::guessRoleFromName (track[ids::name].toString());
+        const auto guess = guessRoleFromTrack (track);
         const auto role = tagged ? juce::String (analysis::getRoleKey (analysis::getRoleFromKey (track[ids::mixRole].toString())))
                         : guess.has_value() ? juce::String (analysis::getRoleKey (*guess)) : juce::String();
         tracks.add (object ({ { "id", (int) track[ids::id] }, { "name", track[ids::name].toString() }, { "role", role },
@@ -1403,7 +1419,7 @@ juce::var DawBridge::describeAutoMix() const
                                    { "deEsser", autoMixOptions.deEsser }, { "reverb", autoMixOptions.reverb },
                                    { "saturation", autoMixOptions.saturation }, { "echo", autoMixOptions.echo },
                                    { "exciter", autoMixOptions.exciter }, { "width", autoMixOptions.width },
-                                   { "rides", autoMixOptions.rides },
+                                   { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },

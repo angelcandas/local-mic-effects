@@ -728,6 +728,8 @@ namespace
         if (role == Role::bass)   return { 30.0, 30.0, 0.0, 6.0f, true };   // hardly covers the words: no dip
         if (role == Role::guitar) return { 80.0, 150.0, 3.5, 8.0f, false }; // leaves the low end to the bass
         if (role == Role::piano)  return { 40.0, 100.0, 3.0, 9.0f, false };
+        if (role == Role::pad)    return { 60.0, 150.0, 3.5, 9.0f, false };  // fills the middle: the deepest dip for the words
+        if (role == Role::synth)  return { 80.0, 160.0, 3.0, 8.0f, false };
         return { 40.0, 120.0, 3.0, 8.0f, false };
     }
 
@@ -1061,6 +1063,8 @@ const char* getRoleKey (Role role)
         case Role::backing:      return "instrumental";
         case Role::guitar:       return "guitar";
         case Role::piano:        return "piano";
+        case Role::pad:          return "pad";
+        case Role::synth:        return "synth";
         case Role::bass:         return "bass";
         case Role::drums:        return "drums";
         case Role::instrument:   return "instrument";
@@ -1088,6 +1092,8 @@ juce::String getRoleName (Role role)
         case Role::backing:      return "Instrumental";
         case Role::guitar:       return "Guitar";
         case Role::piano:        return "Piano / keys";
+        case Role::pad:          return "Pad / strings";
+        case Role::synth:        return "Synth lead";
         case Role::bass:         return "Bass";
         case Role::drums:        return "Drums";
         case Role::instrument:   return "Other instrument";
@@ -1098,7 +1104,8 @@ juce::String getRoleName (Role role)
 
 bool isInstrument (Role role) noexcept
 {
-    return role == Role::guitar || role == Role::piano || role == Role::bass || role == Role::drums || role == Role::instrument;
+    return role == Role::guitar || role == Role::piano || role == Role::pad || role == Role::synth || role == Role::bass
+        || role == Role::drums || role == Role::instrument;
 }
 
 std::optional<Role> guessRoleFromName (const juce::String& trackName)
@@ -1145,11 +1152,42 @@ std::optional<Role> guessRoleFromName (const juce::String& trackName)
         return Role::piano;
     if (hasWord ({ "other", "otros", "others" }))
         return Role::instrument; // the splitter's "everything else" stem
+    if (hasPart ({ "pad", "string", "violin", "cello", "viola", "orchestra", "orquesta", "cuerdas", "ensemble", "choir pad" }))
+        return Role::pad;
+    if (hasPart ({ "synth", "arp", "pluck", "lead synth", "sintetizador" }))
+        return Role::synth;
     if (hasPart ({ "backing", "music", "beat", "instrumental", "karaoke", "pista", "song", "mix", "band", "playback" }))
         return Role::backing;
     if (hasPart ({ "synth", "string", "pad", "violin", "cello", "viola", "sax", "trumpet", "brass", "horn", "flute", "flauta", "lead synth",
                    "arp", "pluck", "fx", "accordion", "acordeon", "harp", "marimba", "bells", "trombon", "orchestra", "other", "otros" }))
         return Role::instrument;
+    return {};
+}
+
+std::optional<Role> guessRoleFromInstrument (const juce::String& pluginId, const juce::String& pluginName)
+{
+    if (pluginId.startsWith ("builtin:"))
+    {
+        const auto key = pluginId.fromFirstOccurrenceOf ("builtin:", false, false);
+        if (key == "keys" || key == "piano" || key == "organ") return Role::piano;
+        if (key == "pad" || key == "strings")                  return Role::pad;
+        if (key == "bass")                                     return Role::bass;
+        if (key == "lead")                                     return Role::synth;
+        return {};
+    }
+
+    // A plugin: its name like a track's, then the words synths are sold under.
+    if (const auto byName = guessRoleFromName (pluginName); byName.has_value() && *byName != Role::voice && *byName != Role::backingVocal
+                                                            && *byName != Role::backing)
+        return byName;
+
+    const auto name = pluginName.toLowerCase();
+    for (auto word : { "drummer", "beat", "groove", "battery", "addictive", "ezdrummer" })
+        if (name.contains (word)) return Role::drums;
+    for (auto word : { "grand", "upright", "keyscape", "e-piano", "rhodes", "felt" })
+        if (name.contains (word)) return Role::piano;
+    for (auto word : { "serum", "vital", "sylenth", "massive", "diva", "spire", "pigments", "omnisphere", "analog", "osc", "wavetable" })
+        if (name.contains (word)) return Role::synth;
     return {};
 }
 
@@ -1450,9 +1488,67 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             eqChange = loudnessChangeDb (profile.getAverageSpectrum(), eqDb);
         }
 
+        // A synth on a MIDI track comes out dry: colour by its role (see MixOptions::colour).
+        const auto colour = options.colour && ! makeRoomOnly && options.midiTracks.count (id) > 0;
+        const auto styleBassDrive = role == Role::bass && ! makeRoomOnly && options.saturation && targets.bassSaturationDb > 0.0f;
+        bool colourWidth = false;
+        if (colour)
+        {
+            const auto add = [&] (fx::ModuleType type, bool atEnd, std::map<juce::String, float> values, const juce::String& reason)
+            {
+                MixMove move;
+                move.trackId = id;
+                move.insert = type;
+                move.atEnd = atEnd;
+                move.values = std::move (values);
+                move.reasons.add (reason);
+                (atEnd ? pendingWidth : plan.moves).push_back (move);
+            };
+
+            if (role == Role::pad)
+            {
+                if (! hasAny (options, id, { fx::ModuleType::chorus }))
+                    add (fx::ModuleType::chorus, false, { { "chorusOn", 1.0f }, { "chorusRate", 0.4f }, { "chorusDepth", 30.0f }, { "chorusMix", 35.0f } },
+                         "Chorus 35%, slow: a synth pad comes out static, this makes it move and shimmer");
+                if (options.width)
+                    add (fx::ModuleType::width, true, { { "widthOn", 1.0f }, { "widthAmount", 140.0f } },
+                         "Stereo width 140%: the pad wraps around the voice, leaving it the middle");
+                colourWidth = options.width;
+            }
+            else if (role == Role::synth)
+            {
+                if (options.saturation)
+                    add (fx::ModuleType::saturation, false, { { "satOn", 1.0f }, { "satDrive", 4.0f }, { "satMix", 30.0f } },
+                         "Saturation 4 dB drive, mixed in at 30%: edge so the lead cuts through");
+                if (options.echo && ! hasAny (options, id, { fx::ModuleType::echo, fx::ModuleType::reverb }))
+                {
+                    const auto ms = roundTo (juce::jlimit (20.0, 1500.0, 0.75 * 60000.0 / juce::jlimit (40.0, 240.0, options.tempo)), 1.0);
+                    add (fx::ModuleType::echo, true, { { "delayOn", 1.0f }, { "delayTime", ms }, { "delayFeedback", 30.0f },
+                                                       { "delayMix", 15.0f }, { "delayPingPong", 1.0f } },
+                         "Echo 15%, " + juce::String (ms, 0) + " ms (a dotted eighth at " + juce::String (options.tempo, 0)
+                             + " BPM), ping-pong: the lead gets a tail and some space");
+                }
+            }
+            else if (role == Role::bass)
+            {
+                if (options.saturation && ! styleBassDrive)
+                    add (fx::ModuleType::saturation, false, { { "satOn", 1.0f }, { "satDrive", 5.0f }, { "satMix", 40.0f } },
+                         "Saturation 5 dB drive, mixed in at 40%: harmonics so a synth bass is heard on small speakers");
+                if (options.width)
+                    add (fx::ModuleType::width, true, { { "widthOn", 1.0f }, { "widthAmount", 0.0f } },
+                         "Stereo width 0%: a mono low end, solid on any speaker");
+            }
+            else if (role == Role::piano && options.width)
+            {
+                add (fx::ModuleType::width, true, { { "widthOn", 1.0f }, { "widthAmount", 120.0f } },
+                     "Stereo width 120%: the keys open up around the voice");
+                colourWidth = true;
+            }
+        }
+
         // Bass: some saturation where the style asks, so it's heard on small speakers.
         // Wider guitars, keys and pads; bass and drums stay centred.
-        if (role == Role::bass && ! makeRoomOnly && options.saturation && targets.bassSaturationDb > 0.0f)
+        if (styleBassDrive)
         {
             MixMove saturation;
             saturation.trackId = id;
@@ -1463,8 +1559,9 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             plan.moves.push_back (saturation);
         }
 
-        if (options.width && ! makeRoomOnly && ! juce::approximatelyEqual (targets.widthAmount, 100.0f)
-            && (role == Role::guitar || role == Role::piano || role == Role::instrument || role == Role::backing))
+        if (options.width && ! makeRoomOnly && ! colourWidth && ! juce::approximatelyEqual (targets.widthAmount, 100.0f)
+            && (role == Role::guitar || role == Role::piano || role == Role::pad || role == Role::synth || role == Role::instrument
+                || role == Role::backing))
         {
             MixMove width;
             width.trackId = id;

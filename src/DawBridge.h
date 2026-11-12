@@ -97,6 +97,7 @@ private:
     void replanAutoMix();
     void readAutoMixEffects (const juce::var& effects);
     void readAutoMixMode (const juce::var& args); // mode, focus
+    static std::optional<analysis::Role> guessRoleFromTrack (const juce::ValueTree& track);
     juce::var describeAutoMix() const;
     juce::var describeAutoMixTags() const;
 

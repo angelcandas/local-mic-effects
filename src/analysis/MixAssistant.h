@@ -4,6 +4,7 @@
 #include "dsp/FxModule.h"
 
 #include <map>
+#include <set>
 
 namespace daw { class Edit; }
 
@@ -37,16 +38,17 @@ namespace analysis
 // voice: the lead (or a sung part); backingVocal: background vocals / harmonies;
 // backing: a full instrumental (karaoke track, the band on one track); instrument: any
 // other instrument; other: left as it is.
-enum class Role { voice, backingVocal, backing, guitar, piano, bass, drums, instrument, other };
+// pad: pads and strings (sustained, wide); synth: a synth lead, arp or pluck.
+enum class Role { voice, backingVocal, backing, guitar, piano, pad, synth, bass, drums, instrument, other };
 
-inline constexpr Role allRoles[] = { Role::voice, Role::backingVocal, Role::backing, Role::guitar, Role::piano,
-                                     Role::bass, Role::drums, Role::instrument, Role::other };
+inline constexpr Role allRoles[] = { Role::voice, Role::backingVocal, Role::backing, Role::guitar, Role::piano, Role::pad,
+                                     Role::synth, Role::bass, Role::drums, Role::instrument, Role::other };
 
 const char* getRoleKey (Role);              // "voice", "background", "instrumental", "guitar"... (project files, UI)
 Role getRoleFromKey (const juce::String&);  // other when unknown
 juce::String getRoleName (Role);            // "Voice", "Background vocals"...
 
-// The roles played by one instrument (guitar, piano, bass, drums, other instrument).
+// The roles played by one instrument (guitar, piano, pad, synth, bass, drums, other instrument).
 bool isInstrument (Role) noexcept;
 
 enum class MixStyle { pop, ballad, rock, coaching, hipHop, rnb, acoustic, electronic, jazz, lofi };
@@ -119,6 +121,12 @@ struct MixOptions
 
     double tempo = 120.0; // BPM, for the echo's time
 
+    // Colour on MIDI tracks: a synth is dry and narrow as it comes, so each gets the
+    // effect its role is usually played with (a pad chorus and width, a synth lead an
+    // echo and some drive, a synth bass drive and a mono low end, keys some width).
+    bool colour = true;
+    std::set<int> midiTracks; // which tracks are MIDI (by id)
+
     // Insert types each track already has (by track id). A voice that already has a
     // reverb or an echo keeps its own space: Auto Mix doesn't add or change one.
     std::map<int, std::vector<fx::ModuleType>> existingInserts;
@@ -139,6 +147,10 @@ std::optional<Role> guessRoleFromName (const juce::String& trackName);
 // unpitched hits; bass when nearly all of it is under 250 Hz; backing when it plays
 // most of the song; otherwise instrument, or other when it's silent.
 Role guessRole (const juce::String& trackName, const Profile&, double songSeconds);
+
+// A MIDI track's role from its instrument: the built-in synths by id ("builtin:pad"),
+// a plugin by its name ("Bass Station", "Superior Drummer"...). Nothing when it says nothing.
+std::optional<Role> guessRoleFromInstrument (const juce::String& pluginId, const juce::String& pluginName);
 
 //==============================================================================
 struct MixMove
