@@ -5,7 +5,7 @@
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
-import { createPresetPicker, presetParams } from "./fxpresets.js";
+import { FX_PRESETS, createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
@@ -4564,6 +4564,8 @@ class DawScreen {
       },
       toast: (message, kind) => toast(message, kind),
       onEvent: (name, handler) => window.__JUCE__.backend.addEventListener(name, handler),
+      // The app's settings (Favourites and Recent): pref(key) reads, pref(key, text) writes.
+      pref: (...args) => Juce.getNativeFunction("uiPref")(...args).catch(() => ""),
     });
     body.append(this.library.element, main);
     window.__JUCE__.backend.addEventListener("dawPlugins", () => this.endJob("scan"));
@@ -4584,6 +4586,17 @@ class DawScreen {
       await daw("setInsert", { id, param: module.power, value: 1, continue: true });
     }
     return id;
+  }
+
+  // Loads one of an effect's factory presets (fxpresets.js) into a new insert; what the
+  // preset doesn't list goes to its default. Joins the add's undo step.
+  async applyEffectPreset(insertId, moduleId, presetName) {
+    const preset = (FX_PRESETS[moduleId] ?? []).find((p) => p.name === presetName);
+    if (!preset) return;
+    for (const param of presetParams(moduleId)) {
+      const value = preset.values[param] ?? parameterInfo[param]?.default;
+      if (value !== undefined) await daw("setInsert", { id: insertId, param, value, continue: true });
+    }
   }
 
   flushSession() {

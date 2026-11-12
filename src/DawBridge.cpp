@@ -2751,6 +2751,54 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "places") { complete (describePlaces()); return; }
     if (command == "browse") { complete (browseFolder (juce::File (args["path"].toString()))); return; }
 
+    // The library's preview: { file, volume (dB) } plays up to 30 s of a file once,
+    // straight to the output; { stop: true } stops it; { volume } alone changes the level.
+    if (command == "preview")
+    {
+        const auto gain = juce::Decibels::decibelsToGain ((float) (double) args.getProperty ("volume", -6.0), -60.0f);
+        if ((bool) args.getProperty ("stop", false)) { engine.stopPreview(); ok(); return; }
+        if (! args.hasProperty ("file")) { engine.setPreviewGain (gain); ok(); return; }
+
+        const juce::File file (args["file"].toString());
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        const std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+        if (reader == nullptr || reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
+        {
+            complete (error ("Couldn't play " + file.getFileName() + "."));
+            return;
+        }
+
+        constexpr double maxSeconds = 30.0;
+        const auto channels = (int) juce::jlimit (1u, 2u, reader->numChannels);
+        const auto sourceLength = (int) juce::jmin (reader->lengthInSamples, (juce::int64) (maxSeconds * reader->sampleRate));
+        juce::AudioBuffer<float> source (channels, sourceLength);
+        reader->read (&source, 0, sourceLength, 0, true, channels > 1);
+
+        // At the engine's rate.
+        const auto ratio = reader->sampleRate / engine.getSampleRate();
+        juce::AudioBuffer<float> audio;
+        if (std::abs (ratio - 1.0) < 1.0e-6)
+        {
+            audio = std::move (source);
+        }
+        else
+        {
+            const auto length = (int) std::floor (sourceLength / ratio);
+            audio.setSize (channels, juce::jmax (0, length - 4));
+            for (int ch = 0; ch < channels; ++ch)
+            {
+                juce::LagrangeInterpolator interpolator;
+                interpolator.process (ratio, source.getReadPointer (ch), audio.getWritePointer (ch), audio.getNumSamples());
+            }
+        }
+
+        const auto seconds = audio.getNumSamples() / engine.getSampleRate();
+        engine.startPreview (std::move (audio), gain);
+        complete (object ({ { "ok", true }, { "seconds", seconds }, { "cut", reader->lengthInSamples > sourceLength } }));
+        return;
+    }
+
     if (command == "importFile")
     {
         const juce::File file (args["file"].toString());
