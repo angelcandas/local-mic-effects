@@ -114,6 +114,7 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     recorder.prepare (sampleRate, (int) spec.numChannels);
     multitrack.prepare (sampleRate);
     looper.prepare (sampleRate);
+    pitchTap.prepare (sampleRate);
     loopInput.setSize (2, juce::jmax (samplesPerBlock, 4096));
     loopInput.clear();
     dawEngine.prepare (sampleRate, samplesPerBlock);
@@ -203,6 +204,9 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
     inputGain.process (context);
     updatePeak (inputPeak, buffer.getMagnitude (0, numSamples));
+
+    // The Practice view follows the singer's own pitch, before any effect touches it.
+    pitchTap.process (buffer.getReadPointer (0), numSamples, multitrack.getPosition());
 
     if (! dryCompare.load())
         chain.process (context);

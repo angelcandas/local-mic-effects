@@ -373,6 +373,70 @@ juce::String GpuModel::download (const juce::File& destination, const Progress& 
     return problem;
 }
 
+Loaded loadBest (const std::function<void (LoadPhase)>& onPhase, const Progress& progress)
+{
+    Loaded result;
+    const auto setPhase = [&] (LoadPhase phase) { if (onPhase != nullptr) onPhase (phase); };
+    const auto cancelled = [&] { return progress != nullptr && ! progress (0.0); };
+
+    // The GPU first, where Core ML is built in: its converted model downloads once, like the CPU one.
+    if (const auto gpuModel = GpuModel::getDefaultFile(); GpuModel::isBuiltIn())
+    {
+        juce::String problem;
+
+        if (! gpuModel.isDirectory())
+        {
+            setPhase (LoadPhase::downloading);
+            problem = GpuModel::download (gpuModel, progress);
+
+            if (cancelled())
+            {
+                result.cancelled = true;
+                return result;
+            }
+
+            if (problem.isNotEmpty())
+                problem = "couldn't get it: " + problem;
+        }
+
+        if (problem.isEmpty())
+        {
+            setPhase (LoadPhase::loading);
+            result.separator = GpuModel::load (gpuModel, problem);
+        }
+
+        if (result.separator != nullptr)
+        {
+            result.gpu = true;
+            return result;
+        }
+
+        result.note = "The GPU model didn't work (" + problem + "), so this split ran on the CPU.";
+    }
+
+    if (cancelled())
+    {
+        result.cancelled = true;
+        return result;
+    }
+
+    const auto model = Model::getDefaultFile();
+    if (! model.existsAsFile() || Model::verify (model).isNotEmpty())
+    {
+        setPhase (LoadPhase::downloading);
+        if (const auto problem = Model::download (model, progress); problem.isNotEmpty())
+        {
+            result.cancelled = cancelled();
+            result.error = result.cancelled ? juce::String() : problem;
+            return result;
+        }
+    }
+
+    setPhase (LoadPhase::loading);
+    result.separator = Model::load (model, result.error);
+    return result;
+}
+
 #if ! MICFX_HAS_COREML
 bool GpuModel::isBuiltIn() { return false; }
 

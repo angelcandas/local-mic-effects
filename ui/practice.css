@@ -1,0 +1,70 @@
+/* The Practice view (Live mode): see practice.js. */
+.practice-toggle { cursor: pointer; font: inherit; font-size: 11.5px; }
+.practice-toggle svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
+.practice-toggle:hover,
+.practice-toggle[aria-pressed="true"] { color: var(--text); border-color: var(--line-strong); }
+body.is-daw .practice-toggle, body.is-daw .practice { display: none; }
+
+.practice {
+  --good: #3fd9c6;
+  --close: #ffc94d;
+  --off: #ff7a90;
+  --target: #8c7bff;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-height: 0;
+}
+.practice[hidden] { display: none; }
+
+.practice-bar { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.practice-title { display: flex; flex-direction: column; min-width: 0; flex: 1; }
+.practice-song { font-size: 15px; font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.practice-info { color: var(--muted); font-size: 11.5px; }
+.practice-voice { color: var(--muted); }
+.practice-guide { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 11.5px; }
+.practice-guide input { width: 110px; accent-color: var(--accent); }
+.practice-guide-value { min-width: 34px; font-family: var(--mono); color: var(--text); }
+.practice-pass { display: flex; flex-direction: column; align-items: center; min-width: 64px; padding: 4px 10px;
+                 border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.practice-pass-value { font-size: 22px; font-weight: 700; line-height: 1.1; font-variant-numeric: tabular-nums; }
+.practice-pass small { color: var(--muted); font-size: 10.5px; }
+.practice-pass.is-good .practice-pass-value { color: var(--good); }
+.practice-pass.is-close .practice-pass-value { color: var(--close); }
+.practice-pass.is-off .practice-pass-value { color: var(--off); }
+
+.practice-progress { display: flex; align-items: center; gap: 12px; color: var(--muted); font-size: 12px; }
+.practice-progress[hidden] { display: none; }
+.practice-progress-bar { flex: 1; height: 4px; overflow: hidden; border-radius: 2px; background: #080a0e; }
+.practice-progress-bar div { height: 100%; width: 0; background: linear-gradient(90deg, var(--accent), var(--accent-2)); transition: width 0.2s; }
+
+.practice-stage { position: relative; flex: 1; min-height: 180px; overflow: hidden; border: 1px solid var(--line);
+                  border-radius: var(--radius); background: var(--panel); cursor: pointer; }
+.practice-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.practice-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center;
+                  gap: 6px; padding: 24px; color: var(--muted); text-align: center; cursor: default; }
+.practice-empty[hidden] { display: none; }
+.practice-empty p { max-width: 520px; margin: 0; }
+.practice-empty .big { color: var(--text); font-size: 16px; font-weight: 650; }
+.practice-empty .tool { margin-top: 10px; }
+
+.practice-tuner { position: absolute; transform: translate(10px, -50%); padding: 2px 7px; border-radius: 8px; pointer-events: none;
+                  background: rgba(11, 13, 18, 0.85); border: 1px solid var(--line-strong); font: 11px var(--mono); white-space: nowrap; }
+.practice-tuner[hidden] { display: none; }
+.practice-tuner.is-good { color: var(--good); border-color: var(--good); }
+.practice-tuner.is-close { color: var(--close); border-color: var(--close); }
+.practice-tuner.is-off { color: var(--off); border-color: var(--off); }
+
+.practice-phrases { display: flex; gap: 3px; min-height: 30px; }
+.practice-phrase { display: flex; align-items: center; justify-content: space-between; gap: 4px; min-width: 22px; padding: 0 6px;
+                   border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--faint);
+                   font: 10.5px var(--mono); cursor: pointer; overflow: hidden; }
+.practice-phrase:hover { border-color: var(--line-strong); color: var(--text); }
+.practice-phrase-score { font-weight: 700; }
+.practice-phrase.is-good { background: color-mix(in srgb, var(--good) 22%, var(--panel)); color: var(--text); }
+.practice-phrase.is-close { background: color-mix(in srgb, var(--close) 22%, var(--panel)); color: var(--text); }
+.practice-phrase.is-off { background: color-mix(in srgb, var(--off) 24%, var(--panel)); color: var(--text); }
+
+.practice-message { min-height: 16px; color: var(--muted); font-size: 11.5px; }
+.practice-message.is-error { color: var(--hot); }
+.workspace[hidden] { display: none; }

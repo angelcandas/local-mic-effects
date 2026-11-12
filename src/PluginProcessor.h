@@ -6,6 +6,7 @@
 #include "Parameters.h"
 #include "Looper.h"
 #include "MidiMap.h"
+#include "PitchTap.h"
 #include "Multitrack.h"
 #include "Recorder.h"
 #include "daw/DawEngine.h"
@@ -75,6 +76,9 @@ public:
     // MIDI learn: pedals, knobs and keys on parameters and actions (Live mode).
     MidiMap& getMidiMap() noexcept                          { return midiMap; }
 
+    // The singer's pitch before the effects, for the Practice view (off until it opens).
+    PitchTap& getPitchTap() noexcept                        { return pitchTap; }
+
     // Backing track + recorded takes, mixed in after the voice chain (so the music
     // isn't processed or recorded with the voice). Message thread only.
     Multitrack& getMultitrack() noexcept                    { return multitrack; }
@@ -129,6 +133,7 @@ private:
     Recorder recorder;
     Multitrack multitrack;
     Looper looper;
+    PitchTap pitchTap;
     MidiMap midiMap { state, looper, juce::JUCEApplicationBase::isStandaloneApp() || wrapperType != wrapperType_Undefined
                                          ? MidiMap::getDefaultFile() : juce::File() };
     juce::AudioBuffer<float> loopInput; // the voice before the limiter, for the looper

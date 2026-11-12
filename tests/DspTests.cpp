@@ -28,6 +28,9 @@
 #include "daw/Project.h"
 #include "daw/Warp.h"
 #include "analysis/Pitch.h"
+#include "analysis/Coach.h"
+#include "Practice.h"
+#include "PitchTap.h"
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
 #include "daw/Quantize.h"
@@ -5716,6 +5719,302 @@ namespace
         return out;
     }
 
+
+    //==============================================================================
+    // A sung line for the coach: each note a harmonic tone with short fades, shifted
+    // `semitones` (fractions are cents) and `delay` seconds.
+    struct SungNote { double start, end; double midi; };
+
+    const std::vector<SungNote>& getCoachMelody()
+    {
+        // Two phrases: C4 D4 E4, a breath, then F4 E4 D4.
+        static const std::vector<SungNote> notes { { 0.2, 0.7, 60 }, { 0.7, 1.2, 62 }, { 1.2, 1.9, 64 },
+                                                   { 2.6, 3.1, 65 }, { 3.1, 3.6, 64 }, { 3.6, 4.4, 62 } };
+        return notes;
+    }
+
+    juce::AudioBuffer<float> singLine (const std::vector<SungNote>& notes, double rate, double semitones = 0.0, double delay = 0.0,
+                                       double seconds = 5.0)
+    {
+        juce::AudioBuffer<float> out (1, (int) (seconds * rate));
+        out.clear();
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+        double phase = 0.0;
+        for (int i = 0; i < out.getNumSamples(); ++i)
+        {
+            const auto t = i / rate - delay;
+            const SungNote* note = nullptr;
+            for (const auto& n : notes)
+                if (t >= n.start && t < n.end)
+                    note = &n;
+            if (note == nullptr)
+                continue;
+            // fades only where the voice stops (legato notes run into each other)
+            auto level = 1.0;
+            const auto startsAfterRest = std::none_of (notes.begin(), notes.end(), [&] (const SungNote& n) { return std::abs (n.end - note->start) < 1e-9; });
+            const auto endsInRest = std::none_of (notes.begin(), notes.end(), [&] (const SungNote& n) { return std::abs (n.start - note->end) < 1e-9; });
+            if (startsAfterRest) level = juce::jmin (level, (t - note->start) / 0.01);
+            if (endsInRest)      level = juce::jmin (level, (note->end - t) / 0.01);
+            phase += twoPi * 440.0 * std::pow (2.0, (note->midi + semitones - 69.0) / 12.0) / rate;
+            double value = 0.0;
+            for (int h = 1; h <= 10; ++h)
+                value += std::sin (phase * h) / h;
+            out.setSample (0, i, (float) (0.2 * level * value));
+        }
+        return out;
+    }
+
+    void testCoach()
+    {
+        std::cout << "\nCoach any song (melody target, phrases, scoring)\n";
+        namespace coach = analysis::coach;
+        namespace pitch = analysis::pitch;
+
+        const auto voice = singLine (getCoachMelody(), sampleRate);
+        const auto song = coach::findMelody (voice, sampleRate);
+
+        juce::String found;
+        for (const auto& n : song.notes)
+            found << juce::String (n.start, 2) << "-" << juce::String (n.end, 2) << " @" << juce::String (n.pitch, 2) << "  ";
+        check (song.notes.size() == 6, "the six sung notes become the target (" + found + ")");
+        check (song.phrases.size() == 2, "grouped into two phrases at the breath (" + juce::String ((int) song.phrases.size()) + ")");
+        if (song.notes.size() != 6 || song.phrases.size() != 2)
+            return;
+
+        auto pitchesRight = true;
+        for (size_t i = 0; i < 6; ++i)
+            pitchesRight = pitchesRight && std::abs (song.notes[i].pitch - (float) getCoachMelody()[i].midi) < 0.15f;
+        check (pitchesRight, "each note at the pitch sung");
+        check (song.phrases[0].firstNote == 0 && song.phrases[0].endNote == 3 && song.phrases[1].endNote == 6
+                   && song.notes[4].phrase == 1 && std::abs (song.phrases[1].start - 2.6) < 0.05,
+               "phrases hold their notes");
+
+        const auto again = coach::Song::fromString (song.toString());
+        check (again.notes.size() == 6 && again.phrases.size() == 2 && std::abs (again.notes[3].pitch - song.notes[3].pitch) < 0.01f,
+               "the melody survives the cache file");
+
+        const auto moved = song.transformed (2.0, 0.5);
+        check (std::abs (moved.notes[1].start - 2.0 * song.notes[1].start) < 1e-6 && std::abs (moved.notes[1].pitch - song.notes[1].pitch - 2.0f) < 1e-4f
+                   && std::abs (moved.phrases[1].end - 2.0 * song.phrases[1].end) < 1e-6,
+               "transformed: half speed doubles the times, the key moves the pitches");
+
+        // Scoring what was sung.
+        const auto scoreOf = [&] (const juce::AudioBuffer<float>& sung) { return coach::score (song, coach::framesFrom (pitch::analyse (sung, sampleRate))); };
+
+        const auto perfect = scoreOf (voice);
+        check (perfect.score > 90.0f && perfect.phrases[0].scored && perfect.phrases[1].scored,
+               "the melody sung as written scores high (" + juce::String (perfect.score, 1) + ")");
+        check (perfect.phrases[0].notesInTune == 3 && std::abs (perfect.lean) < 8.0f, "every note in tune, no lean");
+
+        const auto octave = scoreOf (singLine (getCoachMelody(), sampleRate, -12.0));
+        check (octave.score > 85.0f && std::abs (octave.lean) < 8.0f,
+               "an octave lower counts as right (" + juce::String (octave.score, 1) + ")");
+
+        const auto sharp = scoreOf (singLine (getCoachMelody(), sampleRate, 0.5));
+        check (std::abs (sharp.lean - 50.0f) < 10.0f && sharp.phrases[0].notesInTune == 0,
+               "half a semitone sharp leans +50 cents (" + juce::String (sharp.lean, 1) + ")");
+        check (sharp.score < perfect.score - 20.0f, "and scores lower (" + juce::String (sharp.score, 1) + ")");
+
+        const auto late = scoreOf (singLine (getCoachMelody(), sampleRate, 0.0, 0.25));
+        check (std::abs (late.phrases[0].timing - 0.25f) < 0.05f && std::abs (late.phrases[1].timing - 0.25f) < 0.05f,
+               "coming in a quarter second late shows as late (" + juce::String (late.phrases[0].timing, 3) + " s)");
+        check (late.score < perfect.score - 5.0f, "and costs points (" + juce::String (late.score, 1) + ")");
+
+        // Only the first phrase sung.
+        std::vector<SungNote> half (getCoachMelody().begin(), getCoachMelody().begin() + 3);
+        const auto partial = scoreOf (singLine (half, sampleRate));
+        check (partial.phrases[0].score > 90.0f && partial.phrases[1].score < 5.0f && partial.phrases[1].notesSung == 0,
+               "a phrase left out scores nothing");
+        const auto weak = partial.getWeakPhrases();
+        check (weak.size() == 1 && weak[0] == 1, "and is the weak one to loop");
+
+        // A take that only covers the second phrase leaves the first unscored.
+        const auto second = coach::score (song, coach::framesFrom (pitch::analyse (voice, sampleRate)), 2.4, 5.0);
+        check (! second.phrases[0].scored && second.phrases[1].scored && second.score > 90.0f, "a take covering one phrase scores just that one");
+
+        // A long run of notes with short gaps splits into phrases of 12 s or less.
+        coach::Song longSong;
+        for (int i = 0; i < 40; ++i)
+            longSong.notes.push_back ({ i * 0.5, i * 0.5 + (i % 7 == 6 ? 0.3 : 0.45), 60.0f, 0 });
+        coach::findPhrases (longSong);
+        auto longest = 0.0;
+        for (const auto& p : longSong.phrases)
+            longest = juce::jmax (longest, p.end - p.start);
+        check (longSong.phrases.size() >= 2 && longest <= 12.0, "a 20 s run splits at its widest gaps (" + juce::String (longest, 1) + " s longest)");
+
+        check (std::abs (coach::foldToOctave (48.3f, 60.0f) - 60.3f) < 1e-4f && std::abs (coach::foldToOctave (66.5f, 60.0f) - 54.5f) < 1e-4f,
+               "folding to the nearest octave");
+    }
+
+    void testPractice()
+    {
+        std::cout << "\nPractice (song preparation, cache, live scoring, pitch tap)\n";
+        namespace coach = analysis::coach;
+
+        juce::TemporaryFile folderHolder;
+        const auto root = folderHolder.getFile();
+        root.createDirectory();
+        const auto cacheRoot = root.getChildFile ("cache");
+
+        // A "song": the sung line in stereo at 44.1 kHz.
+        const auto writeSong = [] (const juce::File& file, double semitones)
+        {
+            auto line = singLine (getCoachMelody(), stems::modelSampleRate, semitones);
+            juce::AudioBuffer<float> stereo (2, line.getNumSamples());
+            stereo.copyFrom (0, 0, line, 0, 0, line.getNumSamples());
+            stereo.copyFrom (1, 0, line, 0, 0, line.getNumSamples());
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
+            auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions{}.withSampleRate (stems::modelSampleRate).withNumChannels (2).withBitsPerSample (24));
+            writer->writeFromAudioSampleBuffer (stereo, 0, stereo.getNumSamples());
+        };
+        const auto songFile = root.getChildFile ("Song.wav");
+        writeSong (songFile, 0.0);
+
+        // A stand-in separator: the voice is the whole input, the drums a tenth of it.
+        int loads = 0;
+        Practice::Options options;
+        options.cacheRoot = cacheRoot;
+        options.loadSeparator = [&loads] (const std::function<void (stems::LoadPhase)>& onPhase, const stems::Progress&)
+        {
+            ++loads;
+            onPhase (stems::LoadPhase::loading);
+            stems::Loaded loaded;
+            loaded.separator = [] (const juce::AudioBuffer<float>& chunk, const stems::Progress&)
+            {
+                std::vector<juce::AudioBuffer<float>> parts (stems::numStems, juce::AudioBuffer<float> (2, chunk.getNumSamples()));
+                for (auto& part : parts)
+                    part.clear();
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    parts[(size_t) stems::Stem::vocals].copyFrom (ch, 0, chunk, ch, 0, chunk.getNumSamples());
+                    parts[(size_t) stems::Stem::drums].addFrom (ch, 0, chunk, ch, 0, chunk.getNumSamples(), 0.1f);
+                }
+                return parts;
+            };
+            return loaded;
+        };
+
+        std::set<int> phases;
+        const auto progress = [&phases] (Practice::Phase phase, double) { phases.insert ((int) phase); return true; };
+        const auto first = Practice::prepare (songFile, options, progress);
+        check (first.error.isEmpty() && ! first.cancelled && ! first.fromCache && first.song.notes.size() == 6 && first.song.phrases.size() == 2,
+               "a song splits and its voice becomes the melody (" + first.error + ")");
+        check (first.backing.existsAsFile() && first.guide.existsAsFile() && first.backing.getParentDirectory() == first.folder
+                   && first.folder.getChildFile (Practice::melodyFileName).existsAsFile(),
+               "the backing, the guide voice and the melody are kept in the song's cache folder");
+        check (phases.count ((int) Practice::Phase::splitting) == 1 && phases.count ((int) Practice::Phase::listening) == 1,
+               "progress goes through splitting and listening");
+
+        const auto second = Practice::prepare (songFile, options, progress);
+        check (second.fromCache && loads == 1 && second.song.notes.size() == 6 && second.folder == first.folder && std::abs (second.seconds - 5.0) < 0.05,
+               "opening it again comes from the cache, without splitting");
+
+        options.split = false;
+        const auto voiceOnly = Practice::prepare (songFile, options, progress);
+        check (voiceOnly.error.isEmpty() && voiceOnly.guide == songFile && voiceOnly.backing == juce::File() && voiceOnly.song.notes.size() == 6
+                   && voiceOnly.folder != first.folder,
+               "a voice on its own is the guide itself (its own cache entry)");
+
+        const auto missing = Practice::prepare (root.getChildFile ("Other.wav"), options, progress);
+        check (missing.error.isNotEmpty(), "a missing file says so");
+
+        options.split = true;
+        songFile.copyFileTo (root.getChildFile ("Copy.wav"));
+        const auto copy = Practice::prepare (root.getChildFile ("Copy.wav"), options, progress);
+        check (copy.fromCache && copy.folder == first.folder && loads == 1, "the same song under another name finds its cache");
+
+        writeSong (root.getChildFile ("Higher.wav"), 2.0);
+        const auto cancelled = Practice::prepare (root.getChildFile ("Higher.wav"), options,
+                                                  [] (Practice::Phase phase, double) { return phase != Practice::Phase::splitting; });
+        check (cancelled.cancelled && ! cancelled.folder.getChildFile (Practice::melodyFileName).existsAsFile(),
+               "cancelling while it splits leaves no melody behind");
+
+        // Live scoring as the song plays.
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        juce::PropertiesFile settings (root.getChildFile ("settings.xml"), {});
+        juce::StringArray events;
+        Practice practice (processor, settings, [&events] (const juce::Identifier& id, const juce::var&) { events.add (id.toString()); }, [] { return (juce::int64) 0; });
+        practice.setSong (first.song);
+
+        auto frames = coach::framesFrom (analysis::pitch::analyse (singLine (getCoachMelody(), sampleRate), sampleRate));
+        const auto upTo = [&frames] (double t)
+        {
+            std::vector<coach::Frame> part;
+            for (const auto& f : frames)
+                if (f.time < t)
+                    part.push_back (f);
+            return part;
+        };
+
+        practice.addFrames (upTo (1.0), 1.0);
+        check (practice.getNoteScores()[0].sung && practice.getNoteScores()[0].score > 90.0f && ! practice.getNoteScores()[1].sung
+                   && ! practice.getPhraseScores()[0].scored,
+               "a note is scored as soon as it ends, its phrase when the phrase does");
+        practice.addFrames (upTo (5.0), 5.0);
+        check (practice.getPhraseScores()[0].scored && practice.getPhraseScores()[1].scored && practice.getPassScore() > 90.0f,
+               "the pass score covers the phrases sung (" + juce::String (practice.getPassScore(), 1) + ")");
+
+        practice.restartFrom (2.2);
+        check (practice.getPhraseScores()[0].scored && ! practice.getPhraseScores()[1].scored && ! practice.getNoteScores()[4].sung,
+               "jumping back forgets only what comes after");
+        // Singing the second phrase badly this time.
+        std::vector<coach::Frame> flat;
+        for (const auto& f : frames)
+            if (f.time >= 2.2)
+                flat.push_back ({ f.time, f.midi > 0.0f ? f.midi - 0.6f : 0.0f });
+        practice.addFrames (flat, 5.0);
+        check (practice.getPhraseScores()[1].scored && practice.getPhraseScores()[1].lean < -45.0f && practice.getPassScore() < 85.0f,
+               "and scores the second try (" + juce::String (practice.getPhraseScores()[1].lean, 1) + " cents)");
+
+        // The pitch tap in the processor: off by default, then a reading every 5 ms.
+        auto& tap = processor.getPitchTap();
+        const auto mic = makeVoice (220.0f, 0.3);
+        const auto run = [&]
+        {
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            juce::MidiBuffer midi;
+            for (size_t start = 0; start + blockSize <= mic.size(); start += blockSize)
+            {
+                buffer.clear();
+                buffer.copyFrom (0, 0, mic.data() + start, blockSize);
+                processor.processBlock (buffer, midi);
+            }
+        };
+        std::vector<PitchTap::Reading> readings;
+        run();
+        tap.read (readings);
+        check (readings.empty(), "the pitch tap costs nothing while the view is closed");
+
+        practice.handle ("view", juce::var (new juce::DynamicObject()));
+        tap.setEnabled (true);
+        processor.getMultitrack().seek (48000);
+        run();
+        tap.read (readings);
+        std::vector<float> pitches;
+        for (size_t i = readings.size() / 2; i < readings.size(); ++i)
+            pitches.push_back (readings[i].midi);
+        std::sort (pitches.begin(), pitches.end());
+        const auto expected = (int) (mic.size() / blockSize * blockSize / 240);
+        check (std::abs ((int) readings.size() - expected) <= 1 && ! pitches.empty() && std::abs (pitches[pitches.size() / 2] - 57.0f) < 0.1f,
+               "the tap follows the raw mic every 5 ms (" + juce::String ((int) readings.size()) + " readings, "
+                   + juce::String (pitches.empty() ? 0.0f : pitches[pitches.size() / 2], 2) + ")");
+        check (readings.size() > 2 && std::all_of (readings.begin(), readings.end(), [] (const PitchTap::Reading& r)
+                                                   { return r.position >= 48000 - 400 && r.position <= 48000 + blockSize; }),
+               "each reading stamped with the backing track's position (it stays put while stopped)");
+
+        // With the view open, tick() hands the readings to the page.
+        practice.handle ("view", [] { auto* o = new juce::DynamicObject(); o->setProperty ("open", true); return juce::var (o); }());
+        run();
+        events.clear();
+        practice.tick();
+        check (events.contains ("practicePitch"), "the page gets the pitch trail while the view is open");
+
+        tap.setEnabled (false);
+        root.deleteRecursively();
+    }
+
     void testPitchNotes()
     {
         std::cout << "\nNote pitch editor (sung notes, per-note edits)\n";
@@ -7771,6 +8070,15 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=coach: just the singing coach.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "coach")
+    {
+        testCoach();
+        testPractice();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=notes: just the note pitch editor.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "notes")
     {
@@ -7810,6 +8118,8 @@ int main()
     testLinkedTracks();
     testWarp();
     testPitchNotes();
+    testCoach();
+    testPractice();
     testRhythm();
     testTrackTools();
     testDawBridge();

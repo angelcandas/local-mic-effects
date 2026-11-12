@@ -53,6 +53,8 @@ juce_add_binary_data(MicFX_WebUI
         ui/daw.css
         ui/aiviews.css
         ui/aiviews.js
+        ui/practice.js
+        ui/practice.css
         libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js)
 
 # The MicFX instruments (Grand, Nova, ...): built into the app for MIDI tracks, and each
@@ -84,6 +86,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/MixAssistant.h
     src/analysis/Beats.cpp
     src/analysis/Beats.h
+    src/analysis/Coach.cpp
+    src/analysis/Coach.h
     src/analysis/Pitch.cpp
     src/analysis/Pitch.h
     src/analysis/TakeComp.cpp
@@ -92,6 +96,9 @@ set(MICFX_DSP_SOURCES
     src/Presets.cpp
     src/PluginProcessor.cpp
     src/Recorder.cpp
+    src/PitchTap.h
+    src/Practice.cpp
+    src/Practice.h
     src/Looper.cpp
     src/Looper.h
     src/MidiMap.cpp

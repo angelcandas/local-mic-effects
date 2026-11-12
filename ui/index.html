@@ -7,6 +7,7 @@
   <link rel="stylesheet" href="styles.css">
   <link rel="stylesheet" href="daw.css">
   <link rel="stylesheet" href="aiviews.css">
+  <link rel="stylesheet" href="practice.css">
   <script type="module" src="app.js"></script>
 </head>
 <body>
@@ -57,6 +58,9 @@
       <button class="chip loop-toggle" type="button" aria-pressed="false" title="Show or hide the looper">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 6.2A5 5 0 1 0 13 9" /><path d="M13.2 3.2v3.3H9.9" /></svg>Loop
       </button>
+      <button class="chip practice-toggle" type="button" aria-pressed="false" title="Practice: sing along to any song and see how close you get">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 12h3M6 8h4M11 4h3" /><path d="M2 14c3-1 5-5 7-7s3-3 5-3" stroke-dasharray="1.5 2" /></svg>Practice
+      </button>
       <button class="chip midi-button" type="button" aria-pressed="false" title="MIDI learn: map pedals, knobs and keys to controls">
         <span class="midi-dot"></span>MIDI
       </button>
@@ -103,6 +107,9 @@
       </section>
     </aside>
   </div>
+
+  <!-- The Practice view: built by practice.js. -->
+  <section class="practice" aria-label="Practice" hidden></section>
 
   <div class="confirm-backdrop" hidden>
     <div class="confirm-dialog" role="alertdialog" aria-modal="true" aria-labelledby="confirm-title">

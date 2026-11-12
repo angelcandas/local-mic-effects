@@ -8,6 +8,7 @@ import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, 
 import { initDaw } from "./daw.js";
 import { LOOPER_KEYS, LoopPanel } from "./looper.js";
 import { MidiLearn, markLearnable } from "./midilearn.js";
+import { PracticeView } from "./practice.js";
 
 // Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
 // builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
@@ -1261,6 +1262,10 @@ class Tracks {
 
 const recorderBar = new RecorderBar(document.querySelector(".recorder"));
 const tracks = new Tracks(document.querySelector(".studio"));
+
+const practiceView = new PracticeView({ section: document.querySelector(".practice"),
+                                        toggle: document.querySelector(".practice-toggle"),
+                                        workspace: document.querySelector(".workspace") });
 
 const loopPanel = new LoopPanel(document.querySelector(".looper"), document.querySelector(".loop-toggle"));
 
