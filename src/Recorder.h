@@ -28,7 +28,8 @@ public:
 
     // Message thread. Creates the folder if needed. Returns an error message, or an
     // empty string on success.
-    juce::String start (const juce::File& folder, bool includeDry);
+    // `label`, when given, goes at the end of the file name (which input it is).
+    juce::String start (const juce::File& folder, bool includeDry, const juce::String& label = {});
 
     // Message thread. Flushes and closes the files and returns them. When nothing is
     // recording, returns the last take (e.g. one that prepare() stopped).

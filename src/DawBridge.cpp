@@ -438,6 +438,14 @@ juce::var DawBridge::describeSession()
                               { "link", daw::Edit::getLink (track) },
                               { "inserts", describeInserts (track) }, { "clips", clips },
                               { "output", daw::Edit::getTrackOutput (track) }, { "sends", describeSends (track) },
+                              { "input", [&track]
+                                {
+                                    const auto input = daw::Edit::getTrackInput (track);
+                                    juce::Array<juce::var> list;
+                                    if (input.left != daw::Edit::noInput) list.add (input.left);
+                                    if (input.right != daw::Edit::noInput) list.add (input.right);
+                                    return list;
+                                }() },
                               { "kind", daw::Edit::isMidiTrack (track) ? "midi" : "audio" },
                               { "instrument", describeInstrument (track) } }));
     }
@@ -453,8 +461,16 @@ juce::var DawBridge::describeSession()
                                { "mute", (bool) bus[ids::mute] }, { "solo", (bool) bus[ids::solo] },
                                { "inserts", describeInserts (bus) } }));
 
+    if (lastInputNames.isEmpty())
+        lastInputNames = getInputNames();
+
+    juce::Array<juce::var> inputs;
+    for (const auto& name : lastInputNames)
+        inputs.add (name);
+
     return object ({
         { "available", isAvailable() },
+        { "inputs", inputs },
         { "mode", processor.isDawMode() ? "daw" : "live" },
         { "project", object ({ { "open", project.isOpen() }, { "name", project.isOpen() ? project.getName() : juce::String ("Untitled") },
                                { "path", project.getFolder().getFullPathName() }, { "dirty", project.hasUnsavedChanges() },
@@ -500,17 +516,28 @@ juce::var DawBridge::describeStatus()
         chains->setProperty (juce::String (id), object ({ { "in", fx::peakToDecibels (in) }, { "out", fx::peakToDecibels (out) } }));
     };
 
+    // Each strip's level: the louder side, and left and right for the mixer's stereo meters.
+    auto* stereo = new juce::DynamicObject();
+    const auto addPeaks = [&] (int id)
+    {
+        const auto [left, right] = engine.takePeaks (id);
+        stereo->setProperty (juce::String (id), juce::Array<juce::var> { peakToDecibels (left), peakToDecibels (right) });
+        return peakToDecibels (juce::jmax (left, right));
+    };
+
     for (const auto& track : edit.getTracks())
     {
-        peaks->setProperty (juce::String ((int) track[ids::id]), peakToDecibels (engine.takePeak ((int) track[ids::id])));
+        peaks->setProperty (juce::String ((int) track[ids::id]), addPeaks ((int) track[ids::id]));
         addChain ((int) track[ids::id]);
     }
 
     for (const auto& bus : edit.getReturns())
     {
-        peaks->setProperty (juce::String ((int) bus[ids::id]), peakToDecibels (engine.takePeak ((int) bus[ids::id])));
+        peaks->setProperty (juce::String ((int) bus[ids::id]), addPeaks ((int) bus[ids::id]));
         addChain ((int) bus[ids::id]);
     }
+
+    const auto masterPeak = addPeaks (daw::Edit::masterId);
 
     addChain (daw::Edit::masterId);
 
@@ -529,8 +556,9 @@ juce::var DawBridge::describeStatus()
         { "recording", engine.isRecording() },
         { "recordStart", (double) engine.getRecordStart() / rate },
         { "input", peakToDecibels (processor.inputPeak.exchange (0.0f)) },
-        { "master", peakToDecibels (engine.takePeak (daw::Edit::masterId)) },
+        { "master", masterPeak },
         { "tracks", juce::var (peaks) },
+        { "stereo", juce::var (stereo) },
         { "chains", juce::var (chains) },
         { "inserts", juce::var (inserts) },
         { "loading", engine.getAudioPool().isLoading() },
@@ -637,6 +665,19 @@ void DawBridge::updateInstrumentWindows()
     }
 }
 
+juce::StringArray DawBridge::getInputNames() const
+{
+    if (inputNames != nullptr)
+        if (auto names = inputNames(); ! names.isEmpty())
+            return names;
+
+    // Without the app's device: the processor's input channels.
+    juce::StringArray names;
+    for (int i = 0; i < juce::jmax (1, processor.getTotalNumInputChannels()); ++i)
+        names.add ("Input " + juce::String (i + 1));
+    return names;
+}
+
 void DawBridge::tick()
 {
     updateInstrumentWindows();
@@ -644,6 +685,17 @@ void DawBridge::tick()
     if (auto& host = processor.getPluginHost(); host.isScanning() && ++scanTicks % 10 == 0)
         emit ("dawPlugins", object ({ { "scanning", true }, { "progress", host.getScanProgress() },
                                       { "name", juce::File (host.getScanningName()).getFileNameWithoutExtension() } }));
+
+    // The interface's inputs (tracks pick from them): the session again when they change.
+    if (++inputTicks % 10 == 1)
+    {
+        auto names = getInputNames();
+        if (names != lastInputNames)
+        {
+            lastInputNames = std::move (names);
+            sessionChanged = true;
+        }
+    }
 
     auto& undo = edit.getUndoManager();
     const auto dirty = project.hasUnsavedChanges();
@@ -1924,6 +1976,14 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("solo"))    edit.setTrackSolo (id, args["solo"]);
             if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
             if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
+            if (args.hasProperty ("input"))   // [left] mono, [left, right] stereo, [] none
+            {
+                const auto* list = args["input"].getArray();
+                daw::Edit::Input input { daw::Edit::noInput, daw::Edit::noInput };
+                if (list != nullptr && list->size() > 0) input.left = (int) list->getReference (0);
+                if (list != nullptr && list->size() > 1) input.right = (int) list->getReference (1);
+                edit.setTrackInput (id, input);
+            }
             if (args.hasProperty ("transpose")) edit.setTrackTranspose (id, args["transpose"]);
             if (arg (args, "clearRide", false)) edit.setVolumeRide (id, {});
             if (arg (args, "clearAutomation", false)) edit.clearTrackAutomation (id);

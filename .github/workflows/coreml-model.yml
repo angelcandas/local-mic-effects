@@ -26,6 +26,12 @@ jobs:
           python-version: "3.12"
       - name: Install the pinned conversion tools
         run: pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops "numpy<2.3" demucs==4.0.1
+      - name: Use an up-to-date certificate bundle
+        # python.org's macOS Python ships an old one; downloading the Demucs weights failed with
+        # "certificate has expired".
+        run: |
+          pip install certifi
+          echo "SSL_CERT_FILE=$(python -m certifi)" >> "$GITHUB_ENV"
       - name: Convert the network
         run: python scripts/export_htdemucs_coreml.py --out "$RUNNER_TEMP/model/htdemucs-core.mlpackage"
       - name: Zip it

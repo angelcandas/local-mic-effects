@@ -560,12 +560,50 @@ namespace
     //==============================================================================
     // JUCE's standalone window with one more item in its Options menu, a maximise button and
     // the menu bar.
+    //==============================================================================
+    // Keeps every input of the audio interface open (up to the processor's limit), so DAW
+    // tracks can pick any of them: on start, and whenever the device changes.
+    class InputOpener final : private juce::ChangeListener
+    {
+    public:
+        explicit InputOpener (juce::AudioDeviceManager& m) : manager (m)
+        {
+            manager.addChangeListener (this);
+            openAll();
+        }
+
+        ~InputOpener() override { manager.removeChangeListener (this); }
+
+    private:
+        void changeListenerCallback (juce::ChangeBroadcaster*) override { openAll(); }
+
+        void openAll()
+        {
+            auto* device = manager.getCurrentAudioDevice();
+            if (device == nullptr)
+                return;
+
+            const auto available = juce::jmin (device->getInputChannelNames().size(), (int) PluginProcessor::maxAppInputs);
+            if (device->getActiveInputChannels().countNumberOfSetBits() >= available)
+                return;
+
+            auto setup = manager.getAudioDeviceSetup();
+            setup.useDefaultInputChannels = false;
+            setup.inputChannels.clear();
+            setup.inputChannels.setRange (0, available, true);
+            manager.setAudioDeviceSetup (setup, true);
+        }
+
+        juce::AudioDeviceManager& manager;
+    };
+
     class MicFXWindow final : public juce::StandaloneFilterWindow,
                               private juce::MenuBarModel
     {
     public:
         MicFXWindow (const juce::String& title, juce::Colour background, std::unique_ptr<juce::StandalonePluginHolder> holder)
-            : StandaloneFilterWindow (title, background, std::move (holder))
+            : StandaloneFilterWindow (title, background, std::move (holder)),
+              inputOpener (pluginHolder->deviceManager)
         {
             setTitleBarButtonsRequired (juce::DocumentWindow::allButtons, false);
 
@@ -589,6 +627,7 @@ namespace
         DeviceFavouritesManager* favourites = nullptr;
 
     private:
+        InputOpener inputOpener;
         static constexpr int checkForUpdatesId = 100;
         static constexpr int favouritesId = 101;
         static constexpr int firstMenuItemId = 1000;
