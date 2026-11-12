@@ -17,7 +17,9 @@
 namespace daw
 {
 // Plays an Edit: every track's clips through its insert chain, volume and pan, summed
-// into the master bus, which has its own inserts and volume.
+// into the master bus, which has its own inserts, volume and pan. Tracks can also send
+// some of their signal to return tracks (pre or post fader), or play into one entirely;
+// returns run their own inserts and play into the master.
 //
 // Threading. The engine listens to the Edit on the message thread and keeps an immutable
 // render graph (tracks, clips, the chain each track uses) for the audio thread. A change
@@ -27,7 +29,9 @@ namespace daw
 // so dragging a fader or knob is cheap and keeps effect tails ringing.
 //
 // Latency compensation: every track is delayed to match the track whose inserts add
-// the most latency, so tracks stay in time with each other.
+// the most latency, so tracks stay in time with each other. Returns are lined up the
+// same way: each is delayed to match the slowest, and what plays straight into the
+// master waits for them too.
 //
 // Recording is always dry: the raw mic goes to a WAV file and becomes a clip on every
 // armed track, and the track's inserts are applied on playback. Tracks with monitor on
@@ -124,8 +128,8 @@ public:
     void setCountInBars (int bars) noexcept { countInBars = juce::jlimit (0, 4, bars); }
     int getCountInBars() const noexcept     { return countInBars.load(); }
 
-    // Message thread. Peak level (linear) of a track's output, or the master's with
-    // Edit::masterId, since the last call.
+    // Message thread. Peak level (linear) of a track's (or a return's) output, or the
+    // master's with Edit::masterId, since the last call.
     float takePeak (int trackId);
 
     // Message thread. A track's (or the master's) insert chain: its peak levels (linear)
@@ -157,6 +161,7 @@ private:
         int latencyAtBuild = 0; // the chain's delay when the current graph was built (message thread)
 
         std::atomic<float> targetLeft { 1.0f }, targetRight { 1.0f };
+        std::atomic<float> targetDirect { 1.0f }; // tracks: 0 while a return is soloed (sends still play)
         std::atomic<float> peak { 0.0f };
         std::atomic<bool> monitoring { false }; // mic in (audio tracks) or MIDI in (MIDI tracks)
 
@@ -169,7 +174,7 @@ private:
         int getLatency() const { return chain.getLatencySamples() + (instrument != nullptr ? instrument->getLatencySamples() : 0); }
 
         // Audio thread.
-        juce::SmoothedValue<float> left, right;
+        juce::SmoothedValue<float> left, right, direct;
         juce::AudioBuffer<float> buffer;
         juce::AudioBuffer<float> instrumentBuffer;
         juce::MidiBuffer midi;
@@ -190,22 +195,71 @@ private:
         float gain = 1.0f;
     };
 
+    // A send's level (linear, 0 when off or the track is muted). Shared between graphs
+    // like strips, so moving a send knob doesn't need a new graph.
+    struct SendLevel
+    {
+        std::atomic<float> target { 0.0f };
+        juce::SmoothedValue<float> gain; // audio thread
+    };
+
+    // A delay line for latency compensation (audio thread).
+    struct Delay
+    {
+        juce::AudioBuffer<float> line;
+        int samples = 0, write = 0;
+
+        void setDelay (int numSamples)
+        {
+            samples = numSamples;
+            write = 0;
+            if (samples > 0)
+            {
+                line.setSize (2, samples);
+                line.clear();
+            }
+        }
+
+        void process (juce::AudioBuffer<float>&, int numSamples) noexcept;
+    };
+
+    struct Send
+    {
+        std::shared_ptr<SendLevel> level;
+        int bus = 0;     // index into Graph::returns
+        bool pre = false;
+    };
+
     struct Track
     {
         std::shared_ptr<Strip> strip;
+        std::vector<Send> sends;
+        int output = -1; // index into Graph::returns, or -1 for the master
         std::vector<Clip> clips;
         std::vector<MidiEvent> midiEvents; // MIDI tracks, in time order
         std::vector<std::pair<juce::int64, float>> ride; // volume automation: timeline sample, dB (Edit::RidePoint)
 
         // Latency compensation, before the inserts (audio thread).
-        juce::AudioBuffer<float> delayBuffer;
-        int delaySamples = 0, delayWrite = 0;
+        Delay delay;
+    };
+
+    // A return track: what the tracks send it, through its own strip, into the master.
+    struct Bus
+    {
+        std::shared_ptr<Strip> strip;
+        Delay delay; // lines its output up with the slowest return (after its inserts)
     };
 
     struct Graph
     {
         std::vector<Track> tracks;
+        std::vector<Bus> returns;
         std::shared_ptr<Strip> master;
+
+        // What the tracks play straight into the master, delayed to line up with the
+        // returns' effects when they add latency (otherwise unused).
+        juce::AudioBuffer<float> direct;
+        Delay directDelay;
         int blockSize = 512; // the strips' buffer size: the most one chunk can render
         bool fresh = true;   // not played yet: notes from the previous graph get their note-offs
         TempoMap tempo;      // for the click
@@ -231,7 +285,6 @@ private:
     void collectGarbage();
 
     static void renderClip (const Clip&, juce::AudioBuffer<float>&, juce::int64 blockStart, int numSamples) noexcept;
-    static void applyDelay (Track&, int numSamples) noexcept;
     void renderBlock (Graph&, juce::AudioBuffer<float>& output, int outputOffset, int numChannels, int numSamples,
                       const float* input, const juce::MidiBuffer* midi, int midiOffset) noexcept;
     void renderInstrument (Track&, bool isPlaying, bool fresh, juce::int64 blockStart, int numSamples,
@@ -251,7 +304,8 @@ private:
     int blockSize = 512;
 
     std::map<int, std::shared_ptr<Strip>> strips; // message thread: the current strip per id
-    std::map<int, AudioPool::Audio> lastClipAudio; // message thread: what each clip played in the last graph
+    std::map<int, AudioPool::Audio> lastClipAudio;
+    std::map<std::pair<int, int>, std::shared_ptr<SendLevel>> sendLevels; // message thread: by (track id, return id) // message thread: what each clip played in the last graph
 
     std::atomic<Graph*> incoming { nullptr }; // built, not yet picked up by the audio thread
     Graph* active = nullptr;                  // audio thread

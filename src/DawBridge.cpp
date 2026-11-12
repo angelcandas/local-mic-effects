@@ -149,6 +149,7 @@ namespace
             case analysis::MixStyle::electronic: return "electronic";
             case analysis::MixStyle::jazz:       return "jazz";
             case analysis::MixStyle::lofi:       return "lofi";
+            case analysis::MixStyle::speech:     return "speech";
         }
         return "pop";
     }
@@ -179,6 +180,23 @@ namespace
         for (const auto& point : tempo.getPoints())
             points.add (juce::Array<juce::var> { point.beat, point.bpm, point.ramp });
         return points;
+    }
+
+    // A track's sends for the page: [{ target (return id), level (dB, -inf when off), pre }].
+    juce::var describeSends (const juce::ValueTree& track)
+    {
+        juce::Array<juce::var> sends;
+        for (const auto& send : track)
+        {
+            if (! send.hasType (daw::ids::SEND))
+                continue;
+
+            const auto level = (float) (double) send.getProperty (daw::ids::level, -100.0);
+            sends.add (object ({ { "target", (int) send[daw::ids::target] },
+                                 { "level", level >= daw::Edit::minSendDb ? (double) level : -100.0 },
+                                 { "pre", (bool) send.getProperty (daw::ids::pre, false) } }));
+        }
+        return sends;
     }
 }
 
@@ -396,12 +414,21 @@ juce::var DawBridge::describeSession()
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
                               { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) },
                               { "inserts", describeInserts (track) }, { "clips", clips },
+                              { "output", daw::Edit::getTrackOutput (track) }, { "sends", describeSends (track) },
                               { "kind", daw::Edit::isMidiTrack (track) ? "midi" : "audio" },
                               { "instrument", describeInstrument (track) } }));
     }
 
     const auto master = edit.getMaster();
     auto& undo = edit.getUndoManager();
+
+    juce::Array<juce::var> returns;
+    for (const auto& bus : edit.getReturns())
+        returns.add (object ({ { "id", (int) bus[ids::id] }, { "name", bus[ids::name].toString() }, { "colour", bus[ids::colour].toString() },
+                               { "volume", number (bus, ids::volume) }, { "pan", number (bus, ids::pan) },
+                               { "inGain", number (bus, ids::inGain) }, { "outGain", number (bus, ids::outGain) },
+                               { "mute", (bool) bus[ids::mute] }, { "solo", (bool) bus[ids::solo] },
+                               { "inserts", describeInserts (bus) } }));
 
     return object ({
         { "available", isAvailable() },
@@ -430,7 +457,8 @@ juce::var DawBridge::describeSession()
         { "countIn", engine.getCountInBars() },
         { "canUndo", undo.canUndo() },
         { "canRedo", undo.canRedo() },
-        { "master", object ({ { "volume", number (master, ids::volume) }, { "inGain", number (master, ids::inGain) },
+        { "returns", returns },
+        { "master", object ({ { "volume", number (master, ids::volume) }, { "pan", number (master, ids::pan) }, { "inGain", number (master, ids::inGain) },
                               { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) } }) },
         { "tracks", tracks },
     });
@@ -453,6 +481,12 @@ juce::var DawBridge::describeStatus()
     {
         peaks->setProperty (juce::String ((int) track[ids::id]), peakToDecibels (engine.takePeak ((int) track[ids::id])));
         addChain ((int) track[ids::id]);
+    }
+
+    for (const auto& bus : edit.getReturns())
+    {
+        peaks->setProperty (juce::String ((int) bus[ids::id]), peakToDecibels (engine.takePeak ((int) bus[ids::id])));
+        addChain ((int) bus[ids::id]);
     }
 
     addChain (daw::Edit::masterId);
@@ -1086,7 +1120,7 @@ void DawBridge::loadPresetInto (int trackId, int presetIndex)
         return;
 
     const auto& preset = presets[(size_t) presetIndex];
-    auto inserts = daw::Edit::getInserts (trackId == daw::Edit::masterId ? edit.getMaster() : edit.getTrack (trackId));
+    auto inserts = daw::Edit::getInserts (edit.getChannel (trackId));
     if (! inserts.isValid())
         return;
 
@@ -1815,9 +1849,11 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "removeTrack") { edit.removeTrack (id); ok(); return; }
     if (command == "moveTrack")   { edit.moveTrack (id, arg (args, "index", 0)); ok(); return; }
 
-    if (command == "setTrack")
+    if (command == "setTrack") // a track or a return
     {
-        auto track = edit.getTrack (id);
+        auto track = edit.getChannel (id);
+        if (id == daw::Edit::masterId)
+            track = {};
 
         if (track.isValid())
         {
@@ -1842,11 +1878,38 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "setMaster")
     {
         if (args.hasProperty ("volume"))  edit.setMasterVolume (args["volume"]);
+        if (args.hasProperty ("pan"))     edit.setMasterPan (args["pan"]);
         if (args.hasProperty ("inGain"))  edit.setChainGain (daw::Edit::masterId, false, args["inGain"]);
         if (args.hasProperty ("outGain")) edit.setChainGain (daw::Edit::masterId, true, args["outGain"]);
         ok();
         return;
     }
+
+    //================================================================ returns and sends
+    if (command == "addReturn")
+    {
+        const auto effect = daw::Edit::moduleTypeFromKey (arg (args, "effect", juce::String()));
+        const auto letter = juce::String::charToString ((juce::juce_wchar) ('A' + edit.getReturns().size() % 26));
+        auto name = arg (args, "name", juce::String());
+        if (name.trim().isEmpty())
+            name = "Return " + letter;
+        complete (edit.addReturn (name.substring (0, 60), effect)[ids::id]);
+        return;
+    }
+
+    if (command == "removeReturn") { edit.removeReturn (id); ok(); return; }
+    if (command == "moveReturn")   { edit.moveReturn (id, arg (args, "index", 0)); ok(); return; }
+
+    if (command == "setSend")
+    {
+        const auto target = arg (args, "target", -1);
+        if (args.hasProperty ("level")) edit.setSend (id, target, args["level"]);
+        if (args.hasProperty ("pre"))   edit.setSendPre (id, target, args["pre"]);
+        ok();
+        return;
+    }
+
+    if (command == "setOutput") { edit.setTrackOutput (id, arg (args, "output", (int) daw::Edit::masterId)); ok(); return; }
 
     //================================================================ inserts
     if (command == "addInsert")

@@ -206,4 +206,39 @@ Parameters::Parameters (Layout& l)
         decibels (l, key + "InGain", name + " In Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
         decibels (l, key + "OutGain", name + " Out Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
     }
+
+    // Mastering effects (Mastering.h), added last so hosts keep the parameter order
+    // they already had (their In/Out gains are in the loop above).
+    toggle (l, "mbOn", "Multiband On");
+    hertz (l, "mbLowFreq", "Multiband Low/Mid", 40.0f, 1000.0f, 200.0f, 200.0f);
+    hertz (l, "mbHighFreq", "Multiband Mid/High", 1000.0f, 12000.0f, 3000.0f, 3000.0f);
+    decibels (l, "mbLowThreshold", "Multiband Low Threshold", -48.0f, 0.0f, -18.0f);
+    decibels (l, "mbMidThreshold", "Multiband Mid Threshold", -48.0f, 0.0f, -18.0f);
+    decibels (l, "mbHighThreshold", "Multiband High Threshold", -48.0f, 0.0f, -18.0f);
+    number (l, "mbRatio", "Multiband Ratio", 1.0f, 10.0f, 0.1f, 2.5f, ":1", 3.0f);
+    number (l, "mbAttack", "Multiband Attack", 1.0f, 100.0f, 0.1f, 15.0f, "ms", 15.0f);
+    number (l, "mbRelease", "Multiband Release", 20.0f, 1000.0f, 1.0f, 180.0f, "ms", 180.0f);
+    decibels (l, "mbMakeup", "Multiband Makeup", -6.0f, 12.0f, 0.0f);
+
+    toggle (l, "limOn", "Limiter On");
+    decibels (l, "limDrive", "Limiter Drive", 0.0f, 24.0f, 0.0f);
+    decibels (l, "limCeiling", "Limiter Ceiling", -12.0f, 0.0f, -1.0f);
+    number (l, "limRelease", "Limiter Release", 10.0f, 1000.0f, 1.0f, 120.0f, "ms", 120.0f);
+
+    toggle (l, "meqOn", "Mastering EQ On");
+    hertz (l, "meqLowCut", "Mastering EQ Low Cut", 10.0f, 200.0f, 20.0f, 40.0f);
+    hertz (l, "meqLowFreq", "Mastering EQ Low Freq", 30.0f, 300.0f, 100.0f, 100.0f);
+    decibels (l, "meqLowGain", "Mastering EQ Low", -12.0f, 12.0f, 0.0f);
+    hertz (l, "meqMidFreq", "Mastering EQ Mid Freq", 200.0f, 8000.0f, 1000.0f, 1000.0f);
+    decibels (l, "meqMidGain", "Mastering EQ Mid", -12.0f, 12.0f, 0.0f);
+    hertz (l, "meqHighFreq", "Mastering EQ High Freq", 2000.0f, 16000.0f, 8000.0f, 6000.0f);
+    decibels (l, "meqHighGain", "Mastering EQ High", -12.0f, 12.0f, 0.0f);
+    decibels (l, "meqAirGain", "Mastering EQ Air", -12.0f, 12.0f, 0.0f);
+
+    toggle (l, "imgOn", "Imager On");
+    percent (l, "imgWidth", "Imager Width", 120.0f, 200.0f);
+    hertz (l, "imgMonoBelow", "Imager Mono Below", 0.0f, 500.0f, 120.0f, 120.0f);
+
+    toggle (l, "loudOn", "Loudness Meter On");
+    number (l, "loudTarget", "Loudness Target", -24.0f, -6.0f, 0.5f, -14.0f, "LUFS");
 }

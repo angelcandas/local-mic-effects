@@ -43,6 +43,25 @@ Edit::Edit() : state (ids::PROJECT)
     state.setProperty (ids::version, formatVersion, nullptr);
     state.setProperty (ids::tempo, 120.0, nullptr);
     state.appendChild (makeMaster(), nullptr);
+    addDefaultReturns();
+}
+
+void Edit::addDefaultReturns()
+{
+    // Not undoable: part of a new (or upgraded) project, not an edit.
+    if ((bool) state.getProperty (ids::defaultReturns, false))
+        return;
+
+    state.setProperty (ids::defaultReturns, true, nullptr);
+
+    if (! getReturns().isEmpty())
+        return;
+
+    juce::UndoManager* none = nullptr;
+    std::swap (none, undoTarget);
+    addReturn ("Reverb", fx::ModuleType::reverb);
+    addReturn ("Chorus", fx::ModuleType::chorus);
+    std::swap (none, undoTarget);
 }
 
 void Edit::replaceState (const juce::ValueTree& newState)
@@ -62,11 +81,14 @@ void Edit::replaceState (const juce::ValueTree& newState)
 
     nextId = maxId (state) + 1;
 
+    // Projects from before return tracks get the default ones once.
+    addDefaultReturns();
+
     // Older or hand-edited projects can miss parts the editing code relies on: give every
     // track and the master an effects list, and anything without an id a fresh one.
     for (auto child : state)
     {
-        if (! child.hasType (ids::TRACK) && ! child.hasType (ids::MASTER))
+        if (! child.hasType (ids::TRACK) && ! child.hasType (ids::MASTER) && ! child.hasType (ids::RETURN))
             continue;
 
         if (! child.getChildWithName (ids::INSERTS).isValid())
@@ -77,7 +99,7 @@ void Edit::replaceState (const juce::ValueTree& newState)
                 if (item.hasType (ids::CLIP) && ! item.hasProperty (ids::id))
                     item.setProperty (ids::id, takeNextId(), nullptr);
 
-        if (child.hasType (ids::TRACK) && ! child.hasProperty (ids::id))
+        if ((child.hasType (ids::TRACK) || child.hasType (ids::RETURN)) && ! child.hasProperty (ids::id))
             child.setProperty (ids::id, takeNextId(), nullptr);
     }
 
@@ -117,17 +139,19 @@ juce::ValueTree Edit::addTrack (const juce::String& name, int index)
     track.setProperty (ids::monitor, false, nullptr);
     track.appendChild (juce::ValueTree (ids::INSERTS), nullptr);
 
-    // Tracks come after MASTER; index counts tracks only.
-    const auto numTracks = getTracks().size();
-    const auto position = index < 0 || index > numTracks ? -1 : state.indexOf (getMaster()) + 1 + index;
-    state.addChild (track, position, &undoManager);
+    // Index counts tracks only (markers and returns sit among them in the tree). A new
+    // last track goes right after the last one, so returns stay after the tracks.
+    const auto tracks = getTracks();
+    const auto position = juce::isPositiveAndBelow (index, tracks.size()) ? state.indexOf (tracks[index])
+                        : state.indexOf (tracks.isEmpty() ? getMaster() : tracks.getLast()) + 1;
+    state.addChild (track, position, undoTarget);
     return track;
 }
 
 void Edit::removeTrack (int trackId)
 {
     if (auto track = getTrack (trackId); track.isValid())
-        state.removeChild (track, &undoManager);
+        state.removeChild (track, undoTarget);
 }
 
 void Edit::moveTrack (int trackId, int newIndex)
@@ -136,9 +160,10 @@ void Edit::moveTrack (int trackId, int newIndex)
     if (! track.isValid())
         return;
 
-    const auto numTracks = getTracks().size();
-    const auto first = state.indexOf (getMaster()) + 1;
-    state.moveChild (state.indexOf (track), first + juce::jlimit (0, numTracks - 1, newIndex), &undoManager);
+    // Take the place of the track now at newIndex (moving down, it lands right after it).
+    const auto tracks = getTracks();
+    const auto target = tracks[juce::jlimit (0, tracks.size() - 1, newIndex)];
+    state.moveChild (state.indexOf (track), state.indexOf (target), undoTarget);
 }
 
 juce::ValueTree Edit::getTrack (int trackId) const
@@ -159,7 +184,7 @@ int Edit::duplicateTrack (int trackId)
     copy.setProperty (ids::arm, false, nullptr);
     copy.setProperty (ids::monitor, false, nullptr);
 
-    state.addChild (copy, state.indexOf (track) + 1, &undoManager);
+    state.addChild (copy, state.indexOf (track) + 1, undoTarget);
     return (int) copy[ids::id];
 }
 
@@ -170,27 +195,33 @@ void Edit::copyInserts (int fromTrackId, int toTrackId)
     if (! from.isValid() || ! to.isValid() || from == to)
         return;
 
-    to.removeAllChildren (&undoManager);
+    to.removeAllChildren (undoTarget);
     for (const auto& insert : from)
     {
         auto copy = insert.createCopy();
         copy.setProperty (ids::id, takeNextId(), nullptr);
-        to.appendChild (copy, &undoManager);
+        to.appendChild (copy, undoTarget);
     }
 }
 
 void Edit::soloExclusive (int trackId)
 {
-    for (auto track : getTracks())
-        track.setProperty (ids::solo, (int) track[ids::id] == trackId, &undoManager);
+    auto channels = getTracks();
+    channels.addArray (getReturns());
+
+    for (auto track : channels)
+        track.setProperty (ids::solo, (int) track[ids::id] == trackId, undoTarget);
 }
 
 void Edit::clearMuteAndSolo()
 {
-    for (auto track : getTracks())
+    auto channels = getTracks();
+    channels.addArray (getReturns());
+
+    for (auto track : channels)
     {
-        track.setProperty (ids::solo, false, &undoManager);
-        track.setProperty (ids::mute, false, &undoManager);
+        track.setProperty (ids::solo, false, undoTarget);
+        track.setProperty (ids::mute, false, undoTarget);
     }
 }
 
@@ -203,28 +234,176 @@ juce::Array<juce::ValueTree> Edit::getTracks() const
     return tracks;
 }
 
-juce::ValueTree Edit::getTrackOrMaster (int trackId) const
+juce::ValueTree Edit::getChannel (int id) const
 {
-    return trackId == masterId ? getMaster() : getTrack (trackId);
+    if (id == masterId)
+        return getMaster();
+
+    auto channel = state.getChildWithProperty (ids::id, id);
+    return channel.hasType (ids::TRACK) || channel.hasType (ids::RETURN) ? channel : juce::ValueTree();
 }
 
-void Edit::setTrackVolume (int trackId, float decibels) { getTrack (trackId).setProperty (ids::volume, decibels, &undoManager); }
-void Edit::setTrackPan (int trackId, float pan)         { getTrack (trackId).setProperty (ids::pan, juce::jlimit (-1.0f, 1.0f, pan), &undoManager); }
-void Edit::setTrackMute (int trackId, bool mute)        { getTrack (trackId).setProperty (ids::mute, mute, &undoManager); }
-void Edit::setTrackSolo (int trackId, bool solo)        { getTrack (trackId).setProperty (ids::solo, solo, &undoManager); }
-void Edit::setMasterVolume (float decibels)             { getMaster().setProperty (ids::volume, decibels, &undoManager); }
+// Tracks and returns (not the master: it has no mute or solo).
+void Edit::setTrackVolume (int trackId, float decibels) { getChannel (trackId).setProperty (ids::volume, decibels, undoTarget); }
+void Edit::setTrackPan (int trackId, float pan)         { getChannel (trackId).setProperty (ids::pan, juce::jlimit (-1.0f, 1.0f, pan), undoTarget); }
+void Edit::setTrackMute (int trackId, bool mute)        { if (trackId != masterId) getChannel (trackId).setProperty (ids::mute, mute, undoTarget); }
+void Edit::setTrackSolo (int trackId, bool solo)        { if (trackId != masterId) getChannel (trackId).setProperty (ids::solo, solo, undoTarget); }
+void Edit::setMasterVolume (float decibels)             { getMaster().setProperty (ids::volume, decibels, undoTarget); }
+void Edit::setMasterPan (float pan)                     { getMaster().setProperty (ids::pan, juce::jlimit (-1.0f, 1.0f, pan), undoTarget); }
+
+//==============================================================================
+juce::ValueTree Edit::addReturn (const juce::String& name, std::optional<fx::ModuleType> effect)
+{
+    juce::ValueTree bus (ids::RETURN);
+    bus.setProperty (ids::id, takeNextId(), nullptr);
+    bus.setProperty (ids::name, name, nullptr);
+    bus.setProperty (ids::volume, 0.0f, nullptr);
+    bus.setProperty (ids::pan, 0.0f, nullptr);
+    bus.setProperty (ids::mute, false, nullptr);
+    bus.setProperty (ids::solo, false, nullptr);
+    bus.appendChild (juce::ValueTree (ids::INSERTS), nullptr);
+
+    // After the last return (or the last track, for the first one).
+    const auto returns = getReturns();
+    const auto tracks = getTracks();
+    const auto after = ! returns.isEmpty() ? returns.getLast() : ! tracks.isEmpty() ? tracks.getLast() : getMaster();
+    state.addChild (bus, state.indexOf (after) + 1, undoTarget);
+
+    if (effect.has_value())
+    {
+        auto insert = addInsert ((int) bus[ids::id], *effect);
+
+        // A return carries only the effect: fully wet, the dry signal stays on the track.
+        for (const auto* wet : { "reverbMix", "chorusMix", "flangerMix", "phaserMix", "delayMix", "doublerMix" })
+            if (insert.hasProperty (wet))
+                insert.setProperty (wet, 100.0f, nullptr);
+    }
+
+    return bus;
+}
+
+void Edit::removeReturn (int returnId)
+{
+    auto bus = getReturn (returnId);
+    if (! bus.isValid())
+        return;
+
+    for (auto track : getTracks())
+    {
+        if (auto send = getSend (track, returnId); send.isValid())
+            track.removeChild (send, undoTarget);
+
+        if (getTrackOutput (track) == returnId)
+            track.removeProperty (ids::output, undoTarget);
+    }
+
+    state.removeChild (bus, undoTarget);
+}
+
+juce::ValueTree Edit::getReturn (int returnId) const
+{
+    auto bus = state.getChildWithProperty (ids::id, returnId);
+    return bus.hasType (ids::RETURN) ? bus : juce::ValueTree();
+}
+
+juce::Array<juce::ValueTree> Edit::getReturns() const
+{
+    juce::Array<juce::ValueTree> returns;
+    for (const auto& child : state)
+        if (child.hasType (ids::RETURN))
+            returns.add (child);
+    return returns;
+}
+
+void Edit::moveReturn (int returnId, int newIndex)
+{
+    const auto returns = getReturns();
+    const auto from = returns.indexOf (getReturn (returnId));
+    if (from < 0)
+        return;
+
+    const auto to = returns[juce::jlimit (0, returns.size() - 1, newIndex)];
+    state.moveChild (state.indexOf (returns[from]), state.indexOf (to), undoTarget);
+}
+
+juce::ValueTree Edit::getSend (const juce::ValueTree& track, int returnId)
+{
+    for (const auto& child : track)
+        if (child.hasType (ids::SEND) && (int) child[ids::target] == returnId)
+            return child;
+    return {};
+}
+
+void Edit::setSend (int trackId, int returnId, float decibels)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid() || ! getReturn (returnId).isValid())
+        return;
+
+    const auto level = std::isfinite (decibels) ? juce::jlimit (minSendDb - 1.0f, maxSendDb, decibels) : minSendDb - 1.0f;
+    auto send = getSend (track, returnId);
+
+    if (! send.isValid())
+    {
+        if (level < minSendDb)
+            return; // nothing to turn off
+
+        send = juce::ValueTree (ids::SEND);
+        send.setProperty (ids::id, takeNextId(), nullptr);
+        send.setProperty (ids::target, returnId, nullptr);
+        send.setProperty (ids::level, level, nullptr);
+        send.setProperty (ids::pre, false, nullptr);
+        track.appendChild (send, undoTarget);
+        return;
+    }
+
+    send.setProperty (ids::level, level, undoTarget);
+}
+
+void Edit::setSendPre (int trackId, int returnId, bool preFader)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid() || ! getReturn (returnId).isValid())
+        return;
+
+    auto send = getSend (track, returnId);
+    if (! send.isValid())
+    {
+        send = juce::ValueTree (ids::SEND);
+        send.setProperty (ids::id, takeNextId(), nullptr);
+        send.setProperty (ids::target, returnId, nullptr);
+        send.setProperty (ids::level, minSendDb - 1.0f, nullptr);
+        send.setProperty (ids::pre, preFader, nullptr);
+        track.appendChild (send, undoTarget);
+        return;
+    }
+
+    send.setProperty (ids::pre, preFader, undoTarget);
+}
+
+void Edit::setTrackOutput (int trackId, int returnIdOrMaster)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid())
+        return;
+
+    if (returnIdOrMaster == masterId || ! getReturn (returnIdOrMaster).isValid())
+        track.removeProperty (ids::output, undoTarget);
+    else
+        track.setProperty (ids::output, returnIdOrMaster, undoTarget);
+}
 
 void Edit::setChainGain (int trackId, bool output, float decibels)
 {
-    auto tree = trackId == masterId ? getMaster() : getTrack (trackId);
+    auto tree = getChannel (trackId);
     if (tree.isValid())
-        tree.setProperty (output ? ids::outGain : ids::inGain, juce::jlimit (-maxChainGain, maxChainGain, decibels), &undoManager);
+        tree.setProperty (output ? ids::outGain : ids::inGain, juce::jlimit (-maxChainGain, maxChainGain, decibels), undoTarget);
 }
 
 // Arm and monitor are recording state, not edits: not undoable.
 void Edit::setTrackArm (int trackId, bool arm)          { getTrack (trackId).setProperty (ids::arm, arm, nullptr); }
 void Edit::setTrackMonitor (int trackId, bool monitor)  { getTrack (trackId).setProperty (ids::monitor, monitor, nullptr); }
-void Edit::setTempo (double bpm)                        { state.setProperty (ids::tempo, juce::jlimit (20.0, 400.0, bpm), &undoManager); }
+void Edit::setTempo (double bpm)                        { state.setProperty (ids::tempo, juce::jlimit (20.0, 400.0, bpm), undoTarget); }
 
 TempoMap Edit::getTempoMap() const
 {
@@ -269,8 +448,8 @@ namespace
 juce::ValueTree Edit::addMidiTrack (const juce::String& name, const InstrumentInfo& info, int index)
 {
     auto track = addTrack (name, index);
-    track.setProperty (ids::kind, midiKind, &undoManager);
-    track.appendChild (makeInstrument (info, takeNextId()), &undoManager);
+    track.setProperty (ids::kind, midiKind, undoTarget);
+    track.appendChild (makeInstrument (info, takeNextId()), undoTarget);
     return track;
 }
 
@@ -281,14 +460,14 @@ void Edit::setInstrument (int trackId, const InstrumentInfo& info)
         return;
 
     if (! isMidiTrack (track))
-        track.setProperty (ids::kind, midiKind, &undoManager);
+        track.setProperty (ids::kind, midiKind, undoTarget);
 
     // A new INSTRUMENT (with a new id), so the engine loads a fresh one.
     const auto index = track.indexOf (track.getChildWithName (ids::INSTRUMENT));
     if (index >= 0)
-        track.removeChild (index, &undoManager);
+        track.removeChild (index, undoTarget);
 
-    track.addChild (makeInstrument (info, takeNextId()), index, &undoManager);
+    track.addChild (makeInstrument (info, takeNextId()), index, undoTarget);
 }
 
 juce::ValueTree Edit::getInstrument (int trackId) const
@@ -312,7 +491,7 @@ juce::ValueTree Edit::addMidiClip (int trackId, double startSeconds, double leng
     clip.setProperty (ids::gain, 0.0f, nullptr);
     clip.setProperty (ids::fadeIn, 0.0, nullptr);
     clip.setProperty (ids::fadeOut, 0.0, nullptr);
-    track.appendChild (clip, &undoManager);
+    track.appendChild (clip, undoTarget);
     return clip;
 }
 
@@ -336,20 +515,20 @@ juce::ValueTree Edit::addNote (int clipId, int pitch, double time, double length
     juce::ValueTree note (ids::NOTE);
     note.setProperty (ids::id, takeNextId(), nullptr);
     setNoteProperties (note, pitch, time, length, velocity, nullptr);
-    clip.appendChild (note, &undoManager);
+    clip.appendChild (note, undoTarget);
     return note;
 }
 
 void Edit::setNote (int noteId, int pitch, double time, double length, int velocity)
 {
     if (auto note = getNote (noteId); note.isValid())
-        setNoteProperties (note, pitch, time, length, velocity, &undoManager);
+        setNoteProperties (note, pitch, time, length, velocity, undoTarget);
 }
 
 void Edit::removeNote (int noteId)
 {
     if (auto note = getNote (noteId); note.isValid())
-        note.getParent().removeChild (note, &undoManager);
+        note.getParent().removeChild (note, undoTarget);
 }
 
 juce::ValueTree Edit::getNote (int noteId) const
@@ -375,14 +554,14 @@ juce::ValueTree Edit::addClip (int trackId, const juce::File& file, double start
     clip.setProperty (ids::gain, 0.0f, nullptr);
     clip.setProperty (ids::fadeIn, 0.0, nullptr);
     clip.setProperty (ids::fadeOut, 0.0, nullptr);
-    track.appendChild (clip, &undoManager);
+    track.appendChild (clip, undoTarget);
     return clip;
 }
 
 void Edit::removeClip (int clipId)
 {
     if (auto clip = getClip (clipId); clip.isValid())
-        clip.getParent().removeChild (clip, &undoManager);
+        clip.getParent().removeChild (clip, undoTarget);
 }
 
 juce::ValueTree Edit::getClip (int clipId) const
@@ -396,12 +575,12 @@ void Edit::moveClip (int clipId, double newStart, int toTrackId)
     if (! clip.isValid())
         return;
 
-    clip.setProperty (ids::start, juce::jmax (0.0, newStart), &undoManager);
+    clip.setProperty (ids::start, juce::jmax (0.0, newStart), undoTarget);
 
     if (auto target = getTrack (toTrackId); target.isValid() && target != clip.getParent())
     {
-        clip.getParent().removeChild (clip, &undoManager);
-        target.appendChild (clip, &undoManager);
+        clip.getParent().removeChild (clip, undoTarget);
+        target.appendChild (clip, undoTarget);
     }
 }
 
@@ -416,9 +595,9 @@ void Edit::trimClipStart (int clipId, double newStart)
     const auto clamped = juce::jlimit (juce::jmax (0.0, start - offset), end - minClipSeconds, newStart);
     const auto delta = clamped - start;
 
-    clip.setProperty (ids::start, clamped, &undoManager);
-    clip.setProperty (ids::offset, offset + delta, &undoManager);
-    clip.setProperty (ids::length, length - delta, &undoManager);
+    clip.setProperty (ids::start, clamped, undoTarget);
+    clip.setProperty (ids::offset, offset + delta, undoTarget);
+    clip.setProperty (ids::length, length - delta, undoTarget);
 }
 
 void Edit::trimClipEnd (int clipId, double newEnd)
@@ -428,7 +607,7 @@ void Edit::trimClipEnd (int clipId, double newEnd)
         return;
 
     const auto start = (double) clip[ids::start];
-    clip.setProperty (ids::length, juce::jmax (minClipSeconds, newEnd - start), &undoManager);
+    clip.setProperty (ids::length, juce::jmax (minClipSeconds, newEnd - start), undoTarget);
 }
 
 int Edit::splitClip (int clipId, double time)
@@ -450,16 +629,16 @@ int Edit::splitClip (int clipId, double time)
     right.setProperty (ids::length, start + length - time, nullptr);
     right.setProperty (ids::fadeIn, 0.0, nullptr);
 
-    clip.setProperty (ids::length, time - start, &undoManager);
-    clip.setProperty (ids::fadeOut, 0.0, &undoManager);
-    clip.getParent().addChild (right, clip.getParent().indexOf (clip) + 1, &undoManager);
+    clip.setProperty (ids::length, time - start, undoTarget);
+    clip.setProperty (ids::fadeOut, 0.0, undoTarget);
+    clip.getParent().addChild (right, clip.getParent().indexOf (clip) + 1, undoTarget);
     return id;
 }
 
 void Edit::setClipTranspose (int clipId, double semitones)
 {
     if (auto clip = getClip (clipId); clip.isValid())
-        clip.setProperty (ids::transpose, juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, semitones), &undoManager);
+        clip.setProperty (ids::transpose, juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, semitones), undoTarget);
 }
 
 void Edit::setClipStretch (int clipId, warp::Algorithm algorithm)
@@ -467,9 +646,9 @@ void Edit::setClipStretch (int clipId, warp::Algorithm algorithm)
     if (auto clip = getClip (clipId); clip.isValid())
     {
         if (algorithm == warp::Algorithm::mix)
-            clip.removeProperty (ids::stretch, &undoManager);
+            clip.removeProperty (ids::stretch, undoTarget);
         else
-            clip.setProperty (ids::stretch, warp::getAlgorithmKey (algorithm), &undoManager);
+            clip.setProperty (ids::stretch, warp::getAlgorithmKey (algorithm), undoTarget);
     }
 }
 
@@ -478,16 +657,16 @@ void Edit::setClipFormant (int clipId, bool keep)
     if (auto clip = getClip (clipId); clip.isValid())
     {
         if (keep)
-            clip.setProperty (ids::formant, true, &undoManager);
+            clip.setProperty (ids::formant, true, undoTarget);
         else
-            clip.removeProperty (ids::formant, &undoManager);
+            clip.removeProperty (ids::formant, undoTarget);
     }
 }
 
 void Edit::setTrackTranspose (int trackId, double semitones)
 {
     if (auto track = getTrack (trackId); track.isValid())
-        track.setProperty (ids::transpose, juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, semitones), &undoManager);
+        track.setProperty (ids::transpose, juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, semitones), undoTarget);
 }
 
 void Edit::setVolumeRide (int trackId, const std::vector<RidePoint>& points)
@@ -498,7 +677,7 @@ void Edit::setVolumeRide (int trackId, const std::vector<RidePoint>& points)
 
     if (points.empty())
     {
-        track.removeProperty (ids::ride, &undoManager);
+        track.removeProperty (ids::ride, undoTarget);
         return;
     }
 
@@ -508,7 +687,7 @@ void Edit::setVolumeRide (int trackId, const std::vector<RidePoint>& points)
     juce::StringArray parts;
     for (const auto& point : sorted)
         parts.add (juce::String (juce::jmax (0.0, point.time), 3) + ":" + juce::String (juce::jlimit (-maxRideDb, maxRideDb, point.db), 2));
-    track.setProperty (ids::ride, parts.joinIntoString (";"), &undoManager);
+    track.setProperty (ids::ride, parts.joinIntoString (";"), undoTarget);
 }
 
 std::vector<Edit::RidePoint> Edit::getVolumeRide (const juce::ValueTree& track)
@@ -550,9 +729,9 @@ void Edit::setClipWarp (int clipId, const warp::Map& map)
 
     const auto text = map.toString();
     if (text.isEmpty())
-        clip.removeProperty (ids::warp, &undoManager);
+        clip.removeProperty (ids::warp, undoTarget);
     else
-        clip.setProperty (ids::warp, text, &undoManager);
+        clip.setProperty (ids::warp, text, undoTarget);
 }
 
 warp::Map Edit::getClipWarp (const juce::ValueTree& clip)
@@ -581,25 +760,25 @@ int Edit::duplicateClip (int clipId)
     renumber (copy);
     const auto id = (int) copy[ids::id];
     copy.setProperty (ids::start, (double) clip[ids::start] + (double) clip[ids::length], nullptr);
-    clip.getParent().addChild (copy, clip.getParent().indexOf (clip) + 1, &undoManager);
+    clip.getParent().addChild (copy, clip.getParent().indexOf (clip) + 1, undoTarget);
     return id;
 }
 
 void Edit::setClipGain (int clipId, float decibels)
 {
-    getClip (clipId).setProperty (ids::gain, juce::jlimit (-60.0f, 24.0f, decibels), &undoManager);
+    getClip (clipId).setProperty (ids::gain, juce::jlimit (-60.0f, 24.0f, decibels), undoTarget);
 }
 
 void Edit::setClipName (int clipId, const juce::String& name)
 {
     if (auto clip = getClip (clipId); clip.isValid() && name.trim().isNotEmpty())
-        clip.setProperty (ids::name, name.trim().substring (0, 80), &undoManager);
+        clip.setProperty (ids::name, name.trim().substring (0, 80), undoTarget);
 }
 
 void Edit::setClipMute (int clipId, bool mute)
 {
     if (auto clip = getClip (clipId); clip.isValid())
-        clip.setProperty (ids::mute, mute, &undoManager);
+        clip.setProperty (ids::mute, mute, undoTarget);
 }
 
 juce::Array<int> Edit::keepClipParts (int clipId, const std::vector<std::pair<double, double>>& parts, double fadeSeconds)
@@ -629,12 +808,12 @@ juce::Array<int> Edit::keepClipParts (int clipId, const std::vector<std::pair<do
         const auto half = (b - a) / 2.0;
         part.setProperty (ids::fadeIn, a > 0.0 ? fade : juce::jmin (half, (double) clip[ids::fadeIn]), nullptr);
         part.setProperty (ids::fadeOut, b < length ? fade : juce::jmin (half, (double) clip[ids::fadeOut]), nullptr);
-        parent.addChild (part, ++index, &undoManager);
+        parent.addChild (part, ++index, undoTarget);
         created.add (id);
     }
 
     if (! created.isEmpty())
-        parent.removeChild (clip, &undoManager);
+        parent.removeChild (clip, undoTarget);
 
     return created;
 }
@@ -648,8 +827,8 @@ void Edit::setClipFades (int clipId, double fadeInSeconds, double fadeOutSeconds
     // The two fades together never exceed the clip.
     const auto length = (double) clip[ids::length];
     const auto fadeIn = juce::jlimit (0.0, length, fadeInSeconds);
-    clip.setProperty (ids::fadeIn, fadeIn, &undoManager);
-    clip.setProperty (ids::fadeOut, juce::jlimit (0.0, length - fadeIn, fadeOutSeconds), &undoManager);
+    clip.setProperty (ids::fadeIn, fadeIn, undoTarget);
+    clip.setProperty (ids::fadeOut, juce::jlimit (0.0, length - fadeIn, fadeOutSeconds), undoTarget);
 }
 
 double Edit::snapToGrid (double seconds, double beats) const
@@ -659,20 +838,20 @@ double Edit::snapToGrid (double seconds, double beats) const
 
 void Edit::setBeatsPerBar (int beats)
 {
-    state.setProperty (ids::beatsPerBar, juce::jlimit (2, 12, beats), &undoManager);
+    state.setProperty (ids::beatsPerBar, juce::jlimit (2, 12, beats), undoTarget);
 }
 
 void Edit::setKey (int tonic, bool minor)
 {
     if (tonic < 0 || tonic > 11)
     {
-        state.removeProperty (ids::key, &undoManager);
-        state.removeProperty (ids::keyMinor, &undoManager);
+        state.removeProperty (ids::key, undoTarget);
+        state.removeProperty (ids::keyMinor, undoTarget);
         return;
     }
 
-    state.setProperty (ids::key, tonic, &undoManager);
-    state.setProperty (ids::keyMinor, minor, &undoManager);
+    state.setProperty (ids::key, tonic, undoTarget);
+    state.setProperty (ids::keyMinor, minor, undoTarget);
 }
 
 int Edit::getKey() const
@@ -690,26 +869,26 @@ juce::ValueTree Edit::addMarker (double timeSeconds, const juce::String& name)
     marker.setProperty (ids::id, takeNextId(), nullptr);
     marker.setProperty (ids::name, name.isNotEmpty() ? name : "Marker " + juce::String (getMarkers().size() + 1), nullptr);
     marker.setProperty (ids::time, juce::jmax (0.0, timeSeconds), nullptr);
-    state.appendChild (marker, &undoManager);
+    state.appendChild (marker, undoTarget);
     return marker;
 }
 
 void Edit::removeMarker (int markerId)
 {
     if (auto marker = findById (ids::MARKER, markerId); marker.isValid())
-        state.removeChild (marker, &undoManager);
+        state.removeChild (marker, undoTarget);
 }
 
 void Edit::setMarkerTime (int markerId, double timeSeconds)
 {
     if (auto marker = findById (ids::MARKER, markerId); marker.isValid())
-        marker.setProperty (ids::time, juce::jmax (0.0, timeSeconds), &undoManager);
+        marker.setProperty (ids::time, juce::jmax (0.0, timeSeconds), undoTarget);
 }
 
 void Edit::setMarkerName (int markerId, const juce::String& name)
 {
     if (auto marker = findById (ids::MARKER, markerId); marker.isValid() && name.trim().isNotEmpty())
-        marker.setProperty (ids::name, name.trim().substring (0, 60), &undoManager);
+        marker.setProperty (ids::name, name.trim().substring (0, 60), undoTarget);
 }
 
 juce::Array<juce::ValueTree> Edit::getMarkers() const
@@ -728,9 +907,9 @@ void Edit::setLoop (bool on, double startSeconds, double endSeconds)
 {
     const auto start = juce::jmax (0.0, juce::jmin (startSeconds, endSeconds));
     const auto end = juce::jmax (startSeconds, endSeconds);
-    state.setProperty (ids::loopStart, start, &undoManager);
-    state.setProperty (ids::loopEnd, end, &undoManager);
-    state.setProperty (ids::loopOn, on && end - start >= minClipSeconds, &undoManager);
+    state.setProperty (ids::loopStart, start, undoTarget);
+    state.setProperty (ids::loopEnd, end, undoTarget);
+    state.setProperty (ids::loopOn, on && end - start >= minClipSeconds, undoTarget);
 }
 
 //==============================================================================
@@ -776,14 +955,14 @@ juce::ValueTree Edit::addInsert (int trackId, fx::ModuleType type, int index)
         insert.setProperty (juce::Identifier (module->getValueId (v)), value, nullptr);
     }
 
-    inserts.addChild (insert, index, &undoManager);
+    inserts.addChild (insert, index, undoTarget);
     return insert;
 }
 
 void Edit::removeInsert (int insertId)
 {
     if (auto insert = getInsert (insertId); insert.isValid())
-        insert.getParent().removeChild (insert, &undoManager);
+        insert.getParent().removeChild (insert, undoTarget);
 }
 
 void Edit::moveInsert (int insertId, int newIndex)
@@ -793,13 +972,13 @@ void Edit::moveInsert (int insertId, int newIndex)
         return;
 
     auto inserts = insert.getParent();
-    inserts.moveChild (inserts.indexOf (insert), juce::jlimit (0, inserts.getNumChildren() - 1, newIndex), &undoManager);
+    inserts.moveChild (inserts.indexOf (insert), juce::jlimit (0, inserts.getNumChildren() - 1, newIndex), undoTarget);
 }
 
 void Edit::setInsertValue (int insertId, const juce::String& valueId, float value)
 {
     if (auto insert = getInsert (insertId); insert.isValid() && insert.hasProperty (juce::Identifier (valueId)))
-        insert.setProperty (juce::Identifier (valueId), value, &undoManager);
+        insert.setProperty (juce::Identifier (valueId), value, undoTarget);
 }
 
 juce::ValueTree Edit::getInsert (int insertId) const

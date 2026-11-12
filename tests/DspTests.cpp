@@ -1371,6 +1371,25 @@ namespace
         check (analysis::getModeFromKey (analysis::getModeKey (analysis::MixMode::clean)) == analysis::MixMode::clean
                    && analysis::getModeFromKey ("nonsense") == analysis::MixMode::mix,
                "mode keys round-trip");
+
+        // Speech / podcast: the voice dry and well over a music bed that ducks under it.
+        {
+            const auto speech = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::speech);
+            bool character = false;
+            float duck = 0.0f, master = 0.0f;
+            for (const auto& move : speech.moves)
+            {
+                character = character || move.insert == fx::ModuleType::reverb || move.insert == fx::ModuleType::echo
+                         || move.insert == fx::ModuleType::saturation || move.insert == fx::ModuleType::exciter;
+                if (move.trackId == backing && ! move.ride.empty())
+                    for (const auto& point : move.ride) duck = juce::jmin (duck, point.second);
+                if (move.trackId == daw::Edit::masterId)
+                    master = 1.0f;
+            }
+            check (! character && std::abs (speech.voiceOverBackingLu - 10.0f) < 1.0f && duck <= -5.9f && master > 0.0f,
+                   "speech: no reverb, echo or colour; the voice " + juce::String (speech.voiceOverBackingLu, 1)
+                       + " LU over the music, which ducks " + juce::String (-duck, 1) + " dB while you talk");
+        }
     }
 
     void testAutoMixSynths()
@@ -2045,6 +2064,299 @@ namespace
         }
 
         return out;
+    }
+
+    void testReturns()
+    {
+        std::cout << "\nReturn tracks and sends\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-returns");
+        folder.createDirectory();
+
+        juce::AudioBuffer<float> tone (2, (int) sampleRate);
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                tone.setSample (ch, i, 0.2f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * i / sampleRate));
+
+        const auto toneFile = folder.getChildFile ("tone.wav");
+        writeWav (toneFile, tone, sampleRate);
+
+        daw::Edit edit;
+        const auto defaults = edit.getReturns();
+        check (defaults.size() == 2 && defaults[0][daw::ids::name].toString() == "Reverb" && defaults[1][daw::ids::name].toString() == "Chorus"
+                   && (float) daw::Edit::getInserts (defaults[0]).getChild (0)["reverbMix"] == 100.0f
+                   && (float) daw::Edit::getInserts (defaults[1]).getChild (0)["chorusMix"] == 100.0f
+                   && ! edit.getUndoManager().canUndo(),
+               "a new project has fully wet Reverb and Chorus returns (not an undo step)");
+
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        engine.getAudioPool().loadNow (toneFile);
+
+        const auto track = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        edit.addClip (track, toneFile, 0.0, 1.0);
+        check (edit.getTracks().size() == 1 && edit.getState().indexOf (edit.getTrack (track)) < edit.getState().indexOf (defaults[0]),
+               "tracks stay before the returns");
+
+        const auto bus = (int) edit.addReturn ("Bus")[daw::ids::id];
+        engine.rebuildNow();
+
+        const auto playRms = [&]
+        {
+            engine.rebuildNow(); // no message loop here: apply the changes now
+            engine.seek (0);
+            engine.play();
+            const auto out = render (engine, 0.8);
+            engine.stop();
+            return std::array<float, 2> { rms (out[0], 9600, 33600), rms (out[1], 9600, 33600) };
+        };
+
+        const auto dry = playRms()[0];
+        check (dry > 0.1f, "with every send off, the track plays as before");
+
+        edit.setSend (track, bus, 0.0f);
+        check (std::abs (playRms()[0] / dry - 2.0f) < 0.01f, "a 0 dB send to an empty return doubles the level (dry + return)");
+
+        edit.setSend (track, bus, -6.0f);
+        check (std::abs (playRms()[0] / dry - (1.0f + juce::Decibels::decibelsToGain (-6.0f))) < 0.01f, "send level -6 dB");
+
+        edit.setSend (track, bus, 0.0f);
+        edit.setTrackVolume (track, -100.0f);
+        check (playRms()[0] < 1.0e-4f, "a post-fader send follows the fader");
+
+        edit.setSendPre (track, bus, true);
+        check (std::abs (playRms()[0] / dry - 1.0f) < 0.01f, "a pre-fader send ignores the fader");
+
+        edit.setTrackMute (track, true);
+        check (playRms()[0] < 1.0e-4f, "muting the track silences its pre-fader sends too");
+        edit.setTrackMute (track, false);
+        edit.setTrackVolume (track, 0.0f);
+        edit.setSendPre (track, bus, false);
+        edit.setSend (track, bus, -100.0f);
+
+        edit.setTrackPan (bus, -1.0f);
+        edit.setSend (track, bus, 0.0f);
+        const auto panned = playRms();
+        check (std::abs (panned[0] / dry - 2.0f) < 0.01f && std::abs (panned[1] / dry - 1.0f) < 0.01f, "a return's pan");
+        edit.setTrackPan (bus, 0.0f);
+
+        edit.setTrackSolo (bus, true);
+        check (std::abs (playRms()[0] / dry - 1.0f) < 0.01f, "soloing a return leaves only what is sent to it");
+        edit.setTrackSolo (track, true);
+        check (std::abs (playRms()[0] / dry - 2.0f) < 0.01f, "soloing the track too brings its direct sound back");
+        edit.clearMuteAndSolo();
+        check (! (bool) edit.getReturn (bus)[daw::ids::solo], "Clear M/S clears the returns");
+        edit.setSend (track, bus, -100.0f);
+
+        edit.setTrackOutput (track, bus);
+        edit.setTrackVolume (bus, -6.0f);
+        check (std::abs (playRms()[0] / dry - juce::Decibels::decibelsToGain (-6.0f)) < 0.01f, "a track can play into a return (a group bus)");
+        edit.setTrackVolume (bus, 0.0f);
+
+        edit.setSend (track, bus, 0.0f);
+        edit.getUndoManager().beginNewTransaction();
+        edit.removeReturn (bus);
+        engine.rebuildNow();
+        check (daw::Edit::getTrackOutput (edit.getTrack (track)) == daw::Edit::masterId && ! daw::Edit::getSend (edit.getTrack (track), bus).isValid()
+                   && std::abs (playRms()[0] / dry - 1.0f) < 0.01f,
+               "deleting a return removes its sends and routes its tracks back to the master");
+        edit.getUndoManager().undo();
+        engine.rebuildNow();
+        check (edit.getReturn (bus).isValid() && daw::Edit::getTrackOutput (edit.getTrack (track)) == bus, "undo brings the return back with its routing");
+        edit.setTrackOutput (track, daw::Edit::masterId);
+        edit.setSend (track, bus, -100.0f);
+
+        // The default reverb return: its tail rings on after the clip.
+        edit.setSend (track, (int) defaults[0][daw::ids::id], 0.0f);
+        engine.rebuildNow();
+        engine.seek (0);
+        engine.play();
+        const auto withReverb = render (engine, 1.5);
+        engine.stop();
+        check (rms (withReverb[0], (size_t) (1.05 * sampleRate), (size_t) (1.4 * sampleRate)) > 1.0e-3f, "sending to the Reverb return adds a tail");
+        edit.setSend (track, (int) defaults[0][daw::ids::id], -100.0f);
+        edit.setTrackMute ((int) defaults[0][daw::ids::id], true); // its tail would still be ringing
+
+        // Latency on a return: everything that plays straight to the master waits for it.
+        const auto before = engine.getLatencySamples();
+        auto pitch = edit.addInsert (bus, fx::ModuleType::pitch);
+        edit.setInsertValue ((int) pitch[daw::ids::id], "tuneOn", 0.0f);
+        edit.setInsertValue ((int) pitch[daw::ids::id], "pitchOn", 1.0f);
+        engine.rebuildNow();
+        const auto added = engine.getLatencySamples() - before;
+        render (engine, 0.2); // stopped: lets the muted reverb's fade finish
+        engine.seek (0);
+        engine.play();
+        const auto delayed = render (engine, 0.5);
+        engine.stop();
+        float worst = 0.0f;
+        for (int i = 0; i < 4800; ++i)
+            worst = std::max (worst, std::abs (delayed[0][(size_t) (added + i)] - tone.getSample (0, i)));
+        check (added > 0 && worst < 1.0e-6f, "latency on a return delays the direct sound to match (" + juce::String (added) + " samples, error " + juce::String (worst) + ")");
+
+        // Projects from before returns get the defaults once; deleting them sticks.
+        juce::ValueTree old (daw::ids::PROJECT);
+        old.setProperty (daw::ids::version, 1, nullptr);
+        daw::Edit loaded;
+        loaded.replaceState (old);
+        check (loaded.getReturns().size() == 2, "an older project gets the default returns");
+        for (const auto& r : loaded.getReturns())
+            loaded.removeReturn ((int) r[daw::ids::id]);
+        const auto saved = loaded.getState().createCopy();
+        loaded.replaceState (saved);
+        check (loaded.getReturns().isEmpty(), "deleted default returns stay deleted");
+
+        folder.deleteRecursively();
+    }
+
+    // Runs a module on a stereo signal in blocks; returns the output.
+    juce::AudioBuffer<float> runModule (fx::Module& module, const juce::AudioBuffer<float>& input)
+    {
+        module.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+        juce::AudioBuffer<float> out (input);
+        for (int start = 0; start < out.getNumSamples(); start += blockSize)
+        {
+            const auto n = juce::jmin (blockSize, out.getNumSamples() - start);
+            auto block = juce::dsp::AudioBlock<float> (out).getSubBlock ((size_t) start, (size_t) n);
+            module.process (fx::Module::Context (block));
+        }
+        return out;
+    }
+
+    juce::AudioBuffer<float> stereoSine (double hz, float amplitude, double seconds, float rightGain = 1.0f)
+    {
+        juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const auto v = amplitude * (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / sampleRate);
+            buffer.setSample (0, i, v);
+            buffer.setSample (1, i, v * rightGain);
+        }
+        return buffer;
+    }
+
+    float rmsOf (const juce::AudioBuffer<float>& b, int channel, double fromSeconds)
+    {
+        const auto from = (int) (fromSeconds * sampleRate);
+        return b.getRMSLevel (channel, from, b.getNumSamples() - from);
+    }
+
+    void testMastering()
+    {
+        std::cout << "\nMastering effects\n";
+
+        const auto set = [] (fx::Module& m, const char* id, float v) { m.findValue (id)->store (v); };
+        const auto make = [&] (fx::ModuleType type)
+        {
+            auto m = fx::createModule (type);
+            for (int v = 0; v < m->getNumValues(); ++v)
+                if (m->isSwitch (v)) { m->getValue (v).store (1.0f); break; }
+            return m;
+        };
+
+        {
+            auto mb = make (fx::ModuleType::multiband);
+            set (*mb, "mbLowThreshold", 0.0f); set (*mb, "mbMidThreshold", 0.0f); set (*mb, "mbHighThreshold", 0.0f);
+            bool flat = true;
+            for (const auto hz : { 60.0, 200.0, 700.0, 3000.0, 9000.0 })
+            {
+                const auto in = stereoSine (hz, 0.1f, 0.5);
+                const auto out = runModule (*mb, in);
+                const auto db = juce::Decibels::gainToDecibels (rmsOf (out, 0, 0.2) / rmsOf (in, 0, 0.2));
+                flat = flat && std::abs (db) < 0.1f;
+            }
+            check (flat, "multiband: below threshold, the three bands add back up flat");
+
+            set (*mb, "mbLowThreshold", -30.0f); set (*mb, "mbRatio", 4.0f);
+            const auto loudBass = runModule (*mb, stereoSine (60.0, 0.5f, 0.6));
+            auto readings = std::make_unique<juce::DynamicObject>();
+            mb->addReadings (*readings);
+            const auto bands = readings->getProperty ("bands");
+            const auto bassDb = juce::Decibels::gainToDecibels (rmsOf (loudBass, 0, 0.3) / (0.5f / std::sqrt (2.0f)));
+            check (bassDb < -8.0f && (float) bands[0] > 8.0f && (float) bands[2] < 0.5f,
+                   "multiband: a loud bass is compressed in its own band (" + juce::String (bassDb, 1) + " dB)");
+            const auto treble = runModule (*mb, stereoSine (5000.0, 0.5f, 0.6));
+            check (std::abs (juce::Decibels::gainToDecibels (rmsOf (treble, 0, 0.3) / (0.5f / std::sqrt (2.0f)))) < 0.5f,
+                   "multiband: the high band is left alone");
+        }
+
+        {
+            auto lim = make (fx::ModuleType::limiter);
+            set (*lim, "limCeiling", -1.0f);
+            const auto in = stereoSine (100.0, 2.0f, 0.5);
+            const auto out = runModule (*lim, in);
+            const auto ceiling = juce::Decibels::decibelsToGain (-1.0f);
+            const auto peak = out.getMagnitude (0, out.getNumSamples());
+            check (peak <= ceiling + 1.0e-5f && rmsOf (out, 0, 0.2) > 0.5f * ceiling,
+                   "limiter: a +6 dBFS signal never passes the -1 dB ceiling (peak " + juce::String (juce::Decibels::gainToDecibels (peak), 2) + " dB)");
+
+            auto clean = make (fx::ModuleType::limiter);
+            const auto quiet = stereoSine (440.0, 0.25f, 0.2);
+            const auto passed = runModule (*clean, quiet);
+            const auto latency = clean->getLatencySamples();
+            float worst = 0.0f;
+            for (int i = 0; i < quiet.getNumSamples() - latency; ++i)
+                worst = juce::jmax (worst, std::abs (passed.getSample (0, i + latency) - quiet.getSample (0, i)));
+            check (latency > 0 && latency < 200 && worst < 1.0e-6f, "limiter: below the ceiling it only delays by its look-ahead (" + juce::String (latency) + " samples)");
+
+            set (*clean, "limOn", 0.0f);
+            check (clean->getLatencySamples() == 0, "limiter: no delay while off");
+        }
+
+        {
+            auto eq = make (fx::ModuleType::masterEq);
+            set (*eq, "meqLowGain", 6.0f); set (*eq, "meqLowFreq", 100.0f);
+            const auto low = runModule (*eq, stereoSine (30.0, 0.1f, 1.0));
+            const auto mid = runModule (*eq, stereoSine (2000.0, 0.1f, 0.5));
+            const auto lowDb = juce::Decibels::gainToDecibels (rmsOf (low, 0, 0.5) / (0.1f / std::sqrt (2.0f)));
+            const auto midDb = juce::Decibels::gainToDecibels (rmsOf (mid, 0, 0.2) / (0.1f / std::sqrt (2.0f)));
+            check (lowDb > 4.0f && lowDb < 6.5f && std::abs (midDb) < 0.3f, "mastering EQ: low shelf +6 dB lifts the lows only");
+        }
+
+        {
+            auto img = make (fx::ModuleType::imager);
+            set (*img, "imgWidth", 0.0f); set (*img, "imgMonoBelow", 0.0f);
+            const auto wide = stereoSine (1000.0, 0.3f, 0.3, -0.5f);
+            const auto mono = runModule (*img, wide);
+            float diff = 0.0f;
+            for (int i = 0; i < mono.getNumSamples(); ++i)
+                diff = juce::jmax (diff, std::abs (mono.getSample (0, i) - mono.getSample (1, i)));
+            check (diff < 1.0e-6f, "imager: width 0% folds to mono");
+
+            set (*img, "imgWidth", 100.0f);
+            const auto same = runModule (*img, wide);
+            diff = 0.0f;
+            for (int i = 0; i < same.getNumSamples(); ++i)
+                diff = juce::jmax (diff, std::abs (same.getSample (1, i) - wide.getSample (1, i)));
+            check (diff < 1.0e-5f, "imager: width 100% with mono bass off leaves the sound as it is");
+
+            set (*img, "imgMonoBelow", 150.0f);
+            const auto bass = runModule (*img, stereoSine (40.0, 0.3f, 1.0, -1.0f)); // all side
+            check (rmsOf (bass, 0, 0.5) < 0.3f / std::sqrt (2.0f) * 0.1f, "imager: side content below the mono frequency is removed");
+        }
+
+        {
+            auto loud = make (fx::ModuleType::loudness);
+            const auto in = stereoSine (1000.0, juce::Decibels::decibelsToGain (-20.0f), 4.0);
+            const auto out = runModule (*loud, in);
+            auto readings = std::make_unique<juce::DynamicObject>();
+            loud->addReadings (*readings);
+            const auto m = (float) readings->getProperty ("momentary"), st = (float) readings->getProperty ("shortTerm"),
+                       integrated = (float) readings->getProperty ("integrated");
+            float diff = 0.0f;
+            for (int i = 0; i < out.getNumSamples(); ++i)
+                diff = juce::jmax (diff, std::abs (out.getSample (0, i) - in.getSample (0, i)));
+            check (std::abs (m + 20.0f) < 0.3f && std::abs (st + 20.0f) < 0.3f && std::abs (integrated + 20.0f) < 0.3f && diff == 0.0f,
+                   "loudness meter: a -20 dBFS 1 kHz tone on both channels reads -20 LUFS (M " + juce::String (m) + ", S " + juce::String (st)
+                       + ", I " + juce::String (integrated) + ") and the sound is untouched");
+        }
+
+        {
+            daw::Edit edit;
+            const auto limiter = edit.addInsert (daw::Edit::masterId, fx::ModuleType::limiter);
+            check ((float) limiter["limOn"] == 1.0f && daw::Edit::moduleTypeFromKey ("loudness").has_value(),
+                   "mastering effects go on the master like any insert");
+        }
     }
 
     void testDawEngine()
@@ -5012,6 +5324,8 @@ int main()
     testRecorder();
     testMultitrack();
     testDawEngine();
+    testReturns();
+    testMastering();
     testDawRecording();
     testMidiTracks();
     testPluginHosting();

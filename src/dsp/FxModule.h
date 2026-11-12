@@ -15,17 +15,19 @@ namespace fx
 enum class ModuleType
 {
     highPass, gate, pitch, eq, paraEq, compressor, deEsser, exciter, saturation, radio, bitcrusher,
-    robot, filter, autoWah, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, width
+    robot, filter, autoWah, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, width,
+    multiband, limiter, masterEq, imager, loudness // mastering (see Mastering.h)
 };
 
-inline constexpr int numModuleTypes = (int) ModuleType::width + 1;
+inline constexpr int numModuleTypes = (int) ModuleType::loudness + 1;
 
 // A stable name for each type, for project files, parameter IDs and the UI.
 inline const char* getModuleKey (ModuleType type)
 {
     static constexpr const char* keys[] = {
         "highPass", "gate", "pitch", "eq", "paraEq", "compressor", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
-        "robot", "filter", "autoWah", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "width"
+        "robot", "filter", "autoWah", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "width",
+        "multiband", "limiter", "masterEq", "imager", "loudness"
     };
     static_assert (std::size (keys) == numModuleTypes);
     return keys[(size_t) type];
@@ -106,6 +108,10 @@ public:
 
     // Delay this module adds to the signal, in samples.
     virtual int getLatencySamples() const noexcept { return 0; }
+
+    // Extra live readings for the UI (gain reduction, loudness...), added to the module's
+    // meter object. Message thread.
+    virtual void addReadings (juce::DynamicObject&) {}
 
     //==============================================================================
     // Metering, for the UI's live pictures. Peak levels (linear) going into and out of

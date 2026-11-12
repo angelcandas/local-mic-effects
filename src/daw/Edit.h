@@ -19,14 +19,23 @@
 //     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor, transpose,
 //            kind ("midi" for MIDI tracks; audio when missing), mixRole (Auto Mix's tag:
 //            "voice", "drums"... see analysis::getRoleKey; missing when not tagged),
-//            ride (volume automation, see RidePoint; missing when none)
+//            ride (volume automation, see RidePoint; missing when none),
+//            output (the RETURN id the track plays into instead of the master; missing = master)
 //       INSERTS ...
+//       SEND  id, target (a RETURN's id), level (dB), pre (true = before the fader)
 //       INSTRUMENT  id, plugin, name, format, vendor, description, state   (MIDI tracks)
 //       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute,
 //             transpose (semitones), warp (warp::Map as text),
 //             stretch (warp::Algorithm key; mix when missing), formant (keep formants)
 //       CLIP  kind "midi", id, name, start, offset, length, mute          (MIDI clips)
 //         NOTE  id, pitch (0..127), time, length, velocity (1..127)
+//     RETURN  id, name, colour, volume, pan, mute, solo, inGain, outGain
+//       INSERTS ...
+//
+// Return tracks (aux buses) hold shared effects: tracks send some of their signal to
+// them with SENDs, or play into one entirely with `output` (a group bus). Returns play
+// into the master. A new project starts with a Reverb return and a Chorus return
+// (PROJECT `defaultReturns` says they were made, so deleting them sticks).
 //
 // A MIDI track plays its MIDI clips through its instrument (a built-in synth or a
 // VST3/AU plugin, see Instruments.h), then through its inserts like any track. An
@@ -65,6 +74,8 @@ namespace ids
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
     MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (ride)
+    MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
+    MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges)
 #undef MICFX_DAW_ID
 }
@@ -110,6 +121,31 @@ public:
     void setTrackMute (int trackId, bool);
     void setTrackSolo (int trackId, bool);
     void setMasterVolume (float decibels);
+    void setMasterPan (float pan);
+
+    //==============================================================================
+    // Return tracks. Their ids share the track id space; the mixer setters above
+    // (volume, pan, mute, solo), the chain gains, inserts and copyInserts take a
+    // return's id too.
+    juce::ValueTree addReturn (const juce::String& name, std::optional<fx::ModuleType> effect = std::nullopt);
+    void removeReturn (int returnId); // also removes the sends to it, and routes its tracks back to the master
+    juce::ValueTree getReturn (int returnId) const;
+    juce::Array<juce::ValueTree> getReturns() const;
+    void moveReturn (int returnId, int newIndex);
+
+    // A track's send to a return, in dB (-inf / below minSendDb is off). Pre-fader sends
+    // ignore the track's volume and pan (they still go quiet when it's muted).
+    static constexpr float minSendDb = -60.0f, maxSendDb = 6.0f;
+    void setSend (int trackId, int returnId, float decibels);
+    void setSendPre (int trackId, int returnId, bool preFader);
+    static juce::ValueTree getSend (const juce::ValueTree& track, int returnId);
+
+    // Where a track plays: the master (masterId) or a return's id.
+    void setTrackOutput (int trackId, int returnIdOrMaster);
+    static int getTrackOutput (const juce::ValueTree& track) { return (int) track.getProperty (ids::output, masterId); }
+
+    // A track, return or the master by id (whatever the mixer shows as a strip).
+    juce::ValueTree getChannel (int id) const;
 
     // The insert chain's input and output gain (before and after its effects), in dB,
     // -24..24. On a track, or the master with masterId.
@@ -253,10 +289,12 @@ private:
     int takeNextId();
     void renumber (juce::ValueTree&); // fresh ids for a copied tree and everything in it
     juce::ValueTree findById (const juce::Identifier& type, int id) const;
-    juce::ValueTree getTrackOrMaster (int trackId) const;
+    juce::ValueTree getTrackOrMaster (int trackId) const { return getChannel (trackId); }
+    void addDefaultReturns();
 
     juce::ValueTree state;
     juce::UndoManager undoManager;
+    juce::UndoManager* undoTarget = &undoManager; // null while building parts that aren't edits
     int nextId = 1; // shared by tracks, clips and inserts; never reused
 
     JUCE_DECLARE_NON_COPYABLE (Edit)
