@@ -352,6 +352,56 @@ const views = {
     };
   },
 
+  // The noise profile it's working from (the shaded floor, per band, low to high), and
+  // how far each band is turned down right now (the bars hanging from the top). While
+  // Learn is on, the caption counts the seconds of room noise heard.
+  denoise({ get }) {
+    const BANDS = 32, LOW = 60, HIGH = 16000;       // SpectralDenoiser::numBands, bandLowHz, bandHighHz
+    const FLOOR = -110, CEILING = -30, MAX_CUT = 40;
+    const element = frame("is-denoise");
+    frequencyGrid(element);
+    const edges = Array.from({ length: BANDS + 1 }, (_, b) => xOfF(LOW * Math.pow(HIGH / LOW, b / BANDS)));
+    const profile = path(element, "fx-fill"), outline = path(element, "fx-curve");
+    const bars = edges.slice(0, BANDS).map((x, b) => {
+      const bar = svg("rect", { class: "fx-reduction", x: x + 0.4, width: Math.max(0.6, edges[b + 1] - x - 0.8), y: 0, height: 0 });
+      element.append(bar);
+      return bar;
+    });
+    const floor = svg("line", { class: "fx-threshold", x1: 0, x2: W });
+    element.append(floor);
+    label(element, 3, 11, "Noise");
+    let shown = new Array(BANDS).fill(0);
+
+    return {
+      element,
+      // The dashed line: the most any band can be turned down (Reduction).
+      update() {
+        const y = clamp(get("denoiseReduction") / MAX_CUT) * H * 0.6;
+        floor.setAttribute("y1", y);
+        floor.setAttribute("y2", y);
+      },
+      live(reading) {
+        const noise = reading?.noise ?? [], cut = reading?.reduction ?? [];
+        if (noise.length === BANDS && noise.some((db) => db > -99)) {
+          const points = noise.map((db, b) => {
+            const x = (edges[b] + edges[b + 1]) / 2;
+            return `${x.toFixed(1)},${(H - clamp((db - FLOOR) / (CEILING - FLOOR)) * H * 0.75).toFixed(1)}`;
+          });
+          outline.setAttribute("d", `M${points.join(" L")}`);
+          profile.setAttribute("d", `M${edges[0].toFixed(1)},${H} L${points.join(" L")} L${edges[BANDS].toFixed(1)},${H} Z`);
+        } else {
+          outline.setAttribute("d", "");
+          profile.setAttribute("d", "");
+        }
+        shown = shown.map((v, b) => Math.max(cut[b] ?? 0, v - 0.75));
+        bars.forEach((bar, b) => bar.setAttribute("height", clamp(shown[b] / MAX_CUT) * H * 0.6));
+        if (reading?.learning !== undefined) return `Learning ${reading.learning.toFixed(1)} s`;
+        const average = shown.reduce((sum, v) => sum + v, 0) / BANDS;
+        return reading && average >= 0.5 ? `−${average.toFixed(1)} dB` : "";
+      },
+    };
+  },
+
   // Input level (x) against output level (y), -60..0 dB.
   // Mastering (src/dsp/Mastering.h).
   masterEq({ get, set, range }) {

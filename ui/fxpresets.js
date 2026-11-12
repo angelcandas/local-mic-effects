@@ -15,6 +15,10 @@ const p = (name, values) => ({ name, values });
 export const FX_PRESETS = {
   hpf: [p("Gentle (60 Hz)", { hpfFreq: 60 }), p("Vocal (100 Hz)", { hpfFreq: 100 }), p("Thin (180 Hz)", { hpfFreq: 180 }),
         p("Handheld mic (140 Hz)", { hpfFreq: 140 })],
+  denoise: [p("Light (natural)", { denoiseReduction: 8, denoiseThreshold: 0, denoiseAdaptive: 1 }),
+            p("Podcast", { denoiseReduction: 15, denoiseThreshold: 0, denoiseAdaptive: 1 }),
+            p("Noisy room", { denoiseReduction: 22, denoiseThreshold: 3, denoiseAdaptive: 1 }),
+            p("Hum and hiss only (gentle)", { denoiseReduction: 12, denoiseThreshold: -4, denoiseAdaptive: 1 })],
   gate: [p("Quiet room", { gateThreshold: -60 }), p("Normal", { gateThreshold: -50 }), p("Noisy stage", { gateThreshold: -38 }),
          p("Tight", { gateThreshold: -30 })],
   tune: [p("Natural", { tuneSpeed: 60, tuneAmount: 60 }), p("Pop polish", { tuneSpeed: 25, tuneAmount: 90 }),
