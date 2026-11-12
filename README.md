@@ -185,6 +185,19 @@ up with the clip (same start, trim, gain and fades), and mutes the song's clip. 
 - The stems are 24-bit 44.1 kHz WAVs (`Song - Vocals.wav`, ...) in the project's `Audio` folder, or
   next to your recordings when no project is open.
 
+**On the Mac's GPU (optional, one-time).** Convert the network once and MicFX runs it with Core ML on
+the GPU, with the CPU as the fallback:
+
+```
+python3 -m venv stems-env && source stems-env/bin/activate
+pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops "numpy<2.3" demucs==4.0.1
+python scripts/export_htdemucs_coreml.py
+```
+
+This writes `htdemucs-core.mlpackage` to the Models folder (it needs the Demucs weights from
+Meta's server, so run it on a machine with internet access). The panel says "on the GPU" when it is
+used; if the model is missing or fails to load, the finished message says why the CPU was used.
+
 ### Song key
 
 **Key** next to the time signature (or **Edit → Song key…**) finds the key the song is in, locally:
