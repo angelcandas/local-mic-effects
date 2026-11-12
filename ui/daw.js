@@ -441,6 +441,62 @@ class InsertRack {
       const card = new InsertCard(insert, index, this.owner.inserts.length);
       this.cards.set(insert.id, card);
       this.element.append(card.element);
+      this.enableDrag(card, insert.id);
+    });
+  }
+
+  // Drag a card by its header to reorder the chain (pointer events, so it works in the WebView).
+  enableDrag(card, id) {
+    const head = card.element.querySelector(".insert-head");
+    head.classList.add("is-draggable");
+    head.title = head.title || "Drag to reorder";
+
+    head.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || event.target.closest("button, input, .switch, [role=switch]")) return;
+      const startX = event.clientX;
+      const cards = [...this.element.querySelectorAll(":scope > .insert")];
+      const from = cards.indexOf(card.element);
+      const rects = cards.map((c) => c.getBoundingClientRect());
+      let dragging = false, to = from;
+      head.setPointerCapture(event.pointerId);
+
+      const place = () => {
+        // Cards between the old and new slot slide aside to open the gap.
+        const width = rects[from].width + 8;
+        cards.forEach((c, i) => {
+          if (i === from) return;
+          const shift = from < to && i > from && i <= to ? -width : from > to && i < from && i >= to ? width : 0;
+          c.style.transform = shift ? `translateX(${shift}px)` : "";
+        });
+      };
+      const move = (e) => {
+        const dx = e.clientX - startX;
+        if (!dragging) {
+          if (Math.abs(dx) < 5) return;
+          dragging = true;
+          this.element.classList.add("is-reordering");
+          card.element.classList.add("is-dragging");
+        }
+        card.element.style.transform = `translateX(${dx}px)`;
+        const centre = rects[from].left + rects[from].width / 2 + dx;
+        let target = from;
+        rects.forEach((r, i) => { if (i !== from && (i < from ? centre < r.left + r.width / 2 : centre > r.left + r.width / 2)) target = i < from ? Math.min(target, i) : Math.max(target, i); });
+        if (target !== to) { to = target; place(); }
+      };
+      const finish = (e) => {
+        head.removeEventListener("pointermove", move);
+        head.removeEventListener("pointerup", finish);
+        head.removeEventListener("pointercancel", finish);
+        try { head.releasePointerCapture(event.pointerId); } catch {}
+        if (!dragging) return;
+        this.element.classList.remove("is-reordering");
+        card.element.classList.remove("is-dragging");
+        cards.forEach((c) => { c.style.transform = ""; });
+        if (e.type === "pointerup" && to !== from) daw("moveInsert", { id, index: to });
+      };
+      head.addEventListener("pointermove", move);
+      head.addEventListener("pointerup", finish);
+      head.addEventListener("pointercancel", finish);
     });
   }
 }
@@ -1303,6 +1359,13 @@ class DawScreen {
     const head = html("div", "track-head");
     head.addEventListener("pointerdown", (event) => {
       if (!event.target.closest("button, input, .hslider")) this.select(track.id, null);
+    });
+
+    head.addEventListener("contextmenu", (event) => {
+      if (event.target.closest("input")) return;
+      event.preventDefault();
+      this.select(track.id, null);
+      this.openTrackMenu(track, event.clientX, event.clientY);
     });
 
     const name = html("input", "track-name");
@@ -3016,6 +3079,71 @@ class DawScreen {
   toggleTrackKey(track, key, on, event) {
     if (key === "solo" && event?.altKey) return daw("soloExclusive", { id: track.solo && session_onlySolo(this.session, track.id) ? -1 : track.id });
     return daw("setTrack", { id: track.id, [key]: on });
+  }
+
+  // Right-click menu on a track header.
+  openTrackMenu(track, x, y) {
+    this.closeTrackMenu();
+    const menu = html("div", "track-menu");
+    menu.setAttribute("role", "menu");
+    const tracks = this.session.tracks, index = tracks.findIndex((t) => t.id === track.id);
+    const item = (label, action, { disabled = false, danger = false, checked = false } = {}) => {
+      const b = html("button", `track-menu-item${danger ? " is-danger" : ""}`, (checked ? "✓ " : "") + label);
+      b.type = "button";
+      b.setAttribute("role", "menuitem");
+      b.disabled = disabled;
+      b.addEventListener("click", () => { this.closeTrackMenu(); action(); });
+      menu.append(b);
+    };
+    const rule = () => menu.append(html("div", "track-menu-rule"));
+    const firstClip = track.clips?.[0];
+
+    item("Rename", () => this.renameTrack());
+    item("Duplicate", () => this.duplicateTrack(track.id));
+    item("Delete", () => this.deleteTrack(), { danger: true });
+    rule();
+    item("Mute", () => daw("setTrack", { id: track.id, mute: !track.mute }), { checked: track.mute });
+    item("Solo", () => daw("setTrack", { id: track.id, solo: !track.solo }), { checked: track.solo });
+    item("Arm for recording", () => daw("setTrack", { id: track.id, arm: !track.arm }), { checked: track.arm });
+    rule();
+    item("Move up", () => daw("moveTrack", { id: track.id, index: index - 1 }), { disabled: index <= 0 });
+    item("Move down", () => daw("moveTrack", { id: track.id, index: index + 1 }), { disabled: index >= tracks.length - 1 });
+    rule();
+    item("Add effect…", () => { this.select(track.id, null); this.setDockTab?.("effects"); toast("Pick an effect from Add effect, or drag one from the library."); });
+    item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
+    item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
+    if (track.kind !== "midi")
+      item("Split into stems…", () => this.toggleStems(true, firstClip), { disabled: !firstClip });
+    rule();
+    const colours = html("div", "colour-row track-menu-colours");
+    TRACK_COLOURS.forEach((colour) => {
+      const swatch = button("colour-swatch", "", "Track colour", () => { this.closeTrackMenu(); daw("setTrack", { id: track.id, colour }); });
+      swatch.style.background = colour;
+      colours.append(swatch);
+    });
+    menu.append(colours);
+
+    document.body.append(menu);
+    const box = menu.getBoundingClientRect();
+    menu.style.left = `${Math.max(4, Math.min(x, innerWidth - box.width - 4))}px`;
+    menu.style.top = `${Math.max(4, Math.min(y, innerHeight - box.height - 4))}px`;
+    this.trackMenu = menu;
+    const away = (e) => { if (e.type === "keydown" ? e.key === "Escape" : !menu.contains(e.target)) this.closeTrackMenu(); };
+    this.trackMenuAway = away;
+    setTimeout(() => {
+      document.addEventListener("pointerdown", away, true);
+      document.addEventListener("keydown", away, true);
+    });
+  }
+
+  closeTrackMenu() {
+    this.trackMenu?.remove();
+    this.trackMenu = null;
+    if (this.trackMenuAway) {
+      document.removeEventListener("pointerdown", this.trackMenuAway, true);
+      document.removeEventListener("keydown", this.trackMenuAway, true);
+      this.trackMenuAway = null;
+    }
   }
 
   async duplicateTrack(id = this.selectedTrack) {

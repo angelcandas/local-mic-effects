@@ -700,6 +700,9 @@ body.is-daw .chip--live { display: none; }
 .insert.is-off .insert-body { opacity: 0.45; }
 .insert-controls[hidden] { display: none; }
 .insert-head { display: flex; align-items: center; gap: 5px; }
+.insert-head.is-draggable { cursor: grab; touch-action: none; user-select: none; }
+.is-reordering .insert { transition: transform 0.12s ease; }
+.is-reordering .insert.is-dragging { transition: none; z-index: 5; cursor: grabbing; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5); opacity: 0.92; }
 .insert-name { flex: 1; font-weight: 650; }
 .insert-sub { display: flex; align-items: center; gap: 7px; margin: 8px 0 2px; color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; }
 
@@ -1512,3 +1515,11 @@ body.is-daw .app-project { color: var(--text); font-weight: 600; }
 .topbar { grid-template-columns: auto minmax(0, 1fr) auto; }
 .topbar .preset-bar { justify-self: center; }
 .topbar .chips { grid-column: 3; }
+
+.track-menu { position: fixed; z-index: 1000; min-width: 190px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel-raised); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55); }
+.track-menu-item { display: block; width: 100%; padding: 6px 10px; border: 0; border-radius: 5px; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.track-menu-item:hover:not(:disabled) { background: var(--line); }
+.track-menu-item:disabled { opacity: 0.4; cursor: default; }
+.track-menu-item.is-danger { color: #ff7a7a; }
+.track-menu-rule { height: 1px; margin: 4px 2px; background: var(--line); }
+.track-menu-colours { padding: 4px 6px; }
