@@ -53,7 +53,22 @@ juce_add_binary_data(MicFX_WebUI
         ui/aiviews.js
         libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js)
 
+# The MicFX instruments (Grand, Nova, ...): built into the app for MIDI tracks, and each
+# one also a VST3/AU plugin of its own (below).
+set(MICFX_INSTRUMENT_SOURCES
+    src/instruments/InstrumentCore.h
+    src/instruments/Fx.h
+    src/instruments/InstrumentProcessor.cpp
+    src/instruments/InstrumentProcessor.h
+    src/instruments/InstrumentEditor.cpp
+    src/instruments/InstrumentEditor.h
+    src/instruments/Registry.cpp
+    src/instruments/Registry.h
+    src/instruments/Grand.cpp
+    src/instruments/Nova.cpp)
+
 set(MICFX_DSP_SOURCES
+    ${MICFX_INSTRUMENT_SOURCES}
     src/analysis/Analysis.cpp
     src/analysis/Analysis.h
     src/analysis/Key.cpp
@@ -185,6 +200,45 @@ target_link_libraries(MicFX
         juce::juce_recommended_lto_flags
         juce::juce_recommended_warning_flags)
 
+# Each instrument as a VST3 (and AU on macOS) plugin of its own: "MicFX Grand", "MicFX Nova"...
+#   cmake --build build/debug --target MicFXInstruments
+option(MICFX_BUILD_INSTRUMENT_PLUGINS "Build the instruments as VST3/AU plugins" ON)
+
+if(MICFX_BUILD_INSTRUMENT_PLUGINS)
+    add_custom_target(MicFXInstruments)
+
+    function(micfx_add_instrument_plugin key name code category)
+        set(target "MicFX${name}")
+        juce_add_plugin(${target}
+            COMPANY_NAME "Angel Candas"
+            BUNDLE_ID "com.angelcandas.micfx.${key}"
+            PLUGIN_MANUFACTURER_CODE Angc
+            PLUGIN_CODE ${code}
+            FORMATS VST3 AU
+            PRODUCT_NAME "MicFX ${name}"
+            IS_SYNTH TRUE
+            NEEDS_MIDI_INPUT TRUE
+            NEEDS_MIDI_OUTPUT FALSE
+            IS_MIDI_EFFECT FALSE
+            EDITOR_WANTS_KEYBOARD_FOCUS FALSE
+            VST3_CATEGORIES Instrument ${category}
+            AU_MAIN_TYPE kAudioUnitType_MusicDevice)
+
+        target_sources(${target} PRIVATE src/instruments/PluginEntry.cpp ${MICFX_INSTRUMENT_SOURCES})
+        target_include_directories(${target} PRIVATE src)
+        target_compile_definitions(${target}
+            PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0
+            PRIVATE MICFX_INSTRUMENT_KEY="${key}")
+        target_link_libraries(${target}
+            PRIVATE juce::juce_audio_utils
+            PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_lto_flags juce::juce_recommended_warning_flags)
+        add_dependencies(MicFXInstruments ${target}_All)
+    endfunction()
+
+    micfx_add_instrument_plugin(grand Grand Mgrd Piano)
+    micfx_add_instrument_plugin(nova Nova Mnov Synth)
+endif()
+
 # Headless test runner for the DSP: pitch accuracy, autotune, every preset, CPU load.
 #   cmake --build --preset debug --target MicFXTests && ./build/debug/MicFXTests_artefacts/Debug/MicFXTests
 option(MICFX_BUILD_TESTS "Build the DSP test runner" ON)
@@ -229,6 +283,7 @@ if(MICFX_BUILD_TESTS)
     target_link_libraries(MicFXTests
         PRIVATE
             juce::juce_audio_processors
+            juce::juce_audio_utils
             juce::juce_audio_formats
             juce::juce_cryptography
             juce::juce_dsp

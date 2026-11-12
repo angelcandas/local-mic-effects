@@ -6,8 +6,9 @@
 
 #include <memory>
 
-// Instruments for MIDI tracks: a few built-in synths, so a MIDI track makes sound
-// without any plugin, and VST3/AU instrument plugins through PluginHost.
+// Instruments for MIDI tracks: the MicFX instruments (src/instruments: Grand, Nova, ...)
+// and a couple of simple synths built in, so a MIDI track makes sound without any
+// plugin, and VST3/AU instrument plugins through PluginHost.
 //
 // An instrument is a juce::AudioProcessor: MIDI in, stereo out. The engine makes one per
 // MIDI track from the track's INSTRUMENT tree (see Edit.h) and restores its saved state.
@@ -30,6 +31,9 @@ namespace instruments
     // Returns null and sets `error` if it can't (a plugin that isn't installed).
     InstrumentPtr create (const juce::ValueTree& instrument, double sampleRate, int blockSize, bool realtime,
                           juce::String& error);
+
+    // Whether the instrument has a window of its own (plugins, the MicFX instruments).
+    bool hasWindow (const juce::String& id);
 
     // Reads an instrument's settings, for INSTRUMENT `state` (base64). Message thread.
     juce::String getState (juce::AudioProcessor&);

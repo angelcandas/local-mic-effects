@@ -1,5 +1,8 @@
 #include "Instruments.h"
 
+#include "instruments/InstrumentProcessor.h"
+#include "instruments/Registry.h"
+
 namespace daw
 {
 namespace
@@ -23,13 +26,34 @@ namespace
     constexpr Sound sounds[] = {
         // key     name           saw   sq    sine  sub   det   cutoff  env   kt    A      D     S     R     fD    level
         { "keys",  "Keys",        0.25f, 0.0f, 0.8f, 0.0f, 0.0f, 1800.0f, 2.0f, 0.6f, 0.002f, 1.2f, 0.25f, 0.35f, 0.4f, 0.5f },
-        { "piano", "Soft Piano",  0.35f, 0.0f, 0.6f, 0.0f, 3.0f, 1200.0f, 3.0f, 0.8f, 0.001f, 2.5f, 0.0f, 0.4f, 0.8f, 0.55f },
-        { "pad",   "Warm Pad",    0.6f, 0.0f, 0.0f, 0.2f, 9.0f,  900.0f, 1.0f, 0.3f, 0.6f,  1.0f, 0.8f, 1.2f, 1.5f, 0.35f },
-        { "strings","Strings",    0.7f, 0.0f, 0.0f, 0.0f, 12.0f, 2500.0f, 0.5f, 0.4f, 0.25f, 0.5f, 0.85f, 0.6f, 1.0f, 0.3f },
-        { "bass",  "Synth Bass",  0.7f, 0.0f, 0.0f, 0.7f, 0.0f,  350.0f, 2.5f, 0.3f, 0.003f, 0.4f, 0.6f, 0.12f, 0.25f, 0.55f },
-        { "lead",  "Lead",        0.3f, 0.6f, 0.0f, 0.0f, 6.0f, 3000.0f, 1.5f, 0.5f, 0.005f, 0.3f, 0.7f, 0.2f, 0.3f, 0.35f },
         { "organ", "Organ",       0.0f, 0.15f, 0.8f, 0.4f, 0.0f, 6000.0f, 0.0f, 0.0f, 0.004f, 0.05f, 1.0f, 0.06f, 0.1f, 0.4f },
     };
+
+    // The first built-in sounds now play on the MicFX instruments: a project that used
+    // "builtin:pad" opens on Nova's Warm Pad.
+    struct Alias
+    {
+        const char* key;
+        const char* name;
+        const char* instrument;
+        const char* preset;
+    };
+
+    constexpr Alias aliases[] = {
+        { "piano",   "Soft Piano", "grand", "Felt Piano" },
+        { "pad",     "Warm Pad",   "nova",  "Warm Pad" },
+        { "strings", "Strings",    "nova",  "Strings" },
+        { "bass",    "Synth Bass", "nova",  "Synth Bass" },
+        { "lead",    "Lead",       "nova",  "Solo Lead" },
+    };
+
+    const Alias* findAlias (const juce::String& key)
+    {
+        for (const auto& a : aliases)
+            if (key == a.key)
+                return &a;
+        return nullptr;
+    }
 
     const Sound* findSound (const juce::String& key)
     {
@@ -217,8 +241,12 @@ namespace instruments
     juce::Array<Edit::InstrumentInfo> getBuiltins()
     {
         juce::Array<Edit::InstrumentInfo> list;
+        for (const auto* spec : micfx::inst::getAllSpecs())
+            list.add ({ juce::String ("builtin:") + spec->key, spec->name, builtinFormat, "MicFX", {}, {} });
         for (const auto& s : sounds)
             list.add ({ juce::String ("builtin:") + s.key, s.name, builtinFormat, "MicFX", {}, {} });
+        for (const auto& a : aliases)
+            list.add ({ juce::String ("builtin:") + a.key, a.name, builtinFormat, "MicFX", {}, {} });
         return list;
     }
 
@@ -240,7 +268,20 @@ namespace instruments
 
         if (id.startsWith ("builtin:"))
         {
-            if (const auto* s = findSound (id.fromFirstOccurrenceOf (":", false, false)))
+            const auto key = id.fromFirstOccurrenceOf (":", false, false);
+            const auto* alias = findAlias (key);
+            if (auto instrumentProcessor = micfx::inst::createInstrument (alias != nullptr ? alias->instrument : key))
+            {
+                // A new instrument starts on its first preset (or the old sound's).
+                if (instrument[ids::state].toString().isEmpty())
+                    if (auto* p = dynamic_cast<micfx::inst::InstrumentProcessor*> (instrumentProcessor.get()))
+                    {
+                        if (alias == nullptr || ! p->loadPreset (alias->preset))
+                            p->setCurrentProgram (0);
+                    }
+                processor = std::move (instrumentProcessor);
+            }
+            else if (const auto* s = findSound (key))
                 processor = std::make_unique<BuiltinSynth> (*s);
             else
                 error = "Unknown built-in instrument " + id + ".";
@@ -294,6 +335,14 @@ namespace instruments
                                                                                  { (*static_cast<decltype (destroy)*> (f))(); return nullptr; },
                                                                                  (void*) &destroy);
         });
+    }
+
+    bool hasWindow (const juce::String& id)
+    {
+        if (! id.startsWith ("builtin:"))
+            return true;
+        const auto key = id.fromFirstOccurrenceOf (":", false, false);
+        return micfx::inst::findSpec (key) != nullptr || findAlias (key) != nullptr;
     }
 
     juce::String getState (juce::AudioProcessor& processor)

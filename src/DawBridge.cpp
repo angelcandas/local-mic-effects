@@ -431,7 +431,7 @@ juce::var DawBridge::describeInstrument (const juce::ValueTree& track) const
     return object ({ { "id", instrument[ids::plugin].toString() }, { "name", instrument[ids::name].toString() },
                      { "kind", instrumentKind (format) }, { "vendor", instrument[ids::vendor].toString() },
                      { "loaded", engine.getInstrument (trackId) != nullptr }, { "error", engine.getInstrumentError (trackId) },
-                     { "hasWindow", format != daw::instruments::builtinFormat },
+                     { "hasWindow", daw::instruments::hasWindow (instrument[ids::plugin].toString()) },
                      { "windowOpen", instrumentWindows.count (trackId) > 0 } });
 }
 

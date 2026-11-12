@@ -258,6 +258,22 @@ sets the autotune's key and scale to it.
 Press **?** in DAW mode for every keyboard shortcut (transport, ← → to move the playhead, ↑ ↓ to pick
 a track, M / Shift+S / A / I for mute, solo, arm and monitor, and more).
 
+### Instruments
+
+MIDI tracks play the MicFX instruments, each with a window of its own (presets, knobs, a scope and a
+keyboard you can click): open it with the instrument's button on the track or in the piano roll.
+
+- **Grand**: a modelled grand piano: hammer hardness and tone, two-string beating and two-stage
+  decay, dampers and the sustain pedal, soundboard and room. Presets: Concert Grand, Bright Pop,
+  Felt Piano, Upright, Honky-Tonk, Ballad Hall.
+- **Nova**: an analog-style polysynth: two oscillators with unison, sub and noise, a resonant
+  filter with its own envelope, LFO, glide and mono/legato, chorus, echo and room. Presets for pads,
+  strings, basses, leads, brass and plucks.
+
+Each one is also a VST3 (and AU on macOS) plugin for other DAWs, "MicFX Grand" and "MicFX Nova":
+`cmake --build build/debug --target MicFXInstruments`, then copy the `.vst3` (or `.component`)
+from `build/debug/MicFX<Name>_artefacts/` into your plugin folder.
+
 ## Requirements
 
 - Xcode Command Line Tools (`xcode-select --install`)
@@ -357,6 +373,9 @@ src/analysis/           Auto Mix measurements: loudness (BS.1770 / EBU R128), 1/
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/stems/              Split into stems: chunked, multi-threaded separation, model download and
                         check (StemSplitter), and the Demucs adapter (DemucsSeparator)
+src/instruments/        the MicFX instruments (Grand, Nova): a Spec per instrument (parameters,
+                        window layout, presets, sound engine), InstrumentProcessor (the built-in
+                        instrument and the VST3/AU plugin), InstrumentEditor (its window)
 src/DawBridge.*         the DAW screen's commands and events (session, status, export, stems)
 src/StandaloneApp.cpp   standalone app window, with Options → Check for updates…
 scripts/update.sh       update check / pull + rebuild, used by Check for updates…
