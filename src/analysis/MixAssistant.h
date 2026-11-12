@@ -77,6 +77,8 @@ struct MixTargets
     float echoBeats = 0.5f;         // its time in beats (0.5 = an eighth note)
     float echoFeedback = 25.0f;     // %
     float widthAmount = 100.0f;     // % stereo width on instruments and background vocals (100 = as is)
+    float drumAttack = 0.0f;        // % transient shaper on the drums: + more snap, - softer hits
+    float drumSustain = 0.0f;       // % and their ring after each hit
 
     // Automation ("volume rides"):
     float rideRangeDb = 4.0f;       // the most the vocal ride moves a phrase up or down
@@ -143,6 +145,13 @@ struct MixOptions
     // Echo throws: on the lead's echo, its mix rises on the last word of each phrase and
     // falls back as the next one starts (effect automation), so the tail fills the gap.
     bool throws = true;
+
+    // Dynamic EQ: on a voice whose harsh band (2-5 kHz) jumps out on some notes only, a
+    // bell there that cuts just on those (a static cut would dull the rest).
+    bool dynamicEq = true;
+
+    // Transient shaper on the drums: more snap for punchy styles, softer hits for gentle ones.
+    bool transients = true;
 
     // Insert types each track already has (by track id). A voice that already has a
     // reverb or an echo keeps its own space: Auto Mix doesn't add or change one.
