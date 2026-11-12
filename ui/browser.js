@@ -548,7 +548,8 @@ export class LibraryBrowser {
     const row = under.closest(".track-row[data-track], .strip[data-track]");
     if (row) {
       const track = Number(row.dataset.track);
-      const name = screen.session?.tracks.find((t) => t.id === track)?.name ?? "";
+      const name = screen.session?.tracks.find((t) => t.id === track)?.name ?? screen.session?.groups?.find((g) => g.id === track)?.name ?? "";
+      if (row.classList.contains("group-row") && (kind === "audio" || kind === "instrument")) return null;
       if (kind !== "audio") return { track, element: row, label: name };
       const lane = row.querySelector(".lane");
       if (!lane || row.classList.contains("strip")) return null;

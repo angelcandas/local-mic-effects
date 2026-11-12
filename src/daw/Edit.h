@@ -36,12 +36,17 @@
 //         NOTE  id, pitch (0..127), time, length, velocity (1..127)
 //       TAKE  id, name                    (take lanes, see "Takes and comping" below)
 //         CLIP ...
-//     RETURN  id, name, colour, volume, pan, mute, solo, inGain, outGain
+//       (a track in a group also has `group`, the group's RETURN id, and `output` = that id)
+//     RETURN  id, name, colour, volume, pan, mute, solo, inGain, outGain,
+//             group (true: a group track, see below), folded (a group's tracks are hidden)
 //       INSERTS ...
+//       SEND ... (group tracks only: their own sends into the other returns)
 //
 // Return tracks (aux buses) hold shared effects: tracks send some of their signal to
 // them with SENDs, or play into one entirely with `output` (a group bus). Returns play
-// into the master. A new project starts with a Reverb return and a Chorus return
+// into the master. A group track is a return with `group` set: the tracks in it (their
+// `group` is its id) play into it, so it has its own fader, pan, effects and sends; the UI
+// shows it as a foldable header above its tracks. Groups don't nest. A new project starts with a Reverb return and a Chorus return
 // (PROJECT `defaultReturns` says they were made, so deleting them sticks).
 //
 // A MIDI track plays its MIDI clips through its instrument (a built-in synth or a
@@ -89,7 +94,7 @@ namespace ids
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
     MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
-    MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns)
+    MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns) MICFX_DAW_ID (group) MICFX_DAW_ID (folded)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
     MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight)
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
@@ -149,12 +154,23 @@ public:
     juce::Array<juce::ValueTree> getReturns() const;
     void moveReturn (int returnId, int newIndex);
 
+    // Group tracks (returns with `group`). groupTracks makes a group of the given tracks
+    // (moved next to each other, at the first one's place) and returns its id, or -1.
+    // Tracks already in a group leave it first. ungroup removes the group, its tracks stay.
+    int groupTracks (const juce::Array<int>& trackIds, const juce::String& name = "Group");
+    void ungroup (int groupId);
+    void setTrackGroup (int trackId, int groupIdOrNone); // -1: out of its group
+    void setGroupFolded (int groupId, bool folded);      // view state, not an edit
+    static bool isGroup (const juce::ValueTree& bus) { return bus.hasType (ids::RETURN) && (bool) bus.getProperty (ids::group, false); }
+    static int getTrackGroup (const juce::ValueTree& track) { return (int) track.getProperty (ids::group, -1); }
+
     // A track's send to a return, in dB (-inf / below minSendDb is off). Pre-fader sends
     // ignore the track's volume and pan (they still go quiet when it's muted).
     static constexpr float minSendDb = -60.0f, maxSendDb = 6.0f;
+    // A group track can send too, but only into plain returns.
     void setSend (int trackId, int returnId, float decibels);
     void setSendPre (int trackId, int returnId, bool preFader);
-    static juce::ValueTree getSend (const juce::ValueTree& track, int returnId);
+    static juce::ValueTree getSend (const juce::ValueTree& trackOrGroup, int returnId);
 
     // Where a track plays: the master (masterId) or a return's id.
     void setTrackOutput (int trackId, int returnIdOrMaster);
