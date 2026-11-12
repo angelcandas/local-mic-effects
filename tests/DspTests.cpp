@@ -2978,6 +2978,23 @@ namespace
                "with every song's details");
         check (setlist.step (-1, warning) && setlist.getCurrent() == 1, "previous with nothing loaded starts at the last song");
 
+        // A scene glide still running doesn't land on top of the next song's sound.
+        check (setlist.loadSong (0, warning), "load a song with two scenes");
+        scenes.setGlideSeconds (2.0);
+        set ("satDrive", 6.0f);
+        scenes.recall (1); // to the Chorus (9)
+        scenes.advance (0.5);
+        check (scenes.isGliding(), "a scene glide is running");
+        check (setlist.loadSong (1, warning) && ! scenes.isGliding() && std::abs (get ("satDrive") - 3.0f) < 0.01f,
+               "a song change finishes the glide first, then puts in the song's sound");
+
+        // The setlist as it stands is kept with the app's state.
+        const auto snapshot = setlist.getSnapshot();
+        Setlist other (processor, scenes, looper, processor.getMultitrack());
+        other.restore (snapshot);
+        check (other.size() == 2 && other.getCurrent() == 1 && other.getFile() == file && ! other.isDirty(),
+               "a snapshot brings back the songs, the file and the loaded song");
+
         setlist.removeSong (1);
         check (setlist.size() == 1 && setlist.getCurrent() == -1, "removing the loaded song");
         check (setlist.open (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-nothing.micfxset")).isNotEmpty(),

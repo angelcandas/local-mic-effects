@@ -4,7 +4,8 @@ namespace
 {
     const juce::Identifier SONG { "SONG" }, SCENES { "SCENES" }, name { "name" }, sound { "sound" }, key { "key" },
                            isMinor { "minor" }, tempo { "tempo" }, backing { "backing" }, lyrics { "lyrics" },
-                           notes { "notes" }, current { "current" };
+                           notes { "notes" }, current { "current" },
+                           filePath { "file" }, unsaved { "dirty" };
 }
 
 Setlist::Setlist (juce::AudioProcessor& p, Scenes& s, Looper& l, Multitrack& m)
@@ -123,6 +124,14 @@ bool Setlist::loadSong (int index, juce::String& warning)
     if (! song.isValid())
         return false;
 
+    // The song's scenes first: a scene glide still running finishes here, before the song's
+    // sound is put in place (it would otherwise land on top of it).
+    scenes.replaceScenes (song.getChildWithName (SCENES));
+
+    // The last song's loop stops (its layers stay, for Play or Clear).
+    if (const auto loopState = looper.getState(); loopState == Looper::State::playing || loopState == Looper::State::overdubbing)
+        looper.send (Looper::Command::stop);
+
     // The sound, at once (a song change isn't a glide).
     std::map<juce::String, float> values;
     for (const auto& pair : juce::StringArray::fromTokens (song[sound].toString(), ";", {}))
@@ -154,8 +163,6 @@ bool Setlist::loadSong (int index, juce::String& warning)
             if (choice->getParameterID() == "tuneScale" && (choice->getIndex() == 1 || choice->getIndex() == 2))
                 set (*choice, choice->convertTo0to1 ((bool) song.getProperty (isMinor, false) ? 2.0f : 1.0f));
         }
-
-    scenes.replaceScenes (song.getChildWithName (SCENES));
 
     if (const auto bpm = (double) song.getProperty (tempo, 0.0); bpm > 0.0)
     {
@@ -222,6 +229,27 @@ juce::String Setlist::open (const juce::File& source)
     file = source;
     dirty = false;
     return {};
+}
+
+juce::ValueTree Setlist::getSnapshot() const
+{
+    auto copy = tree.createCopy();
+    copy.setProperty (filePath, file.getFullPathName(), nullptr);
+    copy.setProperty (unsaved, dirty, nullptr);
+    return copy;
+}
+
+void Setlist::restore (const juce::ValueTree& snapshot)
+{
+    if (! snapshot.hasType ("SETLIST"))
+        return;
+
+    tree = snapshot.createCopy();
+    const auto path = tree[filePath].toString();
+    file = juce::File::isAbsolutePath (path) ? juce::File (path) : juce::File();
+    dirty = (bool) tree[unsaved];
+    tree.removeProperty (filePath, nullptr);
+    tree.removeProperty (unsaved, nullptr);
 }
 
 juce::var Setlist::describe() const

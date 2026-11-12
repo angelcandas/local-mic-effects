@@ -315,6 +315,8 @@ void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto tree = state.copyState();
     tree.setProperty ("preset", currentPreset.load(), nullptr);
+    if (juce::JUCEApplicationBase::isStandaloneApp() && (setlist.size() > 0 || setlist.getFile() != juce::File()))
+        tree.appendChild (setlist.getSnapshot(), nullptr); // the app's setlist survives a restart
 
     if (auto xml = tree.createXml())
         copyXmlToBinary (*xml, destData);
@@ -328,6 +330,12 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
         {
             auto tree = juce::ValueTree::fromXml (*xml);
             currentPreset = (int) tree.getProperty ("preset", 0);
+            if (const auto saved = tree.getChildWithName ("SETLIST"); saved.isValid())
+            {
+                if (juce::JUCEApplicationBase::isStandaloneApp())
+                    setlist.restore (saved);
+                tree.removeChild (saved, nullptr);
+            }
             state.replaceState (tree);
         }
     }

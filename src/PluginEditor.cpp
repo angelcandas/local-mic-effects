@@ -841,6 +841,13 @@ void PluginEditor::handleSetlist (const juce::String& action, const juce::var& o
     if (action == "remove") setlist.removeSong (index);
     if (action == "move")   setlist.moveSong (index, (int) options.getProperty ("to", index));
     if (action == "info")   setlist.setSongInfo (index, options);
+    // A song change replaces the backing track, so it waits while a take is recording.
+    if ((action == "load" || action == "step") && processorRef.getRecorder().isRecording())
+    {
+        complete (describeSetlist ({}, "Stop recording before changing songs."));
+        return;
+    }
+
     if (action == "load")   setlist.loadSong (index, warning);
     if (action == "step")   setlist.step ((int) options.getProperty ("delta", 1), warning);
     if (action == "new")    setlist.clear();

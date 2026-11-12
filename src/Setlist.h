@@ -41,6 +41,11 @@ public:
     juce::String save (const juce::File&);
     juce::String open (const juce::File&);
 
+    // The setlist as it stands (unsaved changes, file, loaded song), kept with the app's
+    // state so a restart doesn't lose it; restore() takes it back.
+    juce::ValueTree getSnapshot() const;
+    void restore (const juce::ValueTree&);
+
     // { name, file, dirty, current, songs: [{ name, key, minor, tempo, backing, lyrics, notes, scenes }] }.
     juce::var describe() const;
 
