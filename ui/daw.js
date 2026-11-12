@@ -58,6 +58,28 @@ const RETURN_COLOURS = ["#5fd0ff", "#b38cff", "#ffd166", "#7ee0a1"];
 const returnLetter = (index) => String.fromCharCode(65 + (index % 26));
 const returnColour = (bus, index) => bus.colour || RETURN_COLOURS[index % RETURN_COLOURS.length];
 const sendText = (v) => (v <= -59.5 ? "off" : `${v > 0 ? "+" : ""}${v.toFixed(v > -10 ? 1 : 0)}`);
+
+// A track's input: [left] mono, [left, right] stereo, [] none (indices from 0). As text for
+// the pickers: "0", "0,1", "".
+const inputKey = (input) => (input ?? [0]).join(",");
+const inputNumber = (i) => String(i + 1);
+const inputText = (input, names = []) => {
+  if (!input?.length) return "No input";
+  if (input.length === 1) return `In ${inputNumber(input[0])}${names[input[0]] ? ` · ${names[input[0]]}` : ""}`;
+  const [l, r] = input;
+  return `In ${inputNumber(l)}${r === l + 1 ? "/" : "+"}${inputNumber(r)} · Stereo`;
+};
+// The same, short enough for a mixer strip: "In 1", "In 1/2 ST", "In 3+2 ST".
+const inputShort = (input) => (!input?.length ? "No input" : inputText(input).replace(" · Stereo", " ST"));
+// What the strip's picker offers: no input, each input (mono), neighbouring pairs (stereo),
+// and the track's own pair when it's two other inputs.
+const inputChoices = (names, current) => {
+  const count = Math.max(1, names.length);
+  const choices = [[], ...Array.from({ length: count }, (_, i) => [i])];
+  for (let i = 0; i + 1 < count; i += 2) choices.push([i, i + 1]);
+  if (current?.length && !choices.some((c) => inputKey(c) === inputKey(current))) choices.push(current);
+  return choices;
+};
 // What "+ Return…" offers: [module key (addReturn's effect), name]. The effect starts fully wet.
 const RETURN_EFFECTS = [["reverb", "Reverb"], ["chorus", "Chorus"], ["echo", "Echo"], ["doubler", "Doubler"],
                         ["flanger", "Flanger"], ["phaser", "Phaser"], ["none", "Empty return"]];
@@ -336,6 +358,21 @@ class Level {
       Level.clipped.add(this.key);
       this.element.classList.add("is-clipped");
     }
+  }
+}
+
+// Two vertical meters, left and right, for the mixer strips.
+class StereoLevel {
+  constructor(key) {
+    this.element = html("div", "stereo-meter");
+    this.left = new Level(true, key == null ? null : `${key}:L`);
+    this.right = new Level(true, key == null ? null : `${key}:R`);
+    this.element.append(this.left.element, this.right.element);
+  }
+
+  push(levels, elapsed) {
+    this.left.push(levels?.[0], elapsed);
+    this.right.push(levels?.[1], elapsed);
   }
 }
 
@@ -1452,7 +1489,7 @@ class DawScreen {
     row.classList.toggle("is-midi", isMidi);
     toggles.append(toggle("mute", "M", "Mute"), toggle("solo", "S", "Solo (Alt+click: solo only this track)"),
                    toggle("arm", "●", isMidi ? "Arm to record from your MIDI keyboard (you hear it while armed)" : "Arm for recording"),
-                   toggle("monitor", "In", isMidi ? "Play this track's instrument from your MIDI keyboard" : "Hear the mic through this track's effects"));
+                   toggle("monitor", "In", isMidi ? "Play this track's instrument from your MIDI keyboard" : `Hear the input (${inputText(track.input, this.session.inputs)}) through this track's effects`));
     if (track.link) {
       // Linked tracks warp as one (Pitch & time → Linked tracks).
       const others = this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name);
@@ -1998,7 +2035,7 @@ class DawScreen {
     const session = this.session;
     const returns = session.returns ?? [];
     const describe = (t) => `${t.id}:${t.name}:${t.inserts.map((i) => i.type).join("+")}:${t.colour}`;
-    const signature = session.tracks.map(describe).join("|") + `|r:${returns.map(describe).join("|")}`
+    const signature = session.tracks.map(describe).join("|") + `|r:${returns.map(describe).join("|")}` + `|in:${(session.inputs ?? []).join(",")}`
                       + `|m:${session.master.inserts.map((i) => i.type).join("+")}`;
 
     if (signature !== this.mixerSignature) {
@@ -2021,6 +2058,7 @@ class DawScreen {
       for (const [key, b] of Object.entries(strip.toggles)) b.setAttribute("aria-pressed", String(Boolean(track[key])));
       strip.element.classList.toggle("is-selected", this.selectedTrack === track.id);
       strip.sends?.update(track);
+      strip.input?.update(track);
     }
 
     const master = this.strips.get(0);
@@ -2098,6 +2136,67 @@ class DawScreen {
     return { element, update };
   }
 
+  // Which audio interface inputs feed a track: one (mono) or a pair (stereo).
+  createInputPicker(track, { panel = false } = {}) {
+    const names = this.session.inputs ?? [];
+    const setInput = (input) => daw("setTrack", { id: track.id, input });
+
+    if (!panel) {
+      const select = html("select", "dropdown track-input");
+      select.title = "Input: which inputs of your audio interface this track records and monitors. A pair records in stereo.";
+      const fill = (current) => {
+        select.replaceChildren(...inputChoices(names, current).map((c) => {
+          const option = new Option(inputShort(c), inputKey(c));
+          option.title = inputText(c, names);
+          return option;
+        }));
+      };
+      fill(track.input);
+      select.addEventListener("change", () => setInput(select.value === "" ? [] : select.value.split(",").map(Number)));
+      const update = (t) => {
+        if (document.activeElement === select) return;
+        if (![...select.options].some((o) => o.value === inputKey(t.input))) fill(t.input);
+        select.value = inputKey(t.input);
+      };
+      update(track);
+      return { element: select, update };
+    }
+
+    // The panel: left (or the only one) and right, any two inputs.
+    const element = html("div", "input-pick");
+    const left = html("select", "dropdown");
+    const right = html("select", "dropdown");
+    left.title = "The input this track records (the left side when it's stereo)";
+    right.title = "Stereo: the input for the right side. Mono: the track records one input.";
+    left.append(new Option("No input", "-1"), ...names.map((n, i) => new Option(`${inputNumber(i)} · ${n}`, String(i))));
+    right.append(new Option("Mono", "-1"), ...names.map((n, i) => new Option(`${inputNumber(i)} · ${n}`, String(i))));
+    const change = () => {
+      const l = Number(left.value), r = Number(right.value);
+      setInput(l < 0 ? [] : r < 0 || r === l ? [l] : [l, r]);
+    };
+    left.addEventListener("change", change);
+    right.addEventListener("change", change);
+    const labelled = (text, select) => {
+      const row = html("label", "input-pick-row");
+      row.append(html("span", "", text), select);
+      return row;
+    };
+    element.append(labelled("In", left), labelled("Right", right));
+    const ensure = (select, value) => {
+      if (![...select.options].some((o) => o.value === value)) select.append(new Option(`${Number(value) + 1} · (not connected)`, value));
+      select.value = value;
+    };
+    const update = (t) => {
+      if (document.activeElement === left || document.activeElement === right) return;
+      const input = t.input ?? [0];
+      ensure(left, String(input[0] ?? -1));
+      ensure(right, String(input[1] ?? -1));
+      right.disabled = input.length === 0;
+    };
+    update(track);
+    return { element, update };
+  }
+
   createStrip(track, index, kind = "track") {
     const isMaster = kind === "master";
     const isReturn = kind === "return";
@@ -2122,7 +2221,7 @@ class DawScreen {
                                 format: (v) => (Math.abs(v) < 0.01 ? "C" : `${Math.round(Math.abs(v) * 100)}${v < 0 ? "L" : "R"}`),
                                 onChange: send("pan") });
     const fader = new Fader({ value: track.volume, onChange: send("volume") });
-    const meter = new Level(true, track.id);
+    const meter = new StereoLevel(track.id);
 
     const faderRow = html("div", "strip-fader");
     faderRow.append(fader.element, meter.element);
@@ -2147,8 +2246,9 @@ class DawScreen {
       });
       element.append(remove);
     }
-    element.append(inserts, ...(sends ? [sends.element] : []), pan.element, buttons, faderRow, readout, name);
-    this.strips.set(track.id, { element, fader, pan, readout, toggles, meter, sends });
+    const input = kind === "track" && track.kind !== "midi" ? this.createInputPicker(track) : null;
+    element.append(...(input ? [input.element] : []), inserts, ...(sends ? [sends.element] : []), pan.element, buttons, faderRow, readout, name);
+    this.strips.set(track.id, { element, fader, pan, readout, toggles, meter, sends, input });
     return element;
   }
 
@@ -2291,7 +2391,7 @@ class DawScreen {
     // Effects tab: the track's insert chain. Track tab: the clip, then pitch & time.
     const onTrackTab = this.dockTab === "track";
     const returnsKey = (session.returns ?? []).map((r) => `${r.id}:${r.name}`).join(",");
-    const key = `${this.dockTab}|${owner?.id}|${found?.clip.id}|${owner?.name}|${returnsKey}`;
+    const key = `${this.dockTab}|${owner?.id}|${found?.clip.id}|${owner?.name}|${returnsKey}|${(this.session.inputs ?? []).join(",")}`;
     if (key !== this.inspectorKey) {
       this.inspectorKey = key;
       this.inspector.replaceChildren();
@@ -2316,6 +2416,7 @@ class DawScreen {
     if (found && this.clipPanel) this.clipPanel.update(found.clip, found.track);
     if (owner) this.rack?.update(owner);
     if (owner && this.panelSends?.id === owner.id) this.panelSends.update(owner);
+    if (owner && this.panelInput?.id === owner.id) this.panelInput.update(owner);
     if (owner && this.chainGains?.id === owner.id) {
       this.chainGains.input.knob.update(owner.inGain ?? 0);
       this.chainGains.output.knob.update(owner.outGain ?? 0);
@@ -2485,6 +2586,16 @@ class DawScreen {
     this.chainGains = { id: owner.id, input, output };
 
     const chain = html("div", "chain-row");
+    // Before the chain: the inputs an audio track records from.
+    this.panelInput = null;
+    if (!isMaster && !isReturn && owner.kind !== "midi") {
+      const picker = this.createInputPicker(owner, { panel: true });
+      this.panelInput = { id: owner.id, update: picker.update };
+      const box = html("div", "panel-input");
+      box.title = "Input: which inputs of your audio interface this track records and monitors";
+      box.append(html("span", "chain-gain-title", "Input"), picker.element);
+      chain.append(box);
+    }
     chain.append(input.column, list, output.column);
 
     // After the chain: the track's sends to the returns, and where it plays.
@@ -3147,9 +3258,11 @@ class DawScreen {
       this.chainGains.output.meter.push(chain?.out, elapsed);
       this.status.chains = undefined;
     }
-    if (this.view === "mixer") for (const [id, strip] of this.strips) strip.meter.push(level(id), elapsed);
+    const stereo = (id) => this.status.stereo?.[id] ?? [level(id), level(id)];
+    if (this.view === "mixer") for (const [id, strip] of this.strips) strip.meter.push(stereo(id), elapsed);
     this.status.master = undefined;
     if (this.status.tracks) this.status.tracks = {};
+    this.status.stereo = undefined;
   }
 
   //============================================================================ keyboard

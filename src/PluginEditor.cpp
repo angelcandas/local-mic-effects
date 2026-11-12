@@ -91,6 +91,25 @@ PluginEditor::PluginEditor (PluginProcessor& p)
                                        { webView->emitEventIfBrowserIsVisible (event, payload); },
                                        [this] { return getRoundTripLatency(); });
 
+   #if JucePlugin_Build_Standalone
+    // The app's audio interface: its open inputs by name, for the tracks' input pickers.
+    if (juce::JUCEApplicationBase::isStandaloneApp())
+        daw->inputNames = []
+        {
+            juce::StringArray names;
+            if (auto* holder = juce::StandalonePluginHolder::getInstance())
+                if (auto* device = holder->deviceManager.getCurrentAudioDevice())
+                {
+                    const auto all = device->getInputChannelNames();
+                    const auto active = device->getActiveInputChannels();
+                    for (int i = 0; i < all.size(); ++i)
+                        if (active[i] && names.size() < PluginProcessor::maxAppInputs)
+                            names.add (all[i]);
+                }
+            return names;
+        };
+   #endif
+
     addAndMakeVisible (*webView);
     webView->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
 

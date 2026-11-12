@@ -2776,6 +2776,150 @@ namespace
 
         folder.deleteRecursively();
     }
+    void testStereoInputs()
+    {
+        std::cout << "\nDAW inputs (pick interface inputs, stereo tracks, one take per input)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-daw-inputs");
+        folder.createDirectory();
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+
+        const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto piano = (int) edit.addTrack ("Piano")[daw::ids::id];
+        const auto pair = (int) edit.addTrack ("Room pair")[daw::ids::id];
+
+        check (daw::Edit::getTrackInput (edit.getTrack (vocal)) == daw::Edit::Input { 0, daw::Edit::noInput },
+               "a new track takes input 1, mono");
+
+        edit.setTrackInput (piano, { 1, 2 });
+        edit.setTrackInput (pair, { 3, 0 }); // two mics on any inputs, not only a neighbouring pair
+        check (daw::Edit::getTrackInput (edit.getTrack (piano)).isStereo()
+                   && daw::Edit::getTrackInput (edit.getTrack (pair)) == daw::Edit::Input { 3, 0 },
+               "a track can take a stereo pair, or any two inputs as left and right");
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.setTrackInput (pair, { 2, 2 });
+        check (! daw::Edit::getTrackInput (edit.getTrack (pair)).isStereo(), "the same input twice is mono");
+        edit.getUndoManager().undo();
+        check (daw::Edit::getTrackInput (edit.getTrack (pair)) == daw::Edit::Input { 3, 0 }, "changing the input can be undone");
+
+        // Four inputs, each a different tone.
+        const auto numInputs = 4;
+        std::vector<std::vector<float>> tones;
+        for (int i = 0; i < numInputs; ++i)
+            tones.push_back (makeVoice (150.0f + 110.0f * (float) i, 1.0, 0.1f + 0.1f * (float) i));
+
+        const auto playInputs = [&] (int blocks, std::function<void (const juce::AudioBuffer<float>&)> each = {})
+        {
+            juce::AudioBuffer<float> buffer (numInputs, blockSize);
+            for (int b = 0; b < blocks; ++b)
+            {
+                for (int i = 0; i < numInputs; ++i)
+                    buffer.copyFrom (i, 0, tones[(size_t) i].data() + b * blockSize, blockSize);
+                engine.process (buffer, 2, blockSize, buffer.getArrayOfReadPointers(), numInputs, nullptr);
+                if (each)
+                    each (buffer);
+            }
+        };
+
+        // Monitoring a stereo track: its left input on the left, its right on the right.
+        edit.setTrackMonitor (piano, true);
+        engine.rebuildNow();
+        playInputs (4);
+        float left = 0.0f, right = 0.0f;
+        playInputs (20, [&] (const auto& out) { left = std::max (left, out.getMagnitude (0, 0, blockSize));
+                                                right = std::max (right, out.getMagnitude (1, 0, blockSize)); });
+        // The inputs peak at 0.2 and 0.3: the same ratio comes out (the centre pan law scales both).
+        check (left > 0.1f && std::abs (right / left - 1.5f) < 0.02f,
+               "a monitored stereo track plays its inputs left and right (" + juce::String (left, 3) + ", " + juce::String (right, 3) + ")");
+
+        const auto [peakLeft, peakRight] = engine.takePeaks (daw::Edit::masterId);
+        check (peakLeft > 0.15f && peakRight > peakLeft, "the master meters left and right");
+        edit.setTrackMonitor (piano, false);
+
+        edit.setTrackMonitor (vocal, true);
+        edit.setTrackPan (vocal, -1.0f);
+        engine.rebuildNow();
+        playInputs (8);
+        engine.takePeaks (vocal);
+        playInputs (8);
+        const auto [vocalLeft, vocalRight] = engine.takePeaks (vocal);
+        check (vocalLeft > 0.05f && vocalRight < 0.001f, "a track panned hard left meters on the left only");
+        edit.setTrackMonitor (vocal, false);
+        edit.setTrackPan (vocal, 0.0f);
+
+        // Recording: one file per input, so each track gets what it listens to.
+        const auto doubled = (int) edit.addTrack ("Vocal double")[daw::ids::id]; // also input 1
+        for (const auto id : { vocal, piano, pair, doubled })
+            edit.setTrackArm (id, true);
+        engine.rebuildNow();
+
+        check (engine.startRecording (folder).isEmpty(), "records three inputs at once");
+        playInputs (30);
+        const auto take = engine.stopRecording();
+        engine.rebuildNow();
+
+        const auto clipFile = [&] (int trackId)
+        {
+            for (const auto& child : edit.getTrack (trackId))
+                if (child.hasType (daw::ids::CLIP))
+                    return juce::File (child[daw::ids::file].toString());
+            return juce::File();
+        };
+
+        double rate = 0.0;
+        const auto vocalTake = readWav (clipFile (vocal), rate);
+        const auto pianoTake = readWav (clipFile (piano), rate);
+        const auto pairTake = readWav (clipFile (pair), rate);
+        const auto length = 30 * blockSize;
+
+        check (clipFile (vocal) == clipFile (doubled) && clipFile (vocal) != clipFile (piano) && clipFile (piano) != clipFile (pair)
+                   && clipFile (vocal).getFileName().contains ("In 1") && clipFile (piano).getFileName().contains ("In 2-3"),
+               "tracks on the same input share a take; each other input has its own file, named for it");
+        check (vocalTake.getNumChannels() == 1 && pianoTake.getNumChannels() == 2 && pairTake.getNumChannels() == 2
+                   && vocalTake.getNumSamples() == length && pianoTake.getNumSamples() == length,
+               "a mono track records a mono file, a stereo track a stereo one");
+        check (maxDifference (vocalTake.getReadPointer (0), tones[0].data(), length) < 1.0e-6f
+                   && maxDifference (pianoTake.getReadPointer (0), tones[1].data(), length) < 1.0e-6f
+                   && maxDifference (pianoTake.getReadPointer (1), tones[2].data(), length) < 1.0e-6f
+                   && maxDifference (pairTake.getReadPointer (0), tones[3].data(), length) < 1.0e-6f
+                   && maxDifference (pairTake.getReadPointer (1), tones[0].data(), length) < 1.0e-6f,
+               "each take holds exactly its inputs, left and right");
+        check (take.file.existsAsFile() && ! take.droppedAudio, "the stop reports a take");
+
+        edit.getUndoManager().undo();
+        check (! clipFile (vocal).exists() && ! clipFile (piano).exists() && ! clipFile (pair).exists(),
+               "one undo removes every input's take");
+
+        // A track without an input records nothing; no armed input at all is refused.
+        for (const auto id : { vocal, piano, pair, doubled })
+        {
+            edit.setTrackArm (id, false);
+            edit.setTrackInput (id, { daw::Edit::noInput, daw::Edit::noInput });
+        }
+        edit.setTrackArm (vocal, true);
+        check (engine.startRecording (folder).isNotEmpty() && ! engine.isRecording(), "refuses to record when the armed tracks have no input");
+
+        // An input the interface doesn't have plays and records silence.
+        edit.setTrackInput (vocal, { 9, daw::Edit::noInput });
+        edit.setTrackMonitor (vocal, true);
+        engine.rebuildNow();
+        engine.takePeaks (vocal);
+        playInputs (8);
+        check (engine.takePeak (vocal) < 1.0e-6f, "an input the interface doesn't have is silent");
+
+        // The project file keeps each track's input.
+        daw::Edit copy;
+        copy.replaceState (edit.getState().createCopy());
+        check (daw::Edit::getTrackInput (copy.getTrack (vocal)) == daw::Edit::Input { 9, daw::Edit::noInput },
+               "inputs come back with the session");
+
+        folder.deleteRecursively();
+    }
+
     void testDawRecording()
     {
         std::cout << "\nDAW recording (dry takes, monitoring, metronome)\n";
@@ -5808,6 +5952,7 @@ int main()
     testReturns();
     testMastering();
     testDawRecording();
+    testStereoInputs();
     testMidiTracks();
     testPluginHosting();
     testProjects();

@@ -19,7 +19,11 @@ PluginProcessor::PluginProcessor()
 
 PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterLayout layout)
     : AudioProcessor (BusesProperties()
-                          .withInput  ("Input",  juce::AudioChannelSet::mono(),   true)
+                          // In the app, every input of the audio interface (up to maxAppInputs):
+                          // DAW tracks each pick theirs. Live mode uses the first.
+                          .withInput  ("Input",  juce::JUCEApplicationBase::isStandaloneApp()
+                                                     ? juce::AudioChannelSet::discreteChannels (maxAppInputs)
+                                                     : juce::AudioChannelSet::mono(),   true)
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       params (layout),
       state (*this, nullptr, "MicFX", std::move (layout)),
@@ -70,6 +74,10 @@ bool PluginProcessor::isBusesLayoutSupported (const BusesLayout& layouts) const
     {
         return set == juce::AudioChannelSet::mono() || set == juce::AudioChannelSet::stereo();
     };
+
+    // The app takes any number of inputs (as many as the interface has open).
+    if (juce::JUCEApplicationBase::isStandaloneApp())
+        return in.size() <= maxAppInputs && isMonoOrStereo (out);
 
     return isMonoOrStereo (in) && isMonoOrStereo (out) && in.size() <= out.size();
 }
@@ -139,9 +147,14 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     {
         // The raw mic goes to the DAW engine (recorded dry, monitored through the
         // armed track's inserts); the engine writes the mix over the buffer.
-        updatePeak (inputPeak, numIn > 0 ? buffer.getMagnitude (0, 0, numSamples) : 0.0f);
+        auto inputLevel = 0.0f;
+        for (int ch = 0; ch < numIn; ++ch)
+            inputLevel = juce::jmax (inputLevel, buffer.getMagnitude (ch, 0, numSamples));
+        updatePeak (inputPeak, inputLevel);
+        inputChannels = numIn;
+
         // The standalone app passes the MIDI input here (MIDI tracks play and record it).
-        dawEngine.process (buffer, numOut, numSamples, numIn > 0 ? buffer.getReadPointer (0) : nullptr, &midi);
+        dawEngine.process (buffer, numOut, numSamples, buffer.getArrayOfReadPointers(), numIn, &midi);
         midi.clear();
         applyPeakGuard (buffer, numOut, numSamples);
         updatePeak (outputPeak, buffer.getMagnitude (0, numSamples));
@@ -160,7 +173,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     }
 
     // A mono mic feeds every output channel so stereo effects have signal on both sides.
-    if (numIn == 1)
+    // The app has the interface's every input: Live mode uses the first, as a mono mic.
+    if (numIn == 1 || (numIn > 1 && juce::JUCEApplicationBase::isStandaloneApp()))
         for (int ch = 1; ch < numOut; ++ch)
             buffer.copyFrom (ch, 0, buffer, 0, 0, numSamples);
     else
