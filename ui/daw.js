@@ -24,7 +24,7 @@ const SCALE_STEPS = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 1
 // Auto Mix's track roles (the bridge sends the same list with its tags).
 const AUTOMIX_ROLES = [
   { key: "voice", name: "Voice" }, { key: "background", name: "Background vocals" }, { key: "instrumental", name: "Instrumental" },
-  { key: "guitar", name: "Guitar" }, { key: "piano", name: "Piano / keys" }, { key: "bass", name: "Bass" }, { key: "drums", name: "Drums" },
+  { key: "guitar", name: "Guitar" }, { key: "piano", name: "Piano / keys" }, { key: "pad", name: "Pad / strings" }, { key: "synth", name: "Synth lead" }, { key: "bass", name: "Bass" }, { key: "drums", name: "Drums" },
   { key: "instrument", name: "Other instrument" }, { key: "other", name: "Leave as is" },
 ];
 const SIGNATURES = [[2, "2/4"], [3, "3/4"], [4, "4/4"], [5, "5/4"], [6, "6/8"], [7, "7/8"], [9, "9/8"], [12, "12/8"]];
@@ -2568,7 +2568,7 @@ class DawScreen {
     const result = await daw("autoMix", { action: "tags" });
     if (!result?.ok || this.autoMix.plan) return;
     this.autoMixRoleNames = result.roles;
-    this.renderAutoMixRoles(result.tracks.map((t) => ({ ...t, detail: t.tagged ? "tagged" : t.role ? "from its name" : "" })), true);
+    this.renderAutoMixRoles(result.tracks.map((t) => ({ ...t, detail: t.tagged ? "tagged" : t.role ? (t.midi ? "from its name or instrument" : "from its name") : "" })), true);
   }
 
   // One row per track with its role. Before listening a pick tags the track; after, it

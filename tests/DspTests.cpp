@@ -954,7 +954,7 @@ namespace
             { "Kick", Role::drums }, { "My song - Drums", Role::drums }, { "Overheads", Role::drums }, { "Bajo", Role::bass },
             { "Bass DI", Role::bass }, { "Lead guitar", Role::guitar }, { "Acoustic", Role::guitar }, { "Rhodes", Role::piano },
             { "Piano", Role::piano }, { "Karaoke", Role::backing }, { "Backing track", Role::backing }, { "Instrumental", Role::backing },
-            { "My song - Other", Role::instrument }, { "Strings", Role::instrument }, { "Synth lead", Role::instrument },
+            { "My song - Other", Role::instrument }, { "Strings", Role::pad }, { "Synth lead", Role::synth },
             { "Track 3", std::nullopt }, { "Audio 1", std::nullopt }
         };
         juce::StringArray wrong;
@@ -1371,6 +1371,80 @@ namespace
         check (analysis::getModeFromKey (analysis::getModeKey (analysis::MixMode::clean)) == analysis::MixMode::clean
                    && analysis::getModeFromKey ("nonsense") == analysis::MixMode::mix,
                "mode keys round-trip");
+    }
+
+    void testAutoMixSynths()
+    {
+        std::cout << "\nAuto Mix on MIDI tracks (roles from the instrument, colour)\n";
+
+        using analysis::Role;
+        check (analysis::guessRoleFromInstrument ("builtin:pad", "Warm Pad") == Role::pad
+                   && analysis::guessRoleFromInstrument ("builtin:strings", "Strings") == Role::pad
+                   && analysis::guessRoleFromInstrument ("builtin:lead", "Lead") == Role::synth
+                   && analysis::guessRoleFromInstrument ("builtin:bass", "Synth Bass") == Role::bass
+                   && analysis::guessRoleFromInstrument ("builtin:keys", "Keys") == Role::piano
+                   && analysis::guessRoleFromInstrument ("builtin:organ", "Organ") == Role::piano,
+               "built-in synths: pad, strings, lead, bass, keys, organ");
+        check (analysis::guessRoleFromInstrument ("VST3-Serum", "Serum") == Role::synth
+                   && analysis::guessRoleFromInstrument ("VST3-x", "Superior Drummer 3") == Role::drums
+                   && analysis::guessRoleFromInstrument ("VST3-y", "Trilian Bass") == Role::bass
+                   && ! analysis::guessRoleFromInstrument ("VST3-z", "Thing").has_value(),
+               "plugins by their names (Serum, Superior Drummer, Trilian Bass; nothing from \"Thing\")");
+        check (analysis::guessRoleFromName ("Strings") == Role::pad && analysis::guessRoleFromName ("Synth arp") == Role::synth
+                   && analysis::guessRoleFromName ("Synth bass") == Role::bass,
+               "track names: Strings is a pad, Synth arp a synth, Synth bass a bass");
+        check (analysis::getRoleFromKey (analysis::getRoleKey (Role::pad)) == Role::pad
+                   && analysis::getRoleFromKey (analysis::getRoleKey (Role::synth)) == Role::synth,
+               "pad and synth keys round-trip");
+
+        // A voice, a pad, a synth lead and a synth bass; the three synths are MIDI tracks.
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-synths");
+        folder.createDirectory();
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto file = folder.getChildFile (name + ".wav");
+            writeWav (file, audio, sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, file, 0.0, 12.0);
+            return id;
+        };
+        const auto voice = add ("Vocal", makeSungLine (12.0, 3.0, 1.5));
+        const auto pad = add ("Pad", makeTones ({ { 12.0, 330.0, 0.1f, 0.1f } }));
+        const auto lead = add ("Lead", makeTones ({ { 12.0, 880.0, 0.05f, 0.05f } }));
+        const auto bass = add ("Bass", makeTones ({ { 12.0, 55.0, 0.2f, 0.2f } }));
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, Role> roles { { voice, Role::voice }, { pad, Role::pad }, { lead, Role::synth }, { bass, Role::bass } };
+        const std::map<int, float> volumes { { voice, 0.0f }, { pad, 0.0f }, { lead, 0.0f }, { bass, 0.0f } };
+
+        analysis::MixOptions options;
+        options.midiTracks = { pad, lead, bass };
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options);
+        const auto has = [&plan] (int id, fx::ModuleType type, const char* value = nullptr, float expected = 0.0f)
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == id && move.insert == type
+                    && (value == nullptr || (move.values.count (value) > 0 && juce::approximatelyEqual (move.values.at (value), expected))))
+                    return true;
+            return false;
+        };
+        for (const auto& move : plan.moves)
+            if (move.trackId != voice)
+                for (const auto& reason : move.reasons)
+                    std::cout << "        " << move.trackId << ": " << reason << "\n";
+
+        check (has (pad, fx::ModuleType::chorus) && has (pad, fx::ModuleType::width, "widthAmount", 140.0f), "pad: chorus and 140% width");
+        check (has (lead, fx::ModuleType::echo) && has (lead, fx::ModuleType::saturation), "synth lead: echo and drive");
+        check (has (bass, fx::ModuleType::saturation) && has (bass, fx::ModuleType::width, "widthAmount", 0.0f), "synth bass: drive and mono");
+
+        // Audio tracks with the same roles, or colour off: none of it.
+        options.colour = false;
+        const auto plain = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options);
+        bool none = true;
+        for (const auto& move : plain.moves)
+            none = none && move.insert != fx::ModuleType::chorus && ! (move.trackId == lead && move.insert == fx::ModuleType::echo);
+        check (none, "no colour when it's off");
     }
 
     void testAutoMixRides()
@@ -3326,7 +3400,7 @@ namespace
             };
 
             auto tags = run ("autoMix", args ({ { "action", "tags" } }));
-            check (roleOf (tags, kick) == "drums" && roleOf (tags, plain).isEmpty() && tags["roles"].getArray()->size() == 9,
+            check (roleOf (tags, kick) == "drums" && roleOf (tags, plain).isEmpty() && tags["roles"].getArray()->size() == 11,
                    "tags: guessed from the names before listening (" + roleOf (tags, kick) + ", '" + roleOf (tags, plain) + "')");
 
             tags = run ("autoMix", args ({ { "action", "tag" }, { "track", plain }, { "role", "background" } }));
@@ -4960,6 +5034,7 @@ int main()
     testAutoMixRoles();
     testAutoMixRides();
     testAutoMixModes();
+    testAutoMixSynths();
     testAnalysisSpeed();
     testLatency();
     testSmoothing();
