@@ -475,6 +475,41 @@ SessionAnalyser::SessionAnalyser (daw::Edit& edit, Point p, bool mix, double rat
 {
 }
 
+std::optional<Profile> ProfileCache::find (const juce::String& key) const
+{
+    const std::scoped_lock guard (lock);
+    if (const auto it = profiles.find (key); it != profiles.end())
+        return it->second;
+    return std::nullopt;
+}
+
+void ProfileCache::store (const juce::String& key, const Profile& profile)
+{
+    const std::scoped_lock guard (lock);
+    if (profiles.count (key) == 0)
+        order.push_back (key);
+    profiles[key] = profile;
+
+    while ((int) order.size() > maxEntries)
+    {
+        profiles.erase (order.front());
+        order.erase (order.begin());
+    }
+}
+
+void ProfileCache::clear()
+{
+    const std::scoped_lock guard (lock);
+    profiles.clear();
+    order.clear();
+}
+
+int ProfileCache::size() const
+{
+    const std::scoped_lock guard (lock);
+    return (int) profiles.size();
+}
+
 Profile SessionAnalyser::render (const juce::ValueTree& session, const Progress& progress, double from, double to,
                                  bool& cancelled)
 {
@@ -512,7 +547,7 @@ Profile SessionAnalyser::render (const juce::ValueTree& session, const Progress&
     return analyser.finish();
 }
 
-SessionAnalyser::Result SessionAnalyser::run (Progress progress)
+SessionAnalyser::Result SessionAnalyser::run (Progress progress, ProfileCache* cache)
 {
     Result result;
 
@@ -571,10 +606,49 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress)
     if (includeMix)
         sessions.push_back (snapshot.createCopy());
 
+    // What each render depends on, and whether the cache has it already.
+    const auto keyOf = [this] (const juce::ValueTree& session)
+    {
+        juce::String key;
+        key << "v1|" << sampleRate << "|" << songSeconds << "|" << (int) point << "|";
+        for (const auto& track : session)
+            for (const auto& clip : track)
+                if (clip.hasType (daw::ids::CLIP) && clip.hasProperty (daw::ids::file))
+                {
+                    const juce::File file (clip[daw::ids::file].toString());
+                    key << file.getSize() << ":" << file.getLastModificationTime().toMilliseconds() << "|";
+                }
+        return key + juce::String::toHexString (session.toXmlString().hashCode64());
+    };
+    const auto hasPluginInstrument = [] (const juce::ValueTree& session)
+    {
+        for (const auto& track : session)
+            if (const auto instrument = track.getChildWithName (daw::ids::INSTRUMENT); instrument.isValid())
+                if (! instrument[daw::ids::plugin].toString().startsWith ("builtin:"))
+                    return true;
+        return false;
+    };
+
     const auto jobs = sessions.size();
     std::vector<Profile> profiles (jobs);
+    std::vector<juce::String> keys (jobs);
+    std::vector<size_t> parallelJobs, serialJobs;
+    for (size_t job = 0; job < jobs; ++job)
+    {
+        keys[job] = keyOf (sessions[job]);
+        if (cache != nullptr)
+            if (auto known = cache->find (keys[job]))
+            {
+                profiles[job] = std::move (*known);
+                continue;
+            }
+        (hasPluginInstrument (sessions[job]) ? serialJobs : parallelJobs).push_back (job);
+    }
+    lastRenderCount = (int) (parallelJobs.size() + serialJobs.size());
+
     std::vector<std::atomic<double>> done (jobs);
-    for (auto& d : done) d = 0.0;
+    for (size_t job = 0; job < jobs; ++job)
+        done[job] = profiles[job].getNumFrames() > 0 ? 1.0 : 0.0;
     std::atomic<bool> cancelled { false };
     std::atomic<size_t> next { 0 };
     std::mutex reporting;
@@ -593,24 +667,38 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress)
         return ! cancelled.load();
     };
 
+    const auto renderJob = [&] (size_t job)
+    {
+        bool stopped = false;
+        profiles[job] = render (sessions[job], [&report, job] (double p) { return report (job, p); }, 0.0, 1.0, stopped);
+        if (stopped)
+            cancelled = true;
+    };
     const auto work = [&]
     {
-        for (size_t job; (job = next++) < jobs && ! cancelled.load();)
-        {
-            bool stopped = false;
-            profiles[job] = render (sessions[job], [&report, job] (double p) { return report (job, p); }, 0.0, 1.0, stopped);
-            if (stopped)
-                cancelled = true;
-        }
+        for (size_t i; (i = next++) < parallelJobs.size() && ! cancelled.load();)
+            renderJob (parallelJobs[i]);
     };
 
-    const auto threads = (size_t) juce::jlimit (1, maxThreads, juce::jmin ((int) jobs, (int) std::thread::hardware_concurrency() - 1));
+    const auto threads = (size_t) juce::jlimit (1, maxThreads, juce::jmin ((int) parallelJobs.size(), (int) std::thread::hardware_concurrency() - 1));
     std::vector<std::thread> pool;
     for (size_t i = 1; i < threads; ++i)
         pool.emplace_back (work);
+    for (auto job : serialJobs) // on this thread, one at a time, while the others run
+        if (! cancelled.load())
+            renderJob (job);
     work();
     for (auto& thread : pool)
         thread.join();
+
+    if (! cancelled.load() && cache != nullptr)
+        for (auto job : parallelJobs)
+            cache->store (keys[job], profiles[job]);
+    if (! cancelled.load() && cache != nullptr)
+        for (auto job : serialJobs)
+            cache->store (keys[job], profiles[job]);
+    if (progress && ! cancelled.load())
+        progress (1.0);
 
     if (cancelled.load())
     {

@@ -9,6 +9,8 @@
 
 #include <array>
 #include <functional>
+#include <map>
+#include <mutex>
 #include <optional>
 #include <vector>
 
@@ -148,6 +150,27 @@ struct Masking
 Masking measureMasking (const Profile& voice, const Profile& backing);
 
 //==============================================================================
+// Profiles already measured, by what was rendered: the track's part of the session
+// (clips, notes, instrument, inserts when they count), its audio files' sizes and
+// dates, the sample rate and the song's length. "Listen again" then renders only the
+// tracks that changed; a fader move changes nothing that's measured. Thread-safe.
+class ProfileCache
+{
+public:
+    std::optional<Profile> find (const juce::String& key) const;
+    void store (const juce::String& key, const Profile&);
+    void clear();
+    int size() const;
+
+    static constexpr int maxEntries = 128; // the oldest go first
+
+private:
+    mutable std::mutex lock;
+    std::map<juce::String, Profile> profiles;
+    std::vector<juce::String> order; // oldest first
+};
+
+//==============================================================================
 // Profiles of every track of a DAW session (and the mix), rendered offline from a
 // snapshot like an export, so the session and what you hear are untouched.
 class SessionAnalyser
@@ -174,8 +197,13 @@ public:
 
     // Any thread. The renders run side by side, up to maxThreads at once (offline,
     // faster than real time); `progress` is called from them one at a time.
-    Result run (Progress = {});
+    // With a cache, tracks it already knows aren't rendered again, and new ones are added.
+    // Tracks with a third-party plugin instrument render one at a time (a plugin may
+    // not be safe on several threads at once).
+    Result run (Progress = {}, ProfileCache* = nullptr);
     static constexpr int maxThreads = 8;
+
+    int getLastRenderCount() const noexcept { return lastRenderCount; } // renders the last run() did
 
 private:
     Profile render (const juce::ValueTree& session, const Progress&, double from, double to, bool& cancelled);
@@ -185,5 +213,6 @@ private:
     bool includeMix, includeTracks;
     double sampleRate;
     double songSeconds = 0.0;
+    int lastRenderCount = 0;
 };
 }

@@ -1182,6 +1182,34 @@ namespace
                    && std::abs (result.tracks[t].second.integratedLufs - result.tracks[t % 2].second.integratedLufs) < 0.01f;
         check (inOrder, "6 tracks and the mix, in track order, the same results side by side");
         check (monotonic && std::abs (lastProgress - 1.0) < 1.0e-6, "progress only goes up, to 100%");
+        // A cache: listening again renders only what changed.
+        {
+            analysis::ProfileCache cache;
+            analysis::SessionAnalyser first (edit, analysis::SessionAnalyser::Point::source, false);
+            const auto fresh = first.run ({}, &cache);
+            analysis::SessionAnalyser again (edit, analysis::SessionAnalyser::Point::source, false);
+            const auto cached = again.run ({}, &cache);
+            bool same = cached.tracks.size() == fresh.tracks.size();
+            for (size_t t = 0; same && t < fresh.tracks.size(); ++t)
+                same = cached.tracks[t].first == fresh.tracks[t].first
+                    && juce::exactlyEqual (cached.tracks[t].second.integratedLufs, fresh.tracks[t].second.integratedLufs)
+                    && cached.tracks[t].second.rmsDb == fresh.tracks[t].second.rmsDb;
+            check (first.getLastRenderCount() == 6 && again.getLastRenderCount() == 0 && same,
+                   "listening again renders nothing new, with the same results (" + juce::String (again.getLastRenderCount()) + " renders)");
+
+            edit.setTrackVolume (ids[1], -6.0f);
+            const auto first0 = edit.getTrack (ids[0]);
+            edit.addInsert (ids[2], fx::ModuleType::reverb);
+            analysis::SessionAnalyser faders (edit, analysis::SessionAnalyser::Point::source, false);
+            faders.run ({}, &cache);
+            check (faders.getLastRenderCount() == 0, "a fader or an effect doesn't change what's measured at the source");
+
+            edit.setClipGain ((int) first0.getChildWithName (daw::ids::CLIP)[daw::ids::id], -3.0f);
+            analysis::SessionAnalyser moved (edit, analysis::SessionAnalyser::Point::source, false);
+            moved.run ({}, &cache);
+            check (moved.getLastRenderCount() == 1, "changing one clip renders that track again (" + juce::String (moved.getLastRenderCount()) + ")");
+        }
+
         std::cout << "        6 tracks x 30 s + mix in " << juce::String (seconds, 2) << " s ("
                   << juce::String (7.0 * 30.0 / juce::jmax (0.001, seconds), 0) << "x real time per track, "
                   << (int) std::thread::hardware_concurrency() << " cores, this build)\n";
