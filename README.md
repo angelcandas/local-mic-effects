@@ -270,7 +270,16 @@ keyboard you can click): open it with the instrument's button on the track or in
   filter with its own envelope, LFO, glide and mono/legato, chorus, echo and room. Presets for pads,
   strings, basses, leads, brass and plucks.
 
-Each one is also a VST3 (and AU on macOS) plugin for other DAWs, "MicFX Grand" and "MicFX Nova":
+- **Tines**: an electric piano: tine or reed, bark that grows with how hard you play, a bell
+  partial, drive, stereo tremolo, chorus and room.
+- **Drawbar**: a tonewheel organ: nine drawbars (pull down for more), single-trigger percussion,
+  key click, scanner vibrato and chorus, an overdriven amp and a rotary speaker (the mod wheel
+  switches it to fast).
+
+Projects that used the first built-in sounds (Keys, Organ, Soft Piano, Warm Pad, Strings, Synth
+Bass, Lead) open on the matching instrument and preset.
+
+Each one is also a VST3 (and AU on macOS) plugin for other DAWs, "MicFX Grand", "MicFX Nova", "MicFX Tines" and "MicFX Drawbar":
 `cmake --build build/debug --target MicFXInstruments`, then copy the `.vst3` (or `.component`)
 from `build/debug/MicFX<Name>_artefacts/` into your plugin folder.
 
@@ -373,7 +382,7 @@ src/analysis/           Auto Mix measurements: loudness (BS.1770 / EBU R128), 1/
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/stems/              Split into stems: chunked, multi-threaded separation, model download and
                         check (StemSplitter), and the Demucs adapter (DemucsSeparator)
-src/instruments/        the MicFX instruments (Grand, Nova): a Spec per instrument (parameters,
+src/instruments/        the MicFX instruments (Grand, Nova, Tines, Drawbar): a Spec per instrument (parameters,
                         window layout, presets, sound engine), InstrumentProcessor (the built-in
                         instrument and the VST3/AU plugin), InstrumentEditor (its window)
 src/DawBridge.*         the DAW screen's commands and events (session, status, export, stems)
