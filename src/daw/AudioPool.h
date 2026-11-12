@@ -6,6 +6,7 @@
 #include "Warp.h"
 
 #include <algorithm>
+#include <atomic>
 #include <map>
 #include <memory>
 #include <set>
@@ -37,7 +38,9 @@ public:
     // give the plain file. Rendered copies stay cached while something uses them: call
     // releaseUnusedWarps() with the keys in use, and the rest go (the newest few are
     // kept, so undo doesn't render again). Linked settings render every linked file in
-    // one go and keep each one's copy.
+    // one go and keep each one's copy. A render still running for a file whose clips have
+    // moved on to other settings (a knob dragged past it) is cancelled there too, so the
+    // copy that's wanted now isn't stuck behind renders nobody will hear.
     Audio get (const juce::File&, const warp::Settings&);
     Audio loadNow (const juce::File&, const warp::Settings&);
     static juce::String getWarpKey (const juce::File&, const warp::Settings&);
@@ -62,6 +65,8 @@ private:
     std::map<juce::String, Audio> warps;       // by getWarpKey()
     std::vector<juce::String> warpOrder;       // oldest first, for releaseUnusedWarps()
     std::set<juce::String> warpsPending;
+    using CancelFlag = std::shared_ptr<std::atomic<bool>>;
+    std::map<juce::String, CancelFlag> warpJobs; // pending key -> its render's cancel flag
     static constexpr size_t sparedWarps = 6;
 
     juce::ThreadPool loader { juce::ThreadPoolOptions{}.withThreadName ("MicFX audio pool").withNumberOfThreads (1) };

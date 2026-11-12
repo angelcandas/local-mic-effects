@@ -74,6 +74,9 @@ public:
     static inline bool availableForTesting = false;
 
 private:
+    // False once the bridge is gone: work finishing on other threads checks it.
+    std::shared_ptr<bool> alive = std::make_shared<bool> (true);
+
     juce::var describeStatus();
     juce::var describeInserts (const juce::ValueTree& trackOrMaster) const;
     juce::var describeInstrument (const juce::ValueTree& track) const;

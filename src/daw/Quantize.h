@@ -1,5 +1,7 @@
 #pragma once
 
+#include <functional>
+
 #include "AudioPool.h"
 #include "Edit.h"
 #include "analysis/Beats.h"
@@ -41,6 +43,11 @@ struct Options
 // Note starts (hitpoints) in what a clip shows, as times in its rendered copy, strongest
 // first is not implied: in time order. Sensitivity 0..1.
 std::vector<analysis::rhythm::Onset> findHitpoints (const Edit&, AudioPool&, int clipId, float sensitivity = 0.5f);
+
+// The same, split so the analysis can run off the message thread: call this on the message
+// thread, and the function it returns on any thread (it holds what it needs). Returns an
+// empty function for a missing clip or one that isn't audio.
+std::function<std::vector<analysis::rhythm::Onset>()> prepareHitpoints (const Edit&, AudioPool&, int clipId, float sensitivity = 0.5f);
 
 struct Result
 {
