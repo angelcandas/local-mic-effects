@@ -646,7 +646,9 @@ class Rack {
     this.entries = [];
 
     const groups = {};
+    const liveModules = MODULES.filter((m) => !m.dawOnly); // mastering effects are DAW-only
     for (const [key, category] of Object.entries(CATEGORIES)) {
+      if (!liveModules.some((m) => m.category === key)) continue;
       const group = html("div", "sidebar-group");
       group.style.setProperty("--cat", category.color);
       group.append(html("h3", "", category.name));
@@ -654,7 +656,7 @@ class Rack {
       groups[key] = group;
     }
 
-    for (const module of MODULES) {
+    for (const module of liveModules) {
       const power = Juce.getToggleState(module.power);
       const card = this.buildCard(module, power);
       const item = this.buildSidebarItem(module, power, card);

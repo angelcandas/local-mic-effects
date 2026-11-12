@@ -1893,6 +1893,156 @@ namespace
         folder.deleteRecursively();
     }
 
+    // Runs a module on a stereo signal in blocks; returns the output.
+    juce::AudioBuffer<float> runModule (fx::Module& module, const juce::AudioBuffer<float>& input)
+    {
+        module.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+        juce::AudioBuffer<float> out (input);
+        for (int start = 0; start < out.getNumSamples(); start += blockSize)
+        {
+            const auto n = juce::jmin (blockSize, out.getNumSamples() - start);
+            auto block = juce::dsp::AudioBlock<float> (out).getSubBlock ((size_t) start, (size_t) n);
+            module.process (fx::Module::Context (block));
+        }
+        return out;
+    }
+
+    juce::AudioBuffer<float> stereoSine (double hz, float amplitude, double seconds, float rightGain = 1.0f)
+    {
+        juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
+        for (int i = 0; i < buffer.getNumSamples(); ++i)
+        {
+            const auto v = amplitude * (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / sampleRate);
+            buffer.setSample (0, i, v);
+            buffer.setSample (1, i, v * rightGain);
+        }
+        return buffer;
+    }
+
+    float rmsOf (const juce::AudioBuffer<float>& b, int channel, double fromSeconds)
+    {
+        const auto from = (int) (fromSeconds * sampleRate);
+        return b.getRMSLevel (channel, from, b.getNumSamples() - from);
+    }
+
+    void testMastering()
+    {
+        std::cout << "\nMastering effects\n";
+
+        const auto set = [] (fx::Module& m, const char* id, float v) { m.findValue (id)->store (v); };
+        const auto make = [&] (fx::ModuleType type)
+        {
+            auto m = fx::createModule (type);
+            for (int v = 0; v < m->getNumValues(); ++v)
+                if (m->isSwitch (v)) { m->getValue (v).store (1.0f); break; }
+            return m;
+        };
+
+        {
+            auto mb = make (fx::ModuleType::multiband);
+            set (*mb, "mbLowThreshold", 0.0f); set (*mb, "mbMidThreshold", 0.0f); set (*mb, "mbHighThreshold", 0.0f);
+            bool flat = true;
+            for (const auto hz : { 60.0, 200.0, 700.0, 3000.0, 9000.0 })
+            {
+                const auto in = stereoSine (hz, 0.1f, 0.5);
+                const auto out = runModule (*mb, in);
+                const auto db = juce::Decibels::gainToDecibels (rmsOf (out, 0, 0.2) / rmsOf (in, 0, 0.2));
+                flat = flat && std::abs (db) < 0.1f;
+            }
+            check (flat, "multiband: below threshold, the three bands add back up flat");
+
+            set (*mb, "mbLowThreshold", -30.0f); set (*mb, "mbRatio", 4.0f);
+            const auto loudBass = runModule (*mb, stereoSine (60.0, 0.5f, 0.6));
+            auto readings = std::make_unique<juce::DynamicObject>();
+            mb->addReadings (*readings);
+            const auto bands = readings->getProperty ("bands");
+            const auto bassDb = juce::Decibels::gainToDecibels (rmsOf (loudBass, 0, 0.3) / (0.5f / std::sqrt (2.0f)));
+            check (bassDb < -8.0f && (float) bands[0] > 8.0f && (float) bands[2] < 0.5f,
+                   "multiband: a loud bass is compressed in its own band (" + juce::String (bassDb, 1) + " dB)");
+            const auto treble = runModule (*mb, stereoSine (5000.0, 0.5f, 0.6));
+            check (std::abs (juce::Decibels::gainToDecibels (rmsOf (treble, 0, 0.3) / (0.5f / std::sqrt (2.0f)))) < 0.5f,
+                   "multiband: the high band is left alone");
+        }
+
+        {
+            auto lim = make (fx::ModuleType::limiter);
+            set (*lim, "limCeiling", -1.0f);
+            const auto in = stereoSine (100.0, 2.0f, 0.5);
+            const auto out = runModule (*lim, in);
+            const auto ceiling = juce::Decibels::decibelsToGain (-1.0f);
+            const auto peak = out.getMagnitude (0, out.getNumSamples());
+            check (peak <= ceiling + 1.0e-5f && rmsOf (out, 0, 0.2) > 0.5f * ceiling,
+                   "limiter: a +6 dBFS signal never passes the -1 dB ceiling (peak " + juce::String (juce::Decibels::gainToDecibels (peak), 2) + " dB)");
+
+            auto clean = make (fx::ModuleType::limiter);
+            const auto quiet = stereoSine (440.0, 0.25f, 0.2);
+            const auto passed = runModule (*clean, quiet);
+            const auto latency = clean->getLatencySamples();
+            float worst = 0.0f;
+            for (int i = 0; i < quiet.getNumSamples() - latency; ++i)
+                worst = juce::jmax (worst, std::abs (passed.getSample (0, i + latency) - quiet.getSample (0, i)));
+            check (latency > 0 && latency < 200 && worst < 1.0e-6f, "limiter: below the ceiling it only delays by its look-ahead (" + juce::String (latency) + " samples)");
+
+            set (*clean, "limOn", 0.0f);
+            check (clean->getLatencySamples() == 0, "limiter: no delay while off");
+        }
+
+        {
+            auto eq = make (fx::ModuleType::masterEq);
+            set (*eq, "meqLowGain", 6.0f); set (*eq, "meqLowFreq", 100.0f);
+            const auto low = runModule (*eq, stereoSine (30.0, 0.1f, 1.0));
+            const auto mid = runModule (*eq, stereoSine (2000.0, 0.1f, 0.5));
+            const auto lowDb = juce::Decibels::gainToDecibels (rmsOf (low, 0, 0.5) / (0.1f / std::sqrt (2.0f)));
+            const auto midDb = juce::Decibels::gainToDecibels (rmsOf (mid, 0, 0.2) / (0.1f / std::sqrt (2.0f)));
+            check (lowDb > 4.0f && lowDb < 6.5f && std::abs (midDb) < 0.3f, "mastering EQ: low shelf +6 dB lifts the lows only");
+        }
+
+        {
+            auto img = make (fx::ModuleType::imager);
+            set (*img, "imgWidth", 0.0f); set (*img, "imgMonoBelow", 0.0f);
+            const auto wide = stereoSine (1000.0, 0.3f, 0.3, -0.5f);
+            const auto mono = runModule (*img, wide);
+            float diff = 0.0f;
+            for (int i = 0; i < mono.getNumSamples(); ++i)
+                diff = juce::jmax (diff, std::abs (mono.getSample (0, i) - mono.getSample (1, i)));
+            check (diff < 1.0e-6f, "imager: width 0% folds to mono");
+
+            set (*img, "imgWidth", 100.0f);
+            const auto same = runModule (*img, wide);
+            diff = 0.0f;
+            for (int i = 0; i < same.getNumSamples(); ++i)
+                diff = juce::jmax (diff, std::abs (same.getSample (1, i) - wide.getSample (1, i)));
+            check (diff < 1.0e-5f, "imager: width 100% with mono bass off leaves the sound as it is");
+
+            set (*img, "imgMonoBelow", 150.0f);
+            const auto bass = runModule (*img, stereoSine (40.0, 0.3f, 1.0, -1.0f)); // all side
+            check (rmsOf (bass, 0, 0.5) < 0.3f / std::sqrt (2.0f) * 0.1f, "imager: side content below the mono frequency is removed");
+        }
+
+        {
+            auto loud = make (fx::ModuleType::loudness);
+            const auto in = stereoSine (1000.0, juce::Decibels::decibelsToGain (-20.0f), 4.0);
+            const auto out = runModule (*loud, in);
+            auto readings = std::make_unique<juce::DynamicObject>();
+            loud->addReadings (*readings);
+            const auto m = (float) readings->getProperty ("momentary"), st = (float) readings->getProperty ("shortTerm"),
+                       integrated = (float) readings->getProperty ("integrated");
+            float diff = 0.0f;
+            for (int i = 0; i < out.getNumSamples(); ++i)
+                diff = juce::jmax (diff, std::abs (out.getSample (0, i) - in.getSample (0, i)));
+            check (std::abs (m + 20.0f) < 0.3f && std::abs (st + 20.0f) < 0.3f && std::abs (integrated + 20.0f) < 0.3f && diff == 0.0f,
+                   "loudness meter: a -20 dBFS 1 kHz tone on both channels reads -20 LUFS (M " + juce::String (m) + ", S " + juce::String (st)
+                       + ", I " + juce::String (integrated) + ") and the sound is untouched");
+        }
+
+        {
+            daw::Edit edit;
+            const auto limiter = edit.addInsert (daw::Edit::masterId, fx::ModuleType::limiter);
+            check ((float) limiter["limOn"] == 1.0f && daw::Edit::moduleTypeFromKey ("loudness").has_value(),
+                   "mastering effects go on the master like any insert");
+        }
+    }
+
     void testDawEngine()
     {
         std::cout << "\nDAW engine (tracks, inserts, master bus)\n";
@@ -4619,6 +4769,7 @@ int main()
     testMultitrack();
     testDawEngine();
     testReturns();
+    testMastering();
     testDawRecording();
     testMidiTracks();
     testPluginHosting();

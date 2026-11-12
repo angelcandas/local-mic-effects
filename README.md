@@ -97,6 +97,11 @@ tracks instead of one live chain:
   **Pre** in the Effects panel), and an output picker that can play the whole track into a return
   instead of the master (a group bus). **+ Return…** adds more (Echo, Doubler, Flanger, Phaser or
   empty); returns have their own inserts, pan, mute and solo.
+- **Mastering effects** (DAW only, under *Mastering* in Add effect and the library): **Mastering
+  EQ** (low cut, shelves, one wide bell, air), **Multiband Compressor** (three bands with their
+  own thresholds and live gain reduction), **Stereo Imager** (width with mono bass, correlation
+  readout), **Limiter** (look-ahead brickwall: drive, ceiling, release) and a **Loudness Meter**
+  (momentary, short-term and integrated LUFS against a target). Put them on the master.
 - **Recording is always dry.** Arm one or more tracks and press **Rec** (or **R**). The take is the
   unprocessed mic; the track's inserts play on top, so you can change the effects afterwards.
   Optional click and count-in; the take is shifted by the audio round-trip latency.

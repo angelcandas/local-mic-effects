@@ -526,7 +526,7 @@ class InsertCard {
     const main = parts[0];
     const category = CATEGORIES[main?.category] ?? CATEGORIES.cleanup;
 
-    this.element = html("section", insert.type === "pitch" || insert.type === "paraEq" ? "insert is-wide" : "insert");
+    this.element = html("section", ["pitch", "paraEq", "multiband", "masterEq"].includes(insert.type) ? "insert is-wide" : "insert");
     this.element.style.setProperty("--cat", category.color);
 
     const head = html("header", "insert-head");
