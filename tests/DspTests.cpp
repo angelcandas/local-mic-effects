@@ -2700,6 +2700,139 @@ namespace
         }
     }
     //==========================================================================
+    void testMidiLearn()
+    {
+        std::cout << "\nMIDI learn (Live mode)\n";
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& map = processor.getMidiMap();
+        auto& state = processor.getState();
+        juce::AudioBuffer<float> buffer (2, blockSize);
+
+        // One block with these MIDI messages, then the message thread's turn.
+        const auto send = [&] (std::initializer_list<juce::MidiMessage> messages)
+        {
+            juce::MidiBuffer midi;
+            for (const auto& m : messages)
+                midi.addEvent (m, 0);
+            buffer.clear();
+            processor.processBlock (buffer, midi);
+            map.drain();
+        };
+        const auto value = [&] (const char* id) { return state.getParameter (id)->getValue(); };
+        const auto setValue = [&] (const char* id, float v) { state.getParameter (id)->setValueNotifyingHost (v); };
+        using Source = MidiMap::Source;
+
+        check (processor.acceptsMidi(), "MicFX takes MIDI input (for MIDI learn)");
+
+        // Learning: the next CC is mapped to what was clicked.
+        juce::String learned;
+        map.onLearned = [&] (const MidiMap::Mapping& m) { learned = m.target + " = " + MidiMap::describe (m); };
+        map.learn ("param:satDrive");
+        send ({ juce::MidiMessage::controllerEvent (1, 21, 20) });
+        check (learned == juce::String (juce::CharPointer_UTF8 ("param:satDrive = CC 21 \xc2\xb7 ch 1")) && map.getLearnTarget().isEmpty() && map.getMappings().size() == 1,
+               "learn maps the next CC to the clicked control (" + learned + ")");
+
+        // A knob picks up instead of jumping.
+        setValue ("satDrive", 0.5f);
+        send ({ juce::MidiMessage::controllerEvent (1, 21, 10) });
+        check (std::abs (value ("satDrive") - 0.5f) < 1e-3f, "a knob far from the value doesn't move it");
+        send ({ juce::MidiMessage::controllerEvent (1, 21, 70) });
+        check (std::abs (value ("satDrive") - 70.0f / 127.0f) < 0.01f, "once it passes the value it takes over");
+        send ({ juce::MidiMessage::controllerEvent (1, 21, 127) });
+        check (value ("satDrive") > 0.99f, "and follows the knob");
+        setValue ("satDrive", 0.2f);
+        send ({ juce::MidiMessage::controllerEvent (1, 21, 120) });
+        check (std::abs (value ("satDrive") - 0.2f) < 1e-3f, "moved on screen, the knob has to pick it up again");
+        send ({ juce::MidiMessage::controllerEvent (1, 2, 10) });
+        check (std::abs (value ("satDrive") - 0.2f) < 1e-3f, "other CCs and channels are ignored");
+
+        // Keys and pedals on switches, choices and knobs.
+        map.setMappings ({ { Source::note, 1, 60, "param:reverbOn" }, { Source::cc, 1, 64, "param:delayOn" },
+                           { Source::program, 1, 3, "param:filterType" }, { Source::cc, 1, 22, "param:filterType" } });
+        const auto reverbWas = value ("reverbOn") > 0.5f;
+        send ({ juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100) });
+        const auto flipped = (value ("reverbOn") > 0.5f) != reverbWas;
+        send ({ juce::MidiMessage::noteOff (1, 60) });
+        check (flipped && (value ("reverbOn") > 0.5f) != reverbWas, "a key flips a switch (the release does nothing)");
+        const auto echoWas = value ("delayOn") > 0.5f;
+        send ({ juce::MidiMessage::controllerEvent (1, 64, 127) });
+        const auto pressedOnce = (value ("delayOn") > 0.5f) != echoWas;
+        send ({ juce::MidiMessage::controllerEvent (1, 64, 0) });
+        const auto releasedSame = (value ("delayOn") > 0.5f) != echoWas;
+        send ({ juce::MidiMessage::controllerEvent (1, 64, 127) });
+        check (pressedOnce && releasedSame && (value ("delayOn") > 0.5f) == echoWas, "a pedal flips it on each press");
+        auto* filterType = dynamic_cast<juce::AudioParameterChoice*> (state.getParameter ("filterType"));
+        const auto indexWas = filterType->getIndex();
+        send ({ juce::MidiMessage::programChange (1, 3) });
+        check (filterType->getIndex() == (indexWas + 1) % 3, "a program change steps through a choice");
+        send ({ juce::MidiMessage::controllerEvent (1, 22, 127) });
+        check (filterType->getIndex() == 2, "a CC picks a choice by position");
+
+        // Actions.
+        const auto presetWas = processor.getCurrentProgram();
+        map.setMappings ({ { Source::program, 1, 10, "action:preset.next" }, { Source::note, 2, 36, "action:mute" },
+                           { Source::note, 1, 38, "action:record" } });
+        send ({ juce::MidiMessage::programChange (1, 10) });
+        check (processor.getCurrentProgram() == (presetWas + 1) % processor.getNumPrograms(), "an action steps to the next preset");
+        send ({ juce::MidiMessage::noteOn (2, 36, (juce::uint8) 90) });
+        check (processor.outputMuted.load(), "a pad mutes the output");
+        send ({ juce::MidiMessage::noteOn (2, 36, (juce::uint8) 90) });
+        check (! processor.outputMuted.load(), "and unmutes it");
+        juce::String action;
+        map.onAction = [&] (const juce::String& a) { action = a; };
+        send ({ juce::MidiMessage::noteOn (1, 38, (juce::uint8) 90) });
+        check (action == "record", "actions for the page are passed on");
+
+        // A looper footswitch acts on the audio thread, in the block it arrives in.
+        auto& looper = processor.getLooper();
+        map.setMappings ({ { Source::cc, 1, 80, "action:looper.main" }, { Source::cc, 1, 81, "action:looper.undo" } });
+        {
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::controllerEvent (1, 80, 127), 0);
+            buffer.clear();
+            processor.processBlock (buffer, midi);
+        }
+        check (looper.getState() == Looper::State::recording && looper.getPosition() == blockSize,
+               "a looper pedal starts recording in the same block, no message thread needed");
+        send ({ juce::MidiMessage::controllerEvent (1, 80, 0) });
+        check (looper.getState() == Looper::State::recording, "its release does nothing");
+        playSilence (processor, (int) (0.5 * sampleRate) / blockSize);
+        send ({ juce::MidiMessage::controllerEvent (1, 80, 127) });
+        check (looper.getState() == Looper::State::playing, "the next press closes the loop");
+        send ({ juce::MidiMessage::controllerEvent (1, 81, 127) });
+        check (looper.getState() == Looper::State::playing && looper.getNumLayers() == 1, "undo on the first layer leaves it");
+
+        // Learning replaces what the source or the target had.
+        map.learn ("action:looper.stop");
+        send ({ juce::MidiMessage::controllerEvent (1, 81, 127) });
+        const auto mappings = map.getMappings();
+        check (mappings.size() == 2 && mappings.back().target == "action:looper.stop" && mappings.back().number == 81,
+               "learning a used pedal moves it to the new target");
+        check (looper.getState() == Looper::State::playing, "a pedal pressed while learning only teaches");
+
+        // Saved and loaded.
+        const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-midi", ".json");
+        {
+            Looper other;
+            MidiMap saved (state, other, file);
+            saved.setMappings (map.getMappings());
+        }
+        {
+            Looper other;
+            MidiMap loaded (state, other, file);
+            const auto back = loaded.getMappings();
+            check (back.size() == 2 && back[1].target == "action:looper.stop" && back[1].source == Source::cc && back[1].channel == 1,
+                   "mappings are saved to their file and read back");
+        }
+        file.deleteFile();
+        map.clear();
+        map.onLearned = nullptr;
+        map.onAction = nullptr;
+        processor.outputMuted = false;
+    }
+    //==========================================================================
     // Renders `seconds` of the engine in device-sized blocks; returns {left, right}.
     std::array<std::vector<float>, 2> render (daw::DawEngine& engine, double seconds)
     {
@@ -7601,6 +7734,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "looper")
     {
         testLooper();
+        testMidiLearn();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -7622,6 +7756,7 @@ int main()
     testRecorder();
     testMultitrack();
     testLooper();
+    testMidiLearn();
     testDawEngine();
     testReturns();
     testGroups();

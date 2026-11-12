@@ -19,7 +19,7 @@ juce_add_plugin(MicFX
     FORMATS Standalone AU VST3
     PRODUCT_NAME "MicFX"
     IS_SYNTH FALSE
-    NEEDS_MIDI_INPUT FALSE
+    NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS FALSE
@@ -49,6 +49,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/pianoroll.js
         ui/takes.js
         ui/looper.js
+        ui/midilearn.js
         ui/daw.css
         ui/aiviews.css
         ui/aiviews.js
@@ -93,6 +94,8 @@ set(MICFX_DSP_SOURCES
     src/Recorder.cpp
     src/Looper.cpp
     src/Looper.h
+    src/MidiMap.cpp
+    src/MidiMap.h
     src/Multitrack.cpp
     src/daw/AudioPool.cpp
     src/daw/DawEngine.cpp
