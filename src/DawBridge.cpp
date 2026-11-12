@@ -435,6 +435,7 @@ juce::var DawBridge::describeSession()
                               { "mute", (bool) track[ids::mute] }, { "solo", (bool) track[ids::solo] },
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
                               { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) }, { "automation", describeAutomation (track) },
+                              { "link", daw::Edit::getLink (track) },
                               { "inserts", describeInserts (track) }, { "clips", clips },
                               { "output", daw::Edit::getTrackOutput (track) }, { "sends", describeSends (track) },
                               { "kind", daw::Edit::isMidiTrack (track) ? "midi" : "audio" },
@@ -2244,6 +2245,24 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         complete (object ({ { "ok", true }, { "hits", list } }));
         return;
     }
+
+    // Linked tracks warp as one (args.tracks: ids to link together); unlinkTrack takes one off.
+    if (command == "linkTracks")
+    {
+        juce::Array<int> tracks;
+        if (const auto* list = args["tracks"].getArray())
+            for (const auto& t : *list)
+                tracks.add ((int) t);
+        if (tracks.size() < 2)
+        {
+            complete (error ("Pick at least two audio tracks to link."));
+            return;
+        }
+        edit.linkTracks (tracks);
+        ok();
+        return;
+    }
+    if (command == "unlinkTrack") { edit.unlinkTrack (arg (args, "track", -1)); ok(); return; }
 
     // Back to the audio as recorded (time only; transposes stay).
     if (command == "clearWarp")

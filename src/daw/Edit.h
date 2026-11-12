@@ -83,7 +83,7 @@ namespace ids
     MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns)
-    MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo)
+    MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
 #undef MICFX_DAW_ID
 }
 
@@ -298,6 +298,18 @@ public:
     // The free warp's markers with their targets in rendered time, for the warp tool.
     static std::vector<warp::Marker> getShownWarp (const juce::ValueTree& clip);
 
+    //==============================================================================
+    // Linked tracks warp as one, for recordings made together (the mics of a drum kit, a
+    // stereo pair on two tracks). Tracks with the same `link` number are linked. A clip's
+    // partners are the clips on its linked tracks that start their file at the same moment
+    // (within 1 ms) and overlap it. Warping, quantizing, musical mode, the algorithm and
+    // moving a clip apply to its partners too, and they render together so every mic gets
+    // the same timing and phase decisions (see warp::Settings::linked).
+    void linkTracks (const juce::Array<int>& trackIds); // joins any group one of them is in
+    void unlinkTrack (int trackId);
+    static int getLink (const juce::ValueTree& track) { return (int) track.getProperty (ids::link, 0); }
+    static juce::Array<juce::ValueTree> getLinkedClips (const juce::ValueTree& clip);
+
     // What the clip's rendered copy needs: its warp map and its transpose plus its track's.
     static warp::Settings getWarpSettings (const juce::ValueTree& clip);
 
@@ -330,6 +342,10 @@ public:
 
 private:
     int takeNextId();
+
+    // Runs `apply` for each of a clip's linked partners (not again from inside it).
+    void forPartners (int clipId, const std::function<void (int)>& apply);
+    bool propagating = false;
 
     // Moves and resizes a clip so its window shows the same stretch of the file after its
     // effective map changes from `before`, keeping where the file's start sits.

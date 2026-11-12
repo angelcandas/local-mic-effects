@@ -36,7 +36,8 @@ public:
     // background thread like a decode; onLoaded fires when it's ready. Neutral settings
     // give the plain file. Rendered copies stay cached while something uses them: call
     // releaseUnusedWarps() with the keys in use, and the rest go (the newest few are
-    // kept, so undo doesn't render again).
+    // kept, so undo doesn't render again). Linked settings render every linked file in
+    // one go and keep each one's copy.
     Audio get (const juce::File&, const warp::Settings&);
     Audio loadNow (const juce::File&, const warp::Settings&);
     static juce::String getWarpKey (const juce::File&, const warp::Settings&);
@@ -49,6 +50,8 @@ public:
     std::function<void (const juce::String&)> onError;
 
 private:
+    Audio getLinked (const juce::File&, const warp::Settings&);
+    void installWarp (const juce::String& key, juce::AudioBuffer<float>&&);
     void install (const juce::String& path, double rate, juce::AudioBuffer<float>&&, const juce::String& error);
 
     double sampleRate = 48000.0;

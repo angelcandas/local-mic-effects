@@ -201,7 +201,26 @@ Result quantizeClips (Edit& edit, AudioPool& pool, const juce::Array<int>& clipI
             return true;
         };
 
-        const auto onsets = analysis::rhythm::findOnsets (*source, rate, from, to, options.sensitivity);
+        // Linked tracks: the note starts of all the mics together, so every mic moves the
+        // same way (the partners get this warp too).
+        auto heard = source;
+        if (const auto partners = Edit::getLinkedClips (edit.getClip (group.clips.getFirst())); ! partners.isEmpty())
+        {
+            auto mix = std::make_shared<juce::AudioBuffer<float>> (1, source->getNumSamples());
+            mix->clear();
+            const auto add = [&mix] (const juce::AudioBuffer<float>& audio)
+            {
+                for (int ch = 0; ch < audio.getNumChannels(); ++ch)
+                    mix->addFrom (0, 0, audio, ch, 0, juce::jmin (audio.getNumSamples(), mix->getNumSamples()));
+            };
+            add (*source);
+            for (const auto& partner : partners)
+                if (const auto audio = pool.loadNow (juce::File (partner[ids::file].toString())); audio != nullptr)
+                    add (*audio);
+            heard = mix;
+        }
+
+        const auto onsets = analysis::rhythm::findOnsets (*heard, rate, from, to, options.sensitivity);
         std::vector<double> found;
         for (const auto& onset : onsets)
             if (inWindow (onset.time))
