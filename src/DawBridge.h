@@ -42,6 +42,10 @@ public:
 
     static bool isAvailable(); // DAW mode is a standalone-app feature
 
+    // The audio interface's open inputs by name, in the order the engine gets them (set
+    // by the app's editor). Without it, "Input 1", "Input 2"... from the processor.
+    std::function<juce::StringArray()> inputNames;
+
     // What the file commands do once a file is picked (public for the tests, which can't
     // click through a file chooser). Each returns { ok, error, ... } like handle().
     juce::var openProject (const juce::File& picked);       // a project folder, or any file in one
@@ -133,7 +137,9 @@ private:
     // were last tick (a change redraws the session and closes stale windows).
     std::map<int, std::unique_ptr<juce::Component>> instrumentWindows;
     juce::String instrumentsSeen;
-    int scanTicks = 0;
+    int scanTicks = 0, inputTicks = 0;
+    juce::StringArray lastInputNames;
+    juce::StringArray getInputNames() const;
     std::map<juce::String, juce::var> peakCache;
 
     // A running export (at most one).

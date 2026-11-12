@@ -36,7 +36,6 @@ DawEngine::DawEngine (Edit& e, bool isRealtime) : edit (e), realtime (isRealtime
 {
     pool.setSampleRate (sampleRate);
     pool.onLoaded = [this] { triggerAsyncUpdate(); };
-    recorder.prepare (sampleRate, 1);
     liveMidi.ensureSize (4096);
 
     edit.getState().addListener (this);
@@ -81,7 +80,16 @@ void DawEngine::prepare (double newSampleRate, int maximumBlockSize)
     }
 
     blockSize = juce::jmax (1, maximumBlockSize);
-    recorder.prepare (sampleRate, 1); // stops (and keeps) a take in progress
+    if ((int) silence.size() < blockSize)
+        silence.assign ((size_t) blockSize, 0.0f);
+    // Stops (and keeps) a take in progress.
+    for (auto& take : takes)
+    {
+        take.on = false;
+        if (take.recorder != nullptr)
+            take.recorder->stop();
+    }
+    recordingAudio = false;
     countingIn = false;
     recordingMidi = false;
     updateTempo();
@@ -173,10 +181,13 @@ void DawEngine::forEachInsert (int trackId, const std::function<void (int, fx::M
             visit (insertId, *module);
 }
 
-float DawEngine::takePeak (int trackId)
+std::pair<float, float> DawEngine::takePeaks (int trackId)
 {
     const auto it = strips.find (trackId);
-    return it != strips.end() ? it->second->peak.exchange (0.0f) : 0.0f;
+    if (it == strips.end())
+        return { 0.0f, 0.0f };
+
+    return { it->second->peakLeft.exchange (0.0f), it->second->peakRight.exchange (0.0f) };
 }
 
 //==============================================================================
@@ -256,7 +267,8 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     if (tree.hasType (ids::TRACK) || tree.hasType (ids::MASTER) || tree.hasType (ids::RETURN))
     {
         if (property == ids::volume || property == ids::pan || property == ids::mute || property == ids::solo
-            || property == ids::monitor || property == ids::arm || property == ids::inGain || property == ids::outGain)
+            || property == ids::monitor || property == ids::arm || property == ids::inGain || property == ids::outGain
+            || property == ids::inputLeft || property == ids::inputRight)
             updateMix();
         else if (property == ids::kind)
             triggerAsyncUpdate();
@@ -316,6 +328,9 @@ void DawEngine::updateMix()
             it->second->targetDirect = Edit::getTrackOutput (track) != Edit::masterId || ! anyReturnSolo || (bool) track[ids::solo] ? 1.0f : 0.0f;
             // MIDI tracks play the MIDI input when armed too, so you hear what you record.
             it->second->monitoring = (bool) track[ids::monitor] || (Edit::isMidiTrack (track) && (bool) track[ids::arm]);
+            const auto input = Edit::getTrackInput (track);
+            it->second->inputLeft = input.left;
+            it->second->inputRight = input.right;
         }
 
         for (const auto& send : track)
@@ -705,8 +720,45 @@ juce::String DawEngine::startRecording (const juce::File& folder)
         return "Arm a track to record on first.";
 
     if (armedAudio)
-        if (const auto error = recorder.start (folder, false); error.isNotEmpty())
-            return error;
+    {
+        // One take per input the armed tracks use: tracks on the same input share it.
+        std::vector<Edit::Input> inputs;
+        for (const auto& track : tracks)
+            if ((bool) track[ids::arm] && ! Edit::isMidiTrack (track))
+                if (const auto input = Edit::getTrackInput (track); input.left != Edit::noInput
+                      && std::find (inputs.begin(), inputs.end(), input) == inputs.end())
+                    inputs.push_back (input);
+
+        if (inputs.empty())
+            return "The armed tracks have no input. Pick one in the track's Input.";
+        if ((int) inputs.size() > maxTakes)
+            return "Too many different inputs to record at once (" + juce::String (maxTakes) + " at most).";
+
+        for (size_t i = 0; i < inputs.size(); ++i)
+        {
+            auto& take = takes[i];
+            if (take.recorder == nullptr)
+                take.recorder = std::make_unique<Recorder>();
+
+            take.input = inputs[i];
+            take.recorder->prepare (sampleRate, inputs[i].isStereo() ? 2 : 1);
+
+            const auto label = "In " + juce::String (inputs[i].left + 1) + (inputs[i].isStereo() ? "-" + juce::String (inputs[i].right + 1) : juce::String());
+            if (const auto error = take.recorder->start (folder, false, inputs.size() > 1 ? label : juce::String()); error.isNotEmpty())
+            {
+                for (size_t j = 0; j < i; ++j)
+                {
+                    takes[j].on = false;
+                    takes[j].recorder->stop().file.deleteFile();
+                }
+                return error;
+            }
+            take.on = true;
+        }
+
+        numTakes = (int) inputs.size();
+        recordingAudio = true;
+    }
 
     drainRecordedMidi();
     recordedMidi.clear();
@@ -742,9 +794,32 @@ Recorder::Take DawEngine::stopRecording()
     const auto wasRecordingMidi = recordingMidi.exchange (false);
     drainRecordedMidi();
 
-    const auto wasRecording = recorder.isRecording();
-    auto take = recorder.stop();
-    const auto hasAudio = wasRecording && take.file.existsAsFile() && take.seconds > 0.0;
+    // The audio takes, by the input they recorded.
+    const auto wasRecording = recordingAudio.exchange (false);
+    std::vector<std::pair<Edit::Input, Recorder::Take>> audioTakes;
+    Recorder::Take take;
+
+    for (int i = 0; i < numTakes.load(); ++i)
+    {
+        auto& slot = takes[(size_t) i];
+        const auto wasOn = slot.on.exchange (false);
+        if (slot.recorder == nullptr)
+            continue;
+
+        const auto recorded = slot.recorder->isRecording();
+        auto result = slot.recorder->stop();
+
+        if (wasRecording && wasOn && recorded && result.file.existsAsFile() && result.seconds > 0.0)
+        {
+            if (audioTakes.empty())
+                take = result;
+            take.droppedAudio = take.droppedAudio || result.droppedAudio;
+            audioTakes.emplace_back (slot.input, result);
+        }
+    }
+    numTakes = 0;
+
+    const auto hasAudio = ! audioTakes.empty();
 
     // The notes played, from the MIDI events: times in seconds from the record start,
     // moved earlier by the output latency (the keys were played to what was heard). Held
@@ -830,19 +905,22 @@ Recorder::Take DawEngine::stopRecording()
         return take;
     }
 
-    // Where the first sample was heard: the playhead minus the interface's round trip.
-    auto start = (double) (take.timelineStart - recordingLatency.load()) / sampleRate;
-    auto offset = 0.0;
-
-    if (start < 0.0)
+    for (const auto& [input, recorded] : audioTakes)
     {
-        offset = -start;
-        start = 0.0;
-    }
+        // Where the first sample was heard: the playhead minus the interface's round trip.
+        auto start = (double) (recorded.timelineStart - recordingLatency.load()) / sampleRate;
+        auto offset = 0.0;
 
-    for (const auto& track : edit.getTracks())
-        if ((bool) track[ids::arm] && ! Edit::isMidiTrack (track))
-            edit.addClip ((int) track[ids::id], take.file, start, take.seconds - offset, offset);
+        if (start < 0.0)
+        {
+            offset = -start;
+            start = 0.0;
+        }
+
+        for (const auto& track : edit.getTracks())
+            if ((bool) track[ids::arm] && ! Edit::isMidiTrack (track) && Edit::getTrackInput (track) == input)
+                edit.addClip ((int) track[ids::id], recorded.file, start, recorded.seconds - offset, offset);
+    }
 
     edit.getUndoManager().beginNewTransaction();
     return take;
@@ -1044,7 +1122,8 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce
 }
 
 void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int outputOffset, int numChannels,
-                             int numSamples, const float* input, const juce::MidiBuffer* midi, int midiOffset) noexcept
+                             int numSamples, const float* const* inputs, int numInputs, const juce::MidiBuffer* midi,
+                             int midiOffset) noexcept
 {
     const auto isPlaying = playing.load();
     const auto blockStart = position.load();
@@ -1053,16 +1132,32 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     if (isPlaying && countingIn.load() && blockStart + numSamples > recordStart.load())
         countingIn = false;
 
-    // The dry take: the raw mic from the record start on (not during the count-in).
-    if (isPlaying && input != nullptr && recorder.isRecording())
+    // An input's samples, or silence for one the interface doesn't have.
+    const auto inputChannel = [&] (int index) -> const float*
+    {
+        return index >= 0 && index < numInputs && inputs[index] != nullptr ? inputs[index] : nullptr;
+    };
+
+    // The dry takes: the raw inputs from the record start on (not during the count-in).
+    if (isPlaying && recordingAudio.load())
     {
         const auto start = recordStart.load();
         const auto skip = (int) juce::jlimit ((juce::int64) 0, (juce::int64) numSamples, start - blockStart);
 
         if (skip < numSamples)
         {
-            const float* channels[] = { input + skip };
-            recorder.write (channels, nullptr, numSamples - skip, blockStart + skip);
+            for (int t = 0; t < numTakes.load (std::memory_order_acquire); ++t)
+            {
+                auto& take = takes[(size_t) t];
+                if (! take.on.load (std::memory_order_acquire))
+                    continue;
+
+                const auto* left = inputChannel (take.input.left);
+                const auto* right = inputChannel (take.input.right);
+                const float* channels[] = { left != nullptr ? left + skip : silence.data(),
+                                            right != nullptr ? right + skip : silence.data() };
+                take.recorder->write (channels, nullptr, numSamples - skip, blockStart + skip);
+            }
         }
     }
 
@@ -1118,11 +1213,18 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         if (strip.isMidi)
             renderInstrument (track, isPlaying, fresh, blockStart, numSamples, midi, midiOffset);
 
-        // Live mic after the delay line: monitoring shouldn't wait for compensation.
-        else if (input != nullptr && strip.monitoring.load (std::memory_order_relaxed))
+        // Live input after the delay line: monitoring shouldn't wait for compensation. A
+        // mono input plays on both sides, a stereo one left and right.
+        else if (numInputs > 0 && strip.monitoring.load (std::memory_order_relaxed))
         {
-            strip.buffer.addFrom (0, 0, input, numSamples);
-            strip.buffer.addFrom (1, 0, input, numSamples);
+            const auto* left = inputChannel (strip.inputLeft.load (std::memory_order_relaxed));
+            const auto rightIndex = strip.inputRight.load (std::memory_order_relaxed);
+            const auto* right = rightIndex == Edit::noInput ? left : inputChannel (rightIndex);
+
+            if (left != nullptr)
+                strip.buffer.addFrom (0, 0, left, numSamples);
+            if (right != nullptr)
+                strip.buffer.addFrom (1, 0, right, numSamples);
         }
 
         // Effect automation: each value where the timeline is (knob values glide, so a
@@ -1169,7 +1271,8 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         if (! track.sends.empty())
             feedSends (track, false);
 
-        updatePeak (strip.peak, strip.buffer.getMagnitude (0, numSamples));
+        updatePeak (strip.peakLeft, strip.buffer.getMagnitude (0, 0, numSamples));
+        updatePeak (strip.peakRight, strip.buffer.getMagnitude (1, 0, numSamples));
 
         auto& into = track.output >= 0 ? graph.returns[(size_t) track.output].strip->buffer : direct;
         strip.direct.setTargetValue (strip.targetDirect.load (std::memory_order_relaxed));
@@ -1199,7 +1302,8 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         strip.right.setTargetValue (strip.targetRight.load (std::memory_order_relaxed));
         strip.buffer.applyGainRamp (0, 0, numSamples, strip.left.getCurrentValue(), strip.left.skip (numSamples));
         strip.buffer.applyGainRamp (1, 0, numSamples, strip.right.getCurrentValue(), strip.right.skip (numSamples));
-        updatePeak (strip.peak, strip.buffer.getMagnitude (0, numSamples));
+        updatePeak (strip.peakLeft, strip.buffer.getMagnitude (0, 0, numSamples));
+        updatePeak (strip.peakRight, strip.buffer.getMagnitude (1, 0, numSamples));
 
         bus.delay.process (strip.buffer, numSamples);
         master.buffer.addFrom (0, 0, strip.buffer, 0, 0, numSamples);
@@ -1220,7 +1324,8 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     master.right.setTargetValue (master.targetRight.load (std::memory_order_relaxed));
     master.buffer.applyGainRamp (0, 0, numSamples, master.left.getCurrentValue(), master.left.skip (numSamples));
     master.buffer.applyGainRamp (1, 0, numSamples, master.right.getCurrentValue(), master.right.skip (numSamples));
-    updatePeak (master.peak, master.buffer.getMagnitude (0, numSamples));
+    updatePeak (master.peakLeft, master.buffer.getMagnitude (0, 0, numSamples));
+    updatePeak (master.peakRight, master.buffer.getMagnitude (1, 0, numSamples));
 
     if (numChannels == 1)
     {
@@ -1243,6 +1348,15 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int numSamples, const float* input,
                          const juce::MidiBuffer* midiIn) noexcept
 {
+    const float* inputs[] = { input };
+    process (output, numChannels, numSamples, inputs, input != nullptr ? 1 : 0, midiIn);
+}
+
+void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int numSamples, const float* const* inputs,
+                         int numInputs, const juce::MidiBuffer* midiIn) noexcept
+{
+    numInputs = juce::jlimit (0, Edit::maxInputs, inputs != nullptr ? numInputs : 0);
+
     // The MIDI input plus anything from addLiveMidi(); held notes for the UI.
     const juce::MidiBuffer* midi = midiIn;
 
@@ -1324,7 +1438,11 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
         if (const auto pos = position.load(); looping && pos < end && pos + chunk > end)
             chunk = (int) (end - pos);
 
-        renderBlock (*active, output, done, numChannels, chunk, input != nullptr ? input + done : nullptr, midi, done);
+        std::array<const float*, Edit::maxInputs> chunkInputs {};
+        for (int i = 0; i < numInputs; ++i)
+            chunkInputs[(size_t) i] = inputs[i] != nullptr ? inputs[i] + done : nullptr;
+
+        renderBlock (*active, output, done, numChannels, chunk, chunkInputs.data(), numInputs, midi, done);
 
         if (looping && position.load() == end)
             position = loopStart.load();
