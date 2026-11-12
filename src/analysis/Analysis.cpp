@@ -223,6 +223,7 @@ Analyser::Analyser (double sampleRate)
     profile.sampleRate = sampleRate;
     kWeighting.setup (sampleRate);
     pitch.prepare (sampleRate);
+    pitch.setAutoAnalyse (false); // once per hop, in endHop()
 
     history.assign ((size_t) fftSize, 0.0f);
     fftData.assign ((size_t) fftSize * 2, 0.0f);
@@ -266,6 +267,7 @@ void Analyser::endHop()
     const auto n = (double) hopSize;
     hopPowers.push_back ((hopWeighted[0] + hopWeighted[1]) / n);
     profile.rmsDb.push_back (toDb (hopSquares / n));
+    pitch.analyseNow();
     profile.pitchHz.push_back (pitch.getFrequency());
     hopWeighted[0] = hopWeighted[1] = hopSquares = 0.0;
     hopFill = 0;
@@ -476,7 +478,7 @@ SessionAnalyser::SessionAnalyser (daw::Edit& edit, Point p, bool mix, double rat
 Profile SessionAnalyser::render (const juce::ValueTree& session, const Progress& progress, double from, double to,
                                  bool& cancelled)
 {
-    constexpr int blockSize = 1024;
+    constexpr int blockSize = 4096;
 
     daw::Edit edit;
     edit.replaceState (session);

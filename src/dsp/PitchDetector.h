@@ -56,13 +56,18 @@ public:
             decimationSum = 0.0f;
             decimationCount = 0;
 
-            if (++samplesSinceAnalysis >= hopSize)
+            if (autoAnalyse && ++samplesSinceAnalysis >= hopSize)
             {
                 samplesSinceAnalysis = 0;
                 analyse();
             }
         }
     }
+
+    // Off: push() only collects the input, and analyseNow() gives an estimate when the
+    // caller wants one (offline analysis, once per 100 ms hop instead of every 5 ms).
+    void setAutoAnalyse (bool shouldAnalyse) noexcept { autoAnalyse = shouldAnalyse; }
+    void analyseNow() noexcept { analyse(); }
 
     // Most recent estimate in Hz, or 0 when the input is silent or unpitched.
     float getFrequency() const noexcept { return frequency; }
@@ -159,5 +164,6 @@ private:
     int writeIndex = 0, decimationCount = 0, samplesSinceAnalysis = 0;
     float decimationSum = 0.0f;
     float frequency = 0.0f;
+    bool autoAnalyse = true;
 };
 } // namespace fx
