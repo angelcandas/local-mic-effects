@@ -1354,6 +1354,16 @@ void DawBridge::replanAutoMix()
                     options.existingInserts[id].push_back ((fx::ModuleType) type);
     }
 
+    // The shared reverb: the first return with a reverb on it.
+    for (const auto& ret : edit.getReturns())
+    {
+        for (const auto& insert : daw::Edit::getInserts (ret))
+            if (insert[ids::type].toString() == fx::getModuleKey (fx::ModuleType::reverb))
+                options.reverbReturn = (int) ret[ids::id];
+        if (options.reverbReturn != 0)
+            break;
+    }
+
     autoMixPlan = analysis::planMix (*autoMixAnalysis, autoMixRoles, volumes,
                                      (float) edit.getMaster().getProperty (ids::volume, 0.0f), autoMixStyle, options);
 }
@@ -1379,6 +1389,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("normalize", autoMixOptions.normalize);
     read ("rides", autoMixOptions.rides);
     read ("colour", autoMixOptions.colour);
+    read ("sends", autoMixOptions.sends);
     read ("split", autoMixSplit);
 }
 
@@ -1428,7 +1439,7 @@ juce::var DawBridge::describeAutoMix() const
 {
     const auto nameOf = [this] (int trackId)
     {
-        return trackId == daw::Edit::masterId ? juce::String ("Master") : edit.getTrack (trackId)[ids::name].toString();
+        return trackId == daw::Edit::masterId ? juce::String ("Master") : edit.getChannel (trackId)[ids::name].toString();
     };
 
     juce::Array<juce::var> tracks, moves, notes;
@@ -1448,7 +1459,9 @@ juce::var DawBridge::describeAutoMix() const
 
     for (const auto& move : autoMixPlan.moves)
     {
-        juce::String effect = ! move.ride.empty() ? "Volume ride" : move.values.count ("inGain") > 0 ? "Normalize" : "Volume";
+        juce::String effect = ! move.ride.empty() ? "Volume ride" : move.values.count ("inGain") > 0 ? "Input gain" : "Volume";
+        if (move.sendTo != 0)
+            effect = "Send to " + edit.getReturn (move.sendTo)[ids::name].toString();
         if (move.insert.has_value())
             effect = *move.insert == fx::ModuleType::paraEq     ? (move.instance > 0 ? "Parametric EQ (hum)" : "Parametric EQ")
                    : *move.insert == fx::ModuleType::gate       ? "Noise gate"
@@ -1475,7 +1488,7 @@ juce::var DawBridge::describeAutoMix() const
                                    { "deEsser", autoMixOptions.deEsser }, { "reverb", autoMixOptions.reverb },
                                    { "saturation", autoMixOptions.saturation }, { "echo", autoMixOptions.echo },
                                    { "exciter", autoMixOptions.exciter }, { "width", autoMixOptions.width },
-                                   { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour },
+                                   { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour }, { "sends", autoMixOptions.sends },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },

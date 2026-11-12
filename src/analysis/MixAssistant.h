@@ -134,6 +134,12 @@ struct MixOptions
     bool colour = true;
     std::set<int> midiTracks; // which tracks are MIDI (by id)
 
+    // Shared reverb: when the session has a return with a reverb (reverbReturn, its id),
+    // the voices and the instruments that want space send to it instead of each getting
+    // its own reverb, so they all sit in one room (set to the style's size).
+    bool sends = true;
+    int reverbReturn = 0;
+
     // Insert types each track already has (by track id). A voice that already has a
     // reverb or an echo keeps its own space: Auto Mix doesn't add or change one.
     std::map<int, std::vector<fx::ModuleType>> existingInserts;
@@ -167,6 +173,7 @@ struct MixMove
                                           // to its chain's input gain "inGain" (dB, normalize)
     bool atEnd = false;              // a new insert goes after the track's own effects (reverb)
     int instance = 0;                // which insert of that type (0: the first; 1: a second one, added if missing)
+    int sendTo = 0;                  // a return's id: values {"send": dB}, the track's send to it (no insert)
     std::map<juce::String, float> values; // insert values by ID, or "volume" in dB
     std::vector<std::pair<double, float>> ride; // volume automation (seconds, dB), when not empty (no insert, no values)
     juce::StringArray reasons;       // one line per change, for the UI
