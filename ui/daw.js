@@ -1616,6 +1616,8 @@ class DawScreen {
       const input = html("input");
       Object.assign(input, { type: "range", min: 0, max: 1000, step: 1 });
       input.addEventListener("input", () => onInput(Number(input.value) / 1000));
+      // Let go of the focus after a drag, so the slider follows zoom from keys and Ctrl+scroll again.
+      input.addEventListener("pointerup", () => setTimeout(() => input.blur(), 0));
       wrapper.append(html("span", "", label), input);
       return [wrapper, input];
     };
@@ -1955,6 +1957,17 @@ class DawScreen {
       this.scrollTo(seconds * this.zoom - anchor);
       this.renderTransport();
     }, { passive: false });
+
+    // A trackpad pinch: Safari's web view (macOS) sends gesture events instead of Ctrl+wheel.
+    let pinchFrom = 1;
+    this.arrange.addEventListener("gesturestart", (event) => { event.preventDefault(); pinchFrom = 1; });
+    this.arrange.addEventListener("gesturechange", (event) => {
+      event.preventDefault();
+      const step = event.scale / pinchFrom;
+      pinchFrom = event.scale;
+      if (Number.isFinite(step) && step > 0) this.setZoom(this.zoom * step);
+    });
+    this.arrange.addEventListener("gestureend", (event) => event.preventDefault());
 
     // The cut tool shows where a click will split.
     this.arrange.addEventListener("pointermove", (event) => {
@@ -3413,7 +3426,8 @@ class DawScreen {
       this.setDockTab(tab.dataset.tab);
       if (this.root.classList.contains("dock-hidden")) this.setDock(true);
     }));
-    const onControl = (event) => event.target === this.dockToggle || event.target.closest(".dock-tab");
+    // The tabs, the fold button and the timeline tools (zoom, fit, follow) are controls, not the drag handle.
+    const onControl = (event) => event.target === this.dockToggle || event.target.closest(".dock-tab, .timeline-tools");
     this.dockToggle.addEventListener("click", () => this.setDock(this.root.classList.contains("dock-hidden")));
     splitter.addEventListener("dblclick", (event) => { if (!onControl(event)) this.setDock(this.root.classList.contains("dock-hidden")); });
     splitter.addEventListener("pointerdown", (event) => {
