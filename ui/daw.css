@@ -1491,6 +1491,51 @@ body.library-dragging * { cursor: grabbing !important; }
 .clip-editor-overlay { position: absolute; inset: 0; pointer-events: none; }
 .clip-editor-overlay .warp-marker { border-left-width: 2px; }
 .clip-editor-hint { flex: none; margin: 0; }
+.clip-editor-bar [hidden], .clip-editor-main > [hidden] { display: none; }
+.clip-editor-views { flex: none; }
+/* Notes need the room: the clip's knobs (Wave view) step aside, and the editor grows. */
+.inspector .clip-editor.is-notes { flex: 3 0 720px; }
+.clip-editor.is-notes .clip-editor-side { display: none; }
+.clip-editor-views .segment.has-edits::after { content: " \2022"; color: var(--accent-2); }
+
+/* The note pitch editor (pitchedit.js): sung notes on a keyboard, with a loudness lane. */
+.note-editor { display: flex; flex: 1; flex-direction: column; gap: 4px; min-height: 150px; outline: none; }
+.note-editor:focus-visible .note-area { border-color: var(--accent-2); }
+.note-editor-bar { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 6px; min-width: 0; }
+.note-editor-bar > .tool { height: 26px; padding: 0 10px; font-size: 11px; }
+.note-tools { display: flex; flex: none; gap: 1px; padding: 2px; border: 1px solid var(--line); border-radius: 8px; background: #0d1016; }
+.note-tool {
+  display: grid;
+  place-items: center;
+  width: 28px;
+  height: 22px;
+  padding: 0;
+  border: 0;
+  border-radius: 6px;
+  background: none;
+  color: var(--muted);
+  cursor: pointer;
+}
+.note-tool:hover { color: var(--text); }
+.note-tool.is-active { background: var(--wave, var(--accent-2)); color: #0b0d12; }
+.note-tool:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+.note-readout { overflow: hidden; min-width: 0; margin-left: 4px; color: var(--muted); font-size: 11px; white-space: nowrap; text-overflow: ellipsis; }
+.note-area, .note-lane {
+  position: relative;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.25);
+  touch-action: none;
+}
+.note-area { flex: 1; min-height: 120px; }
+.note-lane { flex: none; height: 56px; cursor: ns-resize; }
+.note-canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.note-lane-label { position: absolute; top: 3px; left: 4px; color: var(--muted); font-size: 8.5px; text-transform: uppercase; letter-spacing: 0.4px; pointer-events: none; }
+.note-playhead { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px solid var(--accent-2); pointer-events: none; }
+.note-band { position: absolute; border: 1px solid rgba(255, 255, 255, 0.7); border-radius: 2px; background: rgba(255, 255, 255, 0.08); pointer-events: none; }
+.note-message { flex: none; color: var(--muted); font-size: 11px; }
+.note-editor [hidden] { display: none; }
 .rhythm-grid-row { margin-top: 0; }
 .rhythm-grid-row .dropdown { flex: 1 1 0; min-width: 0; }
 
