@@ -50,6 +50,15 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
         }
     }
 
+    // MIDI learn's own actions: step through the factory presets, the panic mute.
+    midiMap.onPresetStep = [this] (int delta)
+    {
+        const auto count = getNumPrograms();
+        if (count > 0)
+            setCurrentProgram (((currentPreset.load() + delta) % count + count) % count);
+    };
+    midiMap.onMuteToggle = [this] { outputMuted = ! outputMuted.load(); };
+
     // Saves and backups keep the instruments' current settings (plugin knobs, sounds).
     dawProject.onBeforeWrite = [this] { dawEngine.captureInstrumentStates(); };
 
@@ -164,6 +173,9 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         updatePeak (outputPeak, buffer.getMagnitude (0, numSamples));
         return;
     }
+
+    // Mapped pedals, knobs and keys (MIDI learn). Looper pedals act before this block's audio.
+    midiMap.process (midi);
 
     // Keep the raw mic for the recorder before anything touches it.
     const auto recording = recorder.isRecording();

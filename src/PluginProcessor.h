@@ -5,6 +5,7 @@
 
 #include "Parameters.h"
 #include "Looper.h"
+#include "MidiMap.h"
 #include "Multitrack.h"
 #include "Recorder.h"
 #include "daw/DawEngine.h"
@@ -41,7 +42,7 @@ public:
     bool hasEditor() const override                       { return true; }
 
     const juce::String getName() const override           { return JucePlugin_Name; }
-    bool acceptsMidi() const override                     { return false; }
+    bool acceptsMidi() const override                     { return true; } // MIDI learn (Live mode), MIDI tracks (DAW)
     bool producesMidi() const override                    { return false; }
     bool isMidiEffect() const override                    { return false; }
     double getTailLengthSeconds() const override          { return 5.0; }
@@ -74,6 +75,9 @@ public:
     // The Live mode looper: records the voice after the effects (before the safety
     // limiter) and plays its layers under it. Its playback is in recorded takes.
     Looper& getLooper() noexcept                            { return looper; }
+
+    // MIDI learn: pedals, knobs and keys on parameters and actions (Live mode).
+    MidiMap& getMidiMap() noexcept                          { return midiMap; }
 
     // Backing track + recorded takes, mixed in after the voice chain (so the music
     // isn't processed or recorded with the voice). Message thread only.
@@ -129,6 +133,8 @@ private:
     Recorder recorder;
     Multitrack multitrack;
     Looper looper;
+    MidiMap midiMap { state, looper, juce::JUCEApplicationBase::isStandaloneApp() || wrapperType != wrapperType_Undefined
+                                         ? MidiMap::getDefaultFile() : juce::File() };
     juce::AudioBuffer<float> loopInput; // the voice before the limiter, for the looper
 
     juce::SharedResourcePointer<daw::PluginHost> pluginHost; // before the engine, which loads instruments through it

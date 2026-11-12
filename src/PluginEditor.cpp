@@ -110,6 +110,21 @@ PluginEditor::PluginEditor (PluginProcessor& p)
         };
    #endif
 
+    // MIDI learn tells the page what it learned, and passes on the actions only the page
+    // can do (record, scenes).
+    {
+        auto& map = processorRef.getMidiMap();
+        map.onLearned = [this] (const MidiMap::Mapping& m)
+        {
+            auto* learned = new juce::DynamicObject();
+            learned->setProperty ("target", m.target);
+            learned->setProperty ("name", MidiMap::describe (m));
+            learned->setProperty ("midi", describeMidi());
+            webView->emitEventIfBrowserIsVisible ("midiLearned", juce::var (learned));
+        };
+        map.onAction = [this] (const juce::String& action) { webView->emitEventIfBrowserIsVisible ("midiAction", action); };
+    }
+
     // The looper's tempo, lock and volume are app preferences, like the recording folder.
     {
         auto& looper = processorRef.getLooper();
@@ -131,6 +146,10 @@ PluginEditor::PluginEditor (PluginProcessor& p)
 PluginEditor::~PluginEditor()
 {
     daw.reset();
+
+    auto& map = processorRef.getMidiMap();
+    map.onLearned = nullptr;
+    map.onAction = nullptr;
 
     // The processor (and its tracks) outlive the editor.
     auto& multitrack = processorRef.getMultitrack();
@@ -324,6 +343,23 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            }
 
                            complete (describeLooper (true));
+                       })
+
+                       // (action, args) -> { mappings: [{ source, channel, number, target, name }], learning, last }.
+                       // Actions: "list", "learn" { target } (the next CC, note or program change is
+                       // mapped to it; "midiLearned" follows), "cancel", "remove" { target }, "clear".
+                       .withNativeFunction ("midi", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           const auto options = args.size() > 1 ? args[1] : juce::var();
+                           auto& map = processorRef.getMidiMap();
+
+                           if (action == "learn")  map.learn (options["target"].toString());
+                           if (action == "cancel") map.learn ({});
+                           if (action == "remove") map.removeTarget (options["target"].toString());
+                           if (action == "clear")  map.clear();
+
+                           complete (describeMidi());
                        })
 
                        // (key) -> the stored string, or "" / (key, value) -> value. Small UI preferences
@@ -642,6 +678,14 @@ void PluginEditor::timerCallback()
         status->setProperty ("looper", describeLooper (++looperTicks % 6 == 0
                                                        && processorRef.getLooper().getState() != Looper::State::empty));
 
+    // MIDI: the last message (for the activity light) and the panic mute, which a pedal can flip.
+    auto* midi = new juce::DynamicObject();
+    midi->setProperty ("count", processorRef.getMidiMap().getEventCount());
+    midi->setProperty ("last", processorRef.getMidiMap().getLastEvent());
+    midi->setProperty ("learning", processorRef.getMidiMap().getLearnTarget());
+    status->setProperty ("midi", juce::var (midi));
+    status->setProperty ("muted", processorRef.outputMuted.load());
+
     const auto& recorder = processorRef.getRecorder();
     status->setProperty ("recording", recorder.isRecording() ? recorder.getSeconds() : -1.0);
 
@@ -705,6 +749,16 @@ juce::var PluginEditor::describeLooper (bool withOverview)
         result->setProperty ("overviews", overviews);
     }
 
+    return juce::var (result);
+}
+
+juce::var PluginEditor::describeMidi()
+{
+    const auto& map = processorRef.getMidiMap();
+    auto* result = new juce::DynamicObject();
+    result->setProperty ("mappings", map.toVar());
+    result->setProperty ("learning", map.getLearnTarget());
+    result->setProperty ("last", map.getLastEvent());
     return juce::var (result);
 }
 

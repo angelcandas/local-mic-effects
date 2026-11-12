@@ -7,6 +7,7 @@ import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 import { initDaw } from "./daw.js";
 import { LOOPER_KEYS, LoopPanel } from "./looper.js";
+import { MidiLearn, markLearnable } from "./midilearn.js";
 
 // Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
 // builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
@@ -59,6 +60,7 @@ class Knob {
     element.tabIndex = 0;
     element.setAttribute("role", "slider");
     element.setAttribute("aria-label", label);
+    markLearnable(element, `param:${param}`, label);
     element.title = "Drag or scroll · Shift for fine control · Double-click to reset";
 
     this.state.valueChangedEvent.addListener(() => this.render());
@@ -167,6 +169,7 @@ class Choice {
     this.onUserChange = onUserChange;
     this.element = html("div", "choice");
     this.element.append(html("div", "name", label));
+    markLearnable(this.element, `param:${param}`, label);
     this.signature = null; // choices arrive from C++ after construction; build once now, rebuild then
 
     this.state.valueChangedEvent.addListener(() => this.render());
@@ -220,6 +223,7 @@ class Pill {
     this.state = Juce.getToggleState(param);
     this.element = html("button", "pill");
     this.element.append(html("span", "switch"), html("span", "", label));
+    markLearnable(this.element, `param:${param}`, label);
     this.element.addEventListener("click", () => {
       this.state.setValue(!this.state.getValue());
       onUserChange();
@@ -714,6 +718,7 @@ class Rack {
     const header = html("header");
     const powerButton = html("button", "power");
     powerButton.setAttribute("aria-label", `Turn ${module.name} off`);
+    markLearnable(powerButton, `param:${module.power}`, `${module.name} on/off`);
     powerButton.title = "Turn off";
     powerButton.addEventListener("click", () => {
       power.setValue(false);
@@ -926,6 +931,7 @@ class Rack {
     item.style.setProperty("--cat", CATEGORIES[module.category].color);
     item.title = module.description;
     item.append(html("span", "led"), html("span", "", module.name));
+    markLearnable(item, `param:${module.power}`, `${module.name} on/off`);
 
     item.addEventListener("click", () => {
       const on = !power.getValue();
@@ -1304,6 +1310,16 @@ const tracks = new Tracks(document.querySelector(".studio"));
 
 const loopPanel = new LoopPanel(document.querySelector(".looper"), document.querySelector(".loop-toggle"));
 
+// MIDI learn: the stage buttons can be mapped too.
+markLearnable(document.querySelector('[data-preset-step="-1"]'), "action:preset.previous", "Previous preset");
+markLearnable(document.querySelector('[data-preset-step="1"]'), "action:preset.next", "Next preset");
+markLearnable(document.querySelector(".panic-button"), "action:mute", "Mute (panic)");
+markLearnable(document.querySelector(".record-button"), "action:record", "Record");
+const midiLearn = new MidiLearn(document.querySelector(".midi-button"));
+window.__JUCE__.backend.addEventListener("midiAction", (action) => {
+  if (action === "record") recorderBar.toggle();
+});
+
 const meters = Object.fromEntries(
   [...document.querySelectorAll("[data-meter]")].map((element) => [element.dataset.meter, new Meter(element)]),
 );
@@ -1320,6 +1336,8 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   recorderBar.update(status.recording);
   tracks.update(status.transport);
   if (status.looper) loopPanel.update(status.looper);
+  midiLearn.update(status.midi);
+  if (typeof status.muted === "boolean" && status.muted !== liveState.muted) applyLiveState({ muted: status.muted });
 });
 
 let lastFrame = performance.now();

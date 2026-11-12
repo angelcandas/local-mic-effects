@@ -1110,7 +1110,7 @@ body.is-dry .chain { opacity: 0.45; filter: grayscale(0.7); transition: opacity 
   font: 600 11px var(--mono);
   text-align: center;
 }
-body.is-daw .dry-button, body.is-daw .keys-button, body.is-daw .loop-toggle { display: none; }
+body.is-daw .dry-button, body.is-daw .keys-button, body.is-daw .loop-toggle, body.is-daw .midi-button { display: none; }
 
 /* ---------- Per-effect presets and in/out gain (card footer; DAW inserts use the same parts) ---------- */
 
@@ -1267,3 +1267,64 @@ body.is-daw .dry-button, body.is-daw .keys-button, body.is-daw .loop-toggle { di
 .loop-actions .tool[hidden], .loop-actions select[hidden] { display: none; }
 .looper select.loop-repeats { min-width: 0; height: 26px; padding-top: 0; padding-bottom: 0; }
 .loop-head { align-items: center; }
+
+/* ---------- MIDI learn ---------- */
+
+.midi-button { cursor: pointer; font: inherit; font-size: 11.5px; }
+.midi-button:hover,
+.midi-button[aria-pressed="true"] { color: var(--text); border-color: var(--line-strong); }
+.midi-button[aria-pressed="true"] { border-color: var(--warn); color: var(--warn); }
+.midi-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--line-strong); }
+.midi-button.has-mappings .midi-dot { background: var(--faint); }
+.midi-button.is-receiving .midi-dot { animation: midi-blink 0.3s; }
+@keyframes midi-blink { from { background: var(--warn); box-shadow: 0 0 6px var(--warn); } }
+
+.learn-banner {
+  position: fixed;
+  z-index: 50;
+  top: 64px;
+  left: 50%;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  width: min(880px, calc(100% - 32px));
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--warn) 55%, transparent);
+  border-radius: 12px;
+  background: rgba(26, 30, 40, 0.97);
+  box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5);
+  transform: translateX(-50%);
+}
+.learn-banner[hidden] { display: none; }
+.learn-banner strong { color: var(--warn); font-size: 12px; }
+.learn-text { flex: 1 1 260px; color: var(--muted); font-size: 12px; }
+.learn-list { display: flex; flex: 1 1 100%; flex-wrap: wrap; gap: 6px; order: 5; }
+.learn-list:empty { display: none; }
+.learn-chip { display: inline-flex; align-items: center; gap: 6px; padding: 2px 4px 2px 8px; border: 1px solid var(--line); border-radius: 999px; color: var(--muted); font-size: 11px; }
+.learn-chip b { color: var(--warn); font-weight: 600; }
+.learn-remove { width: 18px; height: 18px; padding: 0; border: 0; border-radius: 50%; background: none; color: var(--faint); cursor: pointer; }
+.learn-remove:hover { background: var(--line); color: var(--text); }
+.learn-clear.is-armed { color: var(--hot); border-color: var(--hot); }
+
+body.is-learning [data-learn] { outline: 1px dashed color-mix(in srgb, var(--warn) 45%, transparent); outline-offset: 2px; cursor: crosshair; }
+body.is-learning [data-learn]:hover { outline: 2px solid var(--warn); }
+body.is-learning [data-learn].is-mapped { outline: 1px solid color-mix(in srgb, var(--warn) 80%, transparent); }
+body.is-learning [data-learn].is-learn-target { outline: 2px solid var(--warn); animation: learn-pulse 1s infinite; }
+body.is-learning [data-learn].is-learned { outline: 2px solid var(--accent-2); }
+@keyframes learn-pulse { 50% { outline-color: transparent; } }
+body.is-learning [data-learn].is-mapped:not(.power) { position: relative; }
+body.is-learning [data-learn].is-mapped:not(.power)::after {
+  content: attr(data-learn-name);
+  position: absolute;
+  z-index: 5;
+  top: -8px;
+  right: -6px;
+  padding: 1px 5px;
+  border-radius: 6px;
+  background: var(--warn);
+  color: #1a1400;
+  font: 600 9px/1.3 var(--mono);
+  white-space: nowrap;
+  pointer-events: none;
+}

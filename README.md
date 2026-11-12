@@ -146,6 +146,26 @@ you sing.
 - The loop is part of what **Record** captures, so a take holds your voice and your loops.
 - Tempo, Free/Bars and loop volume are remembered; the loop itself isn't saved when you quit.
 
+### MIDI learn (Live mode)
+
+Pedals, knobs, pads and keys on any MIDI controller can drive the Live screen. In the app every
+MIDI input is open; in a DAW, send MIDI to the MicFX track (VST3; Logic doesn't pass MIDI to audio
+effects).
+
+1. Press **MIDI** in the top bar. Everything you can map is outlined.
+2. Click a knob, switch, effect, choice or button, then move a knob, press a pedal or key, or send a
+   program change. It's mapped (a source or control that had a mapping gets the new one instead).
+3. Map more, or press **Done** (or Esc). Right-click a mapped control, or **×** in the list, to unmap it.
+
+- A **knob or fader** (CC) moves a value. It picks up: it only takes over once it reaches the value
+  on screen, so the sound never jumps. On a choice, its position picks the option.
+- A **pedal, pad, key or program change** flips a switch, steps through a choice, or flips a knob
+  between its two ends. A pedal acts when pressed, not when released.
+- **Buttons**: the looper's (Loop, stop, undo, redo, clear), previous/next preset, Mute and Record.
+  Looper pedals act in the audio block they arrive in, so a footswitch closes a loop on time.
+- Mappings belong to the app (`MIDI mappings.json` next to its settings), not to the presets, and
+  work while the window is closed.
+
 ### DAW mode (standalone app)
 
 Switch **Live / DAW** at the top of the window. DAW mode is a multitrack recorder built around
@@ -428,6 +448,7 @@ src/PluginProcessor.*   audio thread: input gain, the effect chain, output gain,
 src/Recorder.*          WAV recording of the output (and dry mic) on a background thread
 src/Multitrack.*        backing track + takes: loading, resampling, timeline playback
 src/Looper.*            the Live looper: four layers, overdub, undo/redo, bar-locked length
+src/MidiMap.*           MIDI learn: CC / note / program change -> parameters and actions
 src/daw/                DAW mode: Edit (the session as an undoable ValueTree), AudioPool (decoded
                         clip audio), DawEngine (tracks + inserts + master bus, lock-free graph swap,
                         dry recording, metronome), Project (.micfx folders, autosave, recovery),
@@ -453,6 +474,7 @@ src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune
 ui/modules.js           the effect catalog the UI is built from
 ui/app.js, styles.css   the interface (Live mode)
 ui/looper.js            the Live looper panel
+ui/midilearn.js         MIDI learn mode on the Live screen
 ui/daw.js, daw.css      the DAW screen: tracks, clips, inserts, mixer, transport
 ui/browser.js           the DAW screen's library sidebar (files, effects, instruments, presets)
 ui/widgets.js           helpers shared by both screens
