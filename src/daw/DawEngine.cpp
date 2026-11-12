@@ -57,6 +57,11 @@ DawEngine::~DawEngine()
     delete active;
     active = nullptr;
     collectGarbage();
+
+    delete previewIncoming.exchange (nullptr);
+    delete previewActive;
+    previewActive = nullptr;
+    collectPreviews();
 }
 
 //==============================================================================
@@ -760,6 +765,86 @@ void DawEngine::publish (std::unique_ptr<Graph> graph)
     // A graph the audio thread hasn't picked up yet was never used: free it here.
     delete incoming.exchange (graph.release(), std::memory_order_acq_rel);
     collectGarbage();
+}
+
+//==============================================================================
+void DawEngine::startPreview (juce::AudioBuffer<float>&& audio, float gain)
+{
+    collectPreviews();
+    setPreviewGain (gain);
+    previewStop = false;
+
+    if (! realtime || audio.getNumSamples() == 0)
+        return;
+
+    previewPlaying = true;
+    // One the audio thread hasn't picked up yet was never played: free it here.
+    delete previewIncoming.exchange (new juce::AudioBuffer<float> (std::move (audio)), std::memory_order_acq_rel);
+}
+
+void DawEngine::stopPreview()
+{
+    delete previewIncoming.exchange (nullptr, std::memory_order_acq_rel);
+    previewStop = true;
+    previewPlaying = false;
+    collectPreviews();
+}
+
+void DawEngine::collectPreviews()
+{
+    const auto scope = previewRetiredFifo.read (previewRetiredFifo.getNumReady());
+    scope.forEach ([this] (int index)
+    {
+        delete previewRetired[(size_t) index];
+        previewRetired[(size_t) index] = nullptr;
+    });
+}
+
+void DawEngine::retirePreview (juce::AudioBuffer<float>* audio) noexcept
+{
+    if (audio == nullptr)
+        return;
+
+    const auto scope = previewRetiredFifo.write (1);
+    jassert (scope.blockSize1 == 1); // the message thread isn't freeing old previews
+
+    if (scope.blockSize1 == 1)
+        previewRetired[(size_t) scope.startIndex1] = audio;
+}
+
+void DawEngine::renderPreview (juce::AudioBuffer<float>& output, int numChannels, int numSamples) noexcept
+{
+    if (auto* next = previewIncoming.exchange (nullptr, std::memory_order_acq_rel))
+    {
+        retirePreview (previewActive);
+        previewActive = next;
+        previewPosition = 0;
+    }
+
+    if (previewStop.exchange (false))
+    {
+        retirePreview (previewActive);
+        previewActive = nullptr;
+    }
+
+    if (previewActive == nullptr)
+        return;
+
+    const auto count = juce::jmin (numSamples, previewActive->getNumSamples() - previewPosition);
+    const auto gain = previewGain.load();
+    const auto sourceChannels = previewActive->getNumChannels();
+
+    for (int ch = 0; ch < numChannels && count > 0; ++ch)
+        output.addFrom (ch, 0, *previewActive, juce::jmin (ch, sourceChannels - 1), previewPosition, count, gain);
+
+    previewPosition += juce::jmax (0, count);
+
+    if (previewPosition >= previewActive->getNumSamples())
+    {
+        retirePreview (previewActive);
+        previewActive = nullptr;
+        previewPlaying = false;
+    }
 }
 
 void DawEngine::collectGarbage()
@@ -1633,5 +1718,8 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
 
         done += chunk;
     }
+
+    if (realtime)
+        renderPreview (output, numChannels, numSamples);
 }
 }
