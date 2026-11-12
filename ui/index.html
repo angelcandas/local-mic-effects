@@ -54,6 +54,12 @@
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 6V2h4M10 2h4v4M14 10v4h-4M6 14H2v-4" /></svg>
       </button>
       <button class="chip dry-button" type="button" aria-pressed="false" title="Hold to hear your voice without effects (or hold D)">Hold for dry</button>
+      <button class="chip loop-toggle" type="button" aria-pressed="false" title="Show or hide the looper">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 6.2A5 5 0 1 0 13 9" /><path d="M13.2 3.2v3.3H9.9" /></svg>Loop
+      </button>
+      <button class="chip midi-button" type="button" aria-pressed="false" title="MIDI learn: map pedals, knobs and keys to controls">
+        <span class="midi-dot"></span>MIDI
+      </button>
       <button class="chip keys-button" type="button" title="Keyboard shortcuts (?)">?</button>
       <div class="live-tracks" hidden>
         <button class="chip live-tracks-button" type="button" aria-haspopup="true" aria-expanded="false" title="The tracks of the active DAW project (read only)">DAW tracks <span class="live-tracks-count">0</span></button>
@@ -246,6 +252,8 @@
   </section>
 
   <footer class="recorder studio" aria-label="Tracks and recorder">
+    <!-- The looper: built by looper.js. -->
+    <section class="looper" aria-label="Looper" hidden></section>
     <div class="transport">
       <button class="transport-button" data-transport="stop" title="Back to the start" aria-label="Back to the start">
         <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="2" height="10" rx="0.5" /><path d="M13 3.5v9a.5.5 0 0 1-.8.4L6.3 8.4a.5.5 0 0 1 0-.8l5.9-4.5a.5.5 0 0 1 .8.4z" /></svg>

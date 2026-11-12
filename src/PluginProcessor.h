@@ -4,6 +4,8 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "Parameters.h"
+#include "Looper.h"
+#include "MidiMap.h"
 #include "Multitrack.h"
 #include "Recorder.h"
 #include "daw/DawEngine.h"
@@ -18,6 +20,8 @@
 //   -> de-esser -> exciter -> saturation -> radio -> bitcrusher -> robot -> filter
 //   -> auto-wah -> tremolo -> vibrato -> chorus -> flanger -> phaser -> doubler
 //   -> echo -> reverb -> stereo width
+// The looper records after the output gain and its playback joins after the limiter,
+// ahead of the recorder and the backing track.
 // The plugin parameters drive the chain's module values once per block.
 class PluginProcessor final : public juce::AudioProcessor,
                               private juce::Timer
@@ -38,7 +42,7 @@ public:
     bool hasEditor() const override                       { return true; }
 
     const juce::String getName() const override           { return JucePlugin_Name; }
-    bool acceptsMidi() const override                     { return false; }
+    bool acceptsMidi() const override                     { return true; } // MIDI learn (Live mode), MIDI tracks (DAW)
     bool producesMidi() const override                    { return false; }
     bool isMidiEffect() const override                    { return false; }
     double getTailLengthSeconds() const override          { return 5.0; }
@@ -63,6 +67,13 @@ public:
     // Records the processed output (and optionally the dry mic) to WAV. Start/stop it
     // from the message thread; processBlock feeds it.
     Recorder& getRecorder() noexcept                        { return recorder; }
+
+    // The Live mode looper: records the voice after the effects (before the safety
+    // limiter) and plays its layers under it. Its playback is in recorded takes.
+    Looper& getLooper() noexcept                            { return looper; }
+
+    // MIDI learn: pedals, knobs and keys on parameters and actions (Live mode).
+    MidiMap& getMidiMap() noexcept                          { return midiMap; }
 
     // Backing track + recorded takes, mixed in after the voice chain (so the music
     // isn't processed or recorded with the voice). Message thread only.
@@ -117,6 +128,10 @@ private:
 
     Recorder recorder;
     Multitrack multitrack;
+    Looper looper;
+    MidiMap midiMap { state, looper, juce::JUCEApplicationBase::isStandaloneApp() || wrapperType != wrapperType_Undefined
+                                         ? MidiMap::getDefaultFile() : juce::File() };
+    juce::AudioBuffer<float> loopInput; // the voice before the limiter, for the looper
 
     juce::SharedResourcePointer<daw::PluginHost> pluginHost; // before the engine, which loads instruments through it
     daw::Edit dawEdit;
