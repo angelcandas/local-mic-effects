@@ -28,6 +28,7 @@
 #include "daw/Warp.h"
 #include "daw/Quantize.h"
 #include "analysis/Beats.h"
+#include "DeviceFavourites.h"
 #include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
@@ -5661,6 +5662,67 @@ namespace
 
     // Live readings for the UI: per-module levels and spectra, and the chain's own
     // input and output gain (DAW tracks) with its meters.
+    void testDeviceFavourites()
+    {
+        std::cout << "\nAudio device favourites\n";
+        using devfav::Entry;
+        const auto dev = [] (const char* name, double rate = 48000.0, int buffer = 256)
+        {
+            Entry e; e.type = "CoreAudio"; e.output = name; e.input = name; e.sampleRate = rate; e.bufferSize = buffer; e.bitDepth = 24;
+            return e;
+        };
+
+        devfav::Favourites f;
+        f.remember (dev ("Interface"));
+        f.remember (dev ("Earphones", 44100.0, 512));
+        f.remember (dev ("Speakers"));
+        check (f.list.size() == 3 && f.list[0].output == "Interface", "new devices are added in the order they were used");
+
+        f.remember (dev ("Earphones", 96000.0, 128));
+        check (f.list.size() == 3 && f.list[1].sampleRate == 96000.0 && f.list[1].bufferSize == 128,
+               "a known device keeps its place and gets its latest rate and buffer");
+
+        const auto reloaded = devfav::Favourites::fromString (f.toString());
+        check (reloaded.list.size() == 3 && reloaded.list[1].output == "Earphones" && reloaded.list[1].sampleRate == 96000.0
+                   && reloaded.list[1].bufferSize == 128 && reloaded.list[1].bitDepth == 24,
+               "the list survives saving and loading");
+
+        std::set<juce::String> present { "Interface", "Earphones", "Speakers" }, appeared;
+        const auto available = [&] (const Entry& e) { return present.count (e.output) > 0; };
+        const auto isNew = [&] (const Entry& e) { return appeared.count (e.output) > 0; };
+
+        auto current = dev ("Interface");
+        check (f.choose (&current, available, isNew) == -1, "the top favourite in use stays");
+
+        present.erase ("Interface");
+        check (f.choose (&current, available, isNew) == 1, "unplugging falls back to the next favourite");
+
+        current = dev ("Earphones");
+        present.erase ("Earphones");
+        check (f.choose (&current, available, isNew) == 2, "and on to the one after that");
+
+        present.erase ("Speakers");
+        check (f.choose (&current, available, isNew) == -1, "nothing available leaves the system choice alone");
+
+        present = { "Interface", "Earphones", "Speakers" };
+        current = dev ("Speakers");
+        appeared = { "Interface" };
+        check (f.choose (&current, available, isNew) == 0, "a favourite that reconnects takes over again");
+
+        appeared.clear();
+        current = dev ("Earphones");
+        check (f.choose (&current, available, isNew) == -1, "a lower pick made by hand is not overridden when nothing changed");
+
+        current = dev ("Built-in");
+        present.insert ("Built-in");
+        check (f.choose (&current, available, isNew) == 0, "a device that is not a favourite gives way to one");
+
+        f.move (2, 0);
+        check (f.list[0].output == "Speakers" && f.list[1].output == "Interface", "favourites can be reordered");
+        f.remove (0);
+        check (f.list.size() == 2 && f.list[0].output == "Interface", "and removed");
+    }
+
     void testLiveMeters()
     {
         std::cout << "\nLive effect readings and chain gains\n";
@@ -6131,6 +6193,7 @@ int main()
     testStemPipeline();
 #endif
     testLiveMeters();
+    testDeviceFavourites();
 
     std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
     return failures == 0 ? 0 : 1;
