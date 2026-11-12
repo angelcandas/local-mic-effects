@@ -228,4 +228,9 @@ if(MICFX_BUILD_TESTS)
         PUBLIC
             juce::juce_recommended_config_flags
             juce::juce_recommended_warning_flags)
+
+    # JUCE_PLUGINHOST_AU=1 pulls in AUGenericView, which lives in CoreAudioKit.
+    if(APPLE)
+        target_link_libraries(MicFXTests PRIVATE "-framework CoreAudioKit")
+    endif()
 endif()
