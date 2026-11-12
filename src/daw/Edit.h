@@ -84,6 +84,7 @@ namespace ids
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
+    MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight)
 #undef MICFX_DAW_ID
 }
 
@@ -162,6 +163,20 @@ public:
     // Recording: armed tracks get the take; monitored tracks hear the mic live.
     void setTrackArm (int trackId, bool);
     void setTrackMonitor (int trackId, bool);
+
+    // Which audio interface inputs feed an audio track (what it records and monitors),
+    // counted from 0. Mono: one input (right is noInput). Stereo: a left and a right,
+    // any two inputs (a stereo pair, or two mics). Left noInput: no input at all.
+    // A track without the properties takes input 1, mono.
+    static constexpr int noInput = -1, maxInputs = 32;
+    struct Input
+    {
+        int left = 0, right = noInput;
+        bool isStereo() const noexcept { return left != noInput && right != noInput; }
+        bool operator== (const Input&) const = default;
+    };
+    void setTrackInput (int trackId, Input);
+    static Input getTrackInput (const juce::ValueTree& track);
 
     // The tempo at the start of the song (the whole song while it's steady).
     void setTempo (double bpm);

@@ -81,6 +81,10 @@ public:
     // Peak levels (linear gain) since the UI last read them. Written by the audio
     // thread, drained with exchange (0) by the editor.
     std::atomic<float> inputPeak  { 0.0f };
+    std::atomic<int> inputChannels { 0 }; // DAW mode: how many inputs the engine gets
+
+    // The most audio interface inputs the app opens (DAW tracks pick from them).
+    static constexpr int maxAppInputs = 16;
     std::atomic<float> outputPeak { 0.0f };
 
     std::atomic<int> currentPreset { 0 };

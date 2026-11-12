@@ -86,14 +86,15 @@ public:
     // Recording. Message thread.
     //
     // startRecording() needs at least one armed track. It starts the transport from
-    // the playhead (after the count-in, if any) and writes the dry mic to a new WAV in
-    // `folder`. stopRecording() stops the transport and adds the take as a clip on
-    // every armed track, in one undo step. Returns an error message, or empty.
+    // the playhead (after the count-in, if any) and writes the dry inputs to new WAVs in
+    // `folder`: one file per input the armed tracks use (mono, or stereo for a stereo
+    // track). stopRecording() stops the transport and adds each armed track's take as
+    // a clip on it, in one undo step. Returns an error message, or empty.
     // Armed MIDI tracks record the MIDI input (no file): stopRecording() adds a MIDI clip
     // with what was played to each of them.
     juce::String startRecording (const juce::File& folder);
     Recorder::Take stopRecording();
-    bool isRecording() const noexcept { return recorder.isRecording() || countingIn.load() || recordingMidi.load(); }
+    bool isRecording() const noexcept { return recordingAudio.load() || countingIn.load() || recordingMidi.load(); }
     juce::int64 getRecordStart() const noexcept { return recordStart.load(); } // where the take begins
 
     // Interface input + output latency, so takes line up with what was heard.
@@ -129,8 +130,9 @@ public:
     int getCountInBars() const noexcept     { return countInBars.load(); }
 
     // Message thread. Peak level (linear) of a track's (or a return's) output, or the
-    // master's with Edit::masterId, since the last call.
-    float takePeak (int trackId);
+    // master's with Edit::masterId, since the last call: left and right, or the louder.
+    std::pair<float, float> takePeaks (int trackId);
+    float takePeak (int trackId) { const auto [l, r] = takePeaks (trackId); return juce::jmax (l, r); }
 
     // Message thread. A track's (or the master's) insert chain: its peak levels (linear)
     // after the input gain and after the output gain since the last call, and each
@@ -142,9 +144,13 @@ public:
     // Audio thread. Renders numSamples into the first numChannels of `output`
     // (overwriting them) and advances the playhead while playing. Inserts keep running
     // while stopped, so reverb and echo tails ring out.
-    // `input` is the mono mic (numSamples long), or null when there isn't one. It may
-    // alias the first output channel: each chunk is read before it's overwritten.
+    // `inputs` are the audio interface's inputs (numInputs of them, numSamples long),
+    // which tracks pick from (Edit::getTrackInput). They may alias output channels:
+    // each chunk is read before it's overwritten.
     // `midi` is the MIDI input for this block (timestamps 0..numSamples), or null.
+    void process (juce::AudioBuffer<float>& output, int numChannels, int numSamples,
+                  const float* const* inputs, int numInputs, const juce::MidiBuffer* midi) noexcept;
+    // The same with one input (a mono mic), or none when `input` is null.
     void process (juce::AudioBuffer<float>& output, int numChannels, int numSamples,
                   const float* input = nullptr, const juce::MidiBuffer* midi = nullptr) noexcept;
 
@@ -162,8 +168,9 @@ private:
 
         std::atomic<float> targetLeft { 1.0f }, targetRight { 1.0f };
         std::atomic<float> targetDirect { 1.0f }; // tracks: 0 while a return is soloed (sends still play)
-        std::atomic<float> peak { 0.0f };
+        std::atomic<float> peakLeft { 0.0f }, peakRight { 0.0f };
         std::atomic<bool> monitoring { false }; // mic in (audio tracks) or MIDI in (MIDI tracks)
+        std::atomic<int> inputLeft { 0 }, inputRight { Edit::noInput }; // audio tracks: Edit::getTrackInput
 
         // MIDI tracks: the instrument (null if it didn't load) and what it was made from.
         InstrumentPtr instrument;
@@ -297,7 +304,7 @@ private:
 
     static void renderClip (const Clip&, juce::AudioBuffer<float>&, juce::int64 blockStart, int numSamples) noexcept;
     void renderBlock (Graph&, juce::AudioBuffer<float>& output, int outputOffset, int numChannels, int numSamples,
-                      const float* input, const juce::MidiBuffer* midi, int midiOffset) noexcept;
+                      const float* const* inputs, int numInputs, const juce::MidiBuffer* midi, int midiOffset) noexcept;
     void renderInstrument (Track&, bool isPlaying, bool fresh, juce::int64 blockStart, int numSamples,
                            const juce::MidiBuffer* midi, int midiOffset) noexcept;
     void recordMidi (const juce::MidiBuffer&, int midiOffset, int numSamples, juce::int64 blockStart) noexcept;
@@ -331,7 +338,19 @@ private:
     std::atomic<int> latency { 0 };
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
 
-    Recorder recorder;
+    // Audio takes: one recorder per input the armed tracks use. Made when first needed
+    // (each has a disk thread) and kept; the audio thread writes those that are on.
+    struct TakeInput
+    {
+        std::unique_ptr<Recorder> recorder;
+        Edit::Input input;
+        std::atomic<bool> on { false };
+    };
+    static constexpr int maxTakes = 16;
+    std::array<TakeInput, maxTakes> takes;
+    std::atomic<int> numTakes { 0 };
+    std::atomic<bool> recordingAudio { false };
+    std::vector<float> silence = std::vector<float> (8192, 0.0f); // a missing input (prepare() makes it a block long)
     std::atomic<bool> countingIn { false };
     std::atomic<juce::int64> recordStart { 0 };
     std::atomic<juce::int64> recordingLatency { 0 }, midiRecordingLatency { 0 };

@@ -105,6 +105,12 @@ tracks instead of one live chain:
 - **Recording is always dry.** Arm one or more tracks and press **Rec** (or **R**). The take is the
   unprocessed mic; the track's inserts play on top, so you can change the effects afterwards.
   Optional click and count-in; the take is shifted by the audio round-trip latency.
+- **Inputs and stereo tracks.** The app opens every input of your audio interface (up to 16).
+  Each audio track picks what it records and monitors: one input (mono), a neighbouring pair, or
+  any two inputs as left and right (Input at the top of the mixer strip, or the Input column in
+  the Effects panel). Tracks on different inputs record at the same time, each into its own WAV
+  (stereo for a stereo track). Every strip, the returns and the master have left/right meters;
+  sends and returns are stereo. Live mode uses input 1.
 - **Editing**: drag clips to move them (also to another track), drag the edges to trim, the top
   corners to fade, **Ctrl+E** splits at the playhead, **Ctrl+D** duplicates, **Delete** removes. Edits
   snap to the beat at the project tempo (hold **Alt** to drag freely). Drag on the ruler to mark a
