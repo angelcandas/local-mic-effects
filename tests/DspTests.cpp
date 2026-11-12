@@ -1534,6 +1534,63 @@ namespace
                "no mix measured: a note to listen again");
     }
 
+    void testAutoMixSends()
+    {
+        std::cout << "\nAuto Mix: shared reverb (sends)\n";
+
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-sends");
+        folder.createDirectory();
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto file = folder.getChildFile (name + ".wav");
+            writeWav (file, audio, sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, file, 0.0, 12.0);
+            return id;
+        };
+        const auto voice = add ("Vocal", makeSungLine (12.0, 3.0, 1.5));
+        const auto guitar = add ("Guitar", makeTones ({ { 12.0, 196.0, 0.1f, 0.1f } }));
+        const auto bass = add ("Bass", makeTones ({ { 12.0, 55.0, 0.2f, 0.2f } }));
+        const auto reverb = (int) edit.addReturn ("Room", fx::ModuleType::reverb)[daw::ids::id];
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { guitar, analysis::Role::guitar }, { bass, analysis::Role::bass } };
+        const std::map<int, float> volumes { { voice, 0.0f }, { guitar, 0.0f }, { bass, 0.0f } };
+        analysis::MixOptions options;
+        options.reverbReturn = reverb;
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options);
+
+        std::map<int, float> sends;
+        bool reverbInsert = false, room = false;
+        for (const auto& move : plan.moves)
+        {
+            if (move.sendTo == reverb) sends[move.trackId] = move.values.at ("send");
+            reverbInsert = reverbInsert || (move.insert == fx::ModuleType::reverb && move.trackId != reverb);
+            room = room || (move.trackId == reverb && move.insert == fx::ModuleType::reverb);
+            if (move.sendTo != 0 || move.trackId == reverb)
+                for (const auto& reason : move.reasons)
+                    std::cout << "        " << move.trackId << ": " << reason << "\n";
+        }
+        check (sends.count (voice) > 0 && sends.count (guitar) > 0 && sends.count (bass) == 0 && ! reverbInsert && room,
+               "the voice and the guitar send to the shared reverb, the bass stays dry, no reverb inserts, the room is set");
+        check (sends.count (guitar) > 0 && sends[guitar] < sends[voice], "the guitar sends less than the voice (further back)");
+
+        analysis::applyMix (edit, plan);
+        const auto sent = daw::Edit::getSend (edit.getTrack (voice), reverb);
+        check (sent.isValid() && std::abs ((float) sent[daw::ids::level] - sends[voice]) < 0.01f,
+               "applied: the voice's send is " + juce::String ((float) sent[daw::ids::level], 1) + " dB");
+        const auto size = (float) daw::Edit::getInserts (edit.getReturn (reverb)).getChild (0).getProperty ("reverbSize");
+        check (juce::approximatelyEqual (size, analysis::getTargets (analysis::MixStyle::ballad).reverbSize), "applied: the room's size follows the style");
+
+        // Off: each voice gets its own reverb again.
+        options.sends = false;
+        bool insert = false;
+        for (const auto& move : analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options).moves)
+            insert = insert || (move.trackId == voice && move.insert == fx::ModuleType::reverb);
+        check (insert, "shared reverb off: a reverb insert on the voice");
+    }
+
     void testAutoMixRides()
     {
         std::cout << "\nVolume rides (automation)\n";
@@ -5418,6 +5475,7 @@ int main()
     testAutoMixModes();
     testAutoMixSynths();
     testAutoMixMaster();
+    testAutoMixSends();
     testAnalysisSpeed();
     testLatency();
     testSmoothing();

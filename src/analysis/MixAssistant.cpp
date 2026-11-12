@@ -451,6 +451,14 @@ namespace
         return false;
     }
 
+    // The send level (dB) to a 100%-wet return that gives what a reverb insert at
+    // `mixPercent` would: wet over dry.
+    float sendForMix (float mixPercent)
+    {
+        const auto m = juce::jlimit (1.0f, 90.0f, mixPercent);
+        return roundTo (juce::jlimit ((double) daw::Edit::minSendDb, 0.0, 20.0 * std::log10 (m / (100.0 - m))), 0.5);
+    }
+
     //==========================================================================
     struct VoicePlan
     {
@@ -700,14 +708,27 @@ namespace
                 // Background vocals sit further back: more reverb, a bigger room.
                 const auto mix = background ? roundTo (juce::jmin (40.0f, targets.reverbMix * 1.5f), 1.0) : targets.reverbMix;
                 const auto size = background ? juce::jmin (90.0f, targets.reverbSize + 10.0f) : targets.reverbSize;
-                plan.reverb.insert = fx::ModuleType::reverb;
-                plan.reverb.atEnd = true;
-                plan.reverb.values = { { "reverbOn", 1.0f }, { "reverbMix", mix }, { "reverbSize", size },
-                                       { "reverbDamping", 55.0f }, { "reverbWidth", 100.0f } };
-                plan.reverb.reasons.add ("Reverb " + juce::String (mix, 0) + "%, "
-                                         + (size >= 60.0f ? "large" : size >= 45.0f ? "medium" : "small")
-                                         + (background ? " room: puts the background vocals behind the lead"
-                                                       : " room: the recording is dry and gives the voice some space"));
+                if (options.sends && options.reverbReturn != 0)
+                {
+                    // The same amount of reverb through the shared return (100% wet there).
+                    const auto send = sendForMix (mix);
+                    plan.reverb.sendTo = options.reverbReturn;
+                    plan.reverb.values = { { "send", send } };
+                    plan.reverb.reasons.add ("Send " + juce::String (send, 1) + " dB to the reverb return"
+                                             + (background ? ": the background vocals further back in the same room as the lead"
+                                                           : ": the recording is dry; the voice shares one room with the band"));
+                }
+                else
+                {
+                    plan.reverb.insert = fx::ModuleType::reverb;
+                    plan.reverb.atEnd = true;
+                    plan.reverb.values = { { "reverbOn", 1.0f }, { "reverbMix", mix }, { "reverbSize", size },
+                                           { "reverbDamping", 55.0f }, { "reverbWidth", 100.0f } };
+                    plan.reverb.reasons.add ("Reverb " + juce::String (mix, 0) + "%, "
+                                             + (size >= 60.0f ? "large" : size >= 45.0f ? "medium" : "small")
+                                             + (background ? " room: puts the background vocals behind the lead"
+                                                           : " room: the recording is dry and gives the voice some space"));
+                }
             }
         }
 
@@ -1561,6 +1582,21 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             }
         }
 
+        // Shared reverb: the melodic instruments in the same room as the voice, further back
+        // (bass and drums stay dry and up front; a full backing has its own space).
+        if (options.sends && options.reverbReturn != 0 && options.reverb && ! makeRoomOnly && targets.reverbMix > 0.0f
+            && (role == Role::guitar || role == Role::piano || role == Role::pad || role == Role::synth || role == Role::instrument)
+            && ! hasAny (options, id, { fx::ModuleType::reverb }))
+        {
+            MixMove send;
+            send.trackId = id;
+            send.sendTo = options.reverbReturn;
+            const auto db = juce::jmax (daw::Edit::minSendDb, sendForMix (targets.reverbMix) - (role == Role::pad ? 4.0f : 6.0f));
+            send.values = { { "send", db } };
+            send.reasons.add ("Send " + juce::String (db, 1) + " dB to the reverb return: in the same room as the voice, a little further back");
+            plan.moves.push_back (send);
+        }
+
         // Bass: some saturation where the style asks, so it's heard on small speakers.
         // Wider guitars, keys and pads; bass and drums stay centred.
         if (styleBassDrive)
@@ -1666,6 +1702,18 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
         for (auto* move : { &vp.eq, &vp.compressor, &vp.deEsser, &vp.saturation, &vp.exciter, &vp.echo, &vp.reverb, &vp.width, &vp.ride })
             if (! move->values.empty() || ! move->ride.empty())
                 plan.moves.push_back (*move);
+    }
+
+    // The shared reverb's room, set to the style, when anything is sent to it.
+    if (std::any_of (plan.moves.begin(), plan.moves.end(), [&] (const MixMove& m) { return m.sendTo != 0 && m.sendTo == options.reverbReturn; }))
+    {
+        MixMove room;
+        room.trackId = options.reverbReturn;
+        room.insert = fx::ModuleType::reverb;
+        room.values = { { "reverbOn", 1.0f }, { "reverbSize", targets.reverbSize }, { "reverbDamping", 55.0f } };
+        room.reasons.add (juce::String (targets.reverbSize >= 60.0f ? "Large" : targets.reverbSize >= 45.0f ? "Medium" : "Small")
+                          + " room (" + juce::String (targets.reverbSize, 0) + "% size) on the shared reverb, for " + getStyleName (style));
+        plan.moves.push_back (room);
     }
 
     // Balance: each voice's volume so it sits the style's LU over the backing and the
@@ -2101,9 +2149,18 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
 
     for (const auto& move : plan.moves)
     {
-        auto owner = move.trackId == daw::Edit::masterId ? edit.getMaster() : edit.getTrack (move.trackId);
+        auto owner = edit.getChannel (move.trackId); // a track, a return or the master
         if (! owner.isValid())
             continue;
+
+        if (move.sendTo != 0)
+        {
+            if (! edit.getReturn (move.sendTo).isValid())
+                continue;
+            const auto db = move.values.count ("send") > 0 ? move.values.at ("send") : daw::Edit::minSendDb;
+            edit.setSend (move.trackId, move.sendTo, daw::Edit::minSendDb + (db - daw::Edit::minSendDb) * amount); // from off
+            continue;
+        }
 
         if (! move.ride.empty())
         {
