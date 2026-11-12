@@ -1326,6 +1326,9 @@ std::optional<Role> guessRoleFromInstrument (const juce::String& pluginId, const
         if (key == "keys" || key == "piano" || key == "organ" || key == "grand" || key == "tines"
             || key == "drawbar") return Role::piano;
         if (key == "nova")                                     return Role::synth;
+        if (key == "beat")                                     return Role::drums;
+        if (key == "pluck")                                    return Role::guitar;
+        if (key == "mallets")                                  return Role::instrument;
         if (key == "pad" || key == "strings")                  return Role::pad;
         if (key == "bass")                                     return Role::bass;
         if (key == "lead")                                     return Role::synth;

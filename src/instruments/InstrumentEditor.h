@@ -46,6 +46,7 @@ private:
     class Control;
     class EnvelopeView;
     class Scope;
+    class Keyboard;
 
     void timerCallback() override;
     void updatePresetBox();
@@ -70,7 +71,8 @@ private:
     std::unique_ptr<Scope> scope;
     juce::ComboBox presetBox;
     juce::TextButton previousPreset { "<" }, nextPreset { ">" };
-    juce::MidiKeyboardComponent keyboard;
+    std::unique_ptr<Keyboard> keyboardView;
+    juce::MidiKeyboardComponent& keyboard;
     int shownProgram = -1;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (InstrumentEditor)
