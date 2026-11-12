@@ -3,7 +3,8 @@
 
 Run it once, on the Mac you use MicFX on:
 
-    python3 -m venv ~/micfx-export && source ~/micfx-export/bin/activate
+    # Python 3.12 (brew install python@3.12); PyTorch 2.7.0 has no build for 3.13 or newer
+    /opt/homebrew/bin/python3.12 -m venv ~/micfx-export && source ~/micfx-export/bin/activate
     pip install "torch==2.7.0" "torchaudio==2.7.0" "coremltools==9.0" einops "numpy<2.3" "demucs==4.0.1"
     python3 scripts/export_htdemucs_coreml.py
 
@@ -131,6 +132,31 @@ def main():
     parser.add_argument("--fp32", action="store_true", help="keep 32-bit precision (about twice the size and slower; for checking)")
     parser.add_argument("--no-check", action="store_true", help="skip comparing the converted model with the original")
     args = parser.parse_args()
+
+    if sys.version_info >= (3, 13):
+        sys.exit(f"This is Python {sys.version_info.major}.{sys.version_info.minor}, but PyTorch 2.7.0 (the version Core ML conversion works with) "
+                 "has no build for it. Use Python 3.12:\n\n"
+                 "    brew install python@3.12\n"
+                 "    /opt/homebrew/bin/python3.12 -m venv ~/micfx-export\n"
+                 "    source ~/micfx-export/bin/activate\n"
+                 "    pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops \"numpy<2.3\" demucs==4.0.1\n"
+                 "    python scripts/export_htdemucs_coreml.py")
+
+    missing = []
+    for module, package in (("numpy", "numpy<2.3"), ("torch", "torch==2.7.0"), ("torchaudio", "torchaudio==2.7.0"),
+                            ("coremltools", "coremltools==9.0"), ("einops", "einops"), ("demucs", "demucs==4.0.1")):
+        try:
+            __import__(module)
+        except ImportError:
+            missing.append(package)
+    if missing:
+        sys.exit("Some Python packages this script needs aren't installed in this Python (" + sys.executable + ").\n"
+                 "Set up a virtual environment once, then run the script from it:\n\n"
+                 "    python3 -m venv ~/micfx-export\n"
+                 "    source ~/micfx-export/bin/activate\n"
+                 "    pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops \"numpy<2.3\" demucs==4.0.1\n"
+                 "    python scripts/export_htdemucs_coreml.py\n\n"
+                 "Missing: " + ", ".join(missing))
 
     import numpy as np
     import torch
