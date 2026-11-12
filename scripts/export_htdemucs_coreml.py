@@ -4,10 +4,11 @@
 Run it once, on the Mac you use MicFX on:
 
     python3 -m venv ~/micfx-export && source ~/micfx-export/bin/activate
-    pip install torch coremltools einops numpy "demucs==4.0.1"
+    pip install "torch==2.7.0" "torchaudio==2.7.0" "coremltools==9.0" einops "numpy<2.3" "demucs==4.0.1"
     python3 scripts/export_htdemucs_coreml.py
 
-It downloads Meta's pretrained htdemucs weights (MIT licence) through the demucs package,
+The versions matter: coremltools 9.0 is tested up to PyTorch 2.7, and newer PyTorch makes the
+conversion fail. It downloads Meta's pretrained htdemucs weights (MIT licence) through the demucs package,
 converts the network, and writes
 
     ~/Library/Application Support/MicFX/Models/htdemucs-core.mlpackage
@@ -134,6 +135,9 @@ def main():
     import numpy as np
     import torch
     import coremltools as ct
+
+    if not torch.__version__.startswith("2.7."):
+        print(f"Warning: PyTorch {torch.__version__} isn't the tested 2.7.0; if the conversion fails, install the pinned versions above.")
 
     print("Loading the pretrained model (downloads about 80 MB the first time)…")
     model = load_model(args.model)
