@@ -30,6 +30,10 @@
 class DawBridge final : private juce::ValueTree::Listener
 {
 public:
+    // What Undo and Redo would do ("Move clip"), empty when there is nothing; for the app's Edit menu.
+    juce::String getUndoName() const;
+    juce::String getRedoName() const;
+
     using Emit = std::function<void (const juce::Identifier& event, const juce::var& payload)>;
     using Complete = std::function<void (juce::var)>;
 

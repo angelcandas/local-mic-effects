@@ -35,6 +35,9 @@ public:
     // the matching button or shortcut.
     void sendMenuCommand (const juce::String& action);
     bool isDawMode() const noexcept { return processorRef.isDawMode(); }
+    // What Undo / Redo would do in the DAW ("Move clip"), or empty.
+    juce::String getUndoName() const { return daw != nullptr ? daw->getUndoName() : juce::String(); }
+    juce::String getRedoName() const { return daw != nullptr ? daw->getRedoName() : juce::String(); }
 
     // The standalone app's window, or nullptr inside a plugin host.
     juce::ResizableWindow* getAppWindow() const;
