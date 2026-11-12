@@ -3,6 +3,7 @@
 #include "Effects.h"
 #include "ParametricEq.h"
 #include "FxModule.h"
+#include "Mastering.h"
 #include "PitchEngine.h"
 
 #include <memory>
@@ -639,6 +640,11 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::echo:       return std::make_unique<modules::Echo>();
         case ModuleType::reverb:     return std::make_unique<modules::Reverb>();
         case ModuleType::width:      return std::make_unique<modules::Width>();
+        case ModuleType::multiband:  return std::make_unique<modules::Multiband>();
+        case ModuleType::limiter:    return std::make_unique<modules::Limiter>();
+        case ModuleType::masterEq:   return std::make_unique<modules::MasterEq>();
+        case ModuleType::imager:     return std::make_unique<modules::Imager>();
+        case ModuleType::loudness:   return std::make_unique<modules::Loudness>();
     }
 
     jassertfalse;

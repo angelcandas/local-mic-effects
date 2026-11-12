@@ -232,13 +232,23 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         return;
     }
 
-    if (tree.hasType (ids::TRACK) && (property == ids::transpose || property == ids::ride))
+    if (tree.hasType (ids::SEND))
+    {
+        if (property == ids::level)
+            updateMix();
+        else
+            triggerAsyncUpdate(); // pre/post or another return: a new graph
+
+        return;
+    }
+
+    if (tree.hasType (ids::TRACK) && (property == ids::transpose || property == ids::ride || property == ids::output))
     {
         triggerAsyncUpdate(); // its clips play other rendered copies
         return;
     }
 
-    if (tree.hasType (ids::TRACK) || tree.hasType (ids::MASTER))
+    if (tree.hasType (ids::TRACK) || tree.hasType (ids::MASTER) || tree.hasType (ids::RETURN))
     {
         if (property == ids::volume || property == ids::pan || property == ids::mute || property == ids::solo
             || property == ids::monitor || property == ids::arm || property == ids::inGain || property == ids::outGain)
@@ -272,25 +282,53 @@ void DawEngine::setStripTargets (Strip& strip, const juce::ValueTree& tree, bool
     {
         strip.left.reset (sampleRate, smoothingSeconds);
         strip.right.reset (sampleRate, smoothingSeconds);
+        strip.direct.reset (sampleRate, smoothingSeconds);
         strip.left.setCurrentAndTargetValue (strip.targetLeft);
         strip.right.setCurrentAndTargetValue (strip.targetRight);
+        strip.direct.setCurrentAndTargetValue (strip.targetDirect);
     }
 }
 
 void DawEngine::updateMix()
 {
     const auto tracks = edit.getTracks();
-    const auto anySolo = std::any_of (tracks.begin(), tracks.end(), [] (const auto& t) { return (bool) t[ids::solo]; });
+    const auto returns = edit.getReturns();
+    const auto soloed = [] (const auto& t) { return (bool) t[ids::solo]; };
+    const auto anyTrackSolo = std::any_of (tracks.begin(), tracks.end(), soloed);
+    const auto anyReturnSolo = std::any_of (returns.begin(), returns.end(), soloed);
 
+    // Solo: soloing tracks silences the other tracks but keeps the returns, so the
+    // soloed tracks' reverb is still heard. Soloing a return silences the other returns
+    // and what the tracks play straight to the master; their sends still feed it.
     for (const auto& track : tracks)
     {
-        if (const auto it = strips.find ((int) track[ids::id]); it != strips.end())
+        const auto trackId = (int) track[ids::id];
+        const auto audible = ! (bool) track[ids::mute] && (! anyTrackSolo || (bool) track[ids::solo]);
+
+        if (const auto it = strips.find (trackId); it != strips.end())
         {
-            setStripTargets (*it->second, track, ! (bool) track[ids::mute] && (! anySolo || (bool) track[ids::solo]), false);
+            setStripTargets (*it->second, track, audible, false);
+            it->second->targetDirect = Edit::getTrackOutput (track) != Edit::masterId || ! anyReturnSolo || (bool) track[ids::solo] ? 1.0f : 0.0f;
             // MIDI tracks play the MIDI input when armed too, so you hear what you record.
             it->second->monitoring = (bool) track[ids::monitor] || (Edit::isMidiTrack (track) && (bool) track[ids::arm]);
         }
+
+        for (const auto& send : track)
+        {
+            if (! send.hasType (ids::SEND))
+                continue;
+
+            if (const auto it = sendLevels.find ({ trackId, (int) send[ids::target] }); it != sendLevels.end())
+            {
+                const auto db = (float) send.getProperty (ids::level, -100.0f);
+                it->second->target = audible && db >= Edit::minSendDb ? juce::Decibels::decibelsToGain (db) : 0.0f;
+            }
+        }
     }
+
+    for (const auto& bus : returns)
+        if (const auto it = strips.find ((int) bus[ids::id]); it != strips.end())
+            setStripTargets (*it->second, bus, ! (bool) bus[ids::mute] && (! anyReturnSolo || (bool) bus[ids::solo]), false);
 
     if (const auto it = strips.find (Edit::masterId); it != strips.end())
         setStripTargets (*it->second, edit.getMaster(), true, false);
@@ -380,6 +418,17 @@ void DawEngine::rebuild()
 
     graph->master = reuse (edit.getMaster());
 
+    std::map<int, int> busIndex; // return id -> index in graph->returns
+    for (const auto& returnTree : edit.getReturns())
+    {
+        busIndex[(int) returnTree[ids::id]] = (int) graph->returns.size();
+        graph->returns.push_back ({ reuse (returnTree), {} });
+    }
+
+    std::map<std::pair<int, int>, std::shared_ptr<SendLevel>> previousSends;
+    std::swap (previousSends, sendLevels);
+    std::vector<std::shared_ptr<SendLevel>> newSends; // start at their level instead of fading in
+
     juce::int64 end = 0;
     int maxLatency = 0;
     std::set<juce::String> warpsInUse;
@@ -390,6 +439,34 @@ void DawEngine::rebuild()
         Track track;
         track.strip = reuse (trackTree);
         maxLatency = juce::jmax (maxLatency, track.strip->getLatency());
+
+        const auto trackId = (int) trackTree[ids::id];
+
+        if (const auto it = busIndex.find (Edit::getTrackOutput (trackTree)); it != busIndex.end())
+            track.output = it->second;
+
+        for (const auto& sendTree : trackTree)
+        {
+            if (! sendTree.hasType (ids::SEND))
+                continue;
+
+            const auto target = (int) sendTree[ids::target];
+            const auto bus = busIndex.find (target);
+            if (bus == busIndex.end() || bus->second == track.output)
+                continue; // a missing return, or the one it already plays into
+
+            const std::pair key { trackId, target };
+            auto level = previousSends.count (key) > 0 ? previousSends[key] : nullptr;
+
+            if (level == nullptr)
+            {
+                level = std::make_shared<SendLevel>();
+                newSends.push_back (level);
+            }
+
+            sendLevels[key] = level;
+            track.sends.push_back ({ level, bus->second, (bool) sendTree.getProperty (ids::pre, false) });
+        }
 
         if (track.strip->isMidi)
             buildMidiEvents (track, trackTree, sampleRate, end);
@@ -474,23 +551,39 @@ void DawEngine::rebuild()
     for (auto& track : graph->tracks)
     {
         track.strip->latencyAtBuild = track.strip->getLatency();
-        track.delaySamples = maxLatency - track.strip->latencyAtBuild;
-
-        if (track.delaySamples > 0)
-        {
-            track.delayBuffer.setSize (2, track.delaySamples);
-            track.delayBuffer.clear();
-        }
+        track.delay.setDelay (maxLatency - track.strip->latencyAtBuild);
     }
+
+    // And every return with the slowest return; the tracks' direct sound waits for them.
+    int maxReturnLatency = 0;
+    for (auto& bus : graph->returns)
+    {
+        bus.strip->latencyAtBuild = bus.strip->getLatency();
+        maxReturnLatency = juce::jmax (maxReturnLatency, bus.strip->latencyAtBuild);
+    }
+
+    for (auto& bus : graph->returns)
+        bus.delay.setDelay (maxReturnLatency - bus.strip->latencyAtBuild);
+
+    graph->directDelay.setDelay (maxReturnLatency);
+    if (maxReturnLatency > 0)
+        graph->direct.setSize (2, blockSize);
 
     lastClipAudio = std::move (clipAudio);
     pool.releaseUnusedWarps (warpsInUse);
 
     length = end;
     graph->master->latencyAtBuild = graph->master->chain.getLatencySamples();
-    latency = maxLatency + graph->master->latencyAtBuild;
+    latency = maxLatency + maxReturnLatency + graph->master->latencyAtBuild;
 
     updateMix();
+
+    for (auto& level : newSends)
+    {
+        level->gain.reset (sampleRate, smoothingSeconds);
+        level->gain.setCurrentAndTargetValue (level->target.load());
+    }
+
     publish (std::move (graph));
 }
 
@@ -806,27 +899,25 @@ void DawEngine::renderClip (const Clip& clip, juce::AudioBuffer<float>& buffer, 
     }
 }
 
-void DawEngine::applyDelay (Track& track, int numSamples) noexcept
+void DawEngine::Delay::process (juce::AudioBuffer<float>& buffer, int numSamples) noexcept
 {
-    if (track.delaySamples <= 0)
+    if (samples <= 0)
         return;
-
-    auto& buffer = track.strip->buffer;
 
     for (int ch = 0; ch < 2; ++ch)
     {
         auto* data = buffer.getWritePointer (ch);
-        auto* line = track.delayBuffer.getWritePointer (ch);
-        auto write = track.delayWrite;
+        auto* delayed = line.getWritePointer (ch);
+        auto at = write;
 
         for (int i = 0; i < numSamples; ++i)
         {
-            std::swap (data[i], line[write]);
-            write = (write + 1) % track.delaySamples;
+            std::swap (data[i], delayed[at]);
+            at = (at + 1) % samples;
         }
 
         if (ch == 1)
-            track.delayWrite = write;
+            write = at;
     }
 }
 
@@ -865,7 +956,7 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce
 
     // The timeline's notes are scheduled late by the track's compensation delay, so they
     // line up with the delayed audio tracks (the live input isn't delayed).
-    const auto windowStart = blockStart - track.delaySamples;
+    const auto windowStart = blockStart - track.delay.samples;
     const auto jumped = isPlaying && strip.nextBlock != windowStart;
 
     if (strip.sounding.any() && (fresh || ! isPlaying || jumped))
@@ -953,6 +1044,36 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     auto& master = *graph.master;
     master.buffer.clear (0, numSamples);
 
+    for (auto& bus : graph.returns)
+        bus.strip->buffer.clear (0, numSamples);
+
+    const auto delayDirect = graph.directDelay.samples > 0;
+    auto& direct = delayDirect ? graph.direct : master.buffer;
+    if (delayDirect)
+        direct.clear (0, numSamples);
+
+    // A track's sends: its signal into the returns, gliding to new levels.
+    const auto feedSends = [&graph, numSamples] (Track& track, bool pre)
+    {
+        for (auto& send : track.sends)
+        {
+            if (send.pre != pre)
+                continue;
+
+            auto& gain = send.level->gain;
+            gain.setTargetValue (send.level->target.load (std::memory_order_relaxed));
+            const auto from = gain.getCurrentValue();
+            const auto to = gain.skip (numSamples);
+
+            if (from == 0.0f && to == 0.0f)
+                continue;
+
+            auto& into = graph.returns[(size_t) send.bus].strip->buffer;
+            into.addFromWithRamp (0, 0, track.strip->buffer.getReadPointer (0), numSamples, from, to);
+            into.addFromWithRamp (1, 0, track.strip->buffer.getReadPointer (1), numSamples, from, to);
+        }
+    };
+
     for (auto& track : graph.tracks)
     {
         auto& strip = *track.strip;
@@ -962,7 +1083,7 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
             for (const auto& clip : track.clips)
                 renderClip (clip, strip.buffer, blockStart, numSamples);
 
-        applyDelay (track, numSamples);
+        track.delay.process (strip.buffer, numSamples);
 
         // The instrument after the delay line: its notes are scheduled late instead, so
         // what's played live isn't delayed.
@@ -978,6 +1099,9 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 
         auto block = juce::dsp::AudioBlock<float> (strip.buffer).getSubBlock (0, (size_t) numSamples);
         strip.chain.process (fx::Module::Context (block));
+
+        if (! track.sends.empty())
+            feedSends (track, true);
 
         strip.left.setTargetValue (strip.targetLeft.load (std::memory_order_relaxed));
         strip.right.setTargetValue (strip.targetRight.load (std::memory_order_relaxed));
@@ -1001,9 +1125,51 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
             strip.buffer.applyGainRamp (1, 0, numSamples, from, to);
         }
 
+        if (! track.sends.empty())
+            feedSends (track, false);
+
         updatePeak (strip.peak, strip.buffer.getMagnitude (0, numSamples));
+
+        auto& into = track.output >= 0 ? graph.returns[(size_t) track.output].strip->buffer : direct;
+        strip.direct.setTargetValue (strip.targetDirect.load (std::memory_order_relaxed));
+        const auto from = strip.direct.getCurrentValue();
+        const auto to = strip.direct.skip (numSamples);
+
+        if (from == 1.0f && to == 1.0f)
+        {
+            into.addFrom (0, 0, strip.buffer, 0, 0, numSamples);
+            into.addFrom (1, 0, strip.buffer, 1, 0, numSamples);
+        }
+        else if (from != 0.0f || to != 0.0f)
+        {
+            into.addFromWithRamp (0, 0, strip.buffer.getReadPointer (0), numSamples, from, to);
+            into.addFromWithRamp (1, 0, strip.buffer.getReadPointer (1), numSamples, from, to);
+        }
+    }
+
+    // The returns: their effects on what the tracks sent, into the master.
+    for (auto& bus : graph.returns)
+    {
+        auto& strip = *bus.strip;
+        auto block = juce::dsp::AudioBlock<float> (strip.buffer).getSubBlock (0, (size_t) numSamples);
+        strip.chain.process (fx::Module::Context (block));
+
+        strip.left.setTargetValue (strip.targetLeft.load (std::memory_order_relaxed));
+        strip.right.setTargetValue (strip.targetRight.load (std::memory_order_relaxed));
+        strip.buffer.applyGainRamp (0, 0, numSamples, strip.left.getCurrentValue(), strip.left.skip (numSamples));
+        strip.buffer.applyGainRamp (1, 0, numSamples, strip.right.getCurrentValue(), strip.right.skip (numSamples));
+        updatePeak (strip.peak, strip.buffer.getMagnitude (0, numSamples));
+
+        bus.delay.process (strip.buffer, numSamples);
         master.buffer.addFrom (0, 0, strip.buffer, 0, 0, numSamples);
         master.buffer.addFrom (1, 0, strip.buffer, 1, 0, numSamples);
+    }
+
+    if (delayDirect)
+    {
+        graph.directDelay.process (direct, numSamples);
+        master.buffer.addFrom (0, 0, direct, 0, 0, numSamples);
+        master.buffer.addFrom (1, 0, direct, 1, 0, numSamples);
     }
 
     auto block = juce::dsp::AudioBlock<float> (master.buffer).getSubBlock (0, (size_t) numSamples);

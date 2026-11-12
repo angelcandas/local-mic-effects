@@ -7,6 +7,7 @@ export const CATEGORIES = {
   character:  { name: "Character",  color: "#ffb547" },
   modulation: { name: "Modulation", color: "#ff6fb1" },
   space:      { name: "Space",      color: "#5aafff" },
+  master:     { name: "Mastering",  color: "#7ee0a1" },
 };
 
 const knob = (param, label, options = {}) => ({ type: "knob", param, label, ...options });
@@ -122,6 +123,32 @@ export const MODULES = [
   { id: "width", name: "Stereo Width", category: "space", power: "widthOn",
     description: "Spreads stereo effects wider",
     controls: [knob("widthAmount", "Width")] },
+
+  // Mastering: for the master bus (or a return or track) in DAW mode. `dawOnly` keeps them
+  // out of the Live screen, which is about the voice.
+  { id: "meq", name: "Mastering EQ", category: "master", power: "meqOn", wide: true, dawOnly: true,
+    description: "Broad tone shaping for the whole mix: low cut, shelves, one wide bell and air",
+    controls: [knob("meqLowCut", "Low cut"), knob("meqLowFreq", "Low freq"), bipolar("meqLowGain", "Low"),
+               knob("meqMidFreq", "Mid freq"), bipolar("meqMidGain", "Mid"),
+               knob("meqHighFreq", "High freq"), bipolar("meqHighGain", "High"), bipolar("meqAirGain", "Air")] },
+
+  { id: "mb", name: "Multiband Compressor", category: "master", power: "mbOn", wide: true, dawOnly: true,
+    description: "Three bands compressed on their own, so a loud bass doesn't pump the vocals",
+    controls: [knob("mbLowFreq", "Low / mid"), knob("mbHighFreq", "Mid / high"),
+               knob("mbLowThreshold", "Low"), knob("mbMidThreshold", "Mid"), knob("mbHighThreshold", "High"),
+               knob("mbRatio", "Ratio"), knob("mbAttack", "Attack"), knob("mbRelease", "Release"), bipolar("mbMakeup", "Makeup")] },
+
+  { id: "imager", name: "Stereo Imager", category: "master", power: "imgOn", dawOnly: true,
+    description: "Wider or narrower mix, with the bass kept mono",
+    controls: [knob("imgWidth", "Width"), knob("imgMonoBelow", "Mono below")] },
+
+  { id: "limiter", name: "Limiter", category: "master", power: "limOn", dawOnly: true,
+    description: "Look-ahead brickwall: louder without ever passing the ceiling. Last in the chain",
+    controls: [knob("limDrive", "Drive"), knob("limCeiling", "Ceiling"), knob("limRelease", "Release")] },
+
+  { id: "loudness", name: "Loudness Meter", category: "master", power: "loudOn", dawOnly: true,
+    description: "LUFS like streaming services measure it. Switch off and on to restart",
+    controls: [{ type: "loudness" }, knob("loudTarget", "Target")] },
 ];
 
 // Module key (C++ fx::getModuleKey) for each entry above, used by the DAW inserts and the
@@ -133,6 +160,7 @@ export const MODULE_KEYS = {
   crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", tremolo: "tremolo",
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
   echo: "echo", reverb: "reverb", width: "width",
+  meq: "masterEq", mb: "multiband", imager: "imager", limiter: "limiter", loudness: "loudness",
 };
 
 export const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];

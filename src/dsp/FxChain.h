@@ -156,7 +156,8 @@ private:
 inline bool hasSpectrumView (ModuleType type) noexcept
 {
     return type == ModuleType::highPass || type == ModuleType::eq || type == ModuleType::paraEq
-        || type == ModuleType::deEsser || type == ModuleType::radio || type == ModuleType::filter;
+        || type == ModuleType::deEsser || type == ModuleType::radio || type == ModuleType::filter
+        || type == ModuleType::masterEq;
 }
 
 // One module's live readings for the UI: { in, out } peak dB since the last call, plus
@@ -172,6 +173,8 @@ inline juce::var describeMeter (Module& module, SpectrumAnalyser& analyser)
     auto* result = new juce::DynamicObject();
     result->setProperty ("in", peakToDecibels (in));
     result->setProperty ("out", peakToDecibels (out));
+
+    module.addReadings (*result);
 
     if (hasSpectrumView (module.getType()))
     {

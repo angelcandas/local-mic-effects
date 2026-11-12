@@ -353,6 +353,179 @@ const views = {
   },
 
   // Input level (x) against output level (y), -60..0 dB.
+  // Mastering (src/dsp/Mastering.h).
+  masterEq({ get, set, range }) {
+    const RANGE = 12, AIR = 16000;
+    const element = frame("is-eq");
+    frequencyGrid(element, RANGE);
+    const live = spectrumLayer(element);
+    const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
+    const r = (p, fallback) => range(p) ?? fallback;
+    const setFreq = (p, x, first) => set(p, Math.round(clamp(fOfX(x), r(p, { min: 20 }).min, r(p, { max: 20000 }).max)), first);
+    const setGain = (p, y, first) => set(p, Math.round(clamp(dbOfY(y, RANGE), -12, 12) * 10) / 10, first);
+    const band = (freq, gain, title) => handle(element, (x, y, first) => { setFreq(freq, x, first); setGain(gain, y, false); }, title);
+    const lowCut = handle(element, (x, y, first) => setFreq("meqLowCut", x, first), "Low cut: drag sideways");
+    const low = band("meqLowFreq", "meqLowGain", "Low shelf: drag to set frequency and gain");
+    const mid = band("meqMidFreq", "meqMidGain", "Wide bell: drag to set frequency and gain");
+    const high = band("meqHighFreq", "meqHighGain", "High shelf: drag to set frequency and gain");
+    const air = handle(element, (x, y, first) => setGain("meqAirGain", y, first), "Air (16 kHz shelf): drag up or down");
+
+    return {
+      element,
+      update() {
+        const filters = [biquad("highPass", get("meqLowCut"), 0.707), biquad("lowShelf", get("meqLowFreq"), 0.707, get("meqLowGain")),
+                         biquad("peak", get("meqMidFreq"), 0.7, get("meqMidGain")), biquad("highShelf", get("meqHighFreq"), 0.707, get("meqHighGain")),
+                         biquad("highShelf", AIR, 0.707, get("meqAirGain"))];
+        const d = responsePath(filters, RANGE);
+        curve.setAttribute("d", d);
+        fill.setAttribute("d", `${d} L${W},${H / 2} L0,${H / 2} Z`);
+        lowCut.move(xOfF(get("meqLowCut")), yOfDb(-3, RANGE));
+        low.move(xOfF(get("meqLowFreq")), yOfDb(get("meqLowGain"), RANGE));
+        mid.move(xOfF(get("meqMidFreq")), yOfDb(get("meqMidGain"), RANGE));
+        high.move(xOfF(get("meqHighFreq")), yOfDb(get("meqHighGain"), RANGE));
+        air.move(xOfF(AIR), yOfDb(get("meqAirGain"), RANGE));
+      },
+      live,
+    };
+  },
+
+  // Three bands split at the crossovers (drag them), each with its gain reduction.
+  multiband({ get, set, range }) {
+    const element = frame("is-multiband");
+    frequencyGrid(element);
+    const bars = [0, 1, 2].map(() => {
+      const bar = svg("rect", { class: "fx-reduction", y: 0, height: 0 });
+      element.append(bar);
+      return bar;
+    });
+    const splits = ["mbLowFreq", "mbHighFreq"].map((param) => {
+      const line = svg("line", { class: "fx-curve", y1: 0, y2: H });
+      element.append(line);
+      return line;
+    });
+    const r = (p, fallback) => range(p) ?? fallback;
+    const handles = ["mbLowFreq", "mbHighFreq"].map((param, i) => handle(element,
+      (x, y, first) => set(param, Math.round(clamp(fOfX(x), r(param, { min: 40 }).min, r(param, { max: 12000 }).max)), first),
+      i === 0 ? "Low / mid crossover: drag sideways" : "Mid / high crossover: drag sideways"));
+    ["Low", "Mid", "High"].forEach((text, i) => label(element, [8, W * 0.42, W * 0.82][i], 11, text));
+    let shown = [0, 0, 0];
+    const edges = () => [0, xOfF(get("mbLowFreq")), xOfF(get("mbHighFreq")), W];
+
+    return {
+      element,
+      update() {
+        const x = edges();
+        splits.forEach((line, i) => { line.setAttribute("x1", x[i + 1]); line.setAttribute("x2", x[i + 1]); });
+        handles.forEach((h, i) => h.move(x[i + 1], H / 2));
+        bars.forEach((bar, i) => { bar.setAttribute("x", x[i] + 2); bar.setAttribute("width", Math.max(2, x[i + 1] - x[i] - 4)); });
+      },
+      live(reading) {
+        const values = reading?.bands ?? [0, 0, 0];
+        shown = shown.map((v, i) => Math.max(values[i] ?? 0, v - 0.75));
+        bars.forEach((bar, i) => bar.setAttribute("height", clamp(shown[i] / 12) * H));
+        return reading && shown.some((v) => v >= 0.5) ? shown.map((v) => `−${v.toFixed(1)}`).join(" / ") + " dB" : "";
+      },
+    };
+  },
+
+  // Level in and out on a -24..0 dBFS scale, the ceiling line, and the gain reduction.
+  limiter({ get }) {
+    const FLOOR = -24;
+    const element = frame("is-limiter");
+    const y = (db) => clamp(db / FLOOR) * H;
+    for (const db of [-6, -12, -18]) element.append(svg("line", { class: "grid", x1: 0, x2: W, y1: y(db), y2: y(db) }));
+    const ceiling = svg("line", { class: "fx-curve", x1: 0, x2: W });
+    const input = svg("rect", { class: "fx-fill", x: W * 0.15, width: W * 0.25 });
+    const output = svg("rect", { class: "fx-spectrum", x: W * 0.5, width: W * 0.25 });
+    const reductionBar = svg("rect", { class: "fx-reduction", x: W - 8, width: 8, y: 0, height: 0 });
+    element.append(input, output, ceiling, reductionBar);
+    label(element, W * 0.15 + 2, H - 3, "In");
+    label(element, W * 0.5 + 2, H - 3, "Out");
+    let shownIn = -100, shownOut = -100, shownReduction = 0;
+    const bar = (rect, db) => { const top = y(clamp(db, FLOOR, 6)); rect.setAttribute("y", top); rect.setAttribute("height", Math.max(0, H - top)); };
+
+    return {
+      element,
+      update() {
+        const c = y(get("limCeiling"));
+        ceiling.setAttribute("y1", c);
+        ceiling.setAttribute("y2", c);
+      },
+      live(reading) {
+        shownIn = Math.max(reading?.in ?? -100, shownIn - 1.5);
+        shownOut = Math.max(reading?.out ?? -100, shownOut - 1.5);
+        shownReduction = Math.max(reading?.reduction ?? 0, shownReduction - 0.75);
+        bar(input, shownIn);
+        bar(output, shownOut);
+        reductionBar.setAttribute("height", clamp(shownReduction / 12) * H);
+        return reading && shownReduction >= 0.1 ? `−${shownReduction.toFixed(1)} dB` : "";
+      },
+    };
+  },
+
+  // The stereo spread as a fan (narrow to wide), and a correlation bar along the bottom.
+  imager({ get }) {
+    const element = frame("is-imager");
+    const fan = path(element, "fx-fill"), edge = path(element, "fx-curve");
+    element.append(svg("line", { class: "grid", x1: W / 2, x2: W / 2, y1: 0, y2: H }));
+    const correlation = svg("rect", { class: "fx-spectrum", y: H - 6, height: 6 });
+    element.append(correlation);
+    label(element, 3, H - 9, "−1");
+    label(element, W - 14, H - 9, "+1");
+    let shown = 1;
+
+    return {
+      element,
+      update() {
+        const spread = clamp(get("imgWidth") / 200) * (W / 2 - 8);
+        const tip = `M${W / 2},${H - 10} L${W / 2 - spread},8 L${W / 2 + spread},8 Z`;
+        fan.setAttribute("d", tip);
+        edge.setAttribute("d", `M${W / 2 - spread},8 L${W / 2},${H - 10} L${W / 2 + spread},8`);
+      },
+      live(reading) {
+        if (reading?.correlation !== undefined) shown += (reading.correlation - shown) * 0.3;
+        const x = ((shown + 1) / 2) * W;
+        correlation.setAttribute("x", Math.min(W / 2, x));
+        correlation.setAttribute("width", Math.abs(x - W / 2));
+        return reading ? `corr ${shown.toFixed(2)}` : "";
+      },
+    };
+  },
+
+  // Momentary and short-term loudness as bars on a -36..0 LUFS scale with the target
+  // line; integrated loudness and the peak in the corner.
+  loudness({ get }) {
+    const FLOOR = -36;
+    const element = frame("is-loudness");
+    const x = (lufs) => clamp((lufs - FLOOR) / -FLOOR) * W;
+    for (const lufs of [-30, -24, -18, -12, -6]) element.append(svg("line", { class: "grid", x1: x(lufs), x2: x(lufs), y1: 0, y2: H }));
+    for (const lufs of [-24, -12]) label(element, x(lufs) + 2, H - 3, String(lufs));
+    const momentary = svg("rect", { class: "fx-fill", x: 0, y: 14, height: 26, width: 0 });
+    const shortTerm = svg("rect", { class: "fx-spectrum", x: 0, y: 50, height: 26, width: 0 });
+    const target = svg("line", { class: "fx-curve", y1: 0, y2: H });
+    element.append(momentary, shortTerm, target);
+    label(element, 3, 12, "Momentary");
+    label(element, 3, 48, "Short-term");
+    let shownM = -100;
+
+    return {
+      element,
+      update() {
+        target.setAttribute("x1", x(get("loudTarget")));
+        target.setAttribute("x2", x(get("loudTarget")));
+      },
+      live(reading) {
+        if (!reading) { momentary.setAttribute("width", 0); shortTerm.setAttribute("width", 0); return ""; }
+        shownM = Math.max(reading.momentary ?? -100, shownM - 0.6);
+        momentary.setAttribute("width", x(shownM));
+        shortTerm.setAttribute("width", x(reading.shortTerm ?? -100));
+        const integrated = reading.integrated > -99 ? `${reading.integrated.toFixed(1)} LUFS` : "– LUFS";
+        const off = reading.integrated > -99 ? ` (${reading.integrated - reading.target >= 0 ? "+" : "−"}${Math.abs(reading.integrated - reading.target).toFixed(1)})` : "";
+        return `I ${integrated}${off}`;
+      },
+    };
+  },
+
   compressor({ get, set, range }) {
     return dynamics({ get, set, range, threshold: "compThreshold", ratio: () => get("compRatio"), above: true });
   },
