@@ -3,7 +3,7 @@
 // "dawSession" it receives and sends edits back through one native function,
 // daw (command, args). Every edit is one undo step: drags only send on release.
 import * as Juce from "./juce/index.js";
-import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES } from "./modules.js";
+import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, isControlShown } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
@@ -1015,6 +1015,7 @@ class InsertCard {
     if (this.view) this.body.append(this.view.element);
 
     this.parts = []; // pitch: [{ power, row }], so parts that are off fold away
+    this.conditional = []; // [control, element]: shown for some values of other controls
     for (const part of parts) {
       const row = html("div", "insert-controls");
 
@@ -1026,8 +1027,11 @@ class InsertCard {
       }
 
       for (const control of part.controls) {
+        if (control.liveOnly) continue; // the DAW listens to the other tracks for chords
         const widget = this.createControl(control);
-        if (widget) row.append(widget);
+        if (!widget) continue;
+        row.append(widget);
+        if (control.when) this.conditional.push([control, widget]);
       }
       this.body.append(row);
     }
@@ -1163,6 +1167,8 @@ class InsertCard {
     for (const { param, widget } of this.controls) widget.update(insert.values[param]);
     this.view?.update();
     for (const { power, row } of this.parts) row.hidden = (insert.values[power] ?? 0) < 0.5;
+    for (const [control, element] of this.conditional)
+      element.hidden = !isControlShown(control, (param) => insert.values[param] ?? parameterInfo[param]?.default ?? 0);
     this.element.classList.toggle("is-off", !this.switches.some(({ param }) => (insert.values[param] ?? 0) >= 0.5));
     this.renderTrims();
   }

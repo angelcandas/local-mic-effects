@@ -57,6 +57,10 @@ public:
     juce::AudioProcessorValueTreeState& getState() noexcept { return state; }
     const fx::PitchEngine& getPitchEngine() const noexcept  { return pitchModule.getEngine(); }
 
+    // The chord the harmonizer follows now (Live: the backing track or the instrument
+    // input; DAW: the other tracks). Invalid when nothing is followed. Any thread.
+    analysis::Chord getHarmonyChord() const noexcept;
+
     // The Live chain, for the effect cards' live readings (module meters are atomics).
     fx::FxChain& getLiveChain() noexcept                    { return chain; }
 
@@ -123,6 +127,11 @@ private:
     daw::DawEngine dawEngine { dawEdit };
     daw::Project dawProject { dawEdit };
     std::atomic<bool> dawMode { false };
+
+    // Live mode's chord for the harmonizer (Chords mode): from the backing track's
+    // chord list, or by listening to the instrument input (the interface's 2nd input).
+    void followChords (const juce::AudioBuffer<float>&, int numIn, int numSamples) noexcept;
+    analysis::ChordFollower chordFollower;
 
     void applyPeakGuard (juce::AudioBuffer<float>&, int numChannels, int numSamples) noexcept;
     // Transparent peak guard for the voice + playback sum: only acts above -1 dB, so

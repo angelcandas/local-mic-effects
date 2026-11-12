@@ -1,6 +1,7 @@
 #include "Parameters.h"
 #include "dsp/PitchEngine.h"
 #include "dsp/FxModule.h"
+#include "dsp/FxModules.h"
 
 namespace
 {
@@ -271,4 +272,15 @@ Parameters::Parameters (Layout& l)
     toggle (l, "denoiseAdaptive", "Denoise Adaptive", true);
     toggle (l, "denoiseLearn", "Denoise Learn");
     moduleGains (fx::ModuleType::denoise);
+
+    // The harmonizer's four voices and chord following (PitchEngine), after those.
+    choice (l, "harmonyMode", "Harmony Mode", fx::PitchEngine::getHarmonyModeNames(), 0);
+    choice (l, "harmonyVoices", "Harmony Voices", { "1", "2", "3", "4" }, 1);
+    choice (l, "harmonyStyle", "Harmony Style", fx::PitchEngine::getHarmonyStyleNames(), 0);
+    choice (l, "harmonySource", "Harmony Chords From", fx::modules::Pitch::getHarmonySourceNames(), 0);
+    semitones (l, "harmonyVoice3", "Harmony Voice 3", 12.0f, 1.0f, -5.0f);
+    semitones (l, "harmonyVoice4", "Harmony Voice 4", 12.0f, 1.0f, 12.0f);
+    percent (l, "harmonyHumanize", "Harmony Humanize", 35.0f);
+    percent (l, "harmonySpread", "Harmony Spread", 50.0f);
+    semitones (l, "harmonyFormant", "Harmony Formant", 12.0f, 0.1f, 0.0f);
 }

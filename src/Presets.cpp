@@ -156,6 +156,15 @@ const std::vector<Preset>& getPresets()
             { "radioOn", 1 }, { "radioLow", 350 }, { "radioHigh", 3500 },
             { "delayOn", 1 }, { "delayTime", 380 }, { "delayFeedback", 40 }, { "delayMix", 25 },
             { "reverbMix", 30 }, { "reverbSize", 80 } } },
+
+        // Added later, at the end so hosts' saved program numbers still match.
+        // Harmonies on the backing track's chords (load a song in the Live player).
+        { "Chord Choir", "Tuned", {
+            { "tuneOn", 1 }, { "tuneSpeed", 50 }, { "tuneAmount", 80 },
+            { "harmonyOn", 1 }, { "harmonyMode", 2 }, { "harmonyVoices", 2 }, { "harmonyStyle", 2 },
+            { "harmonyMix", 50 }, { "harmonyHumanize", 45 }, { "harmonySpread", 70 },
+            { "doublerOn", 1 }, { "doublerMix", 15 },
+            { "reverbMix", 30 }, { "reverbSize", 70 } } },
     };
 
     return presets;

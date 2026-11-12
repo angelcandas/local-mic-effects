@@ -529,6 +529,13 @@ void PluginEditor::timerCallback()
     status->setProperty ("output", toDecibels (processorRef.outputPeak));
     status->setProperty ("note",   pitch.detectedNote.load());
     status->setProperty ("target", pitch.tunedNote.load());
+
+    // The harmonizer: the chord it follows ("" for none) and each voice's note (-1 = silent).
+    status->setProperty ("chord", processorRef.getHarmonyChord().getName());
+    juce::Array<juce::var> voices;
+    for (const auto& note : pitch.voiceNotes)
+        voices.add (note.load());
+    status->setProperty ("voices", voices);
     status->setProperty ("preset", processorRef.currentPreset.load());
 
     // Live readings for the effect cards that are on, by module key (Live mode only).

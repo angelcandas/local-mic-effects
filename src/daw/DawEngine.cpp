@@ -77,6 +77,7 @@ void DawEngine::prepare (double newSampleRate, int maximumBlockSize)
         position = (juce::int64) ((double) position.load() * newSampleRate / sampleRate);
         sampleRate = newSampleRate;
         pool.setSampleRate (sampleRate);
+        chordFollower = nullptr; // the next graph gets one at the new rate
     }
 
     blockSize = juce::jmax (1, maximumBlockSize);
@@ -418,6 +419,8 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
                 module.carryStateFrom (*it->second);
 
         strip->modulesByInsertId[(int) insert[ids::id]] = &module;
+        if (auto* pitch = dynamic_cast<fx::modules::Pitch*> (&module))
+            strip->pitches.push_back (pitch);
     }
 
     strip->chain.setGains ((float) trackOrMaster.getProperty (ids::inGain, 0.0f), (float) trackOrMaster.getProperty (ids::outGain, 0.0f));
@@ -451,6 +454,15 @@ void DawEngine::rebuild()
 {
     auto graph = std::make_unique<Graph>();
     graph->blockSize = blockSize;
+
+    if (chordFollower == nullptr)
+    {
+        chordFollower = std::make_shared<analysis::ChordFollower>();
+        chordFollower->prepare (sampleRate);
+    }
+    graph->chords = chordFollower;
+    graph->listen.setSize (2, blockSize);
+    graph->keyMask = analysis::getKeyMask (edit.getKey(), edit.isKeyMinor());
     std::map<int, std::shared_ptr<Strip>> previous;
     std::swap (previous, strips);
 
@@ -1270,6 +1282,8 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     if (isPlaying && midi != nullptr && recordingMidi.load())
         recordMidi (*midi, midiOffset, numSamples, blockStart);
 
+    followChords (graph, isPlaying, blockStart, numSamples);
+
     auto& master = *graph.master;
     master.buffer.clear (0, numSamples);
 
@@ -1458,6 +1472,61 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         renderClick (graph.tempo, output, outputOffset, numChannels, numSamples, blockStart);
         position = blockStart + numSamples;
     }
+}
+
+void DawEngine::followChords (Graph& graph, bool isPlaying, juce::int64 blockStart, int numSamples) noexcept
+{
+    // Every pitch insert, on tracks and returns.
+    const auto forEachPitch = [&graph] (auto&& action)
+    {
+        for (auto& track : graph.tracks)
+            for (auto* pitch : track.strip->pitches)
+                action (*pitch);
+        for (auto& bus : graph.returns)
+            for (auto* pitch : bus.strip->pitches)
+                action (*pitch);
+    };
+
+    auto following = false;
+    forEachPitch ([&following] (fx::modules::Pitch& pitch) { following = following || pitch.isFollowingChords(); });
+
+    if (! following || graph.chords == nullptr)
+    {
+        harmonyChord.store (-1, std::memory_order_relaxed);
+        return;
+    }
+
+    auto& follower = *graph.chords;
+    follower.setKeyMask (graph.keyMask);
+
+    // Notes: what's played on the keyboard plus what the MIDI tracks are sounding.
+    auto notes = getHeldNotes();
+    for (auto& track : graph.tracks)
+        if (track.strip->isMidi)
+            notes |= track.strip->sounding;
+    follower.setHeldNotes (notes);
+
+    // Audio: the clips of the tracks without pitch inserts (the vocals have them), read
+    // a little ahead so the chord has been heard by the time it plays.
+    if (isPlaying && ! notes.any())
+    {
+        const auto lookAhead = (juce::int64) (0.12 * sampleRate);
+        auto& listen = graph.listen;
+        listen.clear (0, numSamples);
+
+        for (auto& track : graph.tracks)
+            if (! track.strip->isMidi && track.strip->pitches.empty())
+                for (const auto& clip : track.clips)
+                    renderClip (clip, listen, blockStart + lookAhead, numSamples);
+
+        listen.addFrom (0, 0, listen, 1, 0, numSamples);
+        follower.pushAudio (listen.getReadPointer (0), numSamples);
+    }
+
+    const auto chord = follower.getChord();
+    harmonyChord.store (chord.pack(), std::memory_order_relaxed);
+
+    forEachPitch ([chord] (fx::modules::Pitch& pitch) { pitch.setChord (chord); });
 }
 
 void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int numSamples, const float* input,
