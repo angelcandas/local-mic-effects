@@ -93,6 +93,7 @@ private:
     // planning and applying on the message thread.
     juce::var handleAutoMix (const juce::var& args, Complete&);
     void startAutoMix (const juce::File& reference);
+    bool startAutoMixSplit();
     void replanAutoMix();
     void readAutoMixEffects (const juce::var& effects);
     juce::var describeAutoMix() const;
@@ -139,6 +140,7 @@ private:
 
     // A running stem split (at most one).
     struct StemJob;
+    void finishAutoMixSplit (StemJob&);
     std::shared_ptr<StemJob> stemJob;
 
     // Auto Mix: the running analysis (at most one), the last analysis and its plan.
@@ -150,6 +152,8 @@ private:
     analysis::MixPlan autoMixPlan;
     analysis::MixOptions autoMixOptions; // the effects it may add (the inserts are filled per plan)
     bool autoMixReference = false; // the plan matches a reference song
+    bool autoMixSplit = false;
+    juce::String autoMixSplitNote;     // split full songs (instrumentals) into stems before listening
     juce::String autoMixReferenceName;
 
     // Key detection: the running analysis (at most one) and the last result.

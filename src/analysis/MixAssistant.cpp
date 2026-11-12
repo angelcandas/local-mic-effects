@@ -235,6 +235,19 @@ namespace
         return (double) percentile (rings, 0.5);
     }
 
+    // The same signal `db` louder (or quieter).
+    void shiftProfile (Profile& profile, float db)
+    {
+        const auto shift = [db] (float& v) { if (v > -150.0f) v += db; };
+        shift (profile.integratedLufs);
+        shift (profile.shortTermMaxLufs);
+        shift (profile.peakDb);
+        for (auto& v : profile.momentaryLufs) shift (v);
+        for (auto& v : profile.rmsDb) shift (v);
+        for (auto& bands : profile.bandsDb)
+            for (auto& v : bands) shift (v);
+    }
+
     bool hasAny (const MixOptions& options, int trackId, std::initializer_list<fx::ModuleType> types)
     {
         const auto it = options.existingInserts.find (trackId);
@@ -249,7 +262,7 @@ namespace
     //==========================================================================
     struct VoicePlan
     {
-        MixMove eq, compressor, deEsser, reverb;
+        MixMove eq, compressor, deEsser, saturation, exciter, echo, reverb, width;
         double loudnessChange = 0.0; // what the EQ and compressor do to its loudness
         double peakChange = 0.0;     // roughly, to the peak
     };
@@ -258,7 +271,8 @@ namespace
                          const juce::String& name, bool background = false)
     {
         VoicePlan plan;
-        plan.eq.trackId = plan.compressor.trackId = plan.deEsser.trackId = plan.reverb.trackId = trackId;
+        for (auto* move : { &plan.eq, &plan.compressor, &plan.deEsser, &plan.saturation, &plan.exciter, &plan.echo, &plan.reverb, &plan.width })
+            move->trackId = trackId;
         plan.eq.insert = fx::ModuleType::paraEq;
         plan.compressor.insert = fx::ModuleType::compressor;
         plan.deEsser.insert = fx::ModuleType::deEsser;
@@ -429,6 +443,55 @@ namespace
             compChange = planCompressor (plan.compressor, voice, eqChange, false, plan.peakChange);
         }
 
+        // Character the style asks for: saturation (warmth or grit, mixed in), and air from
+        // an exciter, unless the S's already stick out.
+        if (options.saturation && targets.voiceSaturationDb > 0.0f)
+        {
+            plan.saturation.insert = fx::ModuleType::saturation;
+            plan.saturation.values = { { "satOn", 1.0f }, { "satDrive", targets.voiceSaturationDb }, { "satMix", 35.0f } };
+            plan.saturation.reasons.add ("Saturation " + juce::String (targets.voiceSaturationDb, 0) + " dB drive, mixed in at 35%: "
+                                         + (targets.voiceSaturationDb >= 6.0f ? "grit" : "warmth and body") + " for " + getStyleName (targets.style));
+        }
+
+        if (options.exciter && targets.exciterAmount > 0.0f && ! background)
+        {
+            if (! plan.deEsser.values.empty())
+                notes.add (name + " is already sibilant: no exciter added.");
+            else
+            {
+                plan.exciter.insert = fx::ModuleType::exciter;
+                plan.exciter.values = { { "exciterOn", 1.0f }, { "exciterFreq", 4000.0f }, { "exciterAmount", targets.exciterAmount } };
+                plan.exciter.reasons.add ("Exciter " + juce::String (targets.exciterAmount, 0) + "% from 4 kHz: air and detail ("
+                                          + getStyleName (targets.style) + ")");
+            }
+        }
+
+        // A tempo-synced echo on the lead, at the end of the chain.
+        const auto ownSpace = hasAny (options, trackId, { fx::ModuleType::reverb, fx::ModuleType::echo });
+        if (options.echo && targets.echoMix > 0.0f && ! background && ! ownSpace)
+        {
+            const auto beat = 60000.0 / juce::jlimit (40.0, 240.0, options.tempo);
+            const auto ms = roundTo (juce::jlimit (20.0, 1500.0, beat * targets.echoBeats), 1.0);
+            const auto note = juce::approximatelyEqual (targets.echoBeats, 0.5f) ? "an eighth note"
+                            : juce::approximatelyEqual (targets.echoBeats, 0.75f) ? "a dotted eighth"
+                            : juce::approximatelyEqual (targets.echoBeats, 1.0f) ? "a quarter note" : "a beat fraction";
+            plan.echo.insert = fx::ModuleType::echo;
+            plan.echo.atEnd = true;
+            plan.echo.values = { { "delayOn", 1.0f }, { "delayTime", ms }, { "delayFeedback", targets.echoFeedback },
+                                 { "delayMix", targets.echoMix }, { "delayPingPong", 1.0f } };
+            plan.echo.reasons.add ("Echo " + juce::String (targets.echoMix, 0) + "%, " + juce::String (ms, 0) + " ms (" + note + " at "
+                                   + juce::String (options.tempo, 0) + " BPM), ping-pong: depth that moves with the song");
+        }
+
+        // Background vocals spread wider than the lead, which stays in the middle.
+        if (background && options.width && targets.widthAmount > 100.0f)
+        {
+            plan.width.insert = fx::ModuleType::width;
+            plan.width.atEnd = true;
+            plan.width.values = { { "widthOn", 1.0f }, { "widthAmount", targets.widthAmount } };
+            plan.width.reasons.add ("Stereo width " + juce::String (targets.widthAmount, 0) + "%: spreads them around the lead");
+        }
+
         // Reverb at the end of the chain: some space, as much as the style asks for, but
         // only on a dry recording that doesn't have a reverb or echo of its own.
         if (options.reverb && targets.reverbMix > 0.0f)
@@ -464,25 +527,75 @@ namespace
 //==============================================================================
 MixTargets getTargets (MixStyle style)
 {
+    MixTargets t { 1.5f, 0.0f, 0.0f };
+
     switch (style)
     {
-        // Coaching keeps the voice dry, so every detail of it can be heard.
-        case MixStyle::pop:      return { 1.5f, 2.0f, 0.0f, -14.0f, 12.0f, 45.0f, 6.0f };
-        case MixStyle::ballad:   return { 2.5f, 0.0f, 1.5f, -14.0f, 20.0f, 65.0f, 7.0f };
-        case MixStyle::rock:     return { 0.0f, 1.0f, -1.0f, -14.0f, 9.0f, 35.0f, 5.0f };
-        case MixStyle::coaching: return { 4.0f, 1.5f, 0.0f, -14.0f, 0.0f, 50.0f, 9.0f };
+        case MixStyle::pop:
+            t = { 1.5f, 2.0f, 0.0f, -14.0f, 12.0f, 45.0f, 6.0f };
+            t.voiceSaturationDb = 3.0f; t.exciterAmount = 20.0f; t.echoMix = 10.0f; t.echoBeats = 0.5f; t.widthAmount = 115.0f;
+            break;
+        case MixStyle::ballad:
+            t = { 2.5f, 0.0f, 1.5f, -14.0f, 20.0f, 65.0f, 7.0f };
+            t.exciterAmount = 10.0f; t.echoMix = 12.0f; t.echoBeats = 1.0f; t.echoFeedback = 30.0f; t.widthAmount = 110.0f;
+            break;
+        case MixStyle::rock:
+            t = { 0.0f, 1.0f, -1.0f, -14.0f, 9.0f, 35.0f, 5.0f };
+            t.voiceSaturationDb = 6.0f; t.bassSaturationDb = 6.0f; t.widthAmount = 120.0f;
+            t.drumsLufs = -19.0f; t.guitarLufs = -21.0f;
+            break;
+        case MixStyle::coaching: // the voice up front and dry, so every detail of it can be heard
+            t = { 4.0f, 1.5f, 0.0f, -14.0f, 0.0f, 50.0f, 9.0f };
+            break;
+        case MixStyle::hipHop:
+            t = { 2.5f, 2.5f, 0.5f, -13.0f, 6.0f, 30.0f, 6.0f };
+            t.voiceSaturationDb = 4.0f; t.bassSaturationDb = 4.0f; t.exciterAmount = 25.0f;
+            t.echoMix = 8.0f; t.echoBeats = 0.5f; t.echoFeedback = 20.0f; t.widthAmount = 110.0f;
+            t.drumsLufs = -19.0f; t.bassLufs = -19.5f;
+            break;
+        case MixStyle::rnb:
+            t = { 2.0f, 1.5f, 1.5f, -14.0f, 16.0f, 55.0f, 6.0f };
+            t.voiceSaturationDb = 2.0f; t.exciterAmount = 20.0f; t.echoMix = 12.0f; t.echoBeats = 0.75f; t.echoFeedback = 30.0f;
+            t.widthAmount = 120.0f; t.bassLufs = -20.0f;
+            break;
+        case MixStyle::acoustic:
+            t = { 2.0f, 0.5f, 1.0f, -16.0f, 14.0f, 50.0f, 7.0f };
+            t.widthAmount = 110.0f; t.guitarLufs = -20.0f; t.pianoLufs = -21.0f; t.drumsLufs = -23.0f;
+            break;
+        case MixStyle::electronic:
+            t = { 1.0f, 2.5f, -0.5f, -12.0f, 14.0f, 60.0f, 5.0f };
+            t.voiceSaturationDb = 3.0f; t.bassSaturationDb = 3.0f; t.exciterAmount = 30.0f;
+            t.echoMix = 15.0f; t.echoBeats = 0.75f; t.echoFeedback = 35.0f; t.widthAmount = 140.0f;
+            t.drumsLufs = -19.0f; t.bassLufs = -20.0f;
+            break;
+        case MixStyle::jazz:
+            t = { 1.0f, 0.0f, 1.0f, -18.0f, 18.0f, 55.0f, 8.0f };
+            t.voiceSaturationDb = 2.0f; t.pianoLufs = -21.0f; t.drumsLufs = -23.0f;
+            break;
+        case MixStyle::lofi:
+            t = { 0.5f, -2.0f, 2.0f, -14.0f, 15.0f, 45.0f, 6.0f };
+            t.voiceSaturationDb = 8.0f; t.bassSaturationDb = 5.0f; t.echoMix = 10.0f; t.echoBeats = 0.5f; t.echoFeedback = 30.0f;
+            t.widthAmount = 90.0f;
+            break;
     }
-    return { 1.5f, 0.0f, 0.0f, -14.0f, 12.0f, 45.0f, 6.0f };
+    t.style = style;
+    return t;
 }
 
 juce::String getStyleName (MixStyle style)
 {
     switch (style)
     {
-        case MixStyle::pop:      return "Pop";
-        case MixStyle::ballad:   return "Ballad";
-        case MixStyle::rock:     return "Rock";
-        case MixStyle::coaching: return "Coaching";
+        case MixStyle::pop:        return "Pop";
+        case MixStyle::ballad:     return "Ballad";
+        case MixStyle::rock:       return "Rock";
+        case MixStyle::coaching:   return "Coaching";
+        case MixStyle::hipHop:     return "Hip-hop";
+        case MixStyle::rnb:        return "R&B";
+        case MixStyle::acoustic:   return "Acoustic";
+        case MixStyle::electronic: return "Electronic";
+        case MixStyle::jazz:       return "Jazz";
+        case MixStyle::lofi:       return "Lo-fi";
     }
     return {};
 }
@@ -630,7 +743,7 @@ Role guessRole (const juce::String& trackName, const Profile& profile, double so
 }
 
 //==============================================================================
-MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Role>& roles,
+MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Role>& roles,
                  const std::map<int, float>& currentVolumes, float currentMasterVolume, MixStyle style,
                  const MixOptions& options)
 {
@@ -639,6 +752,44 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
 
     const auto volumeOf = [&] (int id) { auto it = currentVolumes.find (id); return it != currentVolumes.end() ? it->second : 0.0f; };
     const auto roleOf = [&] (int id) { auto it = roles.find (id); return it != roles.end() ? it->second : Role::other; };
+
+    // Normalize: each track to its role's level, with its chain's input gain. The rest
+    // is planned on the measurements as they will be after it.
+    SessionAnalyser::Result normalized;
+    if (options.normalize)
+    {
+        normalized = measured;
+        for (auto& [id, profile] : normalized.tracks)
+        {
+            const auto role = roleOf (id);
+            if (role == Role::other || profile.getActiveSeconds() <= 0.0 || profile.integratedLufs <= -150.0f)
+                continue;
+
+            const auto level = role == Role::voice || role == Role::backingVocal ? targets.voiceLufs
+                             : role == Role::backing ? targets.instrumentalLufs
+                             : role == Role::drums   ? targets.drumsLufs
+                             : role == Role::bass    ? targets.bassLufs
+                             : role == Role::guitar  ? targets.guitarLufs
+                             : role == Role::piano   ? targets.pianoLufs
+                                                     : targets.otherInstrumentLufs;
+            const auto forLevel = level - profile.integratedLufs;
+            const auto forPeak = -1.0f - profile.peakDb;
+            const auto trim = roundTo (juce::jlimit (-24.0f, 24.0f, juce::jmin (forLevel, forPeak)), 0.5);
+            if (std::abs (trim) < 0.5f)
+                continue;
+
+            shiftProfile (profile, trim);
+
+            MixMove move;
+            move.trackId = id;
+            move.values = { { "inGain", trim } };
+            move.reasons.add ("Input gain " + juce::String (trim > 0 ? "+" : "") + juce::String (trim, 1) + " dB: normalized to "
+                              + juce::String (level, 0) + " LUFS, the level for " + getRoleName (role).toLowerCase() + " in "
+                              + getStyleName (style) + (forPeak < forLevel ? " (held back so its peaks stay under -1 dB)" : ""));
+            plan.moves.push_back (move);
+        }
+    }
+    const auto& analysis = options.normalize ? normalized : measured;
 
     std::vector<int> voices, backgroundVocals, backings, instruments;
     for (const auto& [id, profile] : analysis.tracks)
@@ -683,6 +834,7 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
     // Backing and instruments: a dip where each one covers the lead's words most.
     // Instruments also get a low cut under their lowest notes and, when their level
     // swings a lot, a compressor. All of it in one EQ per track.
+    std::vector<MixMove> pendingWidth;   // after each track's other inserts
     std::map<int, double> backingChange; // loudness change of each one while the lead sings
     for (auto id : backings)
         backingChange[id] = 0.0;
@@ -768,6 +920,32 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
             eqChange = loudnessChangeDb (profile.getAverageSpectrum(), eqDb);
         }
 
+        // Bass: some saturation where the style asks, so it's heard on small speakers.
+        // Wider guitars, keys and pads; bass and drums stay centred.
+        if (role == Role::bass && options.saturation && targets.bassSaturationDb > 0.0f)
+        {
+            MixMove saturation;
+            saturation.trackId = id;
+            saturation.insert = fx::ModuleType::saturation;
+            saturation.values = { { "satOn", 1.0f }, { "satDrive", targets.bassSaturationDb }, { "satMix", 40.0f } };
+            saturation.reasons.add ("Saturation " + juce::String (targets.bassSaturationDb, 0)
+                                    + " dB drive, mixed in at 40%: harmonics so the bass is heard on small speakers");
+            plan.moves.push_back (saturation);
+        }
+
+        if (options.width && ! juce::approximatelyEqual (targets.widthAmount, 100.0f)
+            && (role == Role::guitar || role == Role::piano || role == Role::instrument || role == Role::backing))
+        {
+            MixMove width;
+            width.trackId = id;
+            width.insert = fx::ModuleType::width;
+            width.atEnd = true;
+            width.values = { { "widthOn", 1.0f }, { "widthAmount", targets.widthAmount } };
+            width.reasons.add ("Stereo width " + juce::String (targets.widthAmount, 0) + "%: "
+                               + (targets.widthAmount > 100.0f ? "wider, leaving the middle to the voice" : "narrower, for a tighter " + getStyleName (style) + " sound"));
+            pendingWidth.push_back (width);
+        }
+
         if (options.compressor && instrument)
         {
             MixMove compressor;
@@ -786,9 +964,12 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
         finalLoudness[id] += eqChange;
     }
 
+    for (const auto& move : pendingWidth)
+        plan.moves.push_back (move);
+
     for (const auto& [id, vp] : voicePlans)
     {
-        for (auto* move : { &vp.eq, &vp.compressor, &vp.deEsser, &vp.reverb })
+        for (auto* move : { &vp.eq, &vp.compressor, &vp.deEsser, &vp.saturation, &vp.exciter, &vp.echo, &vp.reverb, &vp.width })
             if (! move->values.empty())
                 plan.moves.push_back (*move);
     }
@@ -840,7 +1021,7 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
         const auto leadVolume = [&]
         {
             for (const auto& move : plan.moves)
-                if (move.trackId == lead && ! move.insert.has_value())
+                if (move.trackId == lead && ! move.insert.has_value() && move.values.count ("volume") > 0)
                     return (double) move.values.at ("volume");
             return (double) volumeOf (lead);
         }();
@@ -1023,6 +1204,13 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
         if (! owner.isValid())
             continue;
 
+        if (! move.insert.has_value() && move.values.count ("inGain") > 0)
+        {
+            const auto current = (float) owner.getProperty (daw::ids::inGain, 0.0f);
+            edit.setChainGain (move.trackId, false, current + (move.values.at ("inGain") - current) * amount);
+            continue;
+        }
+
         if (! move.insert.has_value())
         {
             const auto current = (float) owner.getProperty (daw::ids::volume, 0.0f);
@@ -1053,10 +1241,12 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
         for (const auto& [valueId, value] : move.values)
         {
             auto scaled = value;
-            if (valueId.endsWith ("Gain") || valueId.endsWith ("Threshold") || valueId.endsWith ("Mix"))
+            if (valueId.endsWith ("Gain") || valueId.endsWith ("Threshold") || valueId.endsWith ("Mix") || valueId == "exciterAmount")
                 scaled = value * amount; // from 0 dB: no boost or cut, no compression; from a dry mix
             else if (valueId == "compRatio")
                 scaled = 1.0f + (value - 1.0f) * amount;
+            else if (valueId == "widthAmount")
+                scaled = 100.0f + (value - 100.0f) * amount; // from as it is
 
             edit.setInsertValue (id, valueId, scaled);
         }

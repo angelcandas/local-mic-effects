@@ -2630,6 +2630,9 @@ class DawScreen {
     panel.classList.toggle("is-running", event.state === "analysing");
     panel.querySelector(".export-bar").style.setProperty("--progress", event.progress ?? 1);
 
+    panel.classList.toggle("is-running", event.state === "analysing" || event.state === "splitting");
+    if (event.state === "splitting")
+      return this.setAutoMixResult(event.phase === 0 ? "Downloading the stem model…" : event.phase === 1 ? "Loading the stem model…" : "Splitting the song into stems…");
     if (event.state === "analysing") return this.setAutoMixResult("Listening…");
     if (event.state === "cancelled") return this.setAutoMixResult("Cancelled.");
     if (event.state === "error") return this.setAutoMixResult(event.error, true);
