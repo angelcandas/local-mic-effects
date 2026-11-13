@@ -8733,6 +8733,266 @@ namespace
 
     // Auto Mix and Smooth: the analysis measures how resonant a track is, and the plan
     // adds Smooth where it rings.
+    // Auto Mix placement: who goes left and right, pairs evened out, the centre roles left
+    // in the middle, both sides as loud as each other, mono-safe pans.
+    void testAutoMixPlacement()
+    {
+        std::cout << "\nAuto Mix: placement (pan)\n";
+        using analysis::Role;
+
+        // The balance law and the mono fold-down.
+        check (analysis::getMonoLossDb (0.0f) < 0.01f && std::abs (analysis::getMonoLossDb (1.0f) - 3.01f) < 0.05f
+                   && analysis::getMonoLossDb (0.5f) < analysis::getMonoLossDb (0.8f),
+               "mono fold-down: nothing in the centre, 3 dB fully to one side (" + juce::String (analysis::getMonoLossDb (1.0f), 2) + ")");
+
+        // Stereo image: a dual-mono file has none; two different sides do.
+        {
+            auto dual = makePlucks (2.0);
+            auto wide = makePlucks (2.0);
+            juce::Random random (9);
+            for (int i = 0; i < wide.getNumSamples(); ++i)
+                wide.setSample (1, i, wide.getSample (1, i) * 0.5f + 0.05f * (random.nextFloat() * 2.0f - 1.0f));
+            juce::AudioBuffer<float> mono (1, 1000);
+            mono.clear();
+            check (! analysis::hasStereoImage (dual) && analysis::hasStereoImage (wide) && ! analysis::hasStereoImage (mono),
+                   "stereo image: none in a dual-mono file, one in a file whose sides differ");
+        }
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-placement", {});
+        folder.createDirectory();
+        const auto file = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto f = folder.getChildFile (name + ".wav");
+            writeWav (f, audio, sampleRate);
+            return f;
+        };
+        const auto scaled = [] (juce::AudioBuffer<float> audio, float gain) { audio.applyGain (gain); return audio; };
+
+        // A sustained chord (keys) and a shaker (high noise bursts), for other instruments.
+        const auto makeChord = [&] (double seconds)
+        {
+            juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
+            const auto twoPi = juce::MathConstants<double>::twoPi;
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                const auto t = i / sampleRate;
+                double value = 0.0;
+                for (auto f : { 330.0, 415.3, 493.9, 659.3 })
+                    value += 0.04 * (std::sin (twoPi * f * t) + 0.3 * std::sin (twoPi * 2.0 * f * t));
+                for (int ch = 0; ch < 2; ++ch)
+                    buffer.setSample (ch, i, (float) value);
+            }
+            return buffer;
+        };
+        const auto makeShaker = [&] (double seconds)
+        {
+            juce::AudioBuffer<float> buffer (2, (int) (seconds * sampleRate));
+            juce::Random random (11);
+            float hp = 0.0f, last = 0.0f;
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+            {
+                const auto since = std::fmod (i / sampleRate, 0.25);
+                const auto noise = random.nextFloat() * 2.0f - 1.0f;
+                hp = 0.9f * (hp + noise - last); // a simple high-pass
+                last = noise;
+                const auto value = (float) (0.15 * hp * std::exp (-since * 25.0));
+                for (int ch = 0; ch < 2; ++ch)
+                    buffer.setSample (ch, i, value);
+            }
+            return buffer;
+        };
+
+        const double seconds = 12.0;
+        daw::Edit edit;
+        std::map<int, Role> roles;
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio, Role role)
+        {
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, file (name, audio), 0.0, seconds);
+            roles[id] = role;
+            return id;
+        };
+
+        const auto voice = add ("Lead vocal", makeSungLine (seconds), Role::voice);
+        const auto bass = add ("Bass", makeBassLine (seconds), Role::bass);
+        const auto drums = add ("Drums", makeDrumLoop (seconds), Role::drums);
+        const auto gtr1 = add ("Gtr 1", makePlucks (seconds), Role::guitar);
+        const auto gtr2 = add ("Gtr 2", scaled (makePlucks (seconds), 0.8f), Role::guitar);
+        const auto bv1 = add ("Harmony 1", scaled (makeSungLine (seconds), 0.7f), Role::backingVocal);
+        const auto bv2 = add ("Harmony 2", scaled (makeSungLine (seconds), 0.6f), Role::backingVocal);
+        const auto keys = add ("Keys", makeChord (seconds), Role::piano);
+        const auto shaker = add ("Shaker", makeShaker (seconds), Role::instrument);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        std::map<int, float> volumes;
+        for (const auto& [id, role] : roles)
+            volumes[id] = 0.0f;
+
+        const auto panOf = [] (const analysis::MixPlan& plan, int id) -> std::optional<float>
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == id && ! move.insert.has_value() && move.values.count ("pan") > 0)
+                    return move.values.at ("pan");
+            return {};
+        };
+        const auto named = [] (analysis::MixOptions o, const daw::Edit& e)
+        {
+            for (const auto& track : e.getTracks())
+                o.trackNames[(int) track[daw::ids::id]] = track[daw::ids::name].toString();
+            return o;
+        };
+        const auto describe = [&] (const analysis::MixPlan& plan, const daw::Edit& e)
+        {
+            for (const auto& move : plan.moves)
+                if (move.values.count ("pan") > 0 && ! move.insert.has_value())
+                    for (const auto& reason : move.reasons)
+                        std::cout << "        " << e.getTrack (move.trackId)[daw::ids::name].toString() << ": " << reason << "\n";
+            for (const auto& note : plan.notes)
+                std::cout << "        note: " << note << "\n";
+        };
+
+        analysis::MixOptions options;
+        options.reverb = options.echo = options.sends = options.throws = false; // what's measured below is the dry balance
+        options = named (options, edit);
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, options);
+        describe (plan, edit);
+
+        check (! panOf (plan, voice) && ! panOf (plan, bass) && ! panOf (plan, drums), "the voice, the bass and the drums stay in the middle");
+        check (panOf (plan, gtr1).value_or (0.0f) < -0.3f && juce::approximatelyEqual (panOf (plan, gtr1).value_or (0.0f), -panOf (plan, gtr2).value_or (0.0f)),
+               "a pair of guitars: one each side by the same amount, the first on the left ("
+                   + juce::String (panOf (plan, gtr1).value_or (0.0f), 2) + ", " + juce::String (panOf (plan, gtr2).value_or (0.0f), 2) + ")");
+        check (panOf (plan, bv1).has_value() && juce::approximatelyEqual (*panOf (plan, bv1), -panOf (plan, bv2).value_or (0.0f)),
+               "a pair of background vocals, one each side");
+        check (panOf (plan, keys).has_value() && panOf (plan, shaker).has_value()
+                   && std::max (*panOf (plan, keys), *panOf (plan, shaker)) > 0.0f,
+               "the other instruments even out the louder guitar on the left ("
+                   + juce::String (panOf (plan, keys).value_or (0.0f), 2) + ", " + juce::String (panOf (plan, shaker).value_or (0.0f), 2) + ")");
+
+        bool monoSafe = true;
+        for (const auto& move : plan.moves)
+            if (move.values.count ("pan") > 0 && ! move.insert.has_value())
+                monoSafe = monoSafe && analysis::getMonoLossDb (move.values.at ("pan")) <= 1.5f;
+        check (monoSafe, "every pan loses 1.5 dB or less when the mix plays in mono");
+
+        // Applied and rendered: left and right as loud as each other; the background vocals
+        // still sit the style's LU under the lead though they're panned.
+        const auto sides = [&] (daw::Edit& e)
+        {
+            const auto mixFile = folder.getNonexistentChildFile ("mix", ".wav");
+            daw::Exporter::Settings settings;
+            settings.tail = 0.0;
+            daw::Exporter (e, settings).exportMix (mixFile);
+            double rate = 0.0;
+            const auto mix = readWav (mixFile, rate);
+            juce::AudioBuffer<float> left (1, mix.getNumSamples()), right (1, mix.getNumSamples());
+            left.copyFrom (0, 0, mix, 0, 0, mix.getNumSamples());
+            right.copyFrom (0, 0, mix, 1, 0, mix.getNumSamples());
+            return std::pair<float, float> { analysis::analyse (left, rate).integratedLufs, analysis::analyse (right, rate).integratedLufs };
+        };
+
+        analysis::applyMix (edit, plan);
+        check (std::abs ((float) edit.getTrack (gtr1)[daw::ids::pan] - *panOf (plan, gtr1)) < 1.0e-4f, "applied: the track's pan is set");
+        {
+            const auto [left, right] = sides (edit);
+            check (std::abs (left - right) <= 1.0f, "rendered: left " + juce::String (left, 1) + " LUFS, right " + juce::String (right, 1)
+                                                         + " LUFS (within 1 LU)");
+
+            const auto after = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, false).run();
+            float lead = 0.0f, harmony = 0.0f;
+            for (const auto& [id, profile] : after.tracks)
+            {
+                if (id == voice) lead = profile.getLoudnessOver();
+                if (id == bv1)   harmony = profile.getLoudnessOver();
+            }
+            const auto target = analysis::getTargets (analysis::MixStyle::pop).backingVocalUnderLeadLu;
+            check (std::abs (lead - harmony - target) < 1.5f, "panned background vocals still sit " + juce::String (lead - harmony, 1)
+                                                                  + " LU under the lead (target " + juce::String (target, 1) + ")");
+        }
+        edit.getUndoManager().undo();
+        check (juce::exactlyEqual ((float) edit.getTrack (gtr1)[daw::ids::pan], 0.0f), "one undo puts the pans back");
+
+        // Styles: rock wider than coaching.
+        {
+            const auto rock = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::rock, options);
+            const auto coaching = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::coaching, options);
+            check (std::abs (panOf (rock, gtr1).value_or (0.0f)) > std::abs (panOf (coaching, gtr1).value_or (1.0f)),
+                   "the style sets how wide: guitars at " + juce::String (panOf (rock, gtr1).value_or (0.0f), 2) + " for Rock, "
+                       + juce::String (panOf (coaching, gtr1).value_or (0.0f), 2) + " for Coaching");
+        }
+
+        // Off, panned by you, recorded in stereo.
+        {
+            auto off = options;
+            off.pan = false;
+            const auto none = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, off);
+            check (std::none_of (none.moves.begin(), none.moves.end(), [] (const analysis::MixMove& m) { return m.values.count ("pan") > 0 && ! m.insert.has_value(); }),
+                   "Pan off: no pans");
+
+            auto mine = options;
+            mine.currentPans[keys] = 0.5f;
+            mine.stereoTracks.insert (shaker);
+            const auto kept = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, mine);
+            check (! panOf (kept, keys) && ! panOf (kept, shaker) && kept.notes.joinIntoString (" ").contains ("Kept where you panned")
+                       && kept.notes.joinIntoString (" ").contains ("stereo image"),
+                   "a track you panned and one recorded in stereo are left where they are");
+        }
+
+        // One guitar alone: brought in so the sides stay even.
+        {
+            daw::Edit small;
+            std::map<int, Role> smallRoles;
+            const auto addSmall = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio, Role role)
+            {
+                const auto id = (int) small.addTrack (name)[daw::ids::id];
+                small.addClip (id, file ("small " + name, audio), 0.0, seconds);
+                smallRoles[id] = role;
+                return id;
+            };
+            addSmall ("Vocal", makeSungLine (seconds), Role::voice);
+            addSmall ("Bass", makeBassLine (seconds), Role::bass);
+            const auto guitar = addSmall ("Guitar", scaled (makePlucks (seconds), 2.0f), Role::guitar);
+            const auto smallSource = analysis::SessionAnalyser (small, analysis::SessionAnalyser::Point::source, false).run();
+            std::map<int, float> smallVolumes;
+            for (const auto& [id, role] : smallRoles)
+                smallVolumes[id] = 0.0f;
+            const auto smallPlan = analysis::planMix (smallSource, smallRoles, smallVolumes, 0.0f, analysis::MixStyle::pop, named (options, small));
+            describe (smallPlan, small);
+            analysis::applyMix (small, smallPlan);
+            const auto [left, right] = sides (small);
+            check (std::abs (left - right) <= 1.05f, "a lone guitar: panned " + juce::String (panOf (smallPlan, guitar).value_or (0.0f), 2)
+                                                          + ", left and right within 1 LU (" + juce::String (left - right, 2) + ")");
+        }
+
+        // Names: a stereo pair split on two tracks goes all the way; drum mics where they sit on a kit.
+        {
+            daw::Edit kit;
+            std::map<int, Role> kitRoles;
+            const auto addKit = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio, Role role)
+            {
+                const auto id = (int) kit.addTrack (name)[daw::ids::id];
+                kit.addClip (id, file ("kit " + name, audio), 0.0, seconds);
+                kitRoles[id] = role;
+                return id;
+            };
+            addKit ("Vocal", makeSungLine (seconds), Role::voice);
+            const auto kick = addKit ("Kick", makeDrumLoop (seconds), Role::drums);
+            const auto hat = addKit ("Hi-hat", makeShaker (seconds), Role::drums);
+            const auto ohLeft = addKit ("OH L", makeShaker (seconds), Role::drums);
+            const auto ohRight = addKit ("OH R", makeShaker (seconds), Role::drums);
+            const auto kitSource = analysis::SessionAnalyser (kit, analysis::SessionAnalyser::Point::source, false).run();
+            std::map<int, float> kitVolumes;
+            for (const auto& [id, role] : kitRoles)
+                kitVolumes[id] = 0.0f;
+            const auto kitPlan = analysis::planMix (kitSource, kitRoles, kitVolumes, 0.0f, analysis::MixStyle::pop, named (options, kit));
+            describe (kitPlan, kit);
+            check (! panOf (kitPlan, kick) && panOf (kitPlan, hat).value_or (0.0f) < 0.0f
+                       && juce::exactlyEqual (panOf (kitPlan, ohLeft).value_or (0.0f), -1.0f) && juce::exactlyEqual (panOf (kitPlan, ohRight).value_or (0.0f), 1.0f),
+                   "drum mics by name: the kick in the middle, the hi-hat left, overheads L and R fully to their sides");
+        }
+
+        folder.deleteRecursively();
+    }
+
     void testSmoothAutoMix()
     {
         std::cout << "\nAuto Mix: Smooth where it rings\n";
@@ -11308,6 +11568,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=placement: just Auto Mix's pans.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "placement")
+    {
+        testAutoMixPlacement();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=smooth: just the resonance suppressor.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "smooth")
     {
@@ -11442,6 +11710,7 @@ int main()
     testDawKey();
     testAutoMixEffects();
     testAutoMixRoles();
+    testAutoMixPlacement();
     testAutoMixRides();
     testAutoMixModes();
     testAutoMixSynths();

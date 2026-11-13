@@ -84,6 +84,10 @@ struct MixTargets
     float rideRangeDb = 4.0f;       // the most the vocal ride moves a phrase up or down
     float duckDb = 1.5f;            // instruments dip this much while the lead sings (0: no dip)
 
+    // Placement: how far from the centre the panned parts go, 0..1 of the way to the side
+    // (a pair of double-tracked guitars at 1 sits fully left and right).
+    float spread = 0.7f;
+
     // Levels for "normalize" (LUFS each track is brought to before the rest is planned).
     // The voices sit at voiceLufs; the others by role.
     float voiceLufs = -18.0f;
@@ -158,6 +162,16 @@ struct MixOptions
     // on the master in master mode when the mix has narrow peaks.
     bool smooth = true;
 
+    // Placement (pan): the lead voice, bass, kick and snare and a full backing stay in the
+    // centre; pairs of the same role (double-tracked guitars, background vocals) go left
+    // and right by the same amount; the other instruments are spread so each side carries
+    // a similar loudness and spectrum, as wide as the style wants (MixTargets::spread).
+    // Tracks with a stereo image of their own (stereoTracks) keep it, and the ones you've
+    // panned yourself (currentPans) stay where you put them.
+    bool pan = true;
+    std::set<int> stereoTracks;      // by id: their audio has a real stereo image
+    std::map<int, float> currentPans; // by id, -1..1 (missing: centre)
+
     // Insert types each track already has (by track id). A voice that already has a
     // reverb or an echo keeps its own space: Auto Mix doesn't add or change one.
     std::map<int, std::vector<fx::ModuleType>> existingInserts;
@@ -167,6 +181,14 @@ struct MixOptions
 };
 
 MixTargets getTargets (MixStyle);
+
+// True when a recording has a stereo image worth keeping: two channels that differ
+// (a dual-mono file, the same signal on both sides, is a mono part).
+bool hasStereoImage (const juce::AudioBuffer<float>&);
+
+// Mono fold-down of a mono part at `pan` (the mixer's balance law): how much quieter it
+// gets against the centre when the mix plays in mono (a phone, a club's PA), in dB (>= 0).
+float getMonoLossDb (float pan);
 juce::String getStyleName (MixStyle);
 
 // A guess from the track's name alone ("Lead vocal", "Kick", "Bajo"...), or nothing
@@ -196,6 +218,7 @@ struct MixMove
     // (applyMix scales them from the value set in `values` by the amount).
     std::map<juce::String, std::vector<std::pair<double, float>>> automation;
     std::map<juce::String, float> values; // insert values by ID, or "volume" in dB
+    // values {"pan": -1..1} with no insert: the track's pan.
     std::vector<std::pair<double, float>> ride; // volume automation (seconds, dB), when not empty (no insert, no values)
     juce::StringArray reasons;       // one line per change, for the UI
 };
