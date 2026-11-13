@@ -138,6 +138,20 @@ private:
     // Split into stems (src/stems/StemSplitter.h): downloads the model the first time,
     // then separates on background threads.
     juce::var handleStems (const juce::var& args);
+public:
+    // Commands on a time range (the arrangement's Range tool), one undo step each.
+    // { action, start, end, tracks? }: "split" cuts the covered tracks' clips at both ends,
+    // "delete" removes what lies inside, "duplicate" copies it to just after the range
+    // (over what was there), "deleteTime" removes the range from every track and pulls
+    // the rest of the song (clips, markers, pattern blocks) left, "insertSilence" pushes
+    // everything from the start right by the range's length. -> { ok, error, clips }
+    juce::var editTimeRange (const juce::var& args);
+    // Bounce to a new track: the file (a render of `sourceTrackId` alone, see
+    // Exporter::exportTrack) on a new audio track right under it from `startSeconds`, and the
+    // source muted, in one undo step. Answers { ok, error, track }.
+    juce::var addBouncedTrack (int sourceTrackId, const juce::File&, double startSeconds);
+
+private:
     juce::var handleRebalance (const juce::var& args);
 
     // Auto Mix (src/analysis/MixAssistant.h): analysis runs on a background thread;
@@ -231,6 +245,11 @@ private:
     // A running export (at most one).
     struct ExportJob;
     std::shared_ptr<ExportJob> exportJob;
+
+    // A running "Bounce to a new track" (at most one): the source track, where it starts.
+    std::shared_ptr<ExportJob> bounceJob;
+    int bounceTrack = -1;
+    double bounceStart = 0.0;
 
     // A running stem split (at most one).
     struct StemJob;

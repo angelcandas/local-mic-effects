@@ -1,3 +1,4 @@
+#include <set>
 #include "DawBridge.h"
 
 #include "analysis/TakeComp.h"
@@ -330,6 +331,14 @@ namespace
             { "setPartMutes", "Mute rows" }, { "splitPattern", "Split by track" },
             { "addPatternClips", "Draw patterns" }, { "removePatternClips", "Erase pattern blocks" },
         };
+        if (command == "timeRange")
+        {
+            static const std::map<juce::String, const char*> actions {
+                { "split", "Split at the range" }, { "delete", "Delete the range" }, { "duplicate", "Duplicate the range" },
+                { "deleteTime", "Delete time" }, { "insertSilence", "Insert silence" } };
+            const auto it = actions.find (args["action"].toString());
+            return it != actions.end() ? it->second : "Range edit";
+        }
         if (const auto it = names.find (command); it != names.end())
             return it->second;
         return command;
@@ -378,6 +387,9 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
     }
 
     engine.setMetronomeVolume ((float) settings.getDoubleValue ("dawClickVolume", 1.0));
+    engine.setPunch (settings.getBoolValue ("dawPunch", false));
+    engine.setPreRollBars (settings.getIntValue ("dawPreRoll", 1));
+    engine.setClickOnlyRecording (settings.getBoolValue ("dawClickOnlyRecording", false));
 
     processor.getPluginHost().onScanFinished = [this]
     {
@@ -398,6 +410,8 @@ DawBridge::~DawBridge()
 
     if (exportJob != nullptr)
         exportJob->cancel = true;
+    if (bounceJob != nullptr)
+        bounceJob->cancel = true;
     if (autoMixJob != nullptr)
         autoMixJob->cancel = true;
     if (mixCheckJob != nullptr)
@@ -791,6 +805,9 @@ juce::var DawBridge::describeSession()
                             { "end", number (state, ids::loopEnd) } }) },
         { "metronome", engine.getMetronome() },
         { "countIn", engine.getCountInBars() },
+        { "punch", engine.getPunch() },
+        { "preRoll", engine.getPreRollBars() },
+        { "clickOnlyRecording", engine.getClickOnlyRecording() },
         { "canUndo", undo.canUndo() },
         { "canRedo", undo.canRedo() },
         { "undoName", undo.getUndoDescription() },
@@ -1132,6 +1149,13 @@ void DawBridge::tick()
 
     if (processor.isDawMode())
     {
+        // Punch out: past the end of the punch range, stop and keep the take.
+        if (engine.isPunchedOut())
+        {
+            engine.stopRecording();
+            sessionChanged = true;
+        }
+
         // Stop at the end of the song, unless recording or looping (pattern mode always loops).
         if (engine.isPlaying() && ! engine.isRecording() && engine.getPatternMode() < 0 && engine.getLength() > 0 && engine.getPosition() >= engine.getLength()
             && ! (bool) edit.getState().getProperty (ids::loopOn, false))
@@ -1311,6 +1335,24 @@ void DawBridge::tick()
             finishBackingVocals();
         else
             emit ("dawBackingVocals", object ({ { "state", "analysing" }, { "clip", backingJob->clipId }, { "progress", backingJob->progress.load() } }));
+    }
+
+    if (bounceJob != nullptr)
+    {
+        if (bounceJob->finished)
+        {
+            const auto job = std::move (bounceJob);
+            auto answer = job->result.error.isNotEmpty() || job->result.cancelled || job->result.files.isEmpty()
+                            ? object ({ { "ok", false }, { "error", job->result.cancelled ? juce::String() : job->result.error } })
+                            : addBouncedTrack (bounceTrack, job->result.files.getFirst(), bounceStart);
+            answer.getDynamicObject()->setProperty ("done", true);
+            answer.getDynamicObject()->setProperty ("cancelled", job->result.cancelled);
+            emit ("dawBounce", answer);
+        }
+        else
+        {
+            emit ("dawBounce", object ({ { "progress", bounceJob->progress.load() } }));
+        }
     }
 
     if (exportJob != nullptr)
@@ -1591,6 +1633,141 @@ juce::var DawBridge::addSingAlongTracks (const std::vector<SingAlongRow>& rows)
 
     sessionChanged = true;
     return object ({ { "ok", true }, { "error", juce::String() }, { "tracks", added } });
+}
+
+juce::var DawBridge::editTimeRange (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+    const auto start = juce::jmax (0.0, (double) args.getProperty ("start", 0.0));
+    const auto end = (double) args.getProperty ("end", 0.0);
+    const auto length = end - start;
+    if (length < daw::Edit::minClipSeconds)
+        return error ("Mark a range first: drag with the Range tool (2).");
+
+    // The tracks it covers: those named, or every track for the commands that move time.
+    const auto wholeSong = action == "deleteTime" || action == "insertSilence";
+    std::set<int> covered;
+    if (const auto* list = args["tracks"].getArray(); list != nullptr && ! wholeSong)
+        for (const auto& id : *list)
+            covered.insert ((int) id);
+    juce::Array<juce::ValueTree> tracks;
+    for (const auto& track : edit.getTracks())
+        if (covered.empty() || covered.count ((int) track[ids::id]) > 0)
+            tracks.add (track);
+
+    const auto clipsOf = [] (const juce::ValueTree& track)
+    {
+        std::vector<int> found;
+        for (const auto& child : track)
+            if (child.hasType (ids::CLIP))
+                found.push_back ((int) child[ids::id]);
+        return found;
+    };
+    const auto clipStart = [this] (int id) { return (double) edit.getClip (id)[ids::start]; };
+    const auto clipEnd = [this] (int id) { const auto c = edit.getClip (id); return (double) c[ids::start] + (double) c[ids::length]; };
+    const auto eps = 1e-6;
+
+    // Cuts every clip on the covered tracks that crosses `time`.
+    const auto splitAt = [&] (double time)
+    {
+        for (const auto& track : tracks)
+            for (const auto id : clipsOf (track))
+                if (clipStart (id) < time - eps && clipEnd (id) > time + eps)
+                    edit.splitClip (id, time);
+    };
+    // Removes what lies between from and to on the covered tracks (cutting at both ends first).
+    const auto clear = [&] (double from, double to)
+    {
+        splitAt (from);
+        splitAt (to);
+        for (const auto& track : tracks)
+            for (const auto id : clipsOf (track))
+                if (clipStart (id) >= from - eps && clipEnd (id) <= to + eps)
+                    edit.removeClip (id);
+    };
+    // Moves everything that starts at or after `from` by `delta` seconds: clips, markers, pattern blocks.
+    const auto shiftFrom = [&] (double from, double delta)
+    {
+        for (const auto& track : tracks)
+        {
+            auto ids = clipsOf (track);
+            if (delta > 0.0) std::reverse (ids.begin(), ids.end()); // move the last first so nothing collides
+            for (const auto id : ids)
+                if (clipStart (id) >= from - eps)
+                    edit.moveClip (id, juce::jmax (0.0, clipStart (id) + delta));
+        }
+        for (const auto& marker : edit.getMarkers())
+            if ((double) marker[ids::time] >= from - eps)
+                edit.setMarkerTime ((int) marker[ids::id], juce::jmax (0.0, (double) marker[ids::time] + delta));
+        const auto map = edit.getTempoMap();
+        const auto fromBeats = map.toBeats (from);
+        for (const auto& block : edit.getPatternClips())
+        {
+            const auto startBeats = (double) block[ids::start];
+            if (startBeats < fromBeats - eps)
+                continue;
+            const auto newStart = map.toBeats (juce::jmax (0.0, map.toSeconds (startBeats) + delta));
+            edit.setPatternClip ((int) block[ids::id], newStart, (double) block[ids::length], (int) block[ids::row]);
+        }
+    };
+
+    juce::Array<juce::var> made;
+    if (action == "split")
+    {
+        splitAt (start);
+        splitAt (end);
+    }
+    else if (action == "delete")
+    {
+        clear (start, end);
+    }
+    else if (action == "duplicate")
+    {
+        splitAt (start);
+        splitAt (end);
+        std::vector<int> inside;
+        for (const auto& track : tracks)
+            for (const auto id : clipsOf (track))
+                if (clipStart (id) >= start - eps && clipEnd (id) <= end + eps)
+                    inside.push_back (id);
+        clear (end, end + length);
+        for (const auto id : inside)
+        {
+            const auto copy = edit.duplicateClip (id);
+            if (copy >= 0)
+            {
+                edit.moveClip (copy, clipStart (id) + length);
+                made.add (copy);
+            }
+        }
+    }
+    else if (action == "deleteTime")
+    {
+        clear (start, end);
+        for (const auto& marker : edit.getMarkers())
+            if ((double) marker[ids::time] >= start - eps && (double) marker[ids::time] < end - eps)
+                edit.removeMarker ((int) marker[ids::id]);
+        const auto map = edit.getTempoMap();
+        for (const auto& block : edit.getPatternClips())
+        {
+            const auto at = map.toSeconds ((double) block[ids::start]);
+            if (at >= start - eps && at < end - eps)
+                edit.removePatternClip ((int) block[ids::id]);
+        }
+        shiftFrom (end, -length);
+    }
+    else if (action == "insertSilence")
+    {
+        splitAt (start);
+        shiftFrom (start, length);
+    }
+    else
+    {
+        return error ("Unknown range command: " + action);
+    }
+
+    sessionChanged = true;
+    return object ({ { "ok", true }, { "error", juce::String() }, { "clips", made } });
 }
 
 juce::var DawBridge::handleStems (const juce::var& args)
@@ -1960,6 +2137,40 @@ void DawBridge::loadPresetInto (int trackId, int presetIndex)
         for (int v = 0; v < module->getNumValues(); ++v)
             edit.setInsertValue ((int) insert[ids::id], module->getValueId (v), module->getValue (v).load());
     }
+}
+
+juce::var DawBridge::addBouncedTrack (int sourceTrackId, const juce::File& file, double startSeconds)
+{
+    const auto source = edit.getTrack (sourceTrackId);
+    if (! source.isValid())
+        return error ("The track to bounce has gone.");
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    if (reader == nullptr || reader->lengthInSamples <= 0)
+        return error ("The bounce didn't make any audio.");
+    const auto seconds = (double) reader->lengthInSamples / reader->sampleRate;
+    reader.reset();
+
+    edit.getUndoManager().beginNewTransaction ("Bounce to a new track");
+
+    const auto tracks = edit.getTracks();
+    auto index = tracks.size();
+    for (int i = 0; i < tracks.size(); ++i)
+        if ((int) tracks[i][ids::id] == sourceTrackId)
+            index = i + 1;
+
+    const auto track = edit.addTrack (source[ids::name].toString() + " (bounced)", index);
+    const auto id = (int) track[ids::id];
+    if (source.hasProperty (ids::colour))
+        edit.getTrack (id).setProperty (ids::colour, source[ids::colour], &edit.getUndoManager());
+    edit.addClip (id, file, startSeconds, seconds);
+    edit.setTrackMute (sourceTrackId, true);
+
+    edit.getUndoManager().beginNewTransaction();
+    sessionChanged = true;
+    return object ({ { "ok", true }, { "error", juce::String() }, { "track", id } });
 }
 
 void DawBridge::startExport (const juce::var& args, const juce::File& destination)
@@ -4085,6 +4296,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "trimStart")  { edit.trimClipStart (id, args["start"]); ok(); return; }
     if (command == "trimEnd")    { edit.trimClipEnd (id, args["end"]); ok(); return; }
     if (command == "split")      { complete (edit.splitClip (id, args["time"])); return; }
+    if (command == "timeRange")  { complete (editTimeRange (args)); return; }
     if (command == "duplicate")  { complete (edit.duplicateClip (id)); return; }
     if (command == "removeClip") { edit.removeClip (id); ok(); return; }
 
@@ -4885,6 +5097,16 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "loop")      { edit.setLoop (args["on"], args["start"], args["end"]); ok(); return; }
     if (command == "metronome") { engine.setMetronome (args["on"]); sessionChanged = true; ok(); return; }
     if (command == "countIn")   { engine.setCountInBars (args["bars"]); sessionChanged = true; ok(); return; }
+    if (command == "punch")     { engine.setPunch (args["on"]); settings.setValue ("dawPunch", engine.getPunch()); sessionChanged = true; ok(); return; }
+    if (command == "preRoll")   { engine.setPreRollBars (args["bars"]); settings.setValue ("dawPreRoll", engine.getPreRollBars()); sessionChanged = true; ok(); return; }
+    if (command == "clickOnlyRecording")
+    {
+        engine.setClickOnlyRecording (args["on"]);
+        settings.setValue ("dawClickOnlyRecording", engine.getClickOnlyRecording());
+        sessionChanged = true;
+        ok();
+        return;
+    }
     if (command == "beatsPerBar") { edit.setBeatsPerBar (args["beats"]); ok(); return; }
     if (command == "metronomeVolume")
     {
@@ -5237,6 +5459,46 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                                                      : error (folder.getFileName() + " isn't a folder.");
                      },
                      complete);
+        return;
+    }
+
+    // "bounce" { track, start?, end? }: renders the track alone (through its effects) to a
+    // new audio track under it and mutes it; progress and the end come as "dawBounce"
+    // events. "bounce" { cancel: true } stops it.
+    if (command == "bounce")
+    {
+        if (arg (args, "cancel", false))
+        {
+            if (bounceJob != nullptr)
+                bounceJob->cancel = true;
+            ok();
+            return;
+        }
+        if (bounceJob != nullptr)                 { complete (error ("A track is already bouncing.")); return; }
+        if (! edit.getTrack (id).isValid())       { complete (error ("Select a track to bounce.")); return; }
+
+        engine.captureInstrumentStates();
+        daw::Exporter::Settings settings;
+        settings.sampleRate = engine.getSampleRate();
+        settings.bitDepth = 32;
+        settings.start = juce::jmax (0.0, (double) arg (args, "start", 0.0));
+        settings.end = arg (args, "end", -1.0);
+        settings.tail = settings.end >= 0.0 ? 0.0 : 2.0;
+
+        const auto name = edit.getTrack (id)[ids::name].toString();
+        const auto file = getRecordingFolder().getNonexistentChildFile (juce::File::createLegalFileName (name + " (bounced)"), ".wav", false);
+        auto exporter = std::make_shared<daw::Exporter> (edit, settings); // snapshot on this thread
+        auto job = std::make_shared<ExportJob>();
+        bounceJob = job;
+        bounceTrack = id;
+        bounceStart = settings.start;
+
+        juce::Thread::launch ([exporter, job, file, trackId = id]
+        {
+            job->result = exporter->exportTrack (trackId, file, [job] (double p) { job->progress = p; return ! job->cancel.load(); });
+            job->finished = true;
+        });
+        ok();
         return;
     }
 
