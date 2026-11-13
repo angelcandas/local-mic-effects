@@ -489,6 +489,28 @@ public:
     // Gives a block its own copy of its pattern. Returns the new pattern's id, or -1.
     int makePatternUnique (int clipId);
 
+    // Writes a block out as ordinary MIDI clips, one on each track its pattern has notes
+    // for (swing included), and removes the block. Returns the new clips' ids.
+    juce::Array<int> patternClipToMidiClips (int clipId);
+
+    // The other way: a new pattern from a MIDI clip's notes (as long as the clip, rounded
+    // up to whole beats), and a block of it in the clip's place. Returns the pattern's id,
+    // or -1.
+    int midiClipToPattern (int clipId);
+
+    // Edits made while one of these is alive don't go into the undo history (pattern
+    // recording adds notes as they're played, then makes them one undo step at the end).
+    class NotUndoable
+    {
+    public:
+        explicit NotUndoable (Edit& e) : edit (e), saved (std::exchange (e.undoTarget, nullptr)) {}
+        ~NotUndoable() { edit.undoTarget = saved; }
+    private:
+        Edit& edit;
+        juce::UndoManager* saved;
+        JUCE_DECLARE_NON_COPYABLE (NotUndoable)
+    };
+
     //==============================================================================
     // Inserts on a track, or on the master bus with trackId == masterId. A new insert
     // starts from the module's defaults and switched on.

@@ -154,6 +154,20 @@ public:
     // sends and the click work as usual. Removing the pattern goes back to Song mode.
     void setPatternMode (int patternIdOrNone);
     int getPatternMode() const noexcept { return patternMode; }
+
+    // Pattern recording (the looper): startRecording() in pattern mode records the MIDI
+    // input into the pattern's parts for the armed MIDI tracks while it loops, pass after
+    // pass. Each note goes into the pattern as soon as it ends (so it plays from the next
+    // pass), its time wrapped into the pattern and, with `snap`, moved to the nearest step;
+    // drum parts get one-step notes. A note already on that step isn't added twice.
+    // stopRecording() or finishPatternRecording() (which keeps playing) makes everything
+    // recorded one undo step. Armed audio tracks don't record in pattern mode. Message thread.
+    void setPatternSnap (bool snap) noexcept { patternSnap = snap; }
+    bool getPatternSnap() const noexcept     { return patternSnap; }
+    bool isPatternRecording() const noexcept { return patternRecording.load(); }
+    int finishPatternRecording(); // returns how many notes were recorded
+    // Adds what has been played since the last call (the timer calls it). Public for tests.
+    void collectPatternNotes();
     // Note numbers being played on the MIDI input right now (for the piano roll's keys).
     std::bitset<128> getHeldNotes() const noexcept;
 
@@ -352,7 +366,7 @@ private:
     void valueTreeRedirected (juce::ValueTree&) override                          { previews.clear(); triggerAsyncUpdate(); }
 
     void handleAsyncUpdate() override { rebuild(); }
-    void timerCallback() override     { collectGarbage(); collectPreviews(); drainRecordedMidi(); }
+    void timerCallback() override     { collectGarbage(); collectPreviews(); drainRecordedMidi(); collectPatternNotes(); }
 
     void rebuild();
     std::shared_ptr<Strip> getStrip (const juce::ValueTree& trackOrMaster);
@@ -469,6 +483,18 @@ private:
     int patternMode = -1;
     juce::int64 songPosition = 0;
     std::atomic<juce::int64> patternLoopEnd { 0 };
+
+    // Pattern recording (message thread, apart from the flag): the tracks it records for,
+    // the notes being held (beat, velocity; beat < 0 when not held), the sustain pedal,
+    // and the notes added so far (made one undo step at the end).
+    std::atomic<bool> patternRecording { false };
+    bool patternSnap = true;
+    juce::Array<int> patternTracks;
+    std::array<std::pair<double, int>, 128> patternHeld {};
+    std::bitset<128> patternSustained;
+    bool patternPedal = false;
+    std::vector<int> patternRecorded;
+    void addPatternNote (int pitch, double onBeat, double offBeat, int velocity);
 
     std::atomic<bool> loopOn { false };
     std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 };
