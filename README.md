@@ -148,6 +148,26 @@ you sing.
 - The loop is part of what **Record** captures, so a take holds your voice and your loops.
 - Tempo, Free/Bars and loop volume are remembered; the loop itself isn't saved when you quit.
 
+### Practice any song (Live mode)
+
+**Practice** in the top bar swaps the effect rack for a practice lane. **Open song…** takes any song
+(WAV, AIFF, FLAC, Ogg, MP3): MicFX splits it into stems (the same Demucs model as the DAW's Split into
+stems), keeps the voice as a quiet **guide** and finds its melody, note by note, grouped into phrases at
+the breaths. The rest of the song becomes the backing. Both go on the Live tracks, so the transport at
+the bottom plays them. **Voice only…** takes a recording of a voice on its own (an a cappella or a guide
+vocal) without splitting.
+
+- The target notes scroll past the playhead; your pitch (the mic before any effect) draws over them,
+  green within 25 cents, amber within 60. Sing in any octave: a low voice can sing a high song.
+- Each note is scored as it ends (pitch, coming in on time, holding steady) and turns green, amber or
+  red; each phrase gets a score in the strip under the lane, and the pass gets one at the top right.
+  Hover a phrase for whether you leaned sharp or flat and came in early or late.
+- **Guide voice** sets how loud the original singer plays under you (all the way down mutes it).
+  Click a phrase (in the strip or the lane) to go back and sing it again; **From the top** restarts.
+- A song is prepared once: the stems and the melody are kept in a cache named after the file's contents
+  (Application Support/MicFX/Practice), so opening it again is instant.
+- Timing is measured against what you hear: the audio interface's latency is taken off.
+
 ### Scenes (Live mode)
 
 The bar above the effects keeps **scenes**: the sound of each part of a song (verse, chorus,
@@ -482,6 +502,8 @@ src/Recorder.*          WAV recording of the output (and dry mic) on a backgroun
 src/Multitrack.*        backing track + takes: loading, resampling, timeline playback
 src/Looper.*            the Live looper: four layers, overdub, undo/redo, bar-locked length
 src/MidiMap.*           MIDI learn: CC / note / program change -> parameters and actions
+src/PitchTap.h          the singer's pitch before the effects, every 5 ms, for the Practice view
+src/Practice.*          Practice view: song preparation (stems, melody, cache), live scoring
 src/Scenes.*            Live scenes: snapshots of the sound, recalled with a glide
 src/Setlist.*           the setlist: songs with sound, scenes, tempo, key, backing track, lyrics
 src/daw/                DAW mode: Edit (the session as an undoable ValueTree), AudioPool (decoded
@@ -492,7 +514,8 @@ src/analysis/           Auto Mix measurements: loudness (BS.1770 / EBU R128), 1/
                         activity, how a backing track masks the voice, and offline per-track analysis
                         of a DAW session; MixAssistant turns them into EQ, compressor, de-esser and
                         volume moves (Auto Mix); Key finds the song's key from chroma and key
-                        profiles
+                        profiles; Coach turns a voice into target notes and phrases and scores
+                        singing against them
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/stems/              Split into stems: chunked, multi-threaded separation, model download and
                         check (StemSplitter), and the Demucs adapter (DemucsSeparator)
@@ -509,6 +532,7 @@ src/dsp/                PitchDetector (YIN), PsolaShifter, PitchEngine (autotune
 ui/modules.js           the effect catalog the UI is built from
 ui/app.js, styles.css   the interface (Live mode)
 ui/looper.js            the Live looper panel
+ui/practice.js, .css    the Practice view (Live mode)
 ui/midilearn.js         MIDI learn mode on the Live screen
 ui/scenes.js            the Live scene bar
 ui/setlist.js           the setlist drawer and stage view (standalone)

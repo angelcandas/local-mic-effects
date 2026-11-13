@@ -4,6 +4,7 @@
 
 #include "DawBridge.h"
 #include "PluginProcessor.h"
+#include "Practice.h"
 
 // Hosts the HTML/JS UI from ui/ in a native WebView. Every processor parameter is
 // exposed to JavaScript through a relay named after its parameter ID:
@@ -15,7 +16,8 @@
 //   setRecordDry (bool), revealRecording, getTracks, loadBackingTrack, setTrack (id, { gain, muted }),
 //   removeTrack (id), transport (action, seconds), getParameterInfo, looper (action, args), midi (action, args),
 //   scenes (action, args), setlist (action, args),
-//   daw (command, args) for the DAW screen (see DawBridge),
+//   daw (command, args) for the DAW screen (see DawBridge), practice (action, args) for the
+//   Practice view (see Practice; events "practice", "practicePitch", "practiceScore"),
 //   window (action): "fullScreen" toggles full screen; returns { available, fullScreen }.
 // Pushed events: "meters" { input, output, note, target, preset, recording, transport, looper } at 30 Hz
 // (recording = seconds recorded so far, or -1; transport = { position, length, playing } in
@@ -65,6 +67,7 @@ private:
     int looperTicks = 0;
     juce::var describeWindow() const;
     juce::int64 getRoundTripLatency();
+    juce::int64 getDeviceLatency(); // the audio interface's input + output latency
 
     juce::File lastTakeOnTimeline;
     bool lastFullScreen = false;
@@ -86,6 +89,7 @@ private:
     std::vector<std::unique_ptr<juce::WebComboBoxParameterAttachment>> comboAttachments;
 
     std::unique_ptr<DawBridge> daw; // after webView: it emits through it
+    std::unique_ptr<Practice> practice; // the same
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginEditor)
 };
