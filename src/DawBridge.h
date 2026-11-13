@@ -46,6 +46,7 @@ public:
     void tick();
 
     juce::var describeSession();
+    static juce::var describeRanges (const std::vector<std::pair<double, double>>&);
 
     static bool isAvailable(); // DAW mode is a standalone-app feature
 

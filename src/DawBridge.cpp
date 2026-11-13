@@ -444,6 +444,14 @@ juce::var DawBridge::describeInstrument (const juce::ValueTree& track) const
                      { "windowOpen", instrumentWindows.count (trackId) > 0 } });
 }
 
+juce::var DawBridge::describeRanges (const std::vector<std::pair<double, double>>& ranges)
+{
+    juce::Array<juce::var> list;
+    for (const auto& [from, to] : ranges)
+        list.add (juce::Array<juce::var> { from, to });
+    return list;
+}
+
 juce::var DawBridge::describeSession()
 {
     const auto& state = edit.getState();
@@ -473,6 +481,8 @@ juce::var DawBridge::describeSession()
                            // The audio the clip plays (its file, or a rendered copy): the page keys waveforms on it.
                            { "audioKey", warpSettings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, warpSettings) },
                            { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
+                           // While its copy renders: the stretches of it ([from, to] seconds into the copy) still to come.
+                           { "renderingRanges", describeRanges (engine.getAudioPool().getRenderingRanges (file, warpSettings)) },
                            { "missing", ! file.existsAsFile() },
                            { "take", (int) clip.getProperty (ids::take, -1) } });
     };
@@ -2261,6 +2271,25 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         const auto settings = clip.isValid() ? daw::Edit::getWarpSettings (clip) : daw::warp::Settings();
         complete (args.hasProperty ("seconds") ? getDetailPeaks (file, arg (args, "start", 0.0), arg (args, "end", 0.0), arg (args, "seconds", 0.0), settings)
                                                : getPeaks (file, settings));
+        return;
+    }
+
+    // How far a clip's rendered copy has got: { ready, ranges } (the stretches still to
+    // come, [from, to] seconds into the copy), so the page can shade just those.
+    if (command == "renderState")
+    {
+        const auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+        {
+            complete (error ("No such audio clip"));
+            return;
+        }
+        const juce::File file (clip[ids::file].toString());
+        const auto settings = daw::Edit::getWarpSettings (clip);
+        auto& pool = engine.getAudioPool();
+        const auto ready = pool.get (file, settings) != nullptr;
+        complete (object ({ { "ok", true }, { "ready", ready },
+                            { "ranges", describeRanges (ready ? std::vector<std::pair<double, double>>() : pool.getRenderingRanges (file, settings)) } }));
         return;
     }
 
