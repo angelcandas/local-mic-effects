@@ -258,7 +258,6 @@ namespace
                 { "app:audio", "Audio settings...",      "",             false },
                 { "app:favourites", "Audio device favourites...", "",    false },
                #if ! JUCE_MAC
-                { "app:updates", "Check for updates...", "",             false },
                 { "", "", "", false },
                 { "app:quit",  "Exit",                   "",             false },
                #endif
@@ -312,7 +311,6 @@ namespace
                #else
                 { "app:fullScreen", "Full screen",       "F11",          false },
                #endif
-                { "shortcuts", "Keyboard shortcuts",     "?",            true },
             } },
             { "Transport", {
                 { "play",      "Play / pause",           "Space",        true },
@@ -324,6 +322,13 @@ namespace
                 { "", "", "", false },
                 { "loop",      "Loop range",             "L",            true },
                 { "metronome", "Click (metronome)",      "C",            true },
+            } },
+            { "Help", {
+                { "app:manual",   "User manual",          "F1",          false },
+                { "shortcuts",    "Keyboard shortcuts",   "?",           false },
+                { "", "", "", false },
+                { "app:whatsNew", "What's new",           "",            false },
+                { "app:updates",  "Check for updates...", "",            false },
             } },
         };
         return menus;
@@ -727,6 +732,8 @@ namespace
             if (action == "app:audio")            pluginHolder->showAudioSettingsDialog();
             else if (action == "app:favourites")  { if (favourites != nullptr) favourites->showDialog(); }
             else if (action == "app:updates")     showUpdateDialog (this);
+            else if (action == "app:manual")      PluginEditor::openHelp ("manual");
+            else if (action == "app:whatsNew")    PluginEditor::openHelp ("whatsNew");
             else if (action == "app:fullScreen")  setFullScreen (! isFullScreen());
             else if (action == "app:quit")        juce::JUCEApplicationBase::getInstance()->systemRequestedQuit();
             else if (auto* editor = getEditor())  editor->sendMenuCommand (action);

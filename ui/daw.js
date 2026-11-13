@@ -1284,7 +1284,7 @@ class InsertCard {
 // Tooltips and the hint line. In the DAW, every "title" becomes one styled tooltip
 // (after 400 ms: the name, its shortcut as a key chip, one line of help), and the hint
 // line under the panels shows the same help at once for whatever the mouse is over.
-const TIP_SHORTCUT = /\s*\(((?:(?:Ctrl|Cmd|Shift|Alt|Option)\+)*(?:[A-Z0-9?+\-]|F\d{1,2}|Space|Delete|Enter|Esc|Home|End|Tab|Up|Down|Left|Right))\)[.:]?\s*/;
+const TIP_SHORTCUT = /\s*\(((?:(?:Ctrl|Cmd|Shift|Alt|Option)\+)*(?:[A-Z0-9?+\-←→↑↓]|F\d{1,2}|Space|Delete|Enter|Esc|Home|End|Tab|Up|Down|Left|Right))\)[.:]?\s*/;
 
 // "Play / pause (Space). Right-click: return on stop" -> name, shortcut chip, the rest as help.
 function parseTip(text) {
@@ -1743,6 +1743,9 @@ class DawScreen {
     this.autoMixButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Auto Mix</span>');
     this.mixCheckButton = iconButton("tool has-label mixcheck-button", "mixcheck", "Mix Check: a report on the mix in plain words, with Fix buttons", () => this.mixCheck.toggle());
     this.mixCheckButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Mix Check</span>');
+    this.assistButton = button("tool has-label assist-button", "Assist ▾", "Assist: every smart tool in one menu, by what it works on (the song, the selected track, the selected clip)",
+                               (event) => this.openAssistMenu(event.currentTarget));
+    this.assistButton.setAttribute("aria-haspopup", "menu");
     this.buildActivity();
 
     // The mixer is a tab of the bottom panel: this shows or hides it.
@@ -1754,7 +1757,7 @@ class DawScreen {
     this.moreButton = iconButton("tool tb-more", "more", "More", (event) => this.openMoreMenu(event.currentTarget));
     this.moreButton.hidden = true;
 
-    const right = zone("zone-work", this.tools, snap, this.autoMixButton, this.mixCheckButton, this.activity.button,
+    const right = zone("zone-work", this.tools, snap, this.assistButton, this.autoMixButton, this.mixCheckButton, this.activity.button,
                       html("span", "tb-sep"), this.libraryButton, this.viewTabs, this.dockButton, this.pianoButton, help, this.moreButton);
     bar.append(left, html("span", "tb-spacer"), centre, html("span", "tb-spacer"), right);
 
@@ -1793,6 +1796,7 @@ class DawScreen {
       { level: 4, element: this.libraryButton, label: "Library", run: () => this.library.toggle(), checked: () => !this.library.collapsed },
       { level: 4, element: this.dockButton, label: "Bottom panel", run: () => this.run("toggleDock"), checked: () => !this.root.classList.contains("dock-hidden") },
       { level: 5, element: this.autoMixButton, label: "Auto Mix…", run: () => this.toggleAutoMix() },
+      { level: 6, element: this.assistButton, label: "Assist…", run: () => this.openAssistMenu(this.moreButton) },
       { level: 5, element: this.mixCheckButton, label: "Mix Check…", run: () => this.mixCheck.toggle() },
     ];
     this.foldLevel = 0;
@@ -4281,14 +4285,23 @@ class DawScreen {
 
   //============================================================================ tooltips and hint line
   buildHints() {
-    const DEFAULT_HINT = "Right-click anything for its menu · ? lists the keyboard shortcuts";
-    this.hintLine = html("div", "hint-line");
-    this.hintLine.setAttribute("aria-hidden", "true"); // the same text is each control's label or tooltip
-    const hintText = html("span", "hint-text", DEFAULT_HINT);
-    const hintKey = html("kbd", "key-chip hint-key");
-    hintKey.hidden = true;
-    this.hintLine.append(hintText, hintKey);
-    this.root.append(this.hintLine);
+    // One hint line per mode: the DAW's under the tracks, Live's at the foot of the window.
+    // Both describe the control under the pointer and show its key (FL's hint bar).
+    const DEFAULT_HINT = { daw: "Right-click anything for its menu · ? lists the keyboard shortcuts",
+                           live: "Point at anything to see what it does · ? lists the stage keys · F1 opens the manual" };
+    const makeLine = (className, parent, text) => {
+      const line = html("div", className);
+      line.setAttribute("aria-hidden", "true"); // the same text is each control's label or tooltip
+      const lineText = html("span", "hint-text", text);
+      const lineKey = html("kbd", "key-chip hint-key");
+      lineKey.hidden = true;
+      line.append(lineText, lineKey);
+      parent?.append(line);
+      return { line, text: lineText, key: lineKey };
+    };
+    const lines = { daw: makeLine("hint-line", this.root, DEFAULT_HINT.daw),
+                    live: makeLine("hint-line live-hint-line", document.querySelector("footer.recorder"), DEFAULT_HINT.live) };
+    this.hintLine = lines.daw.line;
 
     const tip = html("div", "tip");
     tip.setAttribute("role", "tooltip");
@@ -4298,8 +4311,10 @@ class DawScreen {
 
     const hide = () => { clearTimeout(timer); tip.hidden = true; };
     const showHint = (parsed) => {
+      const mode = this.active ? "daw" : "live";
+      const { text: hintText, key: hintKey } = lines[mode];
       hintText.textContent = parsed ? [parsed.name, parsed.more].filter(Boolean).join(" · ")
-        : target === null && this.hoverLibrary ? (this.library?.hint?.textContent || DEFAULT_HINT) : DEFAULT_HINT;
+        : mode === "daw" && target === null && this.hoverLibrary ? (this.library?.hint?.textContent || DEFAULT_HINT.daw) : DEFAULT_HINT[mode];
       hintKey.hidden = !parsed?.shortcut;
       hintKey.textContent = parsed?.shortcut ? keyText(parsed.shortcut) : "";
     };
@@ -4317,9 +4332,8 @@ class DawScreen {
     };
 
     document.addEventListener("pointerover", (event) => {
-      if (!this.active) return;
       const element = event.target.closest?.("[title], [data-tip]");
-      this.hoverLibrary = Boolean(event.target.closest?.(".library-panel"));
+      this.hoverLibrary = this.active && Boolean(event.target.closest?.(".library-panel"));
       if (element) claimTitle(element);
       const next = element?.dataset.tip ? element : null;
       if (next === target) return;
@@ -5437,7 +5451,7 @@ class DawScreen {
     ["View", [["Tab / X", "Tracks / mixer"], ["E / Shift+Tab", "Show / hide the effects panel"], ["Shift+B / Ctrl+Alt+B", "Show / hide the library"],
               ["Ctrl+F", "Search the library"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"],
               ["Z / Shift+Z", "Zoom to the selected clip / the whole song"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
-              ["?", "This list"], [IS_MAC ? "Ctrl+Cmd+F" : "F11", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
+              ["?", "This list"], ["F1", "The user manual (Help menu)"], [IS_MAC ? "Ctrl+Cmd+F" : "F11", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
   ];
 
   toggleShortcuts(show) {
@@ -5769,6 +5783,60 @@ class DawScreen {
   }
 
   // Which track to line this one up with (the phase of two mics on one sound).
+  // Every smart tool in one menu, grouped by what it works on. Entries that need a
+  // selection are greyed with the reason in their hint.
+  openAssistMenu(anchor) {
+    const box = anchor.getBoundingClientRect();
+    const tracks = this.session?.tracks ?? [];
+    const track = this.selectedTrackObject();
+    const audioTrack = track && track.kind !== "midi" ? track : null;
+    const found = this.findClip(this.selectedClip);
+    const clip = found && !found.clip.midi ? found.clip : null;
+    const needTrack = "Select an audio track first";
+    const needClip = "Select an audio clip first";
+    const songEmpty = !tracks.some((t) => t.clips?.length);
+    popMenu(box.left, box.bottom + 4, ({ item, heading }) => {
+      heading("The song");
+      item("Auto Mix…", () => this.openAutoMix("mix"), { indent: true, disabled: songEmpty, hint: songEmpty ? "Record or import something first" : "Listen to the tracks and set EQ, compression, space and levels" });
+      item("Mix Check…", () => this.mixCheck.toggle(true), { indent: true, disabled: songEmpty, hint: "A report on the mix in plain words, with Fix buttons" });
+      item("Master the song…", () => this.openAutoMix("master"), { indent: true, disabled: songEmpty, hint: "Mastering EQ, multiband, width and a limiter up to the loudness you pick" });
+      item("Song key…", () => this.toggleKeyPanel(true), { indent: true, hint: "Find or set the song's key" });
+      item("Song map…", () => this.songMap.toggle(true), { indent: true, hint: "Find the intro, verses, choruses and bars" });
+      heading(audioTrack ? `Track “${audioTrack.name}”` : "The selected track");
+      item("Fit into the backing…", () => this.openAutoMix("fit", audioTrack.id), { indent: true, disabled: !audioTrack,
+           hint: audioTrack ? "EQ, compression, space and level for this track; the others only make room" : needTrack });
+      item("Clean and polish…", () => this.openAutoMix("clean", audioTrack.id), { indent: true, disabled: !audioTrack,
+           hint: audioTrack ? "Rumble, hum, noise, mud, harshness, S's and uneven level, on this track only" : needTrack });
+      const takes = audioTrack?.takes?.length ?? 0;
+      item("Pick the best takes", () => this.takes.autoComp(audioTrack.id), { indent: true, disabled: takes < 2 || Boolean(this.takes.busy),
+           hint: !audioTrack ? needTrack : takes < 2 ? "Record two or more takes on this track first" : "Auto Comp: the best take in every phrase. One undo takes it back." });
+      const partners = audioTrack ? tracks.filter((t) => t.id !== audioTrack.id && t.kind !== "midi" && t.clips?.length) : [];
+      item("Align to…", () => this.openAlignMenu(audioTrack, partners, box.left, box.bottom + 4), { indent: true,
+           disabled: !audioTrack?.clips?.length || !partners.length,
+           hint: !audioTrack ? needTrack : "Line its phase up with a track that recorded the same sound" });
+      heading(clip ? `Clip “${clip.name}”` : "The selected clip");
+      const clipItem = (label, run, hint) => item(label, () => run(clip), { indent: true, disabled: !clip, hint: clip ? hint : needClip });
+      clipItem("Split into stems…", (c) => this.toggleStems(true, c), "Vocals, drums, bass and other, each on its own track");
+      clipItem("Rebalance stems…", (c) => this.toggleRebalance(true, c), "Turn the vocals, drums, bass and the rest up or down without making tracks");
+      clipItem("Find song sections…", (c) => this.songMap.toggle(true, { id: c.id, name: c.name }), "Song map of this clip");
+      for (const [label, what, hint] of TO_MIDI_PARTS)
+        clipItem(`Convert to MIDI: ${label.replace("…", "").toLowerCase()}…`, (c) => this.toggleToMidi(true, c, what), hint);
+      clipItem("Build backing vocals…", (c) => this.backing.toggle(true, c), "Harmonies and doubles from this sung lead");
+    });
+  }
+
+  // Opens Auto Mix in one of its modes, on a track for "fit" and "clean".
+  openAutoMix(mode, trackId = null) {
+    const panel = this.autoMixPanel;
+    if (panel.classList.contains("is-running")) return this.toggleAutoMix(true);
+    this.toggleAutoMix(true);
+    const modeSelect = panel.querySelector("[name=mode]");
+    modeSelect.value = mode;
+    this.renderAutoMixMode();
+    if (trackId !== null) panel.querySelector("[name=focus]").value = String(trackId);
+    modeSelect.dispatchEvent(new Event("change"));
+  }
+
   openAlignMenu(track, partners, x, y) {
     popMenu(x, y, ({ item, heading }) => {
       heading(`Line up "${track.name}" with`);
@@ -6276,6 +6344,7 @@ export function initDaw() {
   // The app's menu bar (standalone only) sends the same commands as the buttons and keys.
   window.__JUCE__.backend.addEventListener("appMenu", (action) => {
     if (action === "mode:live" || action === "mode:daw") requestMode(action === "mode:daw");
+    else if (action === "shortcuts" && !screen.active) document.dispatchEvent(new CustomEvent("micfx:liveKeys"));
     else screen.run(action);
   });
 
@@ -6291,6 +6360,11 @@ export function initDaw() {
   const toggleFullScreen = () => nativeWindow("fullScreen").then(applyWindow);
   fullScreen.addEventListener("click", toggleFullScreen);
   window.__JUCE__.backend.addEventListener("window", applyWindow);
+  // F1 opens the user manual, in both modes (Help menu: User manual).
+  const help = Juce.getNativeFunction("help");
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "F1") { event.preventDefault(); help("manual"); }
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key === "F11" || (event.ctrlKey && event.metaKey && event.key.toLowerCase() === "f")) {
       event.preventDefault();

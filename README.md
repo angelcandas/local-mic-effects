@@ -6,6 +6,8 @@ is HTML/CSS/JS running in a native WebView.
 
 Builds as a **standalone app**, plus **AU** and **VST3** plugins from the same code.
 
+**User manual:** [docs/manual/user-manual.md](docs/manual/user-manual.md) (and a PDF next to it; **Help → User manual** or **F1** in the app). Names used in the UI: [docs/glossary.md](docs/glossary.md).
+
 ## What's inside
 
 **26 effects**, processed in this order (each can be switched on/off):

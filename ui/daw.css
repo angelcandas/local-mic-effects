@@ -2517,3 +2517,7 @@ body.is-daw .library-hint { display: none; }
 .backing-panel.is-running .backing-cancel { display: inline-block; }
 .backing-panel.is-running .backing-go { display: none; }
 .backing-panel.is-running .export-options { opacity: 0.55; pointer-events: none; }
+
+/* Live mode's hint line: the control under the pointer and its key, at the foot of the window. */
+.live-hint-line { margin-top: 0; padding: 0 2px; }
+.assist-button { white-space: nowrap; }
