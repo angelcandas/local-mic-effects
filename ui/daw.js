@@ -4426,6 +4426,18 @@ class DawScreen {
     }
   }
 
+  // Slices an audio loop onto a new Kit track's pads, with a pattern that replays it (the
+  // clip is muted, one undo step), and opens the rack on that pattern.
+  async sliceToKit(clip) {
+    toast(`Slicing ${clip.name}…`);
+    const result = await daw("sliceToKit", { id: clip.id });
+    if (!(result?.pattern >= 0)) return;
+    this.selectedPattern = result.pattern;
+    this.selectedTrack = result.track;
+    this.openPatterns();
+    toast(`${result.slices} slice${result.slices === 1 ? "" : "s"} on the pads of a new Kit track. Rearrange the steps in the rack; Ctrl+Z puts the loop back.`);
+  }
+
   //============================================================================ Convert to MIDI
   buildToMidi() {
     const panel = (this.toMidiPanel = this.root.querySelector(".tomidi-panel"));
@@ -5900,6 +5912,8 @@ class DawScreen {
         heading("Convert to MIDI");
         for (const [label, what, hint] of TO_MIDI_PARTS)
           item(label, () => this.toggleToMidi(true, clip, what), { hint, indent: true });
+        item("Slice to drum rack", () => this.sliceToKit(clip), { indent: true,
+          hint: "Cut the loop at its hits onto the pads of a new Kit track, with a pattern that plays them back (the clip is muted)" });
         heading("Vocals");
         item("Build backing vocals…", () => this.backing.toggle(true, clip),
              { hint: "Harmonies and doubles from this sung lead, as new tracks in a folded group", indent: true });

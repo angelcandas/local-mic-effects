@@ -4,6 +4,9 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 
 #include <optional>
+#include <vector>
+
+#include "analysis/Beats.h"
 
 // Audio loops in tempo: is a file a loop (a whole number of bars at a tempo we can tell),
 // and at what tempo exactly. A dropped or previewed loop is then played at the project's
@@ -35,4 +38,15 @@ std::optional<Loop> findLoop (const juce::String& fileNameWithoutExtension, cons
 
 // The same for a file on disk (reads it; detection only for files up to 130 s).
 std::optional<Loop> findLoop (const juce::File&, int beatsPerBar);
+
+// Slice a loop to the drum rack: where to cut it, from its hits (times in what the clip
+// shows, seconds). The slices cover [from, to) without gaps, the first starting at `from`.
+// Hits within minGap of the ends or of a stronger hit are dropped; past maxSlices the
+// weakest cuts go (their slice joins the one before). -> the slices' starts, sorted.
+std::vector<double> chooseSliceStarts (const std::vector<analysis::rhythm::Onset>& hits, double from, double to,
+                                       int maxSlices = 16, double minGap = 0.04);
+
+// One slice of a buffer, [start, end) in samples, with short fades at both ends so it
+// doesn't click (in: 1 ms, out: 4 ms, each at most a quarter of the slice).
+juce::AudioBuffer<float> cutSlice (const juce::AudioBuffer<float>& audio, int start, int end, double sampleRate);
 }
