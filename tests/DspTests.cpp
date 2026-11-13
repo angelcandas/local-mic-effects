@@ -12797,6 +12797,8 @@ static void testPatterns()
             check (project.saveAs (folder.getChildFile ("Beat")).isEmpty(), "saves a project with patterns");
             edit.setPartDrum (patternId, drums, true);
             edit.setPartRows (patternId, drums, { 36, 38, 42 });
+            edit.setPartLevel (patternId, drums, 38, 0.5f);
+            edit.setPartMuted (patternId, drums, { 46 });
             check (project.save().isEmpty(), "(again, with rows)");
 
             daw::Edit reopened;
@@ -12809,6 +12811,9 @@ static void testPatterns()
                        && daw::patterns::getPatternEvents (back, drums).size() == 6
                        && reopened.getPatternClip (block).isValid() && near ((double) reopened.getPatternClip (block)[daw::ids::start], 4.0),
                    "patterns, parts and blocks come back from the project file");
+            check (daw::Edit::getPartMuted (part) == juce::Array<int> { 46 } && daw::Edit::getPartLevels (part).count (38) == 1
+                       && std::abs (daw::Edit::getPartLevels (part).at (38) - 0.5f) < 1.0e-3f,
+                   "and the rack's muted rows and row levels");
 
             // Export plays the blocks.
             daw::Exporter::Settings settings;
@@ -12821,6 +12826,87 @@ static void testPatterns()
             second.close();
             project.close();
         }
+    }
+
+    // The rack tools: muted rows, row levels, shifted steps, track rows and split by track.
+    {
+        daw::Edit edit;
+        const auto beat = *daw::instruments::findBuiltin ("builtin:beat");
+        const auto drums = (int) edit.addMidiTrack ("Drums", beat)[daw::ids::id];
+        const auto bass = (int) edit.addMidiTrack ("Bass", *daw::instruments::findBuiltin ("builtin:nova"))[daw::ids::id];
+        const auto pattern = edit.addPattern();
+        const auto patternId = (int) pattern[daw::ids::id];
+        edit.setSteps (patternId, drums, 36, { { 0, 100 }, { 8, 100 } });
+        edit.setSteps (patternId, drums, 38, { { 4, 100 }, { 12, 100 } });
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.setPartMuted (patternId, drums, { 38 });
+        auto events = daw::patterns::getPatternEvents (pattern, drums);
+        check (events.size() == 2 && std::all_of (events.begin(), events.end(), [] (const auto& e) { return e.pitch == 36; }),
+               "a muted row doesn't play");
+        edit.getUndoManager().undo();
+        check (daw::patterns::getPatternEvents (pattern, drums).size() == 4, "unmuting (undo) brings it back");
+
+        edit.setPartLevel (patternId, drums, 36, 0.5f);
+        events = daw::patterns::getPatternEvents (pattern, drums);
+        check (events[0].pitch == 36 && events[0].velocity == 50 && events[1].velocity == 100, "a row's level scales its velocities");
+        edit.setPartLevel (patternId, drums, 36, 2.0f);
+        check (daw::patterns::getPatternEvents (pattern, drums)[0].velocity == 127, "(clamped to 127)");
+        edit.setPartLevel (patternId, drums, 36, 1.0f);
+        check (edit.getPart (patternId, drums)[daw::ids::levels].toString().isEmpty(), "a level of 1 is the default and isn't stored");
+
+        // A step shifted late stays on its step: painting the next step doesn't remove it.
+        const auto snare = edit.getPart (patternId, drums).getChild (2);
+        edit.setNote ((int) snare[daw::ids::id], 38, 4 * 0.25 + 0.6 * 0.25, 0.25, 100);
+        check (daw::Edit::getStepIndex (4 * 0.25 + 0.6 * 0.25, 0.25) == 4 && daw::Edit::getStepIndex (0.99, 0.25) == 4
+                   && daw::Edit::getStepIndex (0.95, 0.25) == 3,
+               "the step of a note: shifted late stays, a hair early counts as on it");
+        edit.setSteps (patternId, drums, 38, { { 5, 100 } });
+        check (daw::patterns::getPatternEvents (pattern, drums).size() == 5, "a shifted step isn't cleared by painting the next one");
+        edit.setSteps (patternId, drums, 38, { { 4, 0 } });
+        check (daw::patterns::getPatternEvents (pattern, drums).size() == 4, "and clearing its own step removes it");
+
+        // A track row: one note per step, any pitch.
+        edit.setSteps (patternId, bass, 48, { { 0, 100 }, { 2, 100 } });
+        edit.setNote ((int) edit.getPart (patternId, bass).getChild (1)[daw::ids::id], 55, 0.5, 0.25, 100);
+        edit.setSteps (patternId, bass, 48, { { 2, 100 } }, true);
+        events = daw::patterns::getPatternEvents (pattern, bass);
+        check (events.size() == 2 && events[1].pitch == 48, "a track row's step replaces the note on it, whatever its pitch");
+
+        // Split by track: a pattern per track, blocks replaced in place, the same notes play.
+        const auto tempo = edit.getTempoMap();
+        edit.addPatternClip (patternId, 0.0, 8.0, 0);
+        edit.addPatternClip (patternId, 16.0, 4.0, 1);
+        const auto before = [&] (int track)
+        {
+            auto e = daw::patterns::getBlockEvents (edit.getState(), track, tempo);
+            std::sort (e.begin(), e.end(), [] (const auto& a, const auto& b) { return a.on < b.on || (a.on == b.on && a.pitch < b.pitch); });
+            return e;
+        };
+        const auto drumsBefore = before (drums), bassBefore = before (bass);
+        edit.getUndoManager().beginNewTransaction();
+        const auto made = edit.splitPatternByTrack (patternId);
+        auto blocks = edit.getPatternClips();
+        const auto same = [] (const std::vector<daw::patterns::Event>& a, const std::vector<daw::patterns::Event>& b)
+        {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i)
+                if (a[i].pitch != b[i].pitch || a[i].velocity != b[i].velocity || std::abs (a[i].on - b[i].on) > 1.0e-9 || std::abs (a[i].off - b[i].off) > 1.0e-9)
+                    return false;
+            return true;
+        };
+        check (made.size() == 2 && blocks.size() == 4 && edit.getPattern (patternId).isValid()
+                   && edit.getPattern (made[0])[daw::ids::name].toString().endsWith ("Drums")
+                   && edit.getPart (made[0], drums).isValid() && ! edit.getPart (made[0], bass).isValid()
+                   && std::none_of (blocks.begin(), blocks.end(), [&] (const auto& b) { return (int) b[daw::ids::pattern] == patternId; }),
+               "split by track makes a pattern per track and replaces the blocks");
+        check (same (before (drums), drumsBefore) && same (before (bass), bassBefore), "and the song plays the same notes");
+        const auto rowOf = [&] (int p, double start) { for (const auto& b : edit.getPatternClips()) if ((int) b[daw::ids::pattern] == p && std::abs ((double) b[daw::ids::start] - start) < 1.0e-9) return (int) b[daw::ids::row]; return -1; };
+        check (rowOf (made[0], 0.0) == 0 && rowOf (made[1], 0.0) != 0 && rowOf (made[0], 16.0) == 1 && rowOf (made[1], 16.0) != 1,
+               "the new blocks stack on free rows");
+        edit.getUndoManager().undo();
+        blocks = edit.getPatternClips();
+        check (edit.getPatterns().size() == 1 && blocks.size() == 2, "and it undoes in one step");
     }
 
     // The page's commands.
@@ -12903,6 +12989,26 @@ static void testPatterns()
         check (kitTrack["keyNames"]["36"].toString() == "Kick" && kitTrack["keyNames"]["38"].toString() == "Snare",
                "a drum kit's track names its keys");
 
+        // The rack: row levels and muted rows, set and described; split by track.
+        check (ok (run ("setPart", args ({ { "pattern", patternId }, { "track", kit }, { "levels", args ({ { "36", 0.5 } }) } })))
+                   && ok (run ("setPartMutes", args ({ { "pattern", patternId }, { "parts", list ({ args ({ { "track", kit }, { "muted", list ({ 42, 38 }) } }) }) } }))),
+               "setPart takes row levels and setPartMutes muted rows");
+        check (edit.getUndoManager().getUndoDescription() == "Mute rows", "(one undo step named Mute rows)");
+        {
+            const auto described = lastSession()["patterns"][0]["parts"][0];
+            check (near ((double) described["levels"]["36"], 0.5, 1.0e-3) && described["muted"].size() == 2 && (int) described["muted"][0] == 38,
+                   "the session describes them, typed");
+        }
+        run ("setPartMutes", args ({ { "pattern", patternId }, { "parts", list ({ args ({ { "track", kit }, { "muted", list ({}) } }) }) } }));
+        run ("setPart", args ({ { "pattern", patternId }, { "track", kit }, { "levels", args ({ { "36", 1.0 } }) } }));
+        {
+            const auto split = run ("splitPattern", args ({ { "id", patternId } }));
+            check (ok (split) && split["patterns"].size() == 1 && lastSession()["patterns"].size() == 2, "splitPattern");
+            run ("undo");
+            const auto undone = lastSession();
+            check (undone["patterns"].size() == 1 && undone["patternClips"].size() == 1, "and undo");
+        }
+
         check (ok (run ("patternMode", args ({ { "pattern", patternId } }))) && (int) lastSession()["patternMode"] == (int) patternId
                    && processor.getDawEngine().getPatternMode() == (int) patternId,
                "patternMode switches to the pattern");
@@ -12926,6 +13032,7 @@ static void testPatterns()
                    "and a file that isn't there");
             check (ok (run ("kitSample", args ({ { "track", kitTrackId }, { "note", 39 }, { "file", clapFile.getFullPathName() } }))),
                    "kitSample loads a sample onto a pad");
+
             auto names = [&] (int track)
             {
                 const auto tracks = lastSession()["tracks"];
@@ -12937,6 +13044,16 @@ static void testPatterns()
             check (names (kitTrackId)["39"].toString() == "My Clap", "the track's keyNames name the pad after the sample");
             check (ok (run ("kitSample", args ({ { "track", kitTrackId }, { "note", 39 }, { "file", "" } }))) && names (kitTrackId)["39"].toString() != "My Clap",
                    "an empty file clears the pad");
+            check (! ok (run ("kitPad", args ({ { "track", kit }, { "note", 39 }, { "pan", 0.5 } }))), "kitPad refuses a track that isn't a Kit");
+            check (ok (run ("kitPad", args ({ { "track", kitTrackId }, { "note", 39 }, { "pan", -0.5 } }))), "kitPad pans a pad");
+            {
+                const auto tracks = lastSession()["tracks"];
+                juce::var pans;
+                for (int i = 0; i < tracks.size(); ++i)
+                    if ((int) tracks[i]["id"] == kitTrackId)
+                        pans = tracks[i]["kitPans"];
+                check (near ((double) pans["39"], -0.5, 1.0e-3) && near ((double) pans["36"], 0.0, 1.0e-3), "and the track's kitPans show it");
+            }
             run ("removeTrack", args ({ { "id", kitTrackId } }));
             sampleFolder.deleteRecursively();
         }

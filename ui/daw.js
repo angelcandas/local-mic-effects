@@ -5326,6 +5326,9 @@ class DawScreen {
                                ["Warp: drag a handle (ruler)", "Slide a tab along the audio"], ["Warp: Alt+click / double-click", "Remove a tab (Delete: the selected ones)"],
                                ["Warp: ← / → (Shift)", "Nudge the selected tabs 1 ms (10 ms)"], ["Warp: Tab / Shift+Tab", "Select the next / previous tab"],
                                ["Warp: Ctrl/Cmd at the press", "Flip Hold neighbours for one drag"], ["Ctrl/Cmd + scroll", "Zoom (or drag the overview box's edges)"]]],
+    ["Patterns tab (after clicking in it)", [["- / =", "Previous / next pattern"], ["↑ / ↓", "Select the row above / below"],
+                  ["Ctrl+Shift+← / →", "Rotate the selected row's steps"], ["Ctrl+C / V", "Copy / paste the selected row's steps"],
+                  ["Right-click a row's light", "Solo the row (again: every row plays)"]]],
     ["File", [["Ctrl+N", "New project"], ["Ctrl+O", "Open a project"], ["Ctrl+S", "Save (Shift: save as)"],
               ["Ctrl+I", "Import audio"], ["Ctrl+Shift+R / Ctrl+B", "Export (bounce)"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"]]],
     ["View", [["Tab / X", "Tracks / mixer"], ["E / Shift+Tab", "Show / hide the effects panel"], ["Shift+B / Ctrl+Alt+B", "Show / hide the library"],
@@ -5959,6 +5962,7 @@ class DawScreen {
 
   onKey(event) {
     if (!this.active || isTyping(event)) return;
+    if (this.dockTab === "patterns" && this.patternsPanel?.onKey(event)) return; // the rack's own keys
     if (event.ctrlKey && event.metaKey) return; // Ctrl+Cmd+F is full screen on a Mac
     const mod = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
