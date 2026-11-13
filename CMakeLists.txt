@@ -50,6 +50,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/browser.js
         ui/pianoroll.js
         ui/takes.js
+        ui/capture.js
         ui/looper.js
         ui/midilearn.js
         ui/scenes.js
@@ -109,6 +110,8 @@ set(MICFX_DSP_SOURCES
     src/PitchTap.h
     src/Practice.cpp
     src/Practice.h
+    src/CaptureRing.cpp
+    src/CaptureRing.h
     src/Looper.cpp
     src/Looper.h
     src/MidiMap.cpp

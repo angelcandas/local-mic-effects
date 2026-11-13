@@ -119,6 +119,7 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     chain.prepare (spec); // starts every module from its current values
 
     recorder.prepare (sampleRate, (int) spec.numChannels);
+    liveCapture.configure (sampleRate, 3, captureSeconds.load());
     multitrack.prepare (sampleRate);
     looper.prepare (sampleRate);
     pitchTap.prepare (sampleRate);
@@ -193,12 +194,16 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     const auto recording = recorder.isRecording();
     const auto dryLength = juce::jmin (numSamples, dryInput.getNumSamples());
 
-    if (recording && numIn > 0)
+    const auto capturing = liveCapture.isOn();
+
+    if ((recording || capturing) && numIn > 0)
     {
         dryInput.copyFrom (0, 0, buffer, 0, 0, dryLength);
         if (dryLength < numSamples)
             dryInput.clear(); // oversized block: the dry file gets silence rather than garbage
     }
+    else if (capturing)
+        dryInput.clear(); // no input: Capture keeps silence for the dry channel
 
     updateDspParameters();
     followChords (buffer, numIn, numSamples, midi); // before the mic is copied over the other inputs
@@ -255,15 +260,27 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     // voice is recorded, so takes contain only the voice.
     const auto timelinePosition = multitrack.getPosition();
 
-    if (recording)
+    if (recording || capturing)
     {
         // Write in chunks the dry buffer can cover so both files stay sample-aligned.
+        const auto playingBacking = multitrack.isPlaying();
+
         for (int start = 0; start < numSamples; start += dryInput.getNumSamples())
         {
             const auto length = juce::jmin (dryInput.getNumSamples(), numSamples - start);
             std::array<const float*, 2> output { buffer.getReadPointer (0, start),
                                                  buffer.getReadPointer (juce::jmin (1, numOut - 1), start) };
-            recorder.write (output.data(), dryInput.getReadPointer (0), length, timelinePosition + start);
+
+            if (recording)
+                recorder.write (output.data(), dryInput.getReadPointer (0), length, timelinePosition + start);
+
+            if (capturing)
+            {
+                // The voice after the limiter and the looper, and the raw mic. Capture keeps the
+                // timeline position while the backing plays so a capture can sit against it.
+                const std::array<const float*, 3> kept { output[0], output[1], dryInput.getReadPointer (0) };
+                liveCapture.write (kept.data(), length, playingBacking ? timelinePosition + start : -1);
+            }
         }
     }
 
@@ -394,6 +411,14 @@ const juce::String PluginProcessor::getProgramName (int index)
 {
     const auto& presets = getPresets();
     return juce::isPositiveAndBelow (index, (int) presets.size()) ? presets[(size_t) index].name : "";
+}
+
+void PluginProcessor::setCaptureSeconds (double seconds)
+{
+    captureSeconds = juce::jmax (0.0, seconds);
+    dawEngine.setCaptureSeconds (captureSeconds.load()); // the DAW's armed inputs follow the same setting
+    if (getSampleRate() > 0.0)
+        liveCapture.configure (getSampleRate(), 3, captureSeconds.load());
 }
 
 void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)

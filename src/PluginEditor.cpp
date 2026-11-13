@@ -141,6 +141,9 @@ PluginEditor::PluginEditor (PluginProcessor& p)
         looper.setVolume ((float) settings.getDoubleValue ("looper.volume", 1.0));
     }
 
+    // Capture keeps the last few minutes of the voice (0 = off); the choice is an app preference.
+    processorRef.setCaptureSeconds (60.0 * settings.getDoubleValue ("capture.minutes", PluginProcessor::defaultCaptureSeconds / 60.0));
+
     addAndMakeVisible (*webView);
     webView->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
 
@@ -443,6 +446,78 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                        .withNativeFunction ("getRecorderSettings", [this] (const auto&, auto complete)
                        {
                            complete (describeRecorderSettings());
+                       })
+
+                       // (action, options) -> { minutes, seconds, on }. "status" / "settings" { minutes }: how long
+                       // Capture keeps (0 = off). "save" { seconds? } writes the newest `seconds` (default: all of it)
+                       // as a take: { ok, error, file, dryFile, seconds }, and adds it as a track row.
+                       .withNativeFunction ("capture", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           const auto options = args.size() > 1 ? args[1] : juce::var();
+
+                           if (action == "settings" && options.hasProperty ("minutes"))
+                           {
+                               const auto minutes = juce::jlimit (0.0, 10.0, (double) options["minutes"]);
+                               settings.setValue ("capture.minutes", minutes);
+                               processorRef.setCaptureSeconds (minutes * 60.0);
+                           }
+
+                           if (action != "save")
+                           {
+                               complete (describeCapture());
+                               return;
+                           }
+
+                           auto& ring = processorRef.getCapture();
+                           const auto wanted = options.hasProperty ("seconds") ? (double) options["seconds"] : 0.0;
+                           auto taken = std::make_shared<CaptureRing::Result> (ring.take (wanted > 0.0 ? wanted : 1.0e9));
+                           const auto rate = ring.getSampleRate();
+
+                           if (taken->audio.getNumSamples() <= 0)
+                           {
+                               auto* result = new juce::DynamicObject();
+                               result->setProperty ("ok", false);
+                               result->setProperty ("error", ring.isOn() ? "Nothing to capture yet." : "Capture is off. Turn it on to keep the last minutes.");
+                               complete (juce::var (result));
+                               return;
+                           }
+
+                           const auto name = "MicFX capture " + juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S");
+                           const auto file = getRecordingFolder().getChildFile (name + ".wav").getNonexistentSibling();
+                           const auto dryFile = file.getSiblingFile (file.getFileNameWithoutExtension() + " (dry).wav");
+                           const auto includeDry = settings.getBoolValue ("recordDry", false);
+                           const auto start = taken->startPosition >= 0 ? taken->startPosition - getRoundTripLatency() : 0;
+                           juce::Component::SafePointer<PluginEditor> safe (this);
+
+                           // The files can be big: written off the message thread.
+                           juce::Thread::launch ([safe, taken, rate, file, dryFile, includeDry, start, complete]
+                           {
+                               auto error = CaptureRing::writeWav (file, taken->audio, 0, 2, rate);
+                               if (error.isEmpty() && includeDry)
+                                   error = CaptureRing::writeWav (dryFile, taken->audio, 2, 1, rate);
+
+                               const auto seconds = (double) taken->audio.getNumSamples() / rate;
+
+                               juce::MessageManager::callAsync ([safe, error, file, dryFile, includeDry, start, seconds, complete]
+                               {
+                                   auto* result = new juce::DynamicObject();
+                                   result->setProperty ("ok", error.isEmpty());
+                                   result->setProperty ("error", error);
+
+                                   if (error.isEmpty() && safe != nullptr)
+                                   {
+                                       // A new track row, lined up with the music when it was played to it.
+                                       safe->processorRef.getMultitrack().addTake (file, start);
+                                       result->setProperty ("file", file.getFullPathName());
+                                       result->setProperty ("fileName", file.getFileName());
+                                       result->setProperty ("dryFile", includeDry ? dryFile.getFullPathName() : juce::String());
+                                       result->setProperty ("seconds", seconds);
+                                   }
+
+                                   complete (juce::var (result));
+                               });
+                           });
                        })
 
                        // (includeDry) -> { ok, error }
@@ -755,6 +830,7 @@ void PluginEditor::timerCallback()
 
     const auto& recorder = processorRef.getRecorder();
     status->setProperty ("recording", recorder.isRecording() ? recorder.getSeconds() : -1.0);
+    status->setProperty ("capture", processorRef.getCapture().isOn() ? processorRef.getCapture().getAvailableSeconds() : -1.0);
 
     auto& multitrack = processorRef.getMultitrack();
     const auto rate = multitrack.getSampleRate();
@@ -1038,6 +1114,16 @@ juce::File PluginEditor::getRecordingFolder()
 {
     const auto saved = settings.getValue ("recordFolder");
     return juce::File::isAbsolutePath (saved) ? juce::File (saved) : Recorder::getDefaultFolder();
+}
+
+juce::var PluginEditor::describeCapture()
+{
+    auto& ring = processorRef.getCapture();
+    auto* result = new juce::DynamicObject();
+    result->setProperty ("minutes", processorRef.getCaptureSeconds() / 60.0);
+    result->setProperty ("seconds", ring.getAvailableSeconds());
+    result->setProperty ("on", ring.isOn());
+    return juce::var (result);
 }
 
 juce::var PluginEditor::describeRecorderSettings()
