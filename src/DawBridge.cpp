@@ -1661,6 +1661,14 @@ void DawBridge::replanAutoMix()
         options.trackNames[id] = track[ids::name].toString();
         if (daw::Edit::isMidiTrack (track))
             options.midiTracks.insert (id);
+        else if (hasStereoImage (track))
+            options.stereoTracks.insert (id);
+
+        // Pans you set stay; the ones Auto Mix set last time are planned again.
+        const auto pan = (float) track.getProperty (ids::pan, 0.0f);
+        if (const auto it = autoMixPans.find (id); it == autoMixPans.end() || std::abs (it->second - pan) > 0.01f)
+            options.currentPans[id] = pan;
+
         for (const auto& insert : daw::Edit::getInserts (track))
             for (int type = 0; type < fx::numModuleTypes; ++type)
                 if (insert[ids::type].toString() == fx::getModuleKey ((fx::ModuleType) type))
@@ -1679,6 +1687,42 @@ void DawBridge::replanAutoMix()
 
     autoMixPlan = analysis::planMix (*autoMixAnalysis, autoMixRoles, volumes,
                                      (float) edit.getMaster().getProperty (ids::volume, 0.0f), autoMixStyle, options);
+}
+
+// A track recorded in stereo: an input pair, or an audio file whose two sides differ
+// (a dual-mono file is a mono part, and gets panned like one).
+bool DawBridge::hasStereoImage (const juce::ValueTree& track)
+{
+    if (daw::Edit::getTrackInput (track).isStereo())
+        return true;
+
+    for (const auto& clip : track)
+    {
+        if (! clip.hasType (ids::CLIP) || daw::Edit::isMidiClip (clip))
+            continue;
+        const juce::File file (clip[ids::file].toString());
+        const auto key = file.getFullPathName();
+        if (key.isEmpty())
+            continue;
+
+        if (stereoFiles.count (key) == 0)
+        {
+            if (const auto audio = engine.getAudioPool().get (file))
+                stereoFiles[key] = analysis::hasStereoImage (*audio);
+            else
+            {
+                // Not decoded yet: the file's channels say (not remembered, so it's checked again once it is).
+                juce::AudioFormatManager formats;
+                formats.registerBasicFormats();
+                if (std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file)); reader != nullptr && reader->numChannels > 1)
+                    return true;
+                continue;
+            }
+        }
+        if (stereoFiles[key])
+            return true;
+    }
+    return false;
 }
 
 void DawBridge::readAutoMixEffects (const juce::var& effects)
@@ -1707,6 +1751,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("dynamicEq", autoMixOptions.dynamicEq);
     read ("transients", autoMixOptions.transients);
     read ("smooth", autoMixOptions.smooth);
+    read ("pan", autoMixOptions.pan);
     read ("split", autoMixSplit);
 }
 
@@ -1776,7 +1821,8 @@ juce::var DawBridge::describeAutoMix() const
 
     for (const auto& move : autoMixPlan.moves)
     {
-        juce::String effect = ! move.ride.empty() ? "Volume ride" : move.values.count ("inGain") > 0 ? "Input gain" : "Volume";
+        juce::String effect = ! move.ride.empty() ? "Volume ride" : move.values.count ("inGain") > 0 ? "Input gain"
+                            : move.values.count ("pan") > 0 && ! move.insert.has_value() ? "Pan" : "Volume";
         if (move.sendTo != 0)
             effect = "Send to " + edit.getReturn (move.sendTo)[ids::name].toString();
         if (move.insert.has_value())
@@ -1815,7 +1861,7 @@ juce::var DawBridge::describeAutoMix() const
                                    { "exciter", autoMixOptions.exciter }, { "width", autoMixOptions.width },
                                    { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour }, { "sends", autoMixOptions.sends }, { "throws", autoMixOptions.throws },
                                    { "dynamicEq", autoMixOptions.dynamicEq }, { "transients", autoMixOptions.transients },
-                                   { "smooth", autoMixOptions.smooth },
+                                   { "smooth", autoMixOptions.smooth }, { "pan", autoMixOptions.pan },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
@@ -2438,6 +2484,11 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
             undo.undo();
 
         analysis::applyMix (edit, autoMixPlan, arg (args, "amount", 1.0f));
+        autoMixPans.clear();
+        for (const auto& move : autoMixPlan.moves)
+            if (! move.insert.has_value() && move.values.count ("pan") > 0)
+                if (const auto track = edit.getTrack (move.trackId); track.isValid())
+                    autoMixPans[move.trackId] = track.getProperty (ids::pan, 0.0f);
         return error ({});
     }
 
