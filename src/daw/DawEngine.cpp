@@ -1,4 +1,5 @@
 #include "DawEngine.h"
+#include "Patterns.h"
 
 namespace daw
 {
@@ -169,6 +170,48 @@ void DawEngine::addLiveMidi (const juce::MidiMessage& message) noexcept
         liveFifoData[(size_t) scope.startIndex1] = packed;
 }
 
+void DawEngine::addLiveMidi (const juce::MidiMessage& message, int trackId) noexcept
+{
+    if (message.getRawDataSize() > 3)
+        return;
+
+    const auto* data = message.getRawData();
+    juce::uint32 packed = 0;
+    for (int i = 0; i < message.getRawDataSize(); ++i)
+        packed |= (juce::uint32) data[i] << (8 * i);
+
+    const auto scope = auditionFifo.write (1);
+    if (scope.blockSize1 == 1)
+        auditionFifoData[(size_t) scope.startIndex1] = { trackId, packed };
+}
+
+void DawEngine::setPatternMode (int patternId)
+{
+    if (patternId >= 0 && ! edit.getPattern (patternId).isValid())
+        patternId = -1;
+
+    if (patternId == patternMode)
+        return;
+
+    if (patternMode < 0)
+    {
+        songPosition = position.load();
+        position = 0;
+    }
+    else if (patternId < 0)
+    {
+        patternLoopEnd = 0;
+        position = songPosition;
+    }
+    else
+    {
+        position = 0; // another pattern: from its start
+    }
+
+    patternMode = patternId;
+    rebuild();
+}
+
 std::bitset<128> DawEngine::getHeldNotes() const noexcept
 {
     std::bitset<128> held;
@@ -209,6 +252,13 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     {
         // A different plugin needs a new instrument; its saved settings and names don't.
         if (property == ids::plugin)
+            triggerAsyncUpdate();
+        return;
+    }
+
+    if (tree.hasType (ids::PATTERN) || tree.hasType (ids::PART) || tree.hasType (ids::PATTERNCLIP))
+    {
+        if (property != ids::name && property != ids::colour && property != ids::rows)
             triggerAsyncUpdate();
         return;
     }
@@ -443,6 +493,7 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
             const auto channels = juce::jmax (2, instrument->getTotalNumInputChannels(), instrument->getTotalNumOutputChannels());
             strip->instrumentBuffer.setSize (channels, blockSize);
             strip->midi.ensureSize (4096);
+            strip->audition.ensureSize (1024);
         }
         else
         {
@@ -482,6 +533,15 @@ void DawEngine::rebuild()
 
     graph->master = reuse (edit.getMaster());
     graph->tempo = edit.getTempoMap();
+
+    // Pattern mode: just the pattern, as a loop (a removed pattern goes back to the song).
+    auto loopPattern = patternMode >= 0 ? edit.getPattern (patternMode) : juce::ValueTree();
+    if (patternMode >= 0 && ! loopPattern.isValid())
+    {
+        patternMode = -1;
+        patternLoopEnd = 0;
+        position = songPosition;
+    }
 
     std::map<int, int> busIndex; // return id -> index in graph->returns
     // Group tracks first: they send into the plain returns, which must come later.
@@ -569,7 +629,7 @@ void DawEngine::rebuild()
         }
 
         if (track.strip->isMidi)
-            buildMidiEvents (track, trackTree, sampleRate, end);
+            buildMidiEvents (track, trackTree, sampleRate, end, graph->tempo, loopPattern);
 
         for (const auto& point : Edit::getVolumeRide (trackTree))
             track.ride.emplace_back ((juce::int64) std::llround (point.time * sampleRate), point.db);
@@ -632,8 +692,8 @@ void DawEngine::rebuild()
             clip.fadeOut = juce::jmax ((juce::int64) 0, toSamples (clipTree[ids::fadeOut]));
             clip.gain    = volumeToGain (clipTree.getProperty (ids::gain, 0.0f));
 
-            if (clip.length <= 0)
-                continue;
+            if (clip.length <= 0 || loopPattern.isValid())
+                continue; // pattern mode: no clips (their audio stays loaded for the song)
 
             end = juce::jmax (end, clip.start + clip.length);
 
@@ -696,6 +756,16 @@ void DawEngine::rebuild()
     lastClipAudio = std::move (clipAudio);
     pool.releaseUnusedWarps (warpsInUse);
 
+    if (loopPattern.isValid())
+    {
+        end = juce::jmax ((juce::int64) 1, (juce::int64) std::llround (patterns::getLoopSeconds (loopPattern, graph->tempo) * sampleRate));
+        patternLoopEnd = end;
+    }
+    else
+    {
+        end = juce::jmax (end, (juce::int64) std::llround (patterns::getBlocksEnd (edit.getState(), graph->tempo) * sampleRate));
+    }
+
     length = end;
     graph->master->latencyAtBuild = graph->master->chain.getLatencySamples();
     latency = maxLatency + maxReturnLatency + graph->master->latencyAtBuild;
@@ -711,13 +781,28 @@ void DawEngine::rebuild()
     publish (std::move (graph));
 }
 
-void DawEngine::buildMidiEvents (Track& track, const juce::ValueTree& trackTree, double rate, juce::int64& end)
+void DawEngine::buildMidiEvents (Track& track, const juce::ValueTree& trackTree, double rate, juce::int64& end,
+                                 const TempoMap& tempo, const juce::ValueTree& loopPattern)
 {
     const auto toSamples = [rate] (double seconds) { return (juce::int64) std::llround (seconds * rate); };
     const auto transpose = (int) std::lround ((double) trackTree.getProperty (ids::transpose, 0.0));
+    const auto trackId = (int) trackTree[ids::id];
+
+    // Pattern notes (blocks on the timeline, or the pattern mode's loop).
+    const auto patternEvents = loopPattern.isValid() ? patterns::getLoopEvents (loopPattern, trackId, tempo)
+                                                     : patterns::getBlockEvents (trackTree.getParent(), trackId, tempo);
+    for (const auto& e : patternEvents)
+    {
+        const auto on = toSamples (e.on);
+        const auto pitch = juce::jlimit (0, 127, e.pitch + transpose);
+        track.midiEvents.push_back ({ on, pitch, e.velocity });
+        track.midiEvents.push_back ({ juce::jmax (on + 1, toSamples (e.off)), pitch, 0 });
+    }
 
     for (const auto& clip : trackTree)
     {
+        if (loopPattern.isValid())
+            break; // pattern mode: the pattern only
         if (! clip.hasType (ids::CLIP) || ! Edit::isMidiClip (clip))
             continue;
 
@@ -885,6 +970,9 @@ juce::String DawEngine::startRecording (const juce::File& folder)
 
     if (! armedAudio && ! armedMidi)
         return "Arm a track to record on first.";
+
+    if (patternMode >= 0)
+        return "Switch to Song mode to record.";
 
     if (armedAudio)
     {
@@ -1309,6 +1397,12 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce
     if (input != nullptr && strip.monitoring.load (std::memory_order_relaxed))
         midi.addEvents (*input, midiOffset, numSamples, -midiOffset);
 
+    if (! strip.audition.isEmpty())
+    {
+        midi.addEvents (strip.audition, 0, -1, 0);
+        strip.audition.clear();
+    }
+
     const juce::ScopedLock lock (instrument->getCallbackLock());
 
     if (instrument->isSuspended())
@@ -1684,6 +1778,25 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
         active = next;
     }
 
+    // Auditioned notes go to their track's strip (dropped when it isn't in the graph).
+    if (auditionFifo.getNumReady() > 0)
+    {
+        const auto scope = auditionFifo.read (auditionFifo.getNumReady());
+        scope.forEach ([this] (int index)
+        {
+            const auto [trackId, packed] = auditionFifoData[(size_t) index];
+            if (active == nullptr)
+                return;
+
+            for (auto& track : active->tracks)
+                if (track.strip->id == trackId && track.strip->isMidi)
+                {
+                    const juce::uint8 bytes[] = { (juce::uint8) packed, (juce::uint8) (packed >> 8), (juce::uint8) (packed >> 16) };
+                    track.strip->audition.addEvent (bytes, juce::MidiMessage::getMessageLengthFromFirstByte (bytes[0]), 0);
+                }
+        });
+    }
+
     numChannels = juce::jmin (numChannels, output.getNumChannels());
 
     if (active == nullptr || numChannels <= 0)
@@ -1697,12 +1810,16 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
     {
         auto chunk = juce::jmin (active->blockSize, numSamples - done);
 
-        // Looping: stop the chunk at the loop end, then jump back to the start.
-        const auto looping = loopOn.load() && playing.load() && (! isRecording() || loopRecording.load());
-        const auto end = loopEnd.load();
+        // Looping: stop the chunk at the loop end, then jump back to the start. Pattern
+        // mode always loops its pattern (from anywhere past its end too).
+        const auto patternEnd = patternLoopEnd.load();
+        const auto inPattern = patternEnd > 0;
+        const auto looping = playing.load() && (inPattern || (loopOn.load() && (! isRecording() || loopRecording.load())));
+        const auto end = inPattern ? patternEnd : loopEnd.load();
+        const auto start = inPattern ? (juce::int64) 0 : loopStart.load();
 
-        if (looping && position.load() == end)
-            position = loopStart.load();
+        if (looping && (position.load() == end || (inPattern && position.load() > end)))
+            position = start;
 
         if (const auto pos = position.load(); looping && pos < end && pos + chunk > end)
             chunk = (int) (end - pos);
@@ -1714,7 +1831,7 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
         renderBlock (*active, output, done, numChannels, chunk, chunkInputs.data(), numInputs, midi, done);
 
         if (looping && position.load() == end)
-            position = loopStart.load();
+            position = start;
 
         done += chunk;
     }
