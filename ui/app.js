@@ -4,7 +4,7 @@ import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, SCALES, isControlShown } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
-import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
+import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, keyText, polar, releaseFocus, svg } from "./widgets.js";
 import { initDaw } from "./daw.js";
 import { LOOPER_KEYS, LoopPanel } from "./looper.js";
 import { MidiLearn, markLearnable } from "./midilearn.js";
@@ -1154,8 +1154,8 @@ class Tracks {
     });
 
     document.addEventListener("keydown", (event) => {
-      if (event.key === " " && !isTyping(event) && !event.target.closest?.("button, [role=slider]")) {
-        event.preventDefault();
+      if (event.key === " " && !isTyping(event)) { // Space always plays, whatever has focus
+        releaseFocus(event);
         this.transport(this.state.playing ? "pause" : "play");
       }
     });
@@ -1174,7 +1174,7 @@ class Tracks {
 
     for (const track of tracks) {
       seen.add(track.id);
-      const label = track.isTake ? `Take ${++takeNumber}` : track.name;
+      const label = track.isTake ? `Recording ${++takeNumber}` : track.name;
       const row = this.rows.get(track.id) ?? this.createRow(track);
       row.track = track;
       row.name.textContent = label;
@@ -1431,8 +1431,8 @@ micCheckButton.addEventListener("click", () => {
 new SoundCheckPanel(document.querySelector(".sound-check"));
 
 // The "?" overlay with the Live keys.
-const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["← / →", "Previous / next preset"],
-                   ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"], ["M", "Mute the output (panic)"],
+const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["Ctrl+← / →", "Previous / next preset"],
+                   ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"], ["M", "Mute output (panic)"],
                    ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["Esc", "Close"]];
 function toggleLiveKeys(show) {
   let overlay = document.querySelector(".live-keys");
@@ -1446,7 +1446,7 @@ function toggleLiveKeys(show) {
     panel.append(html("h2", "", "Stage keys"), close);
     for (const [keys, action] of LIVE_KEYS) {
       const row = html("div", "live-key");
-      row.append(html("kbd", "", keys), html("span", "", action));
+      row.append(html("kbd", "", keyText(keys)), html("span", "", action));
       panel.append(row);
     }
     overlay.append(panel);
@@ -1458,13 +1458,16 @@ function toggleLiveKeys(show) {
 document.querySelector(".keys-button").addEventListener("click", () => toggleLiveKeys());
 
 document.addEventListener("keydown", (event) => {
-  if (isTyping(event) || event.metaKey || event.ctrlKey || event.altKey) return;
+  if (isTyping(event) || event.altKey) return;
+  // A whole-sound change never sits on a bare arrow key: Ctrl+← / → (Cmd on a Mac) steps presets.
+  if (event.metaKey || event.ctrlKey) {
+    if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); presetBar.step(event.key === "ArrowLeft" ? -1 : 1); }
+    return;
+  }
   if (event.target.closest?.("[role=slider]") && event.key.startsWith("Arrow")) return;
   const key = event.key.toLowerCase();
   if (key === "m" && !event.repeat) { event.preventDefault(); setMuted(!liveState.muted); }
   else if (key === "d") { event.preventDefault(); setDry(true); }
-  else if (event.key === "ArrowLeft") { event.preventDefault(); presetBar.step(-1); }
-  else if (event.key === "ArrowRight") { event.preventDefault(); presetBar.step(1); }
   else if (/^[1-9]$/.test(event.key)) {
     event.preventDefault();
     if (!presetBar.loadFavourite(Number(event.key))) recorderBar.setStatus(`No favourite ${event.key} yet: star presets in the preset menu.`);
