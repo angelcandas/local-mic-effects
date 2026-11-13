@@ -208,7 +208,7 @@ Practice::Prepared Practice::prepare (const juce::File& source, const Options& o
 
         phase = Phase::splitting;
         const auto parts = stems::separate (stereo, loaded.separator, report, stems::Settings { loaded.gpu ? 2 : 0 });
-        if (parts.size() != (size_t) stems::numStems)
+        if (parts.size() < (size_t) stems::numStems)
             return stop();
 
         auto backing = parts[(size_t) stems::Stem::drums];

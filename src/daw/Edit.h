@@ -106,7 +106,7 @@ namespace ids
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns) MICFX_DAW_ID (group) MICFX_DAW_ID (folded)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
-    MICFX_DAW_ID (pitchNotes)
+    MICFX_DAW_ID (pitchNotes) MICFX_DAW_ID (rebalance) MICFX_DAW_ID (rebalanceFrom)
     MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight)
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
     MICFX_DAW_ID (PATTERN) MICFX_DAW_ID (PART) MICFX_DAW_ID (PATTERNCLIP) MICFX_DAW_ID (track) MICFX_DAW_ID (drum)
@@ -289,6 +289,14 @@ public:
     int splitClip (int clipId, double time);           // returns the new (right-hand) clip, or -1
     int duplicateClip (int clipId);                    // placed right after the original
     void setClipGain (int clipId, float decibels);
+
+    // Rebalance: the clip plays `mixed`, a re-mix of its stems at other levels (same length as the
+    // file it replaces, so windows, warps and fades stay as they are). `original` is the file it came
+    // from and `settings` (JSON: quality and the level of each stem in dB) says how it was mixed.
+    // Undoable. resetClipRebalance puts the original file back.
+    void setClipRebalance (int clipId, const juce::File& mixed, const juce::File& original, const juce::String& settings);
+    void resetClipRebalance (int clipId);
+    static juce::File getRebalanceOriginal (const juce::ValueTree& clip); // the clip's own file when not rebalanced
     void setClipFades (int clipId, double fadeInSeconds, double fadeOutSeconds);
     void setClipName (int clipId, const juce::String&);
     void setClipMute (int clipId, bool);

@@ -765,6 +765,7 @@ body.is-daw .chip--live { display: none; }
 
 .export-panel,
 .tomidi-panel,
+.rebalance-panel,
 .stems-panel,
 .automix-panel,
 .mixcheck-panel,
@@ -781,7 +782,7 @@ body.is-daw .chip--live { display: none; }
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
 }
 
-.export-panel[hidden], .tomidi-panel[hidden], .automix-panel[hidden], .key-panel[hidden], .stems-panel[hidden], .mixcheck-panel[hidden] { display: none; }
+.export-panel[hidden], .tomidi-panel[hidden], .automix-panel[hidden], .key-panel[hidden], .stems-panel[hidden], .rebalance-panel[hidden], .mixcheck-panel[hidden] { display: none; }
 .export-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .export-options { display: grid; gap: 8px; }
 .export-options label { display: grid; grid-template-columns: 70px 1fr; align-items: center; color: var(--muted); }
@@ -793,6 +794,7 @@ body.is-daw .chip--live { display: none; }
 .export-bar div { height: 100%; width: calc(var(--progress, 0) * 100%); background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
 .export-panel.is-running .export-bar,
 .tomidi-panel.is-running .export-bar,
+.rebalance-panel.is-running .export-bar,
 .stems-panel.is-running .export-bar,
 .automix-panel.is-running .export-bar,
 .mixcheck-panel.is-running .export-bar,
@@ -806,6 +808,19 @@ body.is-daw .chip--live { display: none; }
 .stems-cancel { display: none; }
 .stems-panel.is-running .stems-cancel { display: inline-block; }
 .stems-panel.is-running .stems-go { display: none; }
+.stems-quality { display: grid; grid-template-columns: 70px 1fr; align-items: center; margin: 4px 0 8px; color: var(--muted); }
+.rebalance-cancel { display: none; }
+.rebalance-panel.is-running .rebalance-cancel { display: inline-block; }
+.rebalance-panel.is-running .rebalance-go,
+.rebalance-panel.is-running .rebalance-reset { display: none; }
+.rebalance-sliders { display: grid; gap: 6px; margin: 12px 0 4px; }
+.rebalance-row { display: grid; grid-template-columns: 64px 1fr 56px; align-items: center; gap: 8px; color: var(--muted); }
+.rebalance-row i { display: inline-block; width: 8px; height: 8px; margin-right: 6px; border-radius: 50%; background: var(--c, var(--accent)); }
+.rebalance-row input[type=range] { accent-color: var(--c, var(--accent)); }
+.rebalance-row b { font-weight: 500; text-align: right; font-variant-numeric: tabular-nums; color: var(--text); }
+.rebalance-row.is-off b { color: var(--muted); }
+.rebalance-panel.is-running .rebalance-sliders,
+.rebalance-panel.is-running .export-options { opacity: 0.5; pointer-events: none; }
 
 
 /* ---------- Auto Mix ---------- */

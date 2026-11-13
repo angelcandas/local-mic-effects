@@ -26,7 +26,7 @@ namespace
     // this, the DAW screen got volumes as text and couldn't draw a loaded project.
     void restoreTypes (juce::ValueTree tree)
     {
-        static const juce::Identifier textIds[] { ids::name, ids::file, ids::colour, ids::type, ids::kind, ids::plugin,
+        static const juce::Identifier textIds[] { ids::name, ids::file, ids::rebalance, ids::rebalanceFrom, ids::colour, ids::type, ids::kind, ids::plugin,
                                                   ids::format, ids::vendor, ids::description, ids::state };
         static const juce::Identifier boolIds[] { ids::mute, ids::solo, ids::arm, ids::monitor, ids::monitorAuto, ids::loopOn, ids::keyMinor, ids::drum };
         static const juce::Identifier intIds[] { ids::id, ids::version, ids::key };
@@ -197,9 +197,12 @@ juce::String Project::load (const juce::File& xmlFile, const juce::File& project
     // Relative clip paths are relative to the project folder.
     forEachClip (tree, [&] (juce::ValueTree& clip)
     {
-        const auto path = clip[ids::file].toString();
-        if (! juce::File::isAbsolutePath (path))
-            clip.setProperty (ids::file, projectFolder.getChildFile (path).getFullPathName(), nullptr);
+        for (const auto& property : { ids::file, ids::rebalanceFrom })
+        {
+            const auto path = clip[property].toString();
+            if (path.isNotEmpty() && ! juce::File::isAbsolutePath (path))
+                clip.setProperty (property, projectFolder.getChildFile (path).getFullPathName(), nullptr);
+        }
     });
 
     tree.setProperty (ids::version, Edit::formatVersion, nullptr);
@@ -215,9 +218,12 @@ juce::String Project::writeTree (const juce::File& destination) const
     // Files inside the project folder are stored relative, so the folder can move.
     forEachClip (tree, [this] (juce::ValueTree& clip)
     {
-        const juce::File file (clip[ids::file].toString());
-        if (file.isAChildOf (folder))
-            clip.setProperty (ids::file, file.getRelativePathFrom (folder).replaceCharacter ('\\', '/'), nullptr);
+        for (const auto& property : { ids::file, ids::rebalanceFrom })
+        {
+            const juce::File file (clip[property].toString());
+            if (clip.hasProperty (property) && file.isAChildOf (folder))
+                clip.setProperty (property, file.getRelativePathFrom (folder).replaceCharacter ('\\', '/'), nullptr);
+        }
     });
 
     const auto xml = tree.createXml();
@@ -272,19 +278,25 @@ juce::String Project::saveAs (const juce::File& requested)
 
     forEachClip (edit.getState(), [&] (juce::ValueTree& clip)
     {
-        const juce::File source (clip[ids::file].toString());
-        auto& copy = copies[source.getFullPathName()];
-
-        if (copy == juce::File() && source.existsAsFile())
+        for (const auto& property : { ids::file, ids::rebalanceFrom })
         {
-            copy = target.getChildFile ("Audio").getNonexistentChildFile (source.getFileNameWithoutExtension(), source.getFileExtension(), false);
+            if (! clip.hasProperty (property))
+                continue;
 
-            if (! source.copyFileTo (copy))
-                error = "Couldn't copy " + source.getFileName() + ".";
+            const juce::File source (clip[property].toString());
+            auto& copy = copies[source.getFullPathName()];
+
+            if (copy == juce::File() && source.existsAsFile())
+            {
+                copy = target.getChildFile ("Audio").getNonexistentChildFile (source.getFileNameWithoutExtension(), source.getFileExtension(), false);
+
+                if (! source.copyFileTo (copy))
+                    error = "Couldn't copy " + source.getFileName() + ".";
+            }
+
+            if (copy != juce::File())
+                clip.setProperty (property, copy.getFullPathName(), nullptr); // not an edit: no undo
         }
-
-        if (copy != juce::File())
-            clip.setProperty (ids::file, copy.getFullPathName(), nullptr); // not an edit: no undo
     });
 
     if (error.isNotEmpty())

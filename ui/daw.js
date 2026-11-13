@@ -100,8 +100,12 @@ const AUDIO_PROCESSES = [
   ["Strip silence: quiet room (−55 dB)", "stripSilenceQuiet", "Split the clip into phrases and remove the silent gaps between them"],
   ["Strip silence: normal (−45 dB)", "stripSilenceNormal", "Split the clip into phrases and remove the silent gaps between them"],
   ["Strip silence: noisy (−35 dB)", "stripSilenceNoisy", "Split the clip into phrases and remove the silent gaps between them"],
-  ["Split into stems…", "splitStems", "Separate the song into vocals, drums, bass and other, each on its own track"],
+  ["Split into stems…", "splitStems", "Separate the song into vocals, drums, bass and other (or guitar and piano too), each on its own track"],
+  ["Rebalance stems…", "rebalanceStems", "Turn the vocals, drums, bass and the rest of this clip up or down without making tracks"],
 ];
+// Rebalance's sliders, in Stem order (the 4-stem model has the first four): [name, colour].
+const STEM_ROWS = [["Drums", "#ffc94d"], ["Bass", "#3fd9c6"], ["Other", "#8c7bff"], ["Vocals", "#ff7a90"], ["Guitar", "#ff9f5a"], ["Piano", "#6fb7ff"]];
+const STEM_OFF_DB = -30; // the slider's lowest position means off
 // The clip menu's "Convert to MIDI": [label, part, hint].
 const TO_MIDI_PARTS = [
   ["Melody…", "melody", "A sung or played line becomes notes on a new piano track"],
@@ -1270,6 +1274,7 @@ class DawScreen {
     this.buildAutoMix();
     this.buildMixCheck();
     this.buildStems();
+    this.buildRebalance();
     this.buildToMidi();
     this.buildLibrary();
     this.buildKeyPanel();
@@ -1281,6 +1286,7 @@ class DawScreen {
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
     window.__JUCE__.backend.addEventListener("dawExport", (progress) => this.onExport(progress));
     window.__JUCE__.backend.addEventListener("dawStems", (event) => this.onStems(event));
+    window.__JUCE__.backend.addEventListener("dawRebalance", (event) => this.onRebalance(event));
     window.__JUCE__.backend.addEventListener("dawToMidi", (event) => this.onToMidi(event));
     document.addEventListener("keydown", (event) => this.onKey(event));
     document.addEventListener("keydown", (event) => this.onPianoKey(event, true), true); // before the shortcuts
@@ -4397,7 +4403,7 @@ class DawScreen {
     panel.querySelector(".stems-go").addEventListener("click", async () => {
       if (!this.stems.clip) return;
       this.setStemsStatus("Starting…");
-      const result = await daw("stems", { action: "start", id: this.stems.clip.id });
+      const result = await daw("stems", { action: "start", id: this.stems.clip.id, quality: panel.querySelector("[name=stemQuality]").value });
       if (result?.ok === false) this.setStemsStatus(result.error, true);
     });
   }
@@ -4409,6 +4415,7 @@ class DawScreen {
     if (this.exportPanel) this.exportPanel.hidden = true;
     if (this.autoMixPanel) this.autoMixPanel.hidden = true;
     if (this.mixCheck) this.mixCheck.panel.hidden = true;
+    if (this.rebalancePanel) this.rebalancePanel.hidden = true;
     if (!this.stems.running) {
       this.stems.clip = clip;
       panel.querySelector("strong").textContent = clip ? `Split “${clip.name}” into stems` : "Split into stems";
@@ -4460,6 +4467,133 @@ class DawScreen {
       this.setStemsStatus("Cancelled.");
     } else if (event.state === "error") {
       this.setStemsStatus(event.error || "The split failed.", true);
+    }
+  }
+
+  //============================================================================ Rebalance
+  // Turns the stems of a clip up or down in place: the clip's file is swapped for a re-mix.
+  buildRebalance() {
+    const panel = (this.rebalancePanel = this.root.querySelector(".rebalance-panel"));
+    this.rebalance = { clip: null, running: false, info: null, gains: new Array(STEM_ROWS.length).fill(0) };
+    const quality = panel.querySelector("[name=quality]");
+    panel.querySelector(".rebalance-close").addEventListener("click", () => this.toggleRebalance(false));
+    panel.querySelector(".rebalance-cancel").addEventListener("click", () => daw("rebalance", { action: "cancel" }));
+    quality.addEventListener("change", () => { this.drawRebalanceSliders(); this.updateRebalanceNote(); });
+    panel.querySelector(".rebalance-go").addEventListener("click", async () => {
+      const { clip } = this.rebalance;
+      if (!clip) return;
+      this.setRebalanceStatus("Starting…");
+      const count = quality.value === "6" ? 6 : 4;
+      const gains = this.rebalance.gains.slice(0, count).map((db) => (db <= STEM_OFF_DB ? -100 : db));
+      const result = await daw("rebalance", { action: "start", id: clip.id, quality: quality.value, gains });
+      if (result?.ok === false) this.setRebalanceStatus(result.error, true);
+    });
+    panel.querySelector(".rebalance-reset").addEventListener("click", async () => {
+      const { clip } = this.rebalance;
+      if (!clip) return;
+      const result = await daw("rebalance", { action: "reset", id: clip.id });
+      if (result?.ok === false) return this.setRebalanceStatus(result.error, true);
+      this.toggleRebalance(false);
+      toast("Back to the original audio.", "", "undo");
+    });
+  }
+
+  async toggleRebalance(show, clip = null) {
+    const panel = this.rebalancePanel;
+    panel.hidden = !show;
+    if (!show) return;
+    if (this.mixCheck) this.mixCheck.panel.hidden = true;
+    for (const other of [this.exportPanel, this.toMidiPanel, this.stemsPanel, this.autoMixPanel]) if (other) other.hidden = true;
+    if (this.rebalance.running) return;
+    this.rebalance.clip = clip;
+    this.rebalance.info = null;
+    panel.querySelector(".rebalance-title").textContent = clip ? `Rebalance “${clip.name}”` : "Rebalance";
+    this.setRebalanceStatus("");
+    const info = await daw("rebalance", { action: "info", id: clip.id });
+    if (!info?.ok) {
+      this.setRebalanceStatus(info?.error || "Couldn't read the clip.", true);
+      return;
+    }
+    this.rebalance.info = info;
+    this.rebalance.gains = info.gains.map((db) => Number(db));
+    panel.querySelector("[name=quality]").value = info.quality;
+    panel.querySelector(".rebalance-reset").hidden = !info.rebalanced;
+    this.drawRebalanceSliders();
+    this.updateRebalanceNote();
+  }
+
+  drawRebalanceSliders() {
+    const panel = this.rebalancePanel;
+    const count = panel.querySelector("[name=quality]").value === "6" ? 6 : 4;
+    const box = panel.querySelector(".rebalance-sliders");
+    box.replaceChildren();
+    const dbText = (db) => (db <= STEM_OFF_DB ? "off" : `${db > 0 ? "+" : ""}${db.toFixed(1)} dB`);
+    STEM_ROWS.slice(0, count).forEach(([name, colour], index) => {
+      const slider = html("input");
+      Object.assign(slider, { type: "range", min: STEM_OFF_DB, max: 12, step: 0.5, value: this.rebalance.gains[index] ?? 0 });
+      slider.title = `${name}: double-click for 0 dB`;
+      const value = html("b", "", dbText(Number(slider.value)));
+      const label = html("span");
+      label.append(html("i"), name);
+      const row = html("div", "rebalance-row");
+      row.append(label, slider, value);
+      row.style.setProperty("--c", colour);
+      row.classList.toggle("is-off", Number(slider.value) <= STEM_OFF_DB);
+      slider.addEventListener("input", () => {
+        const db = Number(slider.value);
+        this.rebalance.gains[index] = db;
+        value.textContent = dbText(db);
+        row.classList.toggle("is-off", db <= STEM_OFF_DB);
+      });
+      slider.addEventListener("dblclick", () => { slider.value = 0; slider.dispatchEvent(new Event("input")); });
+      box.append(row);
+    });
+  }
+
+  updateRebalanceNote() {
+    const panel = this.rebalancePanel;
+    const { info } = this.rebalance;
+    const quality = panel.querySelector("[name=quality]").value;
+    const cached = info?.cached?.[quality];
+    panel.querySelector(".rebalance-note").textContent = !info ? ""
+      : !info.builtIn ? "This build of MicFX doesn't include the stem splitter."
+      : cached ? "This clip's stems are saved, so applying takes a few seconds."
+      : `The first time, MicFX separates the clip into stems on this computer${quality === "4" ? "" : " (CPU only)"}${quality === "best" ? ", about four times slower" : ""}. They're kept, so the next change is quick. The clip plays a re-mix; Reset or undo brings the original back.`;
+  }
+
+  setRebalanceStatus(text, isError = false) {
+    this.rebalancePanel.querySelector(".rebalance-status").replaceChildren(html("span", isError ? "is-error" : "", text));
+  }
+
+  onRebalance(event) {
+    const panel = this.rebalancePanel;
+    const running = ["downloading", "loading", "splitting", "mixing"].includes(event.state);
+    this.rebalance.running = running;
+    panel.classList.toggle("is-running", running);
+    if (running) this.setJob("rebalance", { label: "Rebalance", progress: event.state === "loading" ? null : event.progress ?? 0,
+                                            cancel: () => daw("rebalance", { action: "cancel" }), open: () => { panel.hidden = false; } });
+    else this.endJob("rebalance");
+
+    if (running) {
+      panel.hidden = false;
+      const progress = event.progress ?? 0;
+      panel.querySelector(".export-bar").style.setProperty("--progress", event.state === "loading" ? 0 : progress);
+      const percent = `${Math.round(progress * 100)}%`;
+      this.setRebalanceStatus(event.state === "downloading" ? `Downloading the separation model… ${percent}`
+                            : event.state === "loading" ? "Loading the separation model…"
+                            : event.state === "mixing" ? `Mixing… ${percent}`
+                            : `Separating${event.gpu ? " on the GPU" : ""}… ${percent}`);
+      return;
+    }
+
+    panel.querySelector(".export-bar").style.setProperty("--progress", 0);
+    if (event.state === "done") {
+      panel.hidden = true;
+      toast(`Rebalanced the clip.${event.note ? ` ${event.note}` : ""}`, "", "undo");
+    } else if (event.state === "cancelled") {
+      this.setRebalanceStatus("Cancelled.");
+    } else if (event.state === "error") {
+      this.setRebalanceStatus(event.error || "Rebalance failed.", true);
     }
   }
 
@@ -4549,6 +4683,7 @@ class DawScreen {
         this.keyPanel.hidden = true;
         this.stemsPanel.hidden = true;
         this.toMidiPanel.hidden = true;
+        if (this.rebalancePanel) this.rebalancePanel.hidden = true;
       },
     });
   }
@@ -5646,6 +5781,7 @@ class DawScreen {
         }
       }),
       splitStems: () => this.withClip((clip) => this.toggleStems(true, clip)),
+      rebalanceStems: () => this.withClip((clip) => this.toggleRebalance(true, clip)),
       loopClip: () => this.withClip((clip) => daw("loop", { on: true, start: clip.start, end: clip.start + clip.length })),
       zoomClip: () => this.withClip((clip) => this.zoomToRange(clip.start, clip.start + clip.length)),
       zoomFit: () => this.zoomToRange(0, Math.max(this.songEnd(), 10)),
