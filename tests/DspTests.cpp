@@ -7563,7 +7563,9 @@ namespace
         // Dragging a transpose knob asks for a new copy at every step: renders nobody wants
         // any more are dropped, so the last one isn't queued behind them.
         {
-            auto& pool = engine.getAudioPool();
+            daw::AudioPool pool; // a live one (an offline engine's pool works synchronously)
+            pool.setSampleRate (sampleRate);
+            pool.loadNow (file);
             daw::warp::Settings first, second;
             first.semitones = 3.0;
             second.semitones = 4.0;
@@ -7585,6 +7587,89 @@ namespace
                "a split keeps the warp on both halves");
         edit.setClipWarp (clip, Map());
         check (! edit.getClip (clip).hasProperty (daw::ids::warp), "clearing the warp removes it from the project");
+
+        folder.deleteRecursively();
+    }
+
+    // An offline engine (exports, Auto Mix, key detection, song map) runs on a worker
+    // thread and is deleted there: it must never post work to the message thread, or that
+    // work runs while it renders, or after it's gone. Detect key crashed this way: the
+    // pool's background decode landed on the message thread, which rebuilt the offline
+    // engine's graph under the worker (and then touched it after it was deleted).
+    void testOfflineEngineStaysOffTheMessageThread()
+    {
+        std::cout << "\nOffline engine stays off the message thread\n";
+        constexpr double sampleRate = 48000.0;
+        constexpr int blockSize = 512;
+
+        juce::AudioBuffer<float> sine (1, (int) (3.0 * sampleRate));
+        for (int i = 0; i < sine.getNumSamples(); ++i)
+            sine.setSample (0, i, 0.5f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * i / sampleRate));
+
+        const auto folder = juce::File::createTempFile ("micfx-offline");
+        folder.createDirectory();
+        const auto file = folder.getChildFile ("sine.wav");
+        writeWav (file, sine, sampleRate);
+
+        daw::Edit live;
+        const auto track = (int) live.addTrack ("Voice")[daw::ids::id];
+        live.addClip (track, file, 0.0, 3.0);
+        const auto transposed = (int) live.addClip (track, file, 3.0, 3.0)[daw::ids::id];
+        live.setClipTranspose (transposed, 3.0); // a rendered copy too
+        const auto session = live.getState().createCopy();
+
+        // Rendered on a worker, the way SessionAnalyser and Exporter do it.
+        std::atomic<int> rebuildsAfterLoad { -1 }, rebuildsAtEnd { -2 };
+        std::atomic<bool> loadedEverything { false }, done { false };
+        std::atomic<float> peak { 0.0f };
+        juce::Thread::launch ([&]
+        {
+            {
+                daw::Edit edit;
+                edit.replaceState (session);
+                daw::DawEngine engine (edit, false);
+                engine.prepare (sampleRate, blockSize);
+                engine.loadAllNow();
+                loadedEverything = ! engine.getAudioPool().isLoading();
+                rebuildsAfterLoad = engine.getRebuildCount();
+
+                engine.seek (0);
+                engine.play();
+                juce::AudioBuffer<float> block (2, blockSize);
+                for (int n = 0; n < (int) (6.0 * sampleRate) / blockSize; ++n)
+                {
+                    engine.process (block, 2, blockSize);
+                    peak = juce::jmax (peak.load(), block.getMagnitude (0, 0, blockSize));
+                    juce::Thread::sleep (n % 64 == 0 ? 5 : 0); // time for posted messages to arrive
+                }
+                rebuildsAtEnd = engine.getRebuildCount();
+            } // deleted here, on the worker
+            done = true;
+        });
+
+        // Meanwhile the message thread keeps delivering whatever arrives.
+        for (int i = 0; i < 2000 && ! done.load(); ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+        for (int i = 0; i < 20; ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (10); // anything left over, after it's gone
+
+        check (done.load(), "the render finishes");
+        check (rebuildsAtEnd.load() == rebuildsAfterLoad.load(), "nothing rebuilds it while it renders");
+        check (loadedEverything.load(), "loadAllNow leaves nothing loading in the background");
+        check (peak.load() > 0.3f, "and it plays the clips");
+
+        // And its pool is synchronous: no decode or render is left for the message thread.
+        {
+            daw::Edit edit;
+            edit.replaceState (session);
+            daw::DawEngine engine (edit, false);
+            engine.prepare (sampleRate, blockSize);
+            auto& pool = engine.getAudioPool();
+            daw::warp::Settings up;
+            up.semitones = 2.0;
+            check (pool.get (file) != nullptr && pool.get (file, up) != nullptr && ! pool.isLoading(),
+                   "an offline pool decodes and renders straight away");
+        }
 
         folder.deleteRecursively();
     }
@@ -13832,6 +13917,7 @@ int main()
         testSegments();
         testLivePreview();
         testWarp();
+        testOfflineEngineStaysOffTheMessageThread();
         testLinkedTracks();
         testPitchNotes();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
@@ -13940,6 +14026,7 @@ int main()
     testMusicalMode();
     testLinkedTracks();
     testWarp();
+    testOfflineEngineStaysOffTheMessageThread();
     testSegments();
     testLivePreview();
     testPitchNotes();

@@ -36,12 +36,19 @@ namespace
 DawEngine::DawEngine (Edit& e, bool isRealtime) : edit (e), realtime (isRealtime)
 {
     pool.setSampleRate (sampleRate);
-    pool.onLoaded = [this] { triggerAsyncUpdate(); };
+    pool.setSynchronous (! realtime);
+    pool.onLoaded = [this] { requestRebuild(); };
     liveMidi.ensureSize (4096);
 
     edit.getState().addListener (this);
     updateTempo();
-    rebuild();
+
+    // An offline engine builds its first graph when it's prepared (or on its first
+    // block), at the rate it renders at, so nothing is decoded twice.
+    if (realtime)
+        rebuild();
+    else
+        rebuildPending = true;
 
     if (realtime)
         startTimerHz (10);
@@ -106,6 +113,18 @@ void DawEngine::prepare (double newSampleRate, int maximumBlockSize)
     captureInstrumentStates();
     strips.clear();
     rebuild();
+}
+
+void DawEngine::requestRebuild()
+{
+    // An offline engine lives on the thread that renders it (an export, Auto Mix, key
+    // detection...) and is often deleted there: a rebuild posted to the message thread
+    // would run there while it renders, or after it's gone. It rebuilds before its next
+    // block instead.
+    if (realtime)
+        triggerAsyncUpdate();
+    else
+        rebuildPending = true;
 }
 
 void DawEngine::rebuildNow()
@@ -195,7 +214,7 @@ void DawEngine::retryMissingPlugins()
             }
 
     if (any)
-        triggerAsyncUpdate();
+        requestRebuild();
 }
 
 void DawEngine::checkPluginLatency()
@@ -203,7 +222,7 @@ void DawEngine::checkPluginLatency()
     for (const auto& [id, strip] : strips)
         if (! strip->plugins.empty() && strip->getLatency() != strip->latencyAtBuild)
         {
-            triggerAsyncUpdate();
+            requestRebuild();
             return;
         }
 }
@@ -305,20 +324,20 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     {
         // A different plugin needs a new instrument; its saved settings and names don't.
         if (property == ids::plugin)
-            triggerAsyncUpdate();
+            requestRebuild();
         return;
     }
 
     if (tree.hasType (ids::PATTERN) || tree.hasType (ids::PART) || tree.hasType (ids::PATTERNCLIP))
     {
         if (property != ids::name && property != ids::colour && property != ids::rows)
-            triggerAsyncUpdate();
+            requestRebuild();
         return;
     }
 
     if (tree.hasType (ids::NOTE))
     {
-        triggerAsyncUpdate();
+        requestRebuild();
         return;
     }
 
@@ -330,7 +349,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
             return;
         if (property == ids::plugin)
         {
-            triggerAsyncUpdate();
+            requestRebuild();
             return;
         }
 
@@ -338,7 +357,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         // automation, whose own setting the lanes go back to): a rebuild.
         if (property == ids::type || property == ids::automation || tree.hasProperty (ids::automation))
         {
-            triggerAsyncUpdate();
+            requestRebuild();
             if (property == ids::type || property == ids::automation)
                 return;
         }
@@ -359,7 +378,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
             // Switching autotune or pitch shift on or off changes the track's delay, so
             // the latency compensation is worked out again.
             if (it->second->getLatency() != it->second->latencyAtBuild)
-                triggerAsyncUpdate();
+                requestRebuild();
         }
 
         return;
@@ -368,7 +387,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     if (tree.hasType (ids::PROJECT))
     {
         if (property == ids::tempo || property == ids::tempoChanges)
-            triggerAsyncUpdate(); // the click follows the new tempo map (and so will musical clips)
+            requestRebuild(); // the click follows the new tempo map (and so will musical clips)
         else if (property == ids::beatsPerBar)
             updateTempo();
         else if (property == ids::loopOn || property == ids::loopStart || property == ids::loopEnd)
@@ -382,7 +401,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         if (property == ids::level)
             updateMix();
         else
-            triggerAsyncUpdate(); // pre/post or another return: a new graph
+            requestRebuild(); // pre/post or another return: a new graph
 
         return;
     }
@@ -390,7 +409,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     if (tree.hasType (ids::TRACK) && (property == ids::transpose || property == ids::ride || property == ids::output || property == ids::listenTake
                                      || property == ids::polarity || property == ids::nudge))
     {
-        triggerAsyncUpdate(); // its clips play other rendered copies
+        requestRebuild(); // its clips play other rendered copies
         return;
     }
 
@@ -401,7 +420,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
             || property == ids::inputLeft || property == ids::inputRight)
             updateMix();
         else if (property == ids::kind)
-            triggerAsyncUpdate();
+            requestRebuild();
 
         return;
     }
@@ -411,7 +430,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         // The real edit (or an undo) replaces what was being previewed.
         if (property == ids::warp || property == ids::pitchNotes || property == ids::musical || property == ids::clipTempo)
             previews.erase ((int) tree[ids::id]);
-        triggerAsyncUpdate();
+        requestRebuild();
     }
 }
 
@@ -432,7 +451,7 @@ void DawEngine::setPreviewWarp (int clipId, const warp::Map& map)
         if (preview.map.has_value() && *preview.map == map)
             continue;
         preview.map = map;
-        triggerAsyncUpdate();
+        requestRebuild();
     }
 }
 
@@ -442,7 +461,7 @@ void DawEngine::setPreviewNotes (int clipId, const std::vector<analysis::pitch::
     if (! clip.isValid() || Edit::isMidiClip (clip) || ! Edit::getLinkedClips (clip).isEmpty())
         return;
     previews[clipId].notes = notes;
-    triggerAsyncUpdate();
+    requestRebuild();
 }
 
 void DawEngine::cancelPreview (int clipId)
@@ -452,7 +471,7 @@ void DawEngine::cancelPreview (int clipId)
         if (previews.empty())
             return;
         previews.clear();
-        triggerAsyncUpdate();
+        requestRebuild();
         return;
     }
 
@@ -463,7 +482,7 @@ void DawEngine::cancelPreview (int clipId)
             clipIds.add ((int) partner[ids::id]);
     for (const auto id : clipIds)
         if (previews.erase (id) > 0)
-            triggerAsyncUpdate();
+            requestRebuild();
 }
 
 warp::Settings DawEngine::getPlaybackSettings (const juce::ValueTree& clip) const
@@ -1026,6 +1045,8 @@ void DawEngine::rebuild()
     }
 
     publish (std::move (graph));
+    ++rebuildCount;
+    rebuildPending = false; // what loaded while it built is in this graph
 }
 
 void DawEngine::buildMidiEvents (Track& track, const juce::ValueTree& trackTree, double rate, juce::int64& end,
@@ -2348,6 +2369,9 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
                 word.fetch_and (~bit, std::memory_order_relaxed);
         }
     }
+
+    if (! realtime && rebuildPending)
+        rebuild(); // offline: its own thread (see requestRebuild)
 
     if (auto* next = incoming.exchange (nullptr, std::memory_order_acq_rel))
     {
