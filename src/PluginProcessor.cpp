@@ -27,7 +27,8 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
                           .withOutput ("Output", juce::AudioChannelSet::stereo(), true)),
       params (layout),
       state (*this, nullptr, "MicFX", std::move (layout)),
-      pitchModule (*chain.find<fx::modules::Pitch>())
+      pitchModule (*chain.find<fx::modules::Pitch>()),
+      autoLevelModule (*chain.find<fx::modules::AutoLevel>())
 {
     using Kind = Binding::Kind;
 
@@ -124,6 +125,9 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     soundCheck.prepare (sampleRate);
     loopInput.setSize (2, juce::jmax (samplesPerBlock, 4096));
     loopInput.clear();
+    backingBuffer.setSize (juce::jmax (2, getTotalNumOutputChannels()), juce::jmax (samplesPerBlock, 4096));
+    backingMeter.prepare (sampleRate);
+    backingWasPlaying = false;
     dawEngine.prepare (sampleRate, samplesPerBlock);
     chordFollower.prepare (sampleRate);
     mixGuardGain = 1.0f;
@@ -265,8 +269,29 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
     if (multitrack.isPlaying())
     {
-        multitrack.process (buffer, numOut, numSamples);
+        // The backing on its own first, measured for auto level (the voice's next block
+        // aims over it), then added under the voice.
+        const auto chunk = backingBuffer.getNumSamples();
+        const auto channels = juce::jmin (numOut, backingBuffer.getNumChannels());
+        for (int start = 0; start < numSamples; start += chunk)
+        {
+            const auto length = juce::jmin (chunk, numSamples - start);
+            backingBuffer.clear();
+            multitrack.process (backingBuffer, channels, length);
+            for (int ch = 0; ch < channels; ++ch)
+                buffer.addFrom (ch, start, backingBuffer, ch, 0, length);
+            backingMeter.process (juce::dsp::AudioBlock<float> (backingBuffer).getSubsetChannelBlock (0, (size_t) channels)
+                                                                               .getSubBlock (0, (size_t) length));
+        }
+        autoLevelModule.setReference (backingMeter.getMomentary());
+        backingWasPlaying = true;
         applyPeakGuard (buffer, numOut, numSamples);
+    }
+    else if (backingWasPlaying)
+    {
+        backingMeter.reset();
+        autoLevelModule.setReference (fx::modules::AutoLevel::silence);
+        backingWasPlaying = false;
     }
 
     if (outputMuted.load())

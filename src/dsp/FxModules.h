@@ -4,6 +4,7 @@
 #include "ParametricEq.h"
 #include "FxModule.h"
 #include "Dynamics.h"
+#include "AutoLevel.h"
 #include "Mastering.h"
 #include "PitchEngine.h"
 #include "SpectralDenoiser.h"
@@ -742,6 +743,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::eq:         return std::make_unique<modules::Eq>();
         case ModuleType::paraEq:     return std::make_unique<modules::ParaEq>();
         case ModuleType::compressor: return std::make_unique<modules::Compressor>();
+        case ModuleType::autoLevel:  return std::make_unique<modules::AutoLevel>();
         case ModuleType::deEsser:    return std::make_unique<modules::DeEsser>();
         case ModuleType::exciter:    return std::make_unique<modules::Exciter>();
         case ModuleType::saturation: return std::make_unique<modules::Saturation>();

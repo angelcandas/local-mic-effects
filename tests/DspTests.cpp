@@ -10105,6 +10105,132 @@ static void testSoundCheck()
     }
 }
 
+//==============================================================================
+// Auto level: the voice's loudness (K-weighted) of a stretch of a processed signal.
+static float autoLevelLoudness (const std::vector<float>& signal, double fromSeconds, double toSeconds)
+{
+    const auto from = (size_t) (fromSeconds * sampleRate), to = juce::jmin (signal.size(), (size_t) (toSeconds * sampleRate));
+    fx::LoudnessMeter meter;
+    meter.prepare (sampleRate);
+    std::vector<float> part (signal.begin() + (long) from, signal.begin() + (long) to);
+    float* channels[] = { part.data() };
+    meter.process (juce::dsp::AudioBlock<float> (channels, 1, part.size()));
+    return meter.getIntegrated();
+}
+
+static std::vector<float> runAutoLevel (fx::modules::AutoLevel& module, const std::vector<float>& input, std::vector<float>* rides = nullptr)
+{
+    module.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+    auto output = input;
+    for (size_t start = 0; start + blockSize <= output.size(); start += blockSize)
+    {
+        float* channels[] = { output.data() + start };
+        juce::dsp::AudioBlock<float> block (channels, 1, (size_t) blockSize);
+        module.process (juce::dsp::ProcessContextReplacing<float> (block));
+        if (rides != nullptr)
+            rides->push_back (module.getRideDb());
+    }
+    return output;
+}
+
+static void testAutoLevel()
+{
+    std::cout << "\nAuto level\n";
+
+    // A voice that steps from quiet to loud: 5 s at one level, 5 s at another 16 dB up.
+    std::vector<float> voice;
+    for (const auto peak : { 0.08f, 0.5f })
+    {
+        const auto part = makeSoundCheckVoice (5.0, peak, 0.0f, 100.0, 100.0);
+        voice.insert (voice.end(), part.begin(), part.end());
+    }
+    const auto quietIn = autoLevelLoudness (voice, 3.0, 5.0), loudIn = autoLevelLoudness (voice, 8.0, 10.0);
+
+    fx::modules::AutoLevel module;
+    module.on.store (1.0f);
+    module.target.store (-20.0f);
+    module.range.store (12.0f);
+    module.speed.store (400.0f);
+    const auto out = runAutoLevel (module, voice);
+    const auto quietOut = autoLevelLoudness (out, 3.0, 5.0), loudOut = autoLevelLoudness (out, 8.0, 10.0);
+    check (std::abs (quietOut + 20.0f) <= 1.5f && std::abs (loudOut + 20.0f) <= 1.5f,
+           "a stepped voice (" + juce::String (quietIn, 1) + " then " + juce::String (loudIn, 1) + " LUFS) comes out at -20 LUFS ("
+           + juce::String (quietOut, 1) + ", " + juce::String (loudOut, 1) + ")");
+
+    // Within the range only.
+    module.range.store (3.0f);
+    const auto limited = runAutoLevel (module, voice);
+    check (std::abs (autoLevelLoudness (limited, 3.0, 5.0) - (quietIn + 3.0f)) <= 1.0f, "never more than its range");
+
+    // Silence between phrases doesn't come up: the gain holds.
+    {
+        module.range.store (12.0f);
+        auto phrase = makeSoundCheckVoice (3.0, 0.25f, 0.0f, 100.0, 100.0);
+        const auto noise = makeSoundCheckVoice (4.0, 0.0f, juce::Decibels::decibelsToGain (-65.0f));
+        phrase.insert (phrase.end(), noise.begin(), noise.end());
+        std::vector<float> rides;
+        runAutoLevel (module, phrase, &rides);
+        const auto blocksPerSecond = sampleRate / blockSize;
+        const auto atEnd = rides[(size_t) (2.9 * blocksPerSecond)], later = rides.back();
+        check (later <= atEnd + 0.5f, "the gain holds through 4 s of room noise (" + juce::String (atEnd, 1) + " -> " + juce::String (later, 1) + " dB)");
+    }
+
+    // Over the backing: aims 3 LU over its loudness.
+    {
+        module.mode.store (1.0f);
+        module.overBacking.store (3.0f);
+        module.setReference (-26.0f);
+        const auto over = runAutoLevel (module, voice);
+        check (std::abs (autoLevelLoudness (over, 8.0, 10.0) + 23.0f) <= 1.5f, "over a -26 LUFS backing it sits at -23 LUFS ("
+               + juce::String (autoLevelLoudness (over, 8.0, 10.0), 1) + ")");
+        module.setReference (fx::modules::AutoLevel::silence);
+        const auto none = runAutoLevel (module, voice);
+        check (std::abs (autoLevelLoudness (none, 8.0, 10.0) + 20.0f) <= 1.5f, "with no backing the fixed target holds");
+    }
+
+    // In the Live chain, measuring the backing on the audio thread.
+    {
+        PluginProcessor processor;
+        auto* chainModule = processor.getLiveChain().find<fx::modules::AutoLevel>();
+        check (chainModule != nullptr && processor.getState().getParameter ("alOn") != nullptr
+               && processor.getState().getParameter ("autoLevelInGain") != nullptr, "auto level is in the Live chain with its parameters");
+        int position = -1, compressor = -1;
+        for (int i = 0; i < processor.getLiveChain().size(); ++i)
+        {
+            if (processor.getLiveChain()[i].getType() == fx::ModuleType::autoLevel) position = i;
+            if (processor.getLiveChain()[i].getType() == fx::ModuleType::compressor) compressor = i;
+        }
+        check (position == compressor + 1, "right after the compressor");
+
+        processor.prepareToPlay (sampleRate, blockSize);
+        const auto backingNoise = makeSoundCheckVoice (6.0, 0.0f, juce::Decibels::decibelsToGain (-30.0f));
+        const auto backingLufs = autoLevelLoudness (backingNoise, 1.0, 6.0) + 3.01f; // played on both sides
+        juce::AudioBuffer<float> backing (1, (int) backingNoise.size());
+        backing.copyFrom (0, 0, backingNoise.data(), (int) backingNoise.size());
+        processor.getMultitrack().addAudio ("Backing", std::move (backing), 0);
+        processor.getMultitrack().play();
+        for (const auto& [id, value] : { std::pair<const char*, float> { "alOn", 1.0f }, { "alMode", 1.0f }, { "alOverBacking", 4.0f } })
+            if (auto* parameter = processor.getState().getParameter (id))
+                parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+        const auto mic = makeSoundCheckVoice (3.0, 0.2f, 0.0f, 100.0, 100.0);
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+        for (size_t start = 0; start + blockSize <= mic.size(); start += blockSize)
+        {
+            buffer.clear();
+            buffer.copyFrom (0, 0, mic.data() + start, blockSize);
+            processor.processBlock (buffer, midi);
+        }
+        const auto aimed = chainModule->getEffectiveTarget();
+        check (std::abs (aimed - (backingLufs + 4.0f)) <= 1.0f, "the Live backing is measured: aims " + juce::String (aimed, 1)
+               + " LUFS over a " + juce::String (backingLufs, 1) + " LUFS backing (+4)");
+        processor.getMultitrack().pause();
+        buffer.clear();
+        processor.processBlock (buffer, midi);
+        check (juce::approximatelyEqual (chainModule->getEffectiveTarget(), -18.0f), "stopped: back to the fixed target");
+    }
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juce;
@@ -10130,10 +10256,11 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
-    // MICFX_TEST_ONLY=soundcheck: just the Live sound check.
+    // MICFX_TEST_ONLY=soundcheck: just the Live sound check and auto level.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "soundcheck")
     {
         testSoundCheck();
+        testAutoLevel();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -10196,6 +10323,7 @@ int main()
     testMidiLearn();
     testScenes();
     testSoundCheck();
+    testAutoLevel();
     testSetlist();
     testDawEngine();
     testReturns();
