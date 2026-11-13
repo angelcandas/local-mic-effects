@@ -6871,9 +6871,12 @@ namespace
         const auto track = (int) edit.getTracks()[0][daw::ids::id];
         const auto clipId = (int) edit.addClip (track, file, 1.0, 4.2)[daw::ids::id];
 
-        // Store a filter and edits; the session says so.
+        // Store a filter and edits; the session says so. (The list is built step by step:
+        // brace-initialising an Array from one Array copies it with some compilers.)
+        juce::Array<juce::var> edits;
+        edits.add (juce::var (juce::Array<juce::var> { 0.6, "disabled" }));
         auto stored = run ("setHitpoints", args ({ { "id", clipId }, { "filter", args ({ { "threshold", 0.4 }, { "minLength", 0.05 }, { "beats", 0.0 } }) },
-                                                   { "edits", juce::Array<juce::var> { juce::Array<juce::var> { 0.6, "disabled" } } } }));
+                                                   { "edits", edits } }));
         const auto clip = edit.getClip (clipId);
         check ((bool) stored["ok"] && daw::hitpoints::hasEdits (clip) && std::abs (daw::hitpoints::getFilter (clip).threshold - 0.4) < 1e-6,
                "setHitpoints stores the filter and the hand edits");
