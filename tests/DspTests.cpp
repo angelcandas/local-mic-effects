@@ -2834,6 +2834,175 @@ namespace
         processor.outputMuted = false;
     }
     //==========================================================================
+    void testScenes()
+    {
+        std::cout << "\nScenes (Live mode)\n";
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& scenes = processor.getScenes();
+        auto& state = processor.getState();
+        const auto get = [&] (const char* id) { auto* p = state.getParameter (id); return p->convertFrom0to1 (p->getValue()); };
+        const auto set = [&] (const char* id, float v) { auto* p = state.getParameter (id); p->setValueNotifyingHost (p->convertTo0to1 (v)); };
+
+        set ("satDrive", 2.0f); set ("reverbOn", 0.0f); set ("delayOn", 1.0f); set ("filterType", 0.0f); set ("inputGain", 0.0f);
+        check (scenes.add ("Verse") == 0 && scenes.getActive() == 0 && ! scenes.isModified(), "the current sound is saved as a scene");
+        set ("satDrive", 8.0f);
+        check (scenes.isModified(), "moving a knob marks the active scene as changed");
+        set ("reverbOn", 1.0f); set ("delayOn", 0.0f); set ("filterType", 2.0f); set ("inputGain", 6.0f);
+        check (scenes.add() == 1 && scenes.getName (1) == "Scene 2", "a second scene, named for its place");
+
+        scenes.setGlideSeconds (1.0);
+        scenes.recall (0);
+        check (get ("filterType") == 0.0f && get ("delayOn") > 0.5f, "choices and effects coming on change at once");
+        check (get ("reverbOn") > 0.5f && scenes.isGliding(), "effects going off wait for the end of the glide");
+        scenes.advance (0.5);
+        check (get ("satDrive") > 3.0f && get ("satDrive") < 7.0f, "knobs glide (" + juce::String (get ("satDrive"), 2) + " half way)");
+        scenes.advance (0.6);
+        check (std::abs (get ("satDrive") - 2.0f) < 0.01f && get ("reverbOn") < 0.5f && ! scenes.isGliding() && ! scenes.isModified(),
+               "and arrive at the scene, with the reverb now off");
+        check (std::abs (get ("inputGain") - 6.0f) < 0.01f, "the input gain is left alone, as presets do");
+
+        scenes.setGlideSeconds (0.0);
+        scenes.step (1);
+        check (scenes.getActive() == 1 && get ("satDrive") > 7.9f, "next scene, instantly with no glide");
+        scenes.step (1);
+        check (scenes.getActive() == 0, "next wraps round to the first");
+
+        set ("satDrive", 5.0f);
+        scenes.update (1);
+        scenes.recall (1);
+        check (std::abs (get ("satDrive") - 5.0f) < 0.01f, "save puts the current sound into a scene");
+        scenes.rename (1, "  Chorus ");
+        check (scenes.getName (1) == "Chorus", "rename");
+
+        // MIDI: a pad recalls a scene.
+        processor.getMidiMap().setMappings ({ { MidiMap::Source::note, 1, 40, "action:scene.1" } });
+        {
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::noteOn (1, 40, (juce::uint8) 100), 0);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            buffer.clear();
+            processor.processBlock (buffer, midi);
+            processor.getMidiMap().drain();
+        }
+        check (scenes.getActive() == 0 && std::abs (get ("satDrive") - 2.0f) < 0.01f, "a mapped pad recalls scene 1");
+        processor.getMidiMap().clear();
+
+        // Saved with the plug-in state.
+        juce::MemoryBlock saved;
+        processor.getStateInformation (saved);
+        PluginProcessor restored;
+        restored.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (restored.getScenes().size() == 2 && restored.getScenes().getName (1) == "Chorus" && restored.getScenes().getActive() == 0,
+               "scenes are saved with the plug-in state");
+
+        const auto copy = scenes.copyScenes();
+        scenes.remove (0);
+        check (scenes.size() == 1 && scenes.getActive() == -1, "removing the active scene leaves none active");
+        scenes.replaceScenes (copy);
+        check (scenes.size() == 2 && scenes.getActive() == 0, "a set of scenes can be swapped in (for setlist songs)");
+        for (int i = 0; i < Scenes::maxScenes; ++i)
+            scenes.add();
+        check (scenes.size() == Scenes::maxScenes, "at most eight scenes");
+    }
+    void testSetlist()
+    {
+        std::cout << "\nSetlist (Live, standalone)\n";
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& setlist = processor.getSetlist();
+        auto& scenes = processor.getScenes();
+        auto& looper = processor.getLooper();
+        auto& state = processor.getState();
+        const auto get = [&] (const char* id) { auto* p = state.getParameter (id); return p->convertFrom0to1 (p->getValue()); };
+        const auto set = [&] (const char* id, float v) { auto* p = state.getParameter (id); p->setValueNotifyingHost (p->convertTo0to1 (v)); };
+
+        // Song 1: a drive, one scene, 90 BPM.
+        set ("satDrive", 3.0f); set ("tuneScale", 1.0f); set ("tuneKey", 0.0f);
+        scenes.add ("Verse");
+        looper.setTempo (90.0, 4);
+        looper.setTempoLocked (true);
+        check (setlist.addSong ("  Opener ") == 0 && setlist.getCurrent() == 0 && setlist.isDirty(), "the current sound is added as a song");
+
+        // Song 2: another sound, two scenes, no tempo lock.
+        set ("satDrive", 9.0f);
+        scenes.add ("Chorus");
+        looper.setTempoLocked (false);
+        check (setlist.addSong() == 1 && setlist.describe()["songs"][1]["name"].toString() == "Song 2", "a song without a name is named for its place");
+        setlist.setSongInfo (1, juce::var (new juce::DynamicObject()));
+        {
+            auto* fields = new juce::DynamicObject();
+            fields->setProperty ("key", 9);
+            fields->setProperty ("minor", true);
+            fields->setProperty ("lyrics", "[00:01.00] one\n[00:02.00] two");
+            setlist.setSongInfo (1, juce::var (fields));
+        }
+        const auto song2 = setlist.describe()["songs"][1];
+        check ((int) song2["key"] == 9 && (bool) song2["minor"] && song2["scenes"].size() == 2, "a song keeps its key, mode and scenes");
+
+        set ("inputGain", 5.0f);
+        juce::String warning;
+        check (setlist.loadSong (0, warning) && warning.isEmpty(), "load the first song");
+        check (std::abs (get ("satDrive") - 3.0f) < 0.01f && scenes.size() == 1 && scenes.getName (0) == "Verse",
+               "its sound and its scenes come back");
+        check (looper.isTempoLocked() && std::abs (looper.getBpm() - 90.0) < 0.01, "and the looper's tempo");
+        check (std::abs (get ("inputGain") - 5.0f) < 0.01f, "the input gain is left alone");
+
+        check (setlist.step (1, warning) && setlist.getCurrent() == 1, "next song");
+        check (std::abs (get ("satDrive") - 9.0f) < 0.01f && scenes.size() == 2, "the second song's sound and scenes");
+        check ((int) get ("tuneKey") == 9 && (int) get ("tuneScale") == 2, "its key sets the autotune (A minor)");
+        check (! setlist.step (1, warning) && setlist.getCurrent() == 1, "no wrap past the last song");
+
+        // A missing backing track is reported, not fatal.
+        {
+            auto* fields = new juce::DynamicObject();
+            fields->setProperty ("backing", juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-missing.wav").getFullPathName());
+            setlist.setSongInfo (0, juce::var (fields));
+        }
+        warning.clear();
+        check (setlist.loadSong (0, warning) && warning.contains ("isn't there"), "a missing backing track is a warning");
+
+        setlist.moveSong (0, 1);
+        check (setlist.getCurrent() == 1 && setlist.describe()["songs"][1]["name"].toString() == "Opener", "moving keeps the loaded song");
+
+        // Save and open again.
+        const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-test.micfxset");
+        check (setlist.save (file).isEmpty() && ! setlist.isDirty() && setlist.getName() == "micfx-test", "saved as a .micfxset file");
+        setlist.clear();
+        check (setlist.size() == 0 && setlist.getName() == "New setlist", "new, empty setlist");
+        check (setlist.open (file).isEmpty() && setlist.size() == 2 && setlist.getCurrent() == -1, "opened again, with nothing loaded");
+        const auto reopened = setlist.describe()["songs"];
+        check (reopened[0]["name"].toString() == "Song 2" && reopened[0]["lyrics"].toString().contains ("[00:02.00] two")
+                   && reopened[0]["scenes"].size() == 2 && std::abs ((double) reopened[1]["tempo"] - 90.0) < 0.01,
+               "with every song's details");
+        check (setlist.step (-1, warning) && setlist.getCurrent() == 1, "previous with nothing loaded starts at the last song");
+
+        // A scene glide still running doesn't land on top of the next song's sound.
+        check (setlist.loadSong (0, warning), "load a song with two scenes");
+        scenes.setGlideSeconds (2.0);
+        set ("satDrive", 6.0f);
+        scenes.recall (1); // to the Chorus (9)
+        scenes.advance (0.5);
+        check (scenes.isGliding(), "a scene glide is running");
+        check (setlist.loadSong (1, warning) && ! scenes.isGliding() && std::abs (get ("satDrive") - 3.0f) < 0.01f,
+               "a song change finishes the glide first, then puts in the song's sound");
+
+        // The setlist as it stands is kept with the app's state.
+        const auto snapshot = setlist.getSnapshot();
+        Setlist other (processor, scenes, looper, processor.getMultitrack());
+        other.restore (snapshot);
+        check (other.size() == 2 && other.getCurrent() == 1 && other.getFile() == file && ! other.isDirty(),
+               "a snapshot brings back the songs, the file and the loaded song");
+
+        setlist.removeSong (1);
+        check (setlist.size() == 1 && setlist.getCurrent() == -1, "removing the loaded song");
+        check (setlist.open (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-nothing.micfxset")).isNotEmpty(),
+               "a file that isn't a setlist is refused");
+        file.deleteFile();
+    }
+    //==========================================================================
     // Renders `seconds` of the engine in device-sized blocks; returns {left, right}.
     std::array<std::vector<float>, 2> render (daw::DawEngine& engine, double seconds)
     {
@@ -8435,6 +8604,8 @@ int main()
     {
         testLooper();
         testMidiLearn();
+        testScenes();
+        testSetlist();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -8465,6 +8636,8 @@ int main()
     testMultitrack();
     testLooper();
     testMidiLearn();
+    testScenes();
+    testSetlist();
     testDawEngine();
     testReturns();
     testPreview();

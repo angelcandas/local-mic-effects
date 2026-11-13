@@ -6,6 +6,8 @@
 #include "Parameters.h"
 #include "Looper.h"
 #include "MidiMap.h"
+#include "Scenes.h"
+#include "Setlist.h"
 #include "Multitrack.h"
 #include "Recorder.h"
 #include "daw/DawEngine.h"
@@ -76,6 +78,13 @@ public:
     // limiter) and plays its layers under it. Its playback is in recorded takes.
     Looper& getLooper() noexcept                            { return looper; }
 
+    // Scenes: snapshots of the Live sound, recalled with a glide. Message thread.
+    Scenes& getScenes() noexcept                            { return scenes; }
+
+    // The setlist (standalone app): songs with their sound, scenes, tempo, key, backing
+    // track and lyrics. Message thread.
+    Setlist& getSetlist() noexcept                          { return setlist; }
+
     // MIDI learn: pedals, knobs and keys on parameters and actions (Live mode).
     MidiMap& getMidiMap() noexcept                          { return midiMap; }
 
@@ -133,6 +142,8 @@ private:
     Recorder recorder;
     Multitrack multitrack;
     Looper looper;
+    Scenes scenes { *this, state };
+    Setlist setlist { *this, scenes, looper, multitrack };
     MidiMap midiMap { state, looper, juce::JUCEApplicationBase::isStandaloneApp() || wrapperType != wrapperType_Undefined
                                          ? MidiMap::getDefaultFile() : juce::File() };
     juce::AudioBuffer<float> loopInput; // the voice before the limiter, for the looper

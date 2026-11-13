@@ -247,6 +247,7 @@ void MidiMap::apply (const Mapping& m, const Event& event)
         if (action == "preset.next" && onPresetStep != nullptr)          onPresetStep (1);
         else if (action == "preset.previous" && onPresetStep != nullptr) onPresetStep (-1);
         else if (action == "mute" && onMuteToggle != nullptr)            onMuteToggle();
+        else if (action.startsWith ("scene.") && onScene != nullptr)     onScene (action);
         else if (onAction != nullptr)                                    onAction (action);
         return;
     }

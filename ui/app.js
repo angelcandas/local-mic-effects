@@ -8,6 +8,8 @@ import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, 
 import { initDaw } from "./daw.js";
 import { LOOPER_KEYS, LoopPanel } from "./looper.js";
 import { MidiLearn, markLearnable } from "./midilearn.js";
+import { SCENE_KEYS, SceneBar } from "./scenes.js";
+import { SETLIST_KEYS, SetlistPanel } from "./setlist.js";
 
 // Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
 // builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
@@ -1315,7 +1317,9 @@ markLearnable(document.querySelector('[data-preset-step="-1"]'), "action:preset.
 markLearnable(document.querySelector('[data-preset-step="1"]'), "action:preset.next", "Next preset");
 markLearnable(document.querySelector(".panic-button"), "action:mute", "Mute (panic)");
 markLearnable(document.querySelector(".record-button"), "action:record", "Record");
+const sceneBar = new SceneBar(document.querySelector(".scene-bar"));
 const midiLearn = new MidiLearn(document.querySelector(".midi-button"));
+const setlistPanel = new SetlistPanel(document.querySelector(".setlist-button"), (text) => recorderBar.setStatus(text));
 window.__JUCE__.backend.addEventListener("midiAction", (action) => {
   if (action === "record") recorderBar.toggle();
 });
@@ -1335,8 +1339,10 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   presetBar.syncFromHost(status.preset);
   recorderBar.update(status.recording);
   tracks.update(status.transport);
+  setlistPanel.followPosition(status.transport?.position);
   if (status.looper) loopPanel.update(status.looper);
   midiLearn.update(status.midi);
+  if (status.scenes) sceneBar.update(status.scenes);
   if (typeof status.muted === "boolean" && status.muted !== liveState.muted) applyLiveState({ muted: status.muted });
 });
 
@@ -1408,7 +1414,7 @@ micCheckButton.addEventListener("click", () => {
 // The "?" overlay with the Live keys.
 const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["← / →", "Previous / next preset"],
                    ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"], ["M", "Mute the output (panic)"],
-                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ["?", "This list"], ["Esc", "Close"]];
+                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["Esc", "Close"]];
 function toggleLiveKeys(show) {
   let overlay = document.querySelector(".live-keys");
   if (!overlay) {
