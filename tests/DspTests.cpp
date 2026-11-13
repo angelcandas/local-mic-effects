@@ -965,6 +965,85 @@ namespace
         return buffer;
     }
 
+    // A finished backing track (karaoke, the song with only the voice missing): heard as one
+    // by its sound, and mixed with a light touch: a wide vocal pocket, a dip under the voice
+    // of at least 2 dB, no compressor, low cut, width or resonance cuts on it.
+    void testAutoMixBackingTrack()
+    {
+        std::cout << "\nAuto Mix backing track (karaoke)\n";
+        using analysis::Role;
+
+        const auto folder = juce::File::createTempFile ("micfx-karaoke");
+        folder.createDirectory();
+        const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav"),
+                   plucksFile = folder.getChildFile ("plucks.wav");
+        writeWav (voiceFile, makeSungLine (12.0, 3.0, 1.5), sampleRate); // 1.5 s gaps between lines
+        writeWav (backingFile, makeBacking (12.0), sampleRate);
+        writeWav (plucksFile, makePlucks (12.0), sampleRate);
+
+        daw::Edit edit;
+        const auto voice = (int) edit.addTrack ("Track 1")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Track 2")[daw::ids::id];
+        const auto plucks = (int) edit.addTrack ("Track 3")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 12.0);
+        edit.addClip (backing, backingFile, 0.0, 12.0);
+        edit.addClip (plucks, plucksFile, 0.0, 12.0);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const analysis::Profile* profiles[3] {};
+        for (const auto& [id, profile] : source.tracks)
+            profiles[id == voice ? 0 : id == backing ? 1 : 2] = &profile;
+
+        const auto guessedBacking = analysis::guessRole ("Track 2", *profiles[1], 12.0);
+        const auto guessedPlucks = analysis::guessRole ("Track 3", *profiles[2], 12.0);
+        check (guessedBacking == Role::backing, "hears a full-range track that plays all song as a backing track ("
+                                                    + analysis::getRoleName (guessedBacking) + ")");
+        check (guessedPlucks != Role::backing, "a single instrument that plays all song isn't one ("
+                                                   + analysis::getRoleName (guessedPlucks) + ")");
+        check (analysis::getRoleName (Role::backing).containsIgnoreCase ("karaoke"), "the role says karaoke in its name");
+
+        analysis::MixOptions options;
+        const std::map<int, Role> roles { { voice, Role::voice }, { backing, Role::backing }, { plucks, Role::other } };
+        const auto plan = analysis::planMix (source, roles, { { voice, 0.0f }, { backing, 0.0f }, { plucks, 0.0f } }, 0.0f,
+                                             analysis::MixStyle::pop, options);
+        for (const auto& move : plan.moves)
+            if (move.trackId == backing)
+                for (const auto& reason : move.reasons)
+                    std::cout << "        backing: " << reason << "\n";
+
+        const analysis::MixMove* eq = nullptr;
+        const analysis::MixMove* duck = nullptr;
+        bool heavy = false;
+        for (const auto& move : plan.moves)
+        {
+            if (move.trackId != backing)
+                continue;
+            if (move.insert == fx::ModuleType::paraEq)
+                eq = &move;
+            else if (! move.insert.has_value() && ! move.ride.empty())
+                duck = &move;
+            else if (move.insert == fx::ModuleType::compressor || move.insert == fx::ModuleType::width || move.insert == fx::ModuleType::smooth
+                     || move.insert == fx::ModuleType::saturation)
+                heavy = true;
+        }
+
+        const auto inVoiceRange = [] (float hz) { return hz >= 900.0f && hz <= 4500.0f; };
+        const auto pocket = eq != nullptr && eq->values.count ("peqBell3Freq") > 0 && eq->values.at ("peqBell3Gain") <= -1.0f
+                            && eq->values.at ("peqBell3Q") <= 1.0f && inVoiceRange (eq->values.at ("peqBell3Freq"));
+        const auto dip = eq != nullptr && eq->values.at ("peqBell2Gain") <= -1.0f && inVoiceRange (eq->values.at ("peqBell2Freq"));
+        check (pocket || dip, "makes room where the voice is clearest (1-4 kHz)");
+        check (eq != nullptr && juce::exactlyEqual (eq->values.at ("peqLowCutOn"), 0.0f), "no low cut on a finished mix");
+        check (! heavy, "no compressor, width, saturation or resonance cuts on it");
+
+        float deepest = 0.0f;
+        if (duck != nullptr)
+            for (const auto& point : duck->ride)
+                deepest = juce::jmin (deepest, point.second);
+        check (deepest <= -2.0f + 0.01f, "dips at least 2 dB while the voice sings (" + juce::String (deepest, 1) + " dB)");
+
+        folder.deleteRecursively();
+    }
+
     // Auto Mix with every track tagged: the names, a guess from the sound for drums and
     // bass, and what each role gets (background vocals under the lead, bass and drums
     // only a rumble cut).
@@ -979,6 +1058,8 @@ namespace
             { "Kick", Role::drums }, { "My song - Drums", Role::drums }, { "Overheads", Role::drums }, { "Bajo", Role::bass },
             { "Bass DI", Role::bass }, { "Lead guitar", Role::guitar }, { "Acoustic", Role::guitar }, { "Rhodes", Role::piano },
             { "Piano", Role::piano }, { "Karaoke", Role::backing }, { "Backing track", Role::backing }, { "Instrumental", Role::backing },
+            { "My song (no vocals)", Role::backing }, { "Pista sin voz", Role::backing }, { "Song - Karaoke vocals off", Role::backing },
+            { "Minus one", Role::backing }, { "Acompañamiento", Role::backing }, { "Inst", Role::backing },
             { "My song - Other", Role::instrument }, { "Strings", Role::pad }, { "Synth lead", Role::synth },
             { "Track 3", std::nullopt }, { "Audio 1", std::nullopt }
         };
@@ -2277,7 +2358,8 @@ namespace
         const auto& backingRms = after.tracks[1].second.rmsDb;
         const auto singingLevel = backingRms[36], breathLevel = backingRms[52]; // 3.6 s (singing), 5.2 s (breath)
         const auto dip = breathLevel - singingLevel;
-        const auto target = analysis::getTargets (analysis::MixStyle::pop).duckDb;
+        // A full backing dips at least 2 dB (it is the whole band at once).
+        const auto target = juce::jmax (analysis::getTargets (analysis::MixStyle::pop).duckDb, 2.0f);
         check (std::abs (dip - target) < 0.4f, "the backing dips " + juce::String (dip, 1) + " dB while the voice sings (target "
                                                   + juce::String (target, 1) + ")");
 
@@ -14483,6 +14565,15 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=karaoke: just Auto Mix with a finished backing track.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "karaoke")
+    {
+        testAutoMixBackingTrack();
+        testAutoMixRides();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=placement: just Auto Mix's pans.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "placement")
     {
@@ -14692,6 +14783,7 @@ int main()
     testDawKey();
     testAutoMixEffects();
     testAutoMixRoles();
+    testAutoMixBackingTrack();
     testAutoMixPlacement();
     testAutoMixPhase();
     testAutoMixRides();

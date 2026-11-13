@@ -2044,7 +2044,7 @@ bool DawBridge::startAutoMixSplit()
 
     if (! song.isValid())
     {
-        autoMixSplitNote = "Nothing to split: tag a track holding the whole song (one clip) as Instrumental.";
+        autoMixSplitNote = "Nothing to split: tag a track holding the whole song (one clip) as Backing track (karaoke).";
         return false;
     }
     if (! stems::Model::isBuiltIn())
