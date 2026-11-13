@@ -289,6 +289,91 @@ int Edit::makePatternUnique (int clipId)
     return copy;
 }
 
+juce::Array<int> Edit::patternClipToMidiClips (int clipId)
+{
+    juce::Array<int> added;
+    const auto block = getPatternClip (clipId);
+    if (! block.isValid())
+        return added;
+
+    const auto pattern = getPattern ((int) block[ids::pattern]);
+    const auto tempo = getTempoMap();
+    const auto startBeat = juce::jmax (0.0, (double) block[ids::start]);
+    const auto start = tempo.toSeconds (startBeat);
+    const auto end = tempo.toSeconds (startBeat + juce::jmax (0.0, (double) block[ids::length]));
+
+    // Just this block's notes: the block on its own, in a project-shaped tree.
+    juce::ValueTree single (ids::PROJECT);
+    single.appendChild (pattern.createCopy(), nullptr);
+    auto unmuted = block.createCopy();
+    unmuted.removeProperty (ids::mute, nullptr);
+    single.appendChild (unmuted, nullptr);
+
+    for (const auto& part : pattern)
+    {
+        if (! part.hasType (ids::PART))
+            continue;
+
+        const auto trackId = (int) part[ids::track];
+        const auto events = patterns::getBlockEvents (single, trackId, tempo);
+        if (events.empty() || ! isMidiTrack (getTrack (trackId)))
+            continue;
+
+        auto clip = addMidiClip (trackId, start, end - start, pattern[ids::name].toString());
+        if ((bool) block.getProperty (ids::mute, false))
+            clip.setProperty (ids::mute, true, undoTarget);
+
+        for (const auto& e : events)
+            addNote ((int) clip[ids::id], e.pitch, e.on - start, e.off - e.on, e.velocity);
+
+        added.add ((int) clip[ids::id]);
+    }
+
+    removePatternClip (clipId);
+    return added;
+}
+
+int Edit::midiClipToPattern (int clipId)
+{
+    const auto clip = getClip (clipId);
+    if (! clip.isValid() || ! isMidiClip (clip))
+        return -1;
+
+    const auto track = getOwnerTrack (clip);
+    const auto tempo = getTempoMap();
+    const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+    const auto startBeat = tempo.toBeats (start);
+    const auto lengthBeats = tempo.toBeats (start + length) - startBeat;
+    const auto transpose = (int) std::lround ((double) clip.getProperty (ids::transpose, 0.0));
+
+    const auto pattern = addPattern (clip[ids::name].toString(), std::ceil (lengthBeats - 1.0e-6));
+    const auto patternId = (int) pattern[ids::id];
+    ensurePart (patternId, (int) track[ids::id]);
+
+    for (const auto& note : clip)
+    {
+        if (! note.hasType (ids::NOTE))
+            continue;
+
+        // Only what plays: notes that start inside the clip's window, cut at its edge.
+        const auto time = (double) note[ids::time];
+        if (time < offset || time >= offset + length)
+            continue;
+
+        const auto on = start + time - offset;
+        const auto off = juce::jmin (start + length, on + (double) note[ids::length]);
+        const auto beat = tempo.toBeats (on) - startBeat;
+        addPatternNote (patternId, (int) track[ids::id], (int) note[ids::pitch] + transpose, beat,
+                        tempo.toBeats (off) - tempo.toBeats (on), (int) note.getProperty (ids::velocity, 100));
+    }
+
+    addPatternClip (patternId, startBeat, lengthBeats, 0);
+    if ((bool) clip.getProperty (ids::mute, false))
+        setPatternClipMute ((int) getPatternClips().getLast()[ids::id], true);
+    removeClip (clipId);
+    return patternId;
+}
+
 //==============================================================================
 namespace patterns
 {

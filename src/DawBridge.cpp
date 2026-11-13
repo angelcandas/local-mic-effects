@@ -630,7 +630,9 @@ juce::var DawBridge::describeSession()
         { "patterns", describePatterns() },
         { "patternClips", describePatternClips() },
         { "patternMode", engine.getPatternMode() },
-        { "patternRecording", false },
+        { "patternRecording", engine.isPatternRecording() },
+        { "patternRecording", engine.isPatternRecording() },
+        { "patternSnap", engine.getPatternSnap() },
     });
 }
 
@@ -3619,6 +3621,59 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
     {
         const auto copy = edit.makePatternUnique (id);
         complete (copy >= 0 ? juce::var (copy) : error ("There's no such pattern block."));
+        return true;
+    }
+
+    if (command == "patternRecord")
+    {
+        // The looper: record into the pattern while it loops. `track` is armed when no MIDI
+        // track is (the selected row's track). Stopping keeps playing.
+        if (args.hasProperty ("snap"))
+            engine.setPatternSnap (args["snap"]);
+
+        if (! arg (args, "on", false))
+        {
+            engine.finishPatternRecording();
+            sessionChanged = true;
+            ok();
+            return true;
+        }
+
+        if (engine.getPatternMode() < 0) { complete (error ("Switch to Pattern mode first.")); return true; }
+        if (engine.isRecording())        { complete (error ("Already recording.")); return true; }
+
+        const auto tracks = edit.getTracks();
+        const auto anyArmed = std::any_of (tracks.begin(), tracks.end(), [] (const auto& t) { return (bool) t[ids::arm] && daw::Edit::isMidiTrack (t); });
+        if (! anyArmed && daw::Edit::isMidiTrack (edit.getTrack (trackId)))
+            edit.setTrackArm (trackId, true);
+
+        engine.setMidiRecordingLatency (roundTripLatency() / 2);
+        const auto failed = engine.startRecording (getRecordingFolder());
+        sessionChanged = true;
+        complete (error (failed));
+        return true;
+    }
+
+    if (command == "patternToClips")
+    {
+        if (! edit.getPatternClip (id).isValid()) { complete (error ("There's no such pattern block.")); return true; }
+        juce::Array<juce::var> clips;
+        for (auto clip : edit.patternClipToMidiClips (id))
+            clips.add (clip);
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "clips", clips } }));
+        return true;
+    }
+
+    if (command == "clipToPattern")
+    {
+        const auto made = edit.midiClipToPattern (id);
+        if (const auto part = edit.getPattern (made).getChildWithName (ids::PART); part.isValid())
+        {
+            const auto names = describeKeyNames ((int) part[ids::track]);
+            if (auto* list = names.getDynamicObject(); list != nullptr && ! list->getProperties().isEmpty())
+                edit.setPartDrum (made, (int) part[ids::track], true); // a drum kit: a row per sound
+        }
+        complete (made >= 0 ? juce::var (made) : error ("Pick a MIDI clip first."));
         return true;
     }
 
