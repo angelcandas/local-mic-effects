@@ -14,7 +14,7 @@ namespace fx
 // The effects a chain can hold, in the order Live mode runs them.
 enum class ModuleType
 {
-    highPass, denoise, gate, pitch, eq, paraEq, smooth, compressor, autoLevel, deEsser, exciter, saturation, radio, bitcrusher,
+    highPass, denoise, gate, pitch, eq, paraEq, smooth, compressor, opto, autoLevel, deEsser, exciter, saturation, radio, bitcrusher,
     robot, filter, autoWah, amp, cab, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, irReverb, width,
     multiband, limiter, masterEq, imager, loudness, // mastering (see Mastering.h)
     transient, dynamicEq,
@@ -34,7 +34,7 @@ inline const char* getModuleKey (ModuleType type)
         return "plugin";
 
     static constexpr const char* keys[] = {
-        "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "smooth", "compressor", "autoLevel", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
+        "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "smooth", "compressor", "opto", "autoLevel", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
         "robot", "filter", "autoWah", "amp", "cab", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "irReverb", "width",
         "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq"
     };

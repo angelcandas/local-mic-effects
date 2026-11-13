@@ -26,8 +26,9 @@ export const MODULES = [
                toggle("denoiseAdaptive", "Adaptive"), toggle("denoiseLearn", "Learn noise")] },
 
   { id: "gate", name: "Noise Gate", category: "cleanup", power: "gateOn",
-    description: "Mutes background noise between words",
-    controls: [knob("gateThreshold", "Threshold")] },
+    description: "Mutes background noise between words. Lower the range for a gentle expander; Focus ignores drum and cymbal bleed",
+    controls: [knob("gateThreshold", "Threshold"), knob("gateRange", "Range"), knob("gateHold", "Hold"),
+               knob("gateRelease", "Release"), toggle("gateFocus", "Focus")] },
 
   { id: "tune", name: "Autotune", category: "pitch", power: "tuneOn", wide: true,
     description: "Snaps your voice to the nearest note in the key",
@@ -75,9 +76,14 @@ export const MODULES = [
                choice("smoothStereo", "Stereo"), choice("smoothResolution", "Resolution"), toggle("smoothDelta", "Delta")] },
 
   { id: "comp", name: "Compressor", category: "cleanup", power: "compOn",
-    description: "Evens out loud and quiet moments",
-    controls: [knob("compThreshold", "Threshold"), knob("compRatio", "Ratio"), knob("compAttack", "Attack"),
-               knob("compRelease", "Release"), knob("compMakeup", "Makeup")] },
+    description: "Evens out loud and quiet moments. Clean, Punch (fast, grabs peaks) or Glue (slow, even); Mix below 100 is parallel compression",
+    controls: [choice("compStyle", "Style"), knob("compThreshold", "Threshold"), knob("compRatio", "Ratio"),
+               knob("compAttack", "Attack"), knob("compRelease", "Release"), knob("compKnee", "Knee"),
+               knob("compMakeup", "Makeup"), toggle("compAutoMakeup", "Auto makeup"), knob("compMix", "Mix")] },
+
+  { id: "opto", name: "Opto Compressor", category: "cleanup", power: "optoOn",
+    description: "A slow, smooth leveller for after the Compressor: evens out whole lines without grabbing the peaks",
+    controls: [knob("optoAmount", "Amount"), knob("optoOutput", "Output"), choice("optoMode", "Mode"), knob("optoMix", "Mix")] },
 
   { id: "autolevel", name: "Auto Level", category: "cleanup", power: "alOn", wide: true,
     description: "Rides your level like an engineer on the fader: a steady loudness, or a few LU over the backing track (Live)",
@@ -86,8 +92,10 @@ export const MODULES = [
                knob("alRange", "Range"), knob("alSpeed", "Speed")] },
 
   { id: "deess", name: "De-esser", category: "cleanup", power: "deessOn",
-    description: "Tames harsh S and T sounds",
-    controls: [knob("deessThreshold", "Threshold"), knob("deessFreq", "Freq")] },
+    description: "Tames harsh S and T sounds. Smart works the same on a whisper and a belt; Listen plays only what it takes out",
+    controls: [choice("deessMode", "Mode"), { ...knob("deessThreshold", "Threshold"), when: { deessMode: [0] } },
+               { ...knob("deessAmount", "Amount"), when: { deessMode: [1] } }, knob("deessFreq", "Freq"),
+               knob("deessRange", "Range"), choice("deessBand", "Band"), toggle("deessListen", "Listen")] },
 
   { id: "exciter", name: "Exciter", category: "character", power: "exciterOn",
     description: "Adds sparkle and presence",
@@ -210,7 +218,7 @@ export const MODULES = [
 // harmonizer).
 export const MODULE_KEYS = {
   hpf: "highPass", denoise: "denoise", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq", peq: "paraEq", smooth: "smooth",
-  comp: "compressor", autolevel: "autoLevel", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
+  comp: "compressor", opto: "opto", autolevel: "autoLevel", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
   crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", amp: "amp", cab: "cab", tremolo: "tremolo",
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
   echo: "echo", reverb: "reverb", irverb: "irReverb", width: "width",
