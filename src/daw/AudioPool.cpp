@@ -225,6 +225,82 @@ juce::AudioBuffer<float> AudioPool::renderNow (const std::shared_ptr<const juce:
     return render->assemble (parts);
 }
 
+void AudioPool::renderRange (const juce::File& file, const warp::Settings& settings, double from, double to,
+                             std::function<void (juce::AudioBuffer<float>&&)> done)
+{
+    const auto id = ++*auditionId;
+    const auto source = get (file);
+    if (source == nullptr || settings.linked.size() > 1 || to <= from)
+        return;
+
+    to = juce::jmin (to, from + maxAudition);
+    const auto rate = sampleRate;
+    const auto prefix = getPiecePrefix (file.getFullPathName());
+
+    warpPool.addJob ([this, source, settings, from, to, rate, prefix, id, done = std::move (done), latest = auditionId,
+                      cache = pieces, weak = std::weak_ptr<bool> (alive)]
+    {
+        const auto current = [latest, id] { return latest->load() == id; };
+        if (! current())
+            return;
+
+        const warp::Render render (source, rate, settings);
+        const auto first = (int) std::llround (from * rate);
+        const auto count = juce::jmax (0, (int) std::llround (to * rate) - first);
+        auto result = std::make_shared<juce::AudioBuffer<float>> (render.getNumChannels(), count);
+        result->clear();
+
+        if (! render.isSegmented())
+        {
+            // Cheap and whole (levels, slice, varispeed): cut the stretch out of the copy.
+            const auto whole = render.renderWhole (current);
+            if (whole.getNumSamples() == 0)
+                return;
+            const auto n = juce::jmin (count, whole.getNumSamples() - first);
+            for (int ch = 0; ch < result->getNumChannels(); ++ch)
+                if (n > 0)
+                    result->copyFrom (ch, 0, whole, ch, first, n);
+        }
+        else
+        {
+            const auto& list = render.getPieces();
+            for (size_t i = 0; i < list.size(); ++i)
+            {
+                if (list[i].to <= from || list[i].from >= to)
+                    continue;
+
+                auto piece = cache->find (prefix + list[i].key);
+                if (piece == nullptr)
+                {
+                    auto audio = render.renderPiece (i, current);
+                    if (audio.getNumSamples() == 0)
+                        return; // stopped
+                    piece = std::make_shared<const juce::AudioBuffer<float>> (std::move (audio));
+                    cache->add (prefix + list[i].key, piece);
+                    ++cache->rendered;
+                }
+
+                // The piece's own stretch only (not its crossfade tail): seams are quiet.
+                const auto start = (int) std::llround (list[i].from * rate);
+                const auto length = juce::jmin (piece->getNumSamples(), (int) std::llround (list[i].to * rate) - start);
+                const auto skip = juce::jmax (0, first - start);
+                const auto at = juce::jmax (0, start - first);
+                const auto n = juce::jmin (length - skip, count - at);
+                for (int ch = 0; ch < result->getNumChannels() && n > 0; ++ch)
+                    result->copyFrom (ch, at, *piece, juce::jmin (ch, piece->getNumChannels() - 1), skip, n);
+            }
+        }
+
+        if (! current())
+            return;
+        juce::MessageManager::callAsync ([result, done, weak, latest, id]
+        {
+            if (auto flag = weak.lock(); flag != nullptr && *flag && latest->load() == id)
+                done (std::move (*result));
+        });
+    });
+}
+
 void AudioPool::setSampleRate (double newRate)
 {
     if (newRate <= 0.0 || juce::exactlyEqual (newRate, sampleRate))
