@@ -8697,6 +8697,39 @@ static void testStems()
                "a GPU model zip with the wrong checksum is refused and leaves nothing");
     }
 
+    // The GPU model is compared with the CPU one on a test signal before it is trusted.
+    {
+        const auto quarters = [] (float gain, int count)
+        {
+            return stems::Separator ([gain, count] (const juce::AudioBuffer<float>& in, const stems::Progress&)
+            {
+                std::vector<juce::AudioBuffer<float>> out;
+                for (int s = 0; s < count; ++s)
+                {
+                    out.emplace_back (in);
+                    out.back().applyGain (gain);
+                }
+                return out;
+            });
+        };
+        const auto broken = stems::Separator ([] (const juce::AudioBuffer<float>& in, const stems::Progress&)
+        {
+            std::vector<juce::AudioBuffer<float>> out (4, juce::AudioBuffer<float> (2, in.getNumSamples()));
+            juce::Random random (1);
+            for (auto& stem : out)
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < in.getNumSamples(); ++i)
+                        stem.setSample (ch, i, random.nextFloat() - 0.5f);
+            return out;
+        });
+
+        check (stems::matchOnTestSignal (quarters (0.25f, 4), quarters (0.25f, 4)) > 100.0, "identical separators match perfectly on the test signal");
+        check (stems::matchOnTestSignal (quarters (0.2499f, 4), quarters (0.25f, 4)) > stems::minGpuMatchDb, "a tiny difference still passes");
+        check (stems::matchOnTestSignal (broken, quarters (0.25f, 4)) < stems::minGpuMatchDb, "a model that computes nonsense is caught");
+        check (std::isinf (stems::matchOnTestSignal (quarters (0.25f, 3), quarters (0.25f, 4))), "a model returning the wrong number of stems is caught");
+        check (std::isinf (stems::matchOnTestSignal (nullptr, quarters (0.25f, 4))), "no model, no match");
+    }
+
     // DawBridge: the stems land on four tracks under the song, lined up with its clip, and
     // the song's clip is muted. One undo takes it all back.
     {
