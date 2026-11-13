@@ -167,6 +167,13 @@ vocal) without splitting.
 - A song is prepared once: the stems and the melody are kept in a cache named after the file's contents
   (Application Support/MicFX/Practice), so opening it again is instant.
 - Timing is measured against what you hear: the audio interface's latency is taken off.
+- When the song stops after some singing, the **report** opens (or press **Report**): the pass score,
+  pitch, timing and steadiness, whether you leaned sharp or flat, a heat map of every phrase over the
+  song, and up to three weak phrases worth another go.
+- **Loop it** plays a weak phrase over and over with a short lead-in, scoring each time round. Pick a
+  **speed** (down to 50%) and a **key** (up to 5 semitones either way): the backing and the guide are
+  rendered with the warp engine (the guide keeps its character) and the notes move with them.
+  **Next weak phrase** moves on, **Back to the song** returns.
 
 ### Scenes (Live mode)
 

@@ -68,3 +68,43 @@ body.is-daw .practice-toggle, body.is-daw .practice { display: none; }
 .practice-message { min-height: 16px; color: var(--muted); font-size: 11.5px; }
 .practice-message.is-error { color: var(--hot); }
 .workspace[hidden] { display: none; }
+
+/* Looping a phrase */
+.practice-loop { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; padding: 6px 10px; border-radius: 10px;
+                 border: 1px solid color-mix(in srgb, var(--accent-2) 45%, transparent); background: rgba(63, 217, 198, 0.07);
+                 color: var(--muted); font-size: 11.5px; }
+.practice-loop[hidden] { display: none; }
+.practice-loop-label { flex: 1; color: var(--text); font-weight: 600; }
+.practice-loop label { display: flex; align-items: center; gap: 6px; }
+.practice.is-looping .practice-restart { display: none; }
+
+/* The pass report */
+.practice-report { position: absolute; top: 10px; right: 10px; bottom: 10px; width: min(340px, 46%); overflow: auto; padding: 12px 14px;
+                   display: flex; flex-direction: column; gap: 8px; border: 1px solid var(--line-strong); border-radius: 12px;
+                   background: rgba(19, 22, 30, 0.96); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.45); cursor: default; }
+.practice-report[hidden] { display: none; }
+.practice-report-head { display: flex; align-items: center; justify-content: space-between; }
+.practice-report-close { border: 0; background: none; color: var(--muted); font-size: 16px; cursor: pointer; }
+.practice-report-row { display: flex; align-items: baseline; gap: 10px; }
+.practice-report-row small { color: var(--muted); }
+.practice-report-score { font-size: 36px; font-weight: 750; line-height: 1; font-variant-numeric: tabular-nums; }
+.practice-report-score.is-good, .practice-weak-score.is-good, .practice-meter-fill.is-good { color: var(--good); --fill: var(--good); }
+.practice-report-score.is-close, .practice-weak-score.is-close, .practice-meter-fill.is-close { color: var(--close); --fill: var(--close); }
+.practice-report-score.is-off, .practice-weak-score.is-off, .practice-meter-fill.is-off { color: var(--off); --fill: var(--off); }
+.practice-meter { display: grid; grid-template-columns: 74px 1fr 26px; align-items: center; gap: 8px; color: var(--muted); font-size: 11.5px; }
+.practice-meter-track { height: 6px; border-radius: 3px; background: #080a0e; overflow: hidden; }
+.practice-meter-fill { height: 100%; background: var(--fill, var(--accent)); }
+.practice-meter-value { text-align: right; font-family: var(--mono); color: var(--text); }
+.practice-report-note { margin: 2px 0; color: var(--muted); font-size: 11.5px; }
+.practice-report-sub { margin-top: 4px; color: var(--text); font-weight: 600; font-size: 12px; }
+.practice-heat { position: relative; height: 18px; border-radius: 4px; background: #080a0e; }
+.practice-heat-cell { position: absolute; top: 2px; bottom: 2px; padding: 0; border: 0; border-radius: 2px; background: var(--faint); opacity: 0.5; cursor: pointer; }
+.practice-heat-cell.is-good { background: var(--good); opacity: 1; }
+.practice-heat-cell.is-close { background: var(--close); opacity: 1; }
+.practice-heat-cell.is-off { background: var(--off); opacity: 1; }
+.practice-weak { display: flex; align-items: center; gap: 8px; font-size: 11.5px; }
+.practice-weak-score { min-width: 24px; font: 700 13px var(--mono); }
+.practice-weak-name { flex: 1; color: var(--muted); }
+.practice-weak .tool { padding: 3px 9px; font-size: 11px; }
+.practice-report-options { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; }
+.practice-report-options label { display: flex; align-items: center; gap: 6px; }

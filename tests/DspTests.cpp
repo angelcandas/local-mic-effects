@@ -6184,6 +6184,118 @@ namespace
         root.deleteRecursively();
     }
 
+
+    void testPracticeLoops()
+    {
+        std::cout << "\nPractice (pass report, looping a phrase slower or in another key)\n";
+        namespace coach = analysis::coach;
+        namespace pitch = analysis::pitch;
+
+        // Multitrack loop: a ramp, looped over samples 1000..1600.
+        {
+            Multitrack multitrack;
+            multitrack.prepare (sampleRate);
+            juce::AudioBuffer<float> ramp (1, 4000);
+            for (int i = 0; i < ramp.getNumSamples(); ++i)
+                ramp.setSample (0, i, (float) i / 4000.0f);
+            const auto id = multitrack.addAudio ("Ramp", std::move (ramp), 0);
+            multitrack.setLoop (1000, 1600);
+            multitrack.seek (1500);
+            multitrack.play();
+            juce::AudioBuffer<float> out (1, 256);
+            out.clear();
+            multitrack.process (out, 1, 256);
+            check (id > 0 && multitrack.isLooping() && multitrack.getPosition() == 1000 + 156
+                       && std::abs (out.getSample (0, 99) - 1599.0f / 4000.0f) < 1e-6f && std::abs (out.getSample (0, 100) - 1000.0f / 4000.0f) < 1e-6f,
+                   "a loop goes back to its start inside the block, seamlessly");
+            multitrack.clearLoop();
+            multitrack.seek (1500);
+            out.clear();
+            multitrack.process (out, 1, 256);
+            check (! multitrack.isLooping() && multitrack.getPosition() == 1756, "without a loop it plays on");
+        }
+
+        const auto voice = singLine (getCoachMelody(), sampleRate);
+        const auto song = coach::findMelody (voice, sampleRate);
+        if (song.phrases.size() != 2)
+        {
+            check (false, "the test melody has two phrases");
+            return;
+        }
+
+        const auto part = Practice::cutSong (song, 1, 1.1, 0.5, -2.0);
+        check (part.notes.size() == 3 && std::abs (part.notes[0].start - 2.0 * (song.notes[3].start - 1.1)) < 1e-6
+                   && std::abs (part.notes[0].pitch - (song.notes[3].pitch - 2.0f)) < 1e-4f && part.phrases.size() == 1,
+               "a loop's target: the phrase's notes from its start, slower and lower");
+
+        // Rendering a phrase three quarters as fast and two semitones up.
+        const auto rendered = Practice::renderLoop (nullptr, &voice, sampleRate, 2.0, 5.0, 0.75, 2.0);
+        const auto renderedTrack = pitch::analyse (rendered.guide, sampleRate);
+        const auto f4 = pitch::getPitch (renderedTrack, (2.7 - 2.0) / 0.75, (3.0 - 2.0) / 0.75);
+        check (! rendered.cancelled && rendered.backing.getNumSamples() == 0 && std::abs (rendered.guide.getNumSamples() / sampleRate - 4.0) < 0.05,
+               "the guide renders slower (" + juce::String (rendered.guide.getNumSamples() / sampleRate, 2) + " s for 3 s)");
+        check (std::abs (f4 - 67.0f) < 0.2f, "and in the new key (F4 sung as G4: " + juce::String (f4, 2) + ")");
+
+        // A Practice on the song's tracks: the report, then looping a phrase as it is.
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        juce::TemporaryFile settingsFile (".xml");
+        juce::PropertiesFile settings (settingsFile.getFile(), {});
+        juce::Array<juce::var> events;
+        Practice practice (processor, settings, [&events] (const juce::Identifier& id, const juce::var& v)
+                           { auto* o = new juce::DynamicObject(); o->setProperty ("id", id.toString()); o->setProperty ("v", v); events.add (juce::var (o)); },
+                           [] { return (juce::int64) 0; });
+        auto& multitrack = processor.getMultitrack();
+        multitrack.addAudio ("Song", juce::AudioBuffer<float> (voice), 0);
+        practice.setSong (song);
+
+        // First phrase sung, the second half a semitone flat.
+        std::vector<coach::Frame> frames;
+        for (const auto& f : coach::framesFrom (pitch::analyse (voice, sampleRate)))
+            frames.push_back ({ f.time, f.time > 2.3 && f.midi > 0.0f ? f.midi - 0.5f : f.midi });
+        practice.addFrames (frames, 5.0);
+        const auto report = practice.describeReport();
+        check ((int) report["scored"] == 2 && report["weak"].size() == 1 && (int) report["weak"][0] == 1
+                   && (double) report["lean"] < -15.0 && (double) report["pitch"] < 0.9,
+               "the pass report: both phrases, the flat one is the weak one (lean " + report["lean"].toString() + " cents)");
+
+        auto options = new juce::DynamicObject();
+        options->setProperty ("phrase", 1);
+        options->setProperty ("speed", 1.0);
+        practice.handle ("loop", juce::var (options));
+        const auto expectedStart = (juce::int64) ((song.phrases[1].start - Practice::loopLeadIn) * sampleRate);
+        check (practice.isLooping() && multitrack.isLooping() && std::abs (multitrack.getLoopStart() - expectedStart) <= 1
+                   && multitrack.isPlaying() && practice.getSong().phrases.size() == 1 && practice.getSong().notes.size() == 3
+                   && ! practice.getPhraseScores()[0].scored && std::abs (practice.getSong().notes[0].start - song.notes[3].start) < 1e-6,
+               "looping a phrase as it is loops the song's own tracks from a lead-in, with just that phrase to sing");
+        practice.handle ("unloop", {});
+        check (! practice.isLooping() && ! multitrack.isLooping() && practice.getSong().notes.size() == song.notes.size(),
+               "and back to the whole song");
+
+        // Slower and higher: rendered in the background, played in place of the song's tracks.
+        options = new juce::DynamicObject();
+        options->setProperty ("phrase", 1);
+        options->setProperty ("speed", 0.5);
+        options->setProperty ("semitones", 3);
+        practice.handle ("loop", juce::var (options));
+        for (int i = 0; i < 2400 && ! practice.isLooping(); ++i)
+        {
+            juce::Thread::sleep (25);
+            practice.tick();
+        }
+        const auto tracks = multitrack.getTracks();
+        const auto songTrackMuted = tracks.size() == 2 && tracks[0]->muted.load() && ! tracks[1]->muted.load();
+        check (practice.isLooping() && songTrackMuted && multitrack.getLoopStart() == 0
+                   && std::abs (multitrack.getLoopEnd() / sampleRate - 2.0 * (song.phrases[1].end + Practice::loopTail - (song.phrases[1].start - Practice::loopLeadIn))) < 0.1
+                   && std::abs (practice.getSong().notes[0].start - 2.0 * Practice::loopLeadIn) < 0.02
+                   && std::abs (practice.getSong().notes[0].pitch - song.notes[3].pitch - 3.0f) < 1e-4f,
+               "a slower, higher loop plays its rendered copy, with the target moved to match");
+        practice.handle ("unloop", {});
+        check (! practice.isLooping() && multitrack.getTracks().size() == 1 && ! multitrack.getTracks()[0]->muted.load(),
+               "leaving it removes the copy and brings the song back");
+        multitrack.pause();
+    }
+
     void testPitchNotes()
     {
         std::cout << "\nNote pitch editor (sung notes, per-note edits)\n";
@@ -8613,6 +8725,7 @@ int main()
     {
         testCoach();
         testPractice();
+        testPracticeLoops();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -8660,6 +8773,7 @@ int main()
     testPitchNotes();
     testCoach();
     testPractice();
+    testPracticeLoops();
     testRhythm();
     testTrackTools();
     testDawBridge();

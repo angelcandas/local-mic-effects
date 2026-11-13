@@ -45,6 +45,10 @@ public:
     void loadBackingTrack (const juce::File&);
     void addTake (const juce::File&, juce::int64 startSample);
 
+    // Audio already in memory at the session rate (e.g. a rendered copy), as a backing
+    // track named `name`. Returns its id.
+    int addAudio (const juce::String& name, juce::AudioBuffer<float>&&, juce::int64 startSample);
+
     // Synchronous version for tests. Returns the new track's id, or -1.
     int loadNow (const juce::File&, bool isTake, juce::int64 startSample);
 
@@ -60,6 +64,13 @@ public:
     void pause() noexcept                    { playing = false; }
     void seek (juce::int64 sample) noexcept  { position = juce::jmax ((juce::int64) 0, sample); }
     bool isPlaying() const noexcept          { return playing.load(); }
+
+    // Playback that reaches `end` goes back to `start` (samples). end <= start: no loop.
+    void setLoop (juce::int64 start, juce::int64 end) noexcept { loopStart = start; loopEnd = end; }
+    void clearLoop() noexcept                { loopEnd = 0; loopStart = 0; }
+    bool isLooping() const noexcept          { return loopEnd.load() > loopStart.load(); }
+    juce::int64 getLoopStart() const noexcept { return loopStart.load(); }
+    juce::int64 getLoopEnd() const noexcept  { return loopEnd.load(); }
     juce::int64 getPosition() const noexcept { return position.load(); }
     juce::int64 getLength() const noexcept   { return length.load(); }
     double getSampleRate() const noexcept    { return sampleRate; }
@@ -90,6 +101,7 @@ private:
     std::shared_ptr<Track> makeTrack (const juce::File&, bool isTake, juce::int64 startSample, int id, juce::AudioBuffer<float>&&);
     void install (std::shared_ptr<Track>);
     void publish(); // rebuilds the audio thread's track list
+    void mix (juce::AudioBuffer<float>&, int numChannels, int offset, juce::int64 from, int numSamples) noexcept;
 
     double sampleRate = 48000.0;
     int nextId = 1;
@@ -102,6 +114,7 @@ private:
     std::atomic<bool> playing { false };
     std::atomic<juce::int64> position { 0 };
     std::atomic<juce::int64> length { 0 };
+    std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 };
     std::atomic<int> numLoading { 0 };
 
     juce::ThreadPool loader { juce::ThreadPoolOptions{}.withThreadName ("MicFX track loader").withNumberOfThreads (1) };

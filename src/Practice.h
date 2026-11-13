@@ -43,6 +43,10 @@ public:
     //   "view" { open }            the view opened or closed (follows the singer while open)
     //   "guide" { level }          the guide vocal's level (0..1.5 gain, 0 mutes it)
     //   "reset"                    forgets this pass's scores
+    //   "report"                   -> describeReport()
+    //   "loop" { phrase, speed, semitones } loops one phrase (with a lead-in), slower and/or in
+    //                              another key (rendered with the warp engine); "loopReady" follows
+    //   "unloop"                   back to the whole song
     juce::var handle (const juce::String& action, const juce::var& options);
 
     // About 30 times a second (the editor's timer).
@@ -92,6 +96,32 @@ public:
     static constexpr const char* guideFileName = "Guide voice.wav";
 
     //==============================================================================
+    // Looping a phrase (static parts for the tests).
+    static constexpr double loopLeadIn = 1.5, loopTail = 0.6; // seconds around the phrase
+
+    // One phrase's notes as a song of their own: moved `offset` seconds earlier, played
+    // `speed` times as fast and `semitones` higher.
+    static analysis::coach::Song cutSong (const analysis::coach::Song&, int phrase, double offset, double speed, double semitones);
+
+    struct LoopAudio
+    {
+        juce::AudioBuffer<float> backing, guide; // empty when there was none
+        bool cancelled = false;
+    };
+
+    // `from`..`to` seconds of the backing and the guide (either may be null), stretched and
+    // transposed. The guide keeps its formants, so the voice keeps its character.
+    static LoopAudio renderLoop (const juce::AudioBuffer<float>* backing, const juce::AudioBuffer<float>* guide, double sampleRate,
+                                 double from, double to, double speed, double semitones,
+                                 const std::function<bool()>& shouldContinue = {});
+
+    // { score, pitch, timing, steady, lean, timingSeconds, scored, total, weak: [i], phrases: [...] }:
+    // the pass so far (or the last loop pass).
+    juce::var describeReport() const;
+
+    bool isLooping() const noexcept { return loop.active; }
+
+    //==============================================================================
     // Live scoring, exposed for the tests.
     const analysis::coach::Song& getSong() const noexcept { return song; }
     void setSong (analysis::coach::Song);
@@ -106,6 +136,11 @@ public:
 
 private:
     struct Job;
+    struct LoopJob;
+
+    void startLoop (int phrase, double speed, double semitones);
+    void finishLoop (LoopJob&);
+    void endLoop (bool restoreTracks = true);
 
     void start (const juce::File&, bool split);
     void install (const Prepared&);
@@ -123,7 +158,8 @@ private:
     std::unique_ptr<juce::FileChooser> chooser;
 
     // The song being practised.
-    analysis::coach::Song song;
+    analysis::coach::Song song;     // the target now (a loop's own while looping)
+    analysis::coach::Song baseSong; // the whole song
     juce::String songName;
     juce::File source, guideFile, backingFile;
     float guideLevel = 0.35f;
@@ -139,6 +175,19 @@ private:
     bool scoresReset = false;
     double lastSongTime = 0.0;
     double lastPosition = -1.0;
+    bool wasPlaying = false;
+
+    // Looping a phrase.
+    struct Loop
+    {
+        bool active = false;
+        int phrase = -1;
+        double speed = 1.0, semitones = 0.0;
+        double from = 0.0, to = 0.0;      // in the song
+        int backingId = -1, guideId = -1; // rendered tracks (-1: looping the song's own tracks)
+        std::vector<std::pair<int, bool>> muted; // the song's tracks muted meanwhile, and how they were
+    } loop;
+    std::shared_ptr<LoopJob> loopJob;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Practice)
 };
