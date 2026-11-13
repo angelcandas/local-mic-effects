@@ -5,6 +5,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "dsp/PitchDetector.h"
+#include "dsp/Smooth.h"
 #include "Key.h"
 
 #include <algorithm>
@@ -67,6 +68,17 @@ struct Profile
     float humHz = 0.0f;
     std::array<float, humHarmonics> humHarmonicsDb {};
     float getHumProminenceDb() const noexcept { return *std::max_element (humHarmonicsDb.begin(), humHarmonicsDb.end()); }
+
+    // Resonances: per hop, the deepest cut the resonance suppressor (Smooth, Smooth.h) at
+    // its default settings would be making at the end of the hop, in three ranges.
+    enum ResonanceRange { body, harsh, top };   // 500 Hz-2 kHz, 2-8 kHz, 8-18 kHz
+    static constexpr int numResonanceRanges = 3;
+    std::vector<std::array<float, numResonanceRanges>> resonanceDb;
+
+    // Share of the active hops (or those where `mask` is true) where that range is cut by
+    // at least `minimumDb`, and the cut there on the worst of them (`fraction` percentile).
+    double getResonantFraction (ResonanceRange, float minimumDb = 3.0f, const std::vector<bool>* mask = nullptr) const;
+    float getResonanceDb (ResonanceRange, double fraction = 0.9, const std::vector<bool>* mask = nullptr) const;
 
     int getNumFrames() const noexcept { return (int) rmsDb.size(); }
     double getActiveSeconds() const;
@@ -135,6 +147,10 @@ private:
     int historyPos = 0;
     std::vector<float> window, fftData;
     double windowPower = 0.0;    // sum of squared window values
+
+    // The resonance suppressor, listening only, fed the mono signal a hop at a time.
+    fx::ResonanceSuppressor resonance;
+    std::vector<float> hopMono;
 
     // Per hop, per mains frequency (50, 60 Hz) and harmonic: line over its surroundings, dB.
     std::vector<std::array<std::array<float, Profile::humHarmonics>, 2>> humLines;

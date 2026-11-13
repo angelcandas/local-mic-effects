@@ -1682,6 +1682,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("throws", autoMixOptions.throws);
     read ("dynamicEq", autoMixOptions.dynamicEq);
     read ("transients", autoMixOptions.transients);
+    read ("smooth", autoMixOptions.smooth);
     read ("split", autoMixSplit);
 }
 
@@ -1766,6 +1767,7 @@ juce::var DawBridge::describeAutoMix() const
                    : *move.insert == fx::ModuleType::width      ? "Stereo width"
                    : *move.insert == fx::ModuleType::transient  ? "Transient shaper"
                    : *move.insert == fx::ModuleType::dynamicEq  ? "Dynamic EQ"
+                   : *move.insert == fx::ModuleType::smooth     ? "Smooth (resonances)"
                    : *move.insert == fx::ModuleType::masterEq   ? "Mastering EQ"
                    : *move.insert == fx::ModuleType::multiband  ? "Multiband compressor"
                    : *move.insert == fx::ModuleType::imager     ? "Stereo imager"
@@ -1789,6 +1791,7 @@ juce::var DawBridge::describeAutoMix() const
                                    { "exciter", autoMixOptions.exciter }, { "width", autoMixOptions.width },
                                    { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour }, { "sends", autoMixOptions.sends }, { "throws", autoMixOptions.throws },
                                    { "dynamicEq", autoMixOptions.dynamicEq }, { "transients", autoMixOptions.transients },
+                                   { "smooth", autoMixOptions.smooth },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },

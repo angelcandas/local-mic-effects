@@ -1520,8 +1520,11 @@ namespace
         }
         for (const auto& note : plan.notes)
             std::cout << "        note: " << note << "\n";
+        // (Smooth comes after the EQ when the mix has narrow peaks; these test tones do.)
+        chain.removeString ("smooth");
         check (chain.joinIntoString (",") == "masterEq,multiband,imager,limiter,loudness",
                "a mastering chain on the master: " + chain.joinIntoString (", "));
+        const auto chainLength = (int) std::count_if (plan.moves.begin(), plan.moves.end(), [] (const auto& m) { return m.insert.has_value(); });
 
         analysis::applyMix (edit, plan);
         const auto after = measure();
@@ -1531,7 +1534,7 @@ namespace
 
         // Again from the mastered song: the chain is replaced, not stacked.
         analysis::applyMix (edit, plan);
-        check (daw::Edit::getInserts (edit.getMaster()).getNumChildren() == 5, "applied twice: still one chain");
+        check (daw::Edit::getInserts (edit.getMaster()).getNumChildren() == chainLength, "applied twice: still one chain");
 
         // Loud: -10 LUFS, still under the ceiling.
         edit.getUndoManager().undo();
@@ -8698,6 +8701,129 @@ namespace
         return output;
     }
 
+    // A bright sung note: harmonics of 220 Hz up to 9 kHz with vibrato, over quiet pink
+    // noise; `loudHarmonic` (when > 0) is 10 dB louder than it should be (a resonance).
+    // Sung in phrases (2.5 s on, 0.5 s off) when `phrases`.
+    std::vector<float> makeBrightNote (double seconds, int loudHarmonic, bool phrases = false)
+    {
+        const auto length = (size_t) (seconds * sampleRate);
+        std::vector<float> voice (length, 0.0f);
+        double phase = 0.0;
+        for (size_t i = 0; i < length; ++i)
+        {
+            const auto t = (double) i / sampleRate;
+            phase += juce::MathConstants<double>::twoPi * 220.0 * std::exp2 (0.3 / 12.0 * std::sin (juce::MathConstants<double>::twoPi * 5.5 * t)) / sampleRate;
+            if (phrases && std::fmod (t, 3.0) > 2.5)
+                continue;
+            double value = 0.0;
+            for (int h = 1; h <= 40; ++h)
+                value += std::sin (phase * h) / std::sqrt ((double) h) * (h == loudHarmonic ? 3.16 : 1.0);
+            voice[i] = (float) (value * 0.03);
+        }
+        return mixSignals (voice, makePinkNoise (seconds, -60.0f, 5));
+    }
+
+    juce::AudioBuffer<float> toStereo (const std::vector<float>& mono)
+    {
+        juce::AudioBuffer<float> buffer (2, (int) mono.size());
+        for (int ch = 0; ch < 2; ++ch)
+            buffer.copyFrom (ch, 0, mono.data(), (int) mono.size());
+        return buffer;
+    }
+
+    // Auto Mix and Smooth: the analysis measures how resonant a track is, and the plan
+    // adds Smooth where it rings.
+    void testSmoothAutoMix()
+    {
+        std::cout << "\nAuto Mix: Smooth where it rings\n";
+        using analysis::Profile;
+
+        const auto ringing = analysis::analyse (toStereo (makeBrightNote (8.0, 14, true)), sampleRate);
+        const auto plain = analysis::analyse (toStereo (makeBrightNote (8.0, 0, true)), sampleRate);
+        const auto noise = analysis::analyse (toStereo (makePinkNoise (8.0, -20.0f, 3)), sampleRate);
+        const auto share = [] (const Profile& p) { return p.getResonantFraction (Profile::harsh); };
+        check (ringing.resonanceDb.size() == ringing.rmsDb.size() && share (ringing) > 0.5 && ringing.getResonanceDb (Profile::harsh) > 4.0f
+                   && share (plain) < 0.05 && share (noise) < 0.05,
+               "analysis: 2-8 kHz rings on " + juce::String (share (ringing) * 100.0, 0) + "% of a resonant voice (worst cut "
+                   + juce::String (ringing.getResonanceDb (Profile::harsh), 1) + " dB), " + juce::String (share (plain) * 100.0, 0)
+                   + "% of a plain one, " + juce::String (share (noise) * 100.0, 0) + "% of pink noise");
+
+        // A cymbal-like ring: a noise burst with a 9.4 kHz partial ringing on, every half second.
+        std::vector<float> cymbal ((size_t) (8.0 * sampleRate), 0.0f);
+        {
+            juce::Random random (4);
+            for (size_t i = 0; i < cymbal.size(); ++i)
+            {
+                const auto t = std::fmod ((double) i / sampleRate, 0.5);
+                cymbal[i] = (float) (0.2 * std::exp (-t / 0.03) * (2.0 * random.nextDouble() - 1.0)
+                                     + 0.1 * std::exp (-t / 0.4) * std::sin (juce::MathConstants<double>::twoPi * 9400.0 * (double) i / sampleRate));
+            }
+        }
+
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-smooth");
+        folder.createDirectory();
+        const auto add = [&] (const juce::String& name, const std::vector<float>& audio)
+        {
+            const auto file = folder.getChildFile (name + ".wav");
+            writeWav (file, toStereo (audio), sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, file, 0.0, 8.0);
+            return id;
+        };
+        const auto lead = add ("Lead", makeBrightNote (8.0, 14, true));
+        const auto harmony = add ("Harmony", makeBrightNote (8.0, 0, true));
+        const auto drums = add ("Overheads", cymbal);
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, analysis::Role> roles { { lead, analysis::Role::voice }, { harmony, analysis::Role::backingVocal },
+                                                    { drums, analysis::Role::drums } };
+        const std::map<int, float> volumes { { lead, 0.0f }, { harmony, 0.0f }, { drums, 0.0f } };
+
+        const auto find = [] (const analysis::MixPlan& plan, int track) -> const analysis::MixMove*
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == track && move.insert == fx::ModuleType::smooth)
+                    return &move;
+            return nullptr;
+        };
+
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop);
+        const auto* onLead = find (plan, lead);
+        const auto* onDrums = find (plan, drums);
+        if (onLead != nullptr) std::cout << "        " << onLead->reasons[0] << "\n";
+        if (onDrums != nullptr) std::cout << "        " << onDrums->reasons[0] << "\n";
+        check (onLead != nullptr && onLead->values.at ("smoothLowHz") <= 3080.0f && onLead->values.at ("smoothHighHz") >= 3080.0f
+                   && find (plan, harmony) == nullptr,
+               "the ringing lead gets Smooth around its harsh range, the plain harmony none");
+        check (onDrums != nullptr && onDrums->values.at ("smoothHighHz") >= 9400.0f, "ringing cymbals get Smooth on the top end");
+
+        analysis::MixOptions clean;
+        clean.mode = analysis::MixMode::clean;
+        clean.focusTrackId = lead;
+        check (find (analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, clean), lead) != nullptr,
+               "clean & polish adds it too");
+
+        analysis::MixOptions off;
+        off.smooth = false;
+        const auto without = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, off);
+        check (find (without, lead) == nullptr && find (without, drums) == nullptr, "switched off: no Smooth");
+
+        // Master mode: gently, after the mastering EQ, only when the mix has peaks.
+        const auto master = analysis::planMaster (ringing, -14.0f, 0.0f);
+        const auto* onMaster = find (master, daw::Edit::masterId);
+        check (onMaster != nullptr && onMaster->values.at ("smoothDepth") <= 3.0f && onMaster->atEnd
+                   && find (analysis::planMaster (noise, -14.0f, 0.0f), daw::Edit::masterId) == nullptr,
+               "master mode: a gentle Smooth on a resonant mix, none on a smooth one");
+
+        analysis::applyMix (edit, plan);
+        float depth = -1.0f;
+        for (const auto& insert : daw::Edit::getInserts (edit.getTrack (lead)))
+            if (insert[daw::ids::type].toString() == "smooth")
+                depth = 0.0f;
+        check (depth >= 0.0f, "applied: the lead has a Smooth insert");
+        folder.deleteRecursively();
+    }
+
     void testResonanceSuppressor()
     {
         std::cout << "\nSmooth (resonance suppressor)\n";
@@ -8854,23 +8980,7 @@ namespace
         // alone at every resolution, even where the frame resolves the harmonics; one
         // harmonic 10 dB louder than its neighbours (a resonance) comes down.
         {
-            const auto makeBright = [&] (int loudHarmonic)
-            {
-                std::vector<float> voice (length, 0.0f);
-                double phase = 0.0;
-                for (size_t i = 0; i < length; ++i)
-                {
-                    const auto t = (double) i / sampleRate;
-                    phase += juce::MathConstants<double>::twoPi * 220.0 * std::exp2 (0.3 / 12.0 * std::sin (juce::MathConstants<double>::twoPi * 5.5 * t)) / sampleRate;
-                    double value = 0.0;
-                    for (int h = 1; h <= 40; ++h)
-                        value += std::sin (phase * h) / std::sqrt ((double) h) * (h == loudHarmonic ? 3.16 : 1.0);
-                    voice[i] = (float) (value * 0.03);
-                }
-                return mixSignals (voice, makePinkNoise (seconds, -60.0f, 5));
-            };
-
-            const auto plain = makeBright (0), ringing = makeBright (14); // 3080 Hz
+            const auto plain = makeBrightNote (seconds, 0), ringing = makeBrightNote (seconds, 14); // 3080 Hz
             juce::String report;
             auto worstPlain = 0.0, leastCut = 100.0;
 
@@ -11202,6 +11312,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "smooth")
     {
         testResonanceSuppressor();
+        testSmoothAutoMix();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -11342,6 +11453,7 @@ int main()
     testLatency();
     testDenoise();
     testResonanceSuppressor();
+    testSmoothAutoMix();
     testSmoothing();
     testStems();
 #if MICFX_HAS_DEMUCS
