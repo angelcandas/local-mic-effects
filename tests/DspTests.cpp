@@ -26,6 +26,7 @@
 #include "daw/Exporter.h"
 #include "daw/Instruments.h"
 #include "daw/PluginHost.h"
+#include "daw/PluginInsert.h"
 #include "daw/Project.h"
 #include "daw/Warp.h"
 #include "analysis/Pitch.h"
@@ -5262,6 +5263,180 @@ namespace
             const auto result = exporter.exportMix (data.getChildFile ("plugin.wav"));
             check (result.error.isEmpty() && std::abs (result.peakDecibels - juce::Decibels::gainToDecibels (0.25f)) < 0.5f,
                    "the export plays the plugin with its settings (peak " + juce::String (result.peakDecibels, 1) + " dB)");
+        }
+
+        data.deleteRecursively();
+    }
+
+    void testEffectPlugins()
+    {
+        std::cout << "\nEffect plugins as inserts (scan, play, latency, bypass, keep settings)\n";
+
+        const auto synthFile = juce::File (MICFX_TEST_SYNTH), effectFile = juce::File (MICFX_TEST_EFFECT);
+        check (effectFile.exists(), "the test effect was built: " + effectFile.getFullPathName());
+
+        const auto data = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-effects", {});
+        const auto plugins = data.getChildFile ("Plugins");
+        plugins.createDirectory();
+        synthFile.copyDirectoryTo (plugins.getChildFile (synthFile.getFileName()));
+        effectFile.copyDirectoryTo (plugins.getChildFile (effectFile.getFileName()));
+
+        {
+            daw::PluginHost host (data);
+            host.setExtraFolders ({ plugins.getFullPathName() });
+            host.startScan();
+            for (int i = 0; i < 1200 && host.isScanning(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (50);
+
+            juce::Optional<daw::Edit::InstrumentInfo> synth, effect;
+            for (const auto& info : host.getInstruments())
+                if (info.name == "MicFX Test Synth")
+                    synth = info;
+            for (const auto& info : host.getEffects())
+                if (info.name == "MicFX Test Effect")
+                    effect = info;
+
+            auto effectAmongInstruments = false, synthAmongEffects = false;
+            for (const auto& info : host.getInstruments())
+                effectAmongInstruments = effectAmongInstruments || info.name == "MicFX Test Effect";
+            for (const auto& info : host.getEffects())
+                synthAmongEffects = synthAmongEffects || info.name == "MicFX Test Synth";
+
+            check (synth.hasValue() && effect.hasValue() && effect->format == "VST3" && ! effectAmongInstruments && ! synthAmongEffects
+                       && host.findEffect (effect->id).has_value() && ! host.findEffect (synth.hasValue() ? synth->id : juce::String()).has_value(),
+                   "a scan lists effect plugins apart from instruments" + (host.getFailedFiles().isEmpty() ? juce::String() : " (failed: " + host.getFailedFiles().joinIntoString (", ") + ")"));
+
+            if (! synth.hasValue() || ! effect.hasValue())
+            {
+                for (const auto& type : host.getKnownPlugins().getTypes())
+                    std::cout << "        found " << type.name << " (" << type.pluginFormatName << (type.isInstrument ? ", instrument" : "")
+                              << ", " << type.numInputChannels << " in)\n";
+                data.deleteRecursively();
+                return;
+            }
+
+            daw::Edit edit;
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+
+            const auto track = (int) edit.addMidiTrack ("Synth", *synth)[daw::ids::id];
+            const auto clip = (int) edit.addMidiClip (track, 0.0, 1.0)[daw::ids::id];
+            edit.addNote (clip, 57, 0.1, 0.5);
+            engine.rebuildNow();
+
+            const auto play = [&] (double seconds)
+            {
+                engine.seek (0);
+                engine.play();
+                auto out = render (engine, seconds);
+                engine.stop();
+                render (engine, 0.05);
+                return out;
+            };
+
+            // The largest difference between `out` and `reference` played `shift` samples later.
+            const auto difference = [] (const std::array<std::vector<float>, 2>& out, const std::array<std::vector<float>, 2>& reference, int shift, float scale)
+            {
+                float worst = 0.0f;
+                for (size_t ch = 0; ch < 2; ++ch)
+                    for (size_t i = 0; i + (size_t) shift < out[ch].size(); ++i)
+                        worst = std::max (worst, std::abs (out[ch][i + (size_t) shift] - scale * reference[ch][i]));
+                return worst;
+            };
+
+            const auto dry = play (0.9);
+            const auto before = engine.getLatencySamples();
+
+            const auto insert = (int) edit.addPluginInsert (track, *effect)[daw::ids::id];
+            engine.rebuildNow();
+            auto running = engine.getInsertPlugin (insert);
+            check (running != nullptr && engine.getInsertPluginError (insert).isEmpty() && daw::Edit::isPluginInsert (edit.getInsert (insert)),
+                   "a plugin insert loads the effect " + engine.getInsertPluginError (insert));
+
+            if (running == nullptr)
+            {
+                data.deleteRecursively();
+                return;
+            }
+
+            const auto added = engine.getLatencySamples() - before;
+            const auto wet = play (0.9);
+            check (added == 64 && difference (wet, dry, added, 1.0f) < 1.0e-5f && rms (dry[0], 0, dry[0].size()) > 0.1f,
+                   "it plays the track through the plugin, its delay compensated (" + juce::String (added) + " samples)");
+
+            running->getParameters()[0]->setValueNotifyingHost (0.25f); // half as loud
+            const auto quieter = play (0.9);
+            check (difference (quieter, dry, added, 0.5f) < 1.0e-5f, "the plugin's own settings change the sound");
+
+            edit.setInsertValue (insert, daw::PluginInsert::onId, 0.0f);
+            const auto bypassed = play (0.9);
+            check (engine.getLatencySamples() - before == added && difference (bypassed, dry, added, 1.0f) < 1.0e-5f,
+                   "switched off, the signal goes round it with the same delay");
+            edit.setInsertValue (insert, daw::PluginInsert::onId, 1.0f);
+
+            edit.setInsertValue (insert, "pluginOutGain", -6.0f);
+            render (engine, 0.3); // the gain glides there
+            const auto trimmed = play (0.9);
+            check (difference (trimmed, dry, added, 0.5f * juce::Decibels::decibelsToGain (-6.0f)) < 1.0e-5f, "the insert's out gain works as on any effect");
+            edit.setInsertValue (insert, "pluginOutGain", 0.0f);
+
+            // Another insert on the track builds its chain again: the same plugin keeps running.
+            const auto eq = (int) edit.addInsert (track, fx::ModuleType::eq, 0)[daw::ids::id];
+            engine.rebuildNow();
+            check (engine.getInsertPlugin (insert) == running, "a new chain for the track keeps the running plugin (and what it has in memory)");
+            edit.removeInsert (eq);
+            engine.rebuildNow();
+
+            // Saved with the project, and back when it opens.
+            running.reset();
+            engine.captureInstrumentStates();
+            check (edit.getInsert (insert)[daw::ids::state].toString().isNotEmpty(), "the plugin's settings are stored on its insert");
+
+            {
+                daw::Edit copy;
+                copy.replaceState (edit.getState().createCopy());
+                daw::DawEngine second (copy);
+                second.prepare (sampleRate, blockSize);
+                second.rebuildNow();
+                const auto restored = second.getInsertPlugin (insert);
+                check (restored != nullptr && std::abs (restored->getParameters()[0]->getValue() - 0.25f) < 1.0e-3f,
+                       "and come back when the project loads");
+            }
+
+            // Offline: the export loads its own copy, with those settings (0.5 x 0.5 peak).
+            {
+                daw::Exporter::Settings settings;
+                settings.end = 1.0;
+                settings.tail = 0.0;
+                daw::Exporter exporter (edit, settings);
+                const auto result = exporter.exportMix (data.getChildFile ("effect.wav"));
+                check (result.error.isEmpty() && std::abs (result.peakDecibels - juce::Decibels::gainToDecibels (0.25f)) < 0.5f,
+                       "the export plays the effect with its settings (peak " + juce::String (result.peakDecibels, 1) + " dB)");
+            }
+
+            // A plugin that isn't installed: the sound goes on past it, and its settings stay.
+            {
+                daw::Edit missing;
+                missing.replaceState (edit.getState().createCopy());
+                auto lost = missing.getInsert (insert);
+                lost.setProperty (daw::ids::plugin, "VST3-Not Installed-0-0", nullptr);
+                lost.setProperty (daw::ids::name, "Not Installed", nullptr);
+                lost.setProperty (daw::ids::description, juce::String(), nullptr);
+                const auto savedState = lost[daw::ids::state].toString();
+
+                daw::DawEngine third (missing);
+                third.prepare (sampleRate, blockSize);
+                third.rebuildNow();
+                third.seek (0);
+                third.play();
+                const auto passed = render (third, 0.9);
+                third.stop();
+                third.captureInstrumentStates();
+                check (third.getInsertPlugin (insert) == nullptr && third.getInsertPluginError (insert).contains ("isn't installed")
+                           && third.getLatencySamples() == before && difference (passed, dry, 0, 1.0f) < 1.0e-5f
+                           && missing.getInsert (insert)[daw::ids::state].toString() == savedState,
+                       "a missing effect plugin is skipped, says why and keeps its settings");
+            }
         }
 
         data.deleteRecursively();
@@ -12845,6 +13020,7 @@ int main()
     testInstruments();
     testKit();
     testPluginHosting();
+    testEffectPlugins();
     testProjects();
     testExport();
     testClipEditing();

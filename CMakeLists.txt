@@ -141,6 +141,8 @@ set(MICFX_DSP_SOURCES
     src/daw/Exporter.cpp
     src/daw/Instruments.cpp
     src/daw/PluginHost.cpp
+    src/daw/PluginInsert.cpp
+    src/daw/PluginInsert.h
     src/daw/Project.cpp
     src/daw/Quantize.cpp
     src/daw/Quantize.h
@@ -330,8 +332,24 @@ if(MICFX_BUILD_TESTS)
         PRIVATE juce::juce_audio_utils
         PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
 
+    # And a tiny VST3 effect (plugin inserts).
+    juce_add_plugin(MicFXTestEffect
+        COMPANY_NAME "MicFX Tests"
+        BUNDLE_ID "com.angelcandas.micfx.testeffect"
+        PLUGIN_MANUFACTURER_CODE Mfxt
+        PLUGIN_CODE Mfte
+        FORMATS VST3
+        PRODUCT_NAME "MicFX Test Effect"
+        VST3_CATEGORIES Fx)
+
+    target_sources(MicFXTestEffect PRIVATE tests/TestEffect.cpp)
+    target_compile_definitions(MicFXTestEffect PUBLIC JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_VST3_CAN_REPLACE_VST2=0)
+    target_link_libraries(MicFXTestEffect
+        PRIVATE juce::juce_audio_utils
+        PUBLIC juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+
     juce_add_console_app(MicFXTests PRODUCT_NAME "MicFXTests")
-    add_dependencies(MicFXTests MicFXTestSynth_VST3)
+    add_dependencies(MicFXTests MicFXTestSynth_VST3 MicFXTestEffect_VST3)
 
     target_sources(MicFXTests PRIVATE tests/DspTests.cpp src/DawBridge.cpp ${MICFX_DSP_SOURCES})
     target_include_directories(MicFXTests PRIVATE src)
@@ -342,6 +360,7 @@ if(MICFX_BUILD_TESTS)
             MICFX_HAS_DEMUCS=${MICFX_HAS_DEMUCS}
             MICFX_HAS_COREML=${MICFX_HAS_COREML}
             MICFX_TEST_SYNTH="$<GENEX_EVAL:$<TARGET_PROPERTY:MicFXTestSynth_VST3,JUCE_PLUGIN_ARTEFACT_FILE>>"
+            MICFX_TEST_EFFECT="$<GENEX_EVAL:$<TARGET_PROPERTY:MicFXTestEffect_VST3,JUCE_PLUGIN_ARTEFACT_FILE>>"
             JUCE_PLUGINHOST_VST3=1
             JUCE_PLUGINHOST_AU=1
             JUCE_MODAL_LOOPS_PERMITTED=1
