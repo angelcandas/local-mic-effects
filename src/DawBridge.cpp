@@ -6,6 +6,7 @@
 #include "daw/Quantize.h"
 #include "daw/ClipTools.h"
 #include "daw/Patterns.h"
+#include "daw/Loops.h"
 #include "instruments/InstrumentProcessor.h"
 #include "instruments/Kit.h"
 
@@ -1322,7 +1323,7 @@ namespace
     }
 }
 
-juce::var DawBridge::importAudio (const juce::File& file, int trackId, double start)
+juce::var DawBridge::importAudio (const juce::File& file, int trackId, double start, bool match)
 {
     // Check the file before copying it anywhere. Only the header is read: the audio
     // itself loads in the background (AudioPool), so a long song doesn't freeze the app.
@@ -1343,14 +1344,30 @@ juce::var DawBridge::importAudio (const juce::File& file, int trackId, double st
     if (start < 0.0)
         start = (double) engine.getPosition() / engine.getSampleRate();
     start = juce::jmax (0.0, start);
+
+    // A loop: on the nearest bar, at the project's tempo.
+    const auto tempo = edit.getTempoMap();
+    const auto perBar = edit.getBeatsPerBar();
+    const auto loop = match ? daw::loops::findLoop (file, perBar) : std::nullopt;
+    if (loop)
+        start = tempo.toSeconds (juce::jmax (0.0, std::round (tempo.toBeats (start) / perBar) * perBar));
+
     const auto clip = edit.addClip (trackId, source, start, std::get<double> (length));
     sessionChanged = true;
 
     if (! clip.isValid())
         return error ("Couldn't add " + file.getFileName() + " to the track.");
 
-    return object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId }, { "clip", clip[ids::id] },
-                     { "start", start } });
+    auto reply = object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId }, { "clip", clip[ids::id] },
+                           { "start", start } });
+    if (loop)
+    {
+        edit.setClipMusical ((int) clip[ids::id], true, loop->bpm);
+        reply.getDynamicObject()->setProperty ("loop", object ({ { "from", std::round (loop->bpm * 10.0) / 10.0 },
+                                                                 { "to", std::round (tempo.getBpmAt (start) * 10.0) / 10.0 },
+                                                                 { "bars", loop->bars }, { "found", loop->from } }));
+    }
+    return reply;
 }
 
 juce::var DawBridge::addStemTracks (const juce::ValueTree& clip, int trackId,
@@ -4257,7 +4274,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         const auto trackId = arg (args, "track", -1);
         withChooser ("Import audio", juce::File::getSpecialLocation (juce::File::userMusicDirectory), getAudioFilePatterns(),
                      Flags::openMode | Flags::canSelectFiles,
-                     [this, trackId] (const juce::File& file) { return importAudio (file, trackId); },
+                     [this, trackId] (const juce::File& file) { return importAudio (file, trackId, -1.0, matchLoops); },
                      complete);
         return;
     }
@@ -4284,7 +4301,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             return;
         }
 
-        constexpr double maxSeconds = 30.0;
+        // In tempo (the library's "Match loops" switch): a loop is stretched to the project's
+        // tempo, repeats, and starts on the next bar while the song plays.
+        const auto sync = arg (args, "sync", false);
+        const auto loop = sync ? daw::loops::findLoop (file, edit.getBeatsPerBar()) : std::nullopt;
+
+        const auto maxSeconds = loop ? 130.0 : 30.0;
         const auto channels = (int) juce::jlimit (1u, 2u, reader->numChannels);
         const auto sourceLength = (int) juce::jmin (reader->lengthInSamples, (juce::int64) (maxSeconds * reader->sampleRate));
         juce::AudioBuffer<float> source (channels, sourceLength);
@@ -4308,9 +4330,62 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             }
         }
 
+        if (loop)
+        {
+            // The stretch takes a moment: off the message thread, then started at the next bar.
+            const auto rate = engine.getSampleRate();
+            const auto tempoMap = edit.getTempoMap();
+            const auto perBar = edit.getBeatsPerBar();
+            auto shared = std::make_shared<juce::AudioBuffer<float>> (std::move (audio));
+            const auto bars = loop->bars;
+            juce::Thread::launch ([this, shared, rate, tempoMap, perBar, bars, gain, complete, weak = std::weak_ptr<bool> (alive),
+                                   from = loop->bpm]
+            {
+                // The loop's length at the tempo where the song is now.
+                const auto sourceSeconds = shared->getNumSamples() / rate;
+                const auto targetSeconds = bars * perBar * 60.0 / tempoMap.getBpmAt (0.0);
+                daw::warp::Settings settings;
+                settings.map = daw::warp::Map ({ { 0.0, 0.0 }, { sourceSeconds, targetSeconds } });
+                settings.algorithm = daw::warp::Algorithm::drums;
+                auto stretched = std::abs (targetSeconds - sourceSeconds) < 1.0e-4 ? *shared : daw::warp::render (*shared, rate, settings);
+                stretched.setSize (stretched.getNumChannels(), juce::jmax (1, (int) std::lround (targetSeconds * rate)), true, true);
+
+                juce::MessageManager::callAsync ([this, stretched = std::move (stretched), rate, tempoMap, perBar, gain, complete, weak, from,
+                                                  targetSeconds]() mutable
+                {
+                    if (auto flag = weak.lock(); flag == nullptr || ! *flag)
+                        return;
+                    auto delay = 0;
+                    if (engine.isPlaying())
+                    {
+                        const auto now = (double) engine.getPosition() / rate;
+                        const auto beats = tempoMap.toBeats (now);
+                        const auto nextBar = std::ceil (beats / perBar - 1.0e-6) * perBar;
+                        delay = (int) std::lround ((tempoMap.toSeconds (nextBar) - now) * rate);
+                    }
+                    engine.startPreview (std::move (stretched), gain, true, delay);
+                    complete (object ({ { "ok", true }, { "seconds", targetSeconds }, { "loop", true }, { "from", std::round (from * 10.0) / 10.0 },
+                                        { "to", std::round (tempoMap.getBpmAt (0.0) * 10.0) / 10.0 } }));
+                });
+            });
+            return;
+        }
+
         const auto seconds = audio.getNumSamples() / engine.getSampleRate();
         engine.startPreview (std::move (audio), gain);
         complete (object ({ { "ok", true }, { "seconds", seconds }, { "cut", reader->lengthInSamples > sourceLength } }));
+        return;
+    }
+
+    if (command == "matchLoops")
+    {
+        // The library's "Match loops to the tempo" switch, kept in the settings.
+        if (args.hasProperty ("on"))
+        {
+            matchLoops = (bool) args["on"];
+            settings.setValue ("dawMatchLoops", matchLoops);
+        }
+        complete (object ({ { "ok", true }, { "on", matchLoops } }));
         return;
     }
 
@@ -4318,7 +4393,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         const juce::File file (args["file"].toString());
         complete (juce::File::isAbsolutePath (args["file"].toString()) && file.existsAsFile()
-                      ? importAudio (file, arg (args, "track", -1), arg (args, "start", -1.0))
+                      ? importAudio (file, arg (args, "track", -1), arg (args, "start", -1.0), arg (args, "match", matchLoops))
                       : error ("That file isn't there any more."));
         return;
     }
