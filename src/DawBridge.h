@@ -73,7 +73,8 @@ public:
     // start < 0: at the playhead. trackId not a track: on a new track.
     // -> { ok, error, track, clip, start, loop? { from, to, bars } }. `match`: a loop (see
     // daw/Loops.h) starts on the nearest bar and plays at the project's tempo (musical mode).
-    juce::var importAudio (const juce::File& file, int trackId, double start = -1.0, bool match = false);
+    // `continueStep`: part of the previous command's undo step (the Draw tool's stroke).
+    juce::var importAudio (const juce::File& file, int trackId, double start = -1.0, bool match = false, bool continueStep = false);
 
     // The library sidebar (ui/browser.js): the places it shows, and one folder's
     // subfolders and audio files.

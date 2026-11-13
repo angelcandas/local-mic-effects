@@ -558,6 +558,7 @@ public:
     juce::ValueTree addPatternClip (int patternId, double startBeats, double lengthBeats = 0.0, int row = 0);
     void setPatternClip (int clipId, double startBeats, double lengthBeats, int row);
     void setPatternClipMute (int clipId, bool);
+    void setPatternClipPattern (int clipId, int patternId); // "Use another pattern" for this block
     void removePatternClip (int clipId);
     juce::ValueTree getPatternClip (int clipId) const;
     juce::Array<juce::ValueTree> getPatternClips() const;
