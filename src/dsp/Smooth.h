@@ -171,6 +171,12 @@ public:
 
     const Settings& getSettings() const noexcept { return settings; }
 
+    // Works out the cuts (and publishes them) but skips the synthesis, on frames that
+    // don't overlap: what Auto Mix's analysis uses to see how resonant a track is, at a
+    // quarter of the cost. The audio given to process() is left as it is. Call before
+    // prepare().
+    void setListenOnly (bool shouldOnlyListen) noexcept { listenOnly = shouldOnlyListen; }
+
     // One frame, for the current resolution.
     int getLatencySamples() const noexcept { return configured < 0 ? getFrameSize (settings.resolution, sampleRate) : fftSize; }
 
@@ -193,7 +199,11 @@ public:
         {
             const auto p = (size_t) position;
 
-            if (midSide)
+            if (listenOnly)
+            {
+                a.input[writeAt + p] = numChannels > 1 ? 0.5f * (left[i] + right[i]) : left[i];
+            }
+            else if (midSide)
             {
                 const auto l = left[i], r = right[i];
                 a.input[writeAt + p] = 0.5f * (l + r);
@@ -217,7 +227,7 @@ public:
             if (++position == hop)
             {
                 position = 0;
-                processFrame (numChannels, midSide);
+                processFrame (listenOnly ? 1 : numChannels, midSide && ! listenOnly);
             }
         }
     }
@@ -262,7 +272,7 @@ private:
         configured = (int) resolution;
         const auto& frame = frames[(size_t) configured];
         fftSize = frame.size;
-        hop = fftSize / 4;
+        hop = listenOnly ? fftSize : fftSize / 4; // listening only, the frames needn't overlap
         numBins = fftSize / 2 + 1;
 
         const auto binHz = sampleRate / fftSize;
@@ -354,6 +364,15 @@ private:
             }
 
             updateCuts (paths[p], frame.fullScalePower);
+        }
+
+        // Listening only (analysis): the cuts are worked out, the audio isn't touched.
+        if (listenOnly)
+        {
+            for (size_t ch = 0; ch < numChannels; ++ch)
+                std::copy (channels[ch].input.begin() + hop, channels[ch].input.begin() + fftSize, channels[ch].input.begin());
+            publish (numPaths);
+            return;
         }
 
         // Synthesis: apply the gains, inverse FFT, window and overlap-add.
@@ -528,6 +547,7 @@ private:
     std::array<int, numBands + 1> bandEdges {};
 
     float detectionCoefficient = 1.0f, attackCoefficient = 1.0f, releaseCoefficient = 1.0f;
+    bool listenOnly = false;
     Settings settings;
     std::atomic<float> deepestCutDb { 0.0f };
 };

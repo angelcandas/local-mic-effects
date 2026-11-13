@@ -536,9 +536,61 @@ namespace
     }
 
     //==========================================================================
+    // See MixOptions::smooth. What the resonance suppressor at its default settings would
+    // cut, measured in the analysis (Profile::resonanceDb), decides: a range that rings on
+    // enough of the playing time gets a Smooth focused there, as deep as the worst of it.
+    enum class SmoothUse { voice, instrument, master };
+
+    void planSmooth (MixMove& move, int trackId, const Profile& profile, SmoothUse use)
+    {
+        const auto range = use == SmoothUse::instrument ? Profile::top : Profile::harsh;
+        const auto fraction = use == SmoothUse::master ? juce::jmax (profile.getResonantFraction (Profile::harsh, 2.0f),
+                                                                     profile.getResonantFraction (Profile::top, 2.0f))
+                                                       : profile.getResonantFraction (range);
+        const auto worst = use == SmoothUse::master ? juce::jmax (profile.getResonanceDb (Profile::harsh), profile.getResonanceDb (Profile::top))
+                                                    : profile.getResonanceDb (range);
+        const auto enough = use == SmoothUse::master ? fraction >= 0.15 : fraction >= 0.15 && worst >= 4.0f;
+
+        if (! enough || profile.getActiveSeconds() < 2.0)
+            return;
+
+        move.trackId = trackId;
+        move.insert = fx::ModuleType::smooth;
+        const auto percent = juce::String (juce::roundToInt (fraction * 100.0)) + "%";
+
+        if (use == SmoothUse::voice)
+        {
+            const auto depth = juce::jlimit (3.0f, 9.0f, roundTo (worst * 0.8f, 0.5));
+            move.values = { { "smoothOn", 1.0f }, { "smoothDepth", depth }, { "smoothThreshold", 6.0f }, { "smoothSharpness", 60.0f },
+                            { "smoothFocus", 30.0f }, { "smoothLowHz", 1500.0f }, { "smoothHighHz", 10000.0f },
+                            { "smoothAttack", 5.0f }, { "smoothRelease", 120.0f }, { "smoothMix", 100.0f }, { "smoothResolution", 2.0f } };
+            move.reasons.add ("Smooth 1.5-10 kHz, up to -" + juce::String (depth, 1) + " dB: narrow harsh peaks ring on "
+                              + percent + " of the singing, so they come down only while they ring");
+        }
+        else if (use == SmoothUse::instrument)
+        {
+            const auto depth = juce::jlimit (3.0f, 8.0f, roundTo (worst * 0.8f, 0.5));
+            move.values = { { "smoothOn", 1.0f }, { "smoothDepth", depth }, { "smoothThreshold", 6.0f }, { "smoothSharpness", 70.0f },
+                            { "smoothFocus", 50.0f }, { "smoothLowHz", 4000.0f }, { "smoothHighHz", 18000.0f },
+                            { "smoothAttack", 5.0f }, { "smoothRelease", 250.0f }, { "smoothMix", 100.0f }, { "smoothResolution", 2.0f } };
+            move.reasons.add ("Smooth 4-18 kHz, up to -" + juce::String (depth, 1) + " dB: the top end rings on narrow peaks ("
+                              + percent + " of the time, cymbals or a harsh top), turned down only while they ring");
+        }
+        else
+        {
+            move.atEnd = true;
+            move.values = { { "smoothOn", 1.0f }, { "smoothDepth", 3.0f }, { "smoothThreshold", 8.0f }, { "smoothSharpness", 50.0f },
+                            { "smoothFocus", 0.0f }, { "smoothLowHz", 200.0f }, { "smoothHighHz", 16000.0f },
+                            { "smoothAttack", 5.0f }, { "smoothRelease", 150.0f }, { "smoothMix", 100.0f }, { "smoothResolution", 2.0f } };
+            move.reasons.add ("Smooth, gently (up to -3 dB): narrow peaks stick out of the mix " + percent
+                              + " of the time; they come down only while they do");
+        }
+    }
+
+    //==========================================================================
     struct VoicePlan
     {
-        MixMove eq, dynEq, compressor, deEsser, saturation, exciter, echo, reverb, width, ride;
+        MixMove eq, smooth, dynEq, compressor, deEsser, saturation, exciter, echo, reverb, width, ride;
         double eqChange = 0.0;       // what the EQ does to its loudness
         double loudnessChange = 0.0; // what the EQ and compressor do to its loudness
         double peakChange = 0.0;     // roughly, to the peak
@@ -548,7 +600,7 @@ namespace
                          const juce::String& name, bool background = false)
     {
         VoicePlan plan;
-        for (auto* move : { &plan.eq, &plan.dynEq, &plan.compressor, &plan.deEsser, &plan.saturation, &plan.exciter, &plan.echo, &plan.reverb, &plan.width })
+        for (auto* move : { &plan.eq, &plan.smooth, &plan.dynEq, &plan.compressor, &plan.deEsser, &plan.saturation, &plan.exciter, &plan.echo, &plan.reverb, &plan.width })
             move->trackId = trackId;
         plan.eq.insert = fx::ModuleType::paraEq;
         plan.compressor.insert = fx::ModuleType::compressor;
@@ -717,6 +769,10 @@ namespace
         // note and the harshest ones. The bell cuts above a typical note's level there.
         if (options.dynamicEq)
             planDynamicEq (plan.dynEq, voice, background);
+
+        // Smooth when that range rings on narrow peaks note to note.
+        if (options.smooth)
+            planSmooth (plan.smooth, trackId, voice, SmoothUse::voice);
 
         // Compressor from how much the level swings between phrases.
         double compChange = 0.0;
@@ -1037,7 +1093,7 @@ namespace
             auto cleanOptions = options;
             cleanOptions.reverb = cleanOptions.echo = cleanOptions.exciter = cleanOptions.saturation = cleanOptions.width = false;
             auto vp = planVoice (id, profile, targets, cleanOptions, plan.notes, name, role == Role::backingVocal);
-            for (auto* move : { &vp.eq, &vp.dynEq, &vp.deEsser, &vp.compressor })
+            for (auto* move : { &vp.eq, &vp.smooth, &vp.dynEq, &vp.deEsser, &vp.compressor })
                 if (! move->values.empty())
                     plan.moves.push_back (*move);
             firstEq = ! vp.eq.values.empty();
@@ -1080,6 +1136,14 @@ namespace
                 plan.moves.push_back (eqMove);
                 firstEq = true;
                 eqChange = loudnessChangeDb (profile.getAverageSpectrum(), fx::ParametricEq::getMagnitudeDb (eq, bandCentres(), analysisRate));
+            }
+
+            if (options.smooth && role != Role::backing && role != Role::bass)
+            {
+                MixMove smooth;
+                planSmooth (smooth, id, profile, SmoothUse::instrument);
+                if (! smooth.values.empty())
+                    plan.moves.push_back (smooth);
             }
 
             if (options.compressor && role != Role::backing)
@@ -1407,7 +1471,7 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
         if (! measured.mix.has_value())
             plan.notes.add ("Listen again in Master mode: it measures the whole mix as it plays.");
         else
-            plan = planMaster (*measured.mix, options.masterLufs, currentMasterVolume);
+            plan = planMaster (*measured.mix, options.masterLufs, currentMasterVolume, options.smooth);
         return plan;
     }
 
@@ -1772,6 +1836,15 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             }
         }
 
+        // Smooth on drums and other instruments whose top end rings (cymbals).
+        if (options.smooth && ! makeRoomOnly && (role == Role::drums || role == Role::instrument || role == Role::other))
+        {
+            MixMove smooth;
+            planSmooth (smooth, id, profile, SmoothUse::instrument);
+            if (! smooth.values.empty())
+                plan.moves.push_back (smooth);
+        }
+
         // Snap (or softer hits) on the drums, as the style asks.
         if (options.transients && role == Role::drums && ! makeRoomOnly
             && (std::abs (targets.drumAttack) > 0.0f || std::abs (targets.drumSustain) > 0.0f))
@@ -1847,7 +1920,7 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
 
     for (const auto& [id, vp] : voicePlans)
     {
-        for (auto* move : { &vp.eq, &vp.dynEq, &vp.compressor, &vp.deEsser, &vp.saturation, &vp.exciter, &vp.echo, &vp.reverb, &vp.width, &vp.ride })
+        for (auto* move : { &vp.eq, &vp.smooth, &vp.dynEq, &vp.compressor, &vp.deEsser, &vp.saturation, &vp.exciter, &vp.echo, &vp.reverb, &vp.width, &vp.ride })
             if (! move->values.empty() || ! move->ride.empty())
                 plan.moves.push_back (*move);
     }
@@ -2000,7 +2073,7 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
 
 
 //==============================================================================
-MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVolume)
+MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVolume, bool smooth)
 {
     MixPlan plan;
     if (mix.getActiveSeconds() <= 0.0 || mix.integratedLufs <= -150.0f)
@@ -2097,6 +2170,15 @@ MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVol
     describe (airGain, "air (16 kHz)");
     if (eq.reasons.size() == 1)
         eq.reasons.add ("The tonal balance is already close to a finished master");
+
+    // Narrow peaks that stick out of the mix, taken down gently after the EQ.
+    if (smooth)
+    {
+        MixMove resonances;
+        planSmooth (resonances, master, mix, SmoothUse::master);
+        if (! resonances.values.empty())
+            plan.moves.push_back (resonances);
+    }
 
     // Loudness: the master fader goes to 0 dB (it comes after the limiter, so anything
     // else would move the ceiling); the master chain's input gain brings the mix up (or

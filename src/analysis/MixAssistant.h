@@ -153,6 +153,11 @@ struct MixOptions
     // Transient shaper on the drums: more snap for punchy styles, softer hits for gentle ones.
     bool transients = true;
 
+    // Smooth (resonance suppressor): on a voice whose 2-8 kHz rings on narrow peaks from
+    // note to note, on drums or other instruments whose top end rings (cymbals), and gently
+    // on the master in master mode when the mix has narrow peaks.
+    bool smooth = true;
+
     // Insert types each track already has (by track id). A voice that already has a
     // reverb or an echo keeps its own space: Auto Mix doesn't add or change one.
     std::map<int, std::vector<fx::ModuleType>> existingInserts;
@@ -218,7 +223,7 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
 // Master mode: a mastering chain on the master bus from the mix as it plays now
 // (mastering EQ towards a typical finished master's tonal balance, a gentle multiband,
 // width with a mono low end, a limiter towards the loudness target, a loudness meter).
-MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVolume);
+MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVolume, bool smooth = true);
 
 MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float currentMasterVolume);
 

@@ -91,6 +91,32 @@ double Profile::getActiveSeconds() const
     return (double) std::count (active.begin(), active.end(), true) * hopSeconds;
 }
 
+double Profile::getResonantFraction (ResonanceRange range, float minimumDb, const std::vector<bool>* mask) const
+{
+    int counted = 0, resonant = 0;
+    for (size_t i = 0; i < resonanceDb.size() && i < active.size(); ++i)
+        if (mask != nullptr ? (i < mask->size() && (*mask)[i]) : active[i])
+        {
+            ++counted;
+            if (resonanceDb[i][(size_t) range] >= minimumDb)
+                ++resonant;
+        }
+    return counted > 0 ? (double) resonant / counted : 0.0;
+}
+
+float Profile::getResonanceDb (ResonanceRange range, double fraction, const std::vector<bool>* mask) const
+{
+    std::vector<float> cuts;
+    for (size_t i = 0; i < resonanceDb.size() && i < active.size(); ++i)
+        if (mask != nullptr ? (i < mask->size() && (*mask)[i]) : active[i])
+            cuts.push_back (resonanceDb[i][(size_t) range]);
+    if (cuts.empty())
+        return 0.0f;
+    const auto nth = cuts.begin() + (long) ((double) (cuts.size() - 1) * juce::jlimit (0.0, 1.0, fraction));
+    std::nth_element (cuts.begin(), nth, cuts.end());
+    return *nth;
+}
+
 double Profile::getPitchedFraction() const
 {
     int activeFrames = 0, pitched = 0;
@@ -225,6 +251,10 @@ Analyser::Analyser (double sampleRate)
     pitch.prepare (sampleRate);
     pitch.setAutoAnalyse (false); // once per hop, in endHop()
 
+    resonance.setListenOnly (true);
+    resonance.prepare ({ sampleRate, (juce::uint32) hopSize, 1 });
+    hopMono.reserve ((size_t) hopSize);
+
     history.assign ((size_t) fftSize, 0.0f);
     fftData.assign ((size_t) fftSize * 2, 0.0f);
     window.resize ((size_t) fftSize);
@@ -254,6 +284,7 @@ void Analyser::push (const float* left, const float* right, int numSamples)
 
         const auto mono = 0.5f * (l + r);
         pitch.push (&mono, 1);
+        hopMono.push_back (mono);
         history[(size_t) historyPos] = mono;
         historyPos = (historyPos + 1) % fftSize;
 
@@ -276,6 +307,25 @@ void Analyser::endHop()
     const auto last = hopPowers.size();
     const auto first = last >= 4 ? last - 4 : (size_t) 0;
     profile.momentaryLufs.push_back (toLufs (std::accumulate (hopPowers.begin() + (long) first, hopPowers.end(), 0.0) / 4.0));
+
+    // Resonances: what Smooth would be cutting now, deepest per range.
+    {
+        float* channel[] = { hopMono.data() };
+        juce::dsp::AudioBlock<float> block (channel, 1, hopMono.size());
+        resonance.process (juce::dsp::ProcessContextReplacing<float> (block));
+        hopMono.clear();
+
+        std::array<float, Profile::numResonanceRanges> deepest {};
+        for (int b = 0; b < fx::ResonanceSuppressor::numBands; ++b)
+        {
+            using R = fx::ResonanceSuppressor;
+            const auto hz = R::bandLowHz * std::pow (R::bandHighHz / R::bandLowHz, (b + 0.5) / R::numBands);
+            const auto range = hz < 500.0 ? -1 : hz < 2000.0 ? (int) Profile::body : hz < 8000.0 ? (int) Profile::harsh : (int) Profile::top;
+            if (range >= 0)
+                deepest[(size_t) range] = juce::jmax (deepest[(size_t) range], resonance.reductionBandsDb[(size_t) b].load (std::memory_order_relaxed));
+        }
+        profile.resonanceDb.push_back (deepest);
+    }
 
     // Spectrum of the last fftSize samples.
     for (int i = 0; i < fftSize; ++i)
@@ -683,7 +733,7 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress, ProfileCache* c
     const auto keyOf = [this] (const juce::ValueTree& session)
     {
         juce::String key;
-        key << "v2|" << sampleRate << "|" << songSeconds << "|" << (int) point << "|";
+        key << "v3|" << sampleRate << "|" << songSeconds << "|" << (int) point << "|";
         for (const auto& track : session)
             for (const auto& clip : track)
                 if (clip.hasType (daw::ids::CLIP) && clip.hasProperty (daw::ids::file))
