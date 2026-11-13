@@ -1521,7 +1521,8 @@ namespace
             }
 
             const auto wideProfile = analysis::analyse (makeCheckMix (30.0, -14.0, 0.0, true), sampleRate);
-            if (const auto* lows = find (analysis::checkMix (noTracks, wideProfile, context), "lowEndStereo"))
+            const auto wideReport = analysis::checkMix (noTracks, wideProfile, context);
+            if (const auto* lows = find (wideReport, "lowEndStereo"))
             {
                 plan = analysis::planFix (*lows, noTracks, wideProfile, context);
                 check (plan.moves.size() == 1 && plan.moves[0].insert == fx::ModuleType::imager && plan.moves[0].values.at ("imgMonoBelow") == 120.0f,
