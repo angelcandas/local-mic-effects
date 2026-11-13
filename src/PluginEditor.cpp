@@ -118,6 +118,9 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     processorRef.getSoundCheck().onChange = [this] (const juce::var& status)
     { webView->emitEventIfBrowserIsVisible ("soundCheck", status); };
 
+    processorRef.getLiveHistory().onChange = [this]
+    { webView->emitEventIfBrowserIsVisible ("liveHistory", describeLiveHistory()); };
+
     // MIDI learn tells the page what it learned, and passes on the actions only the page
     // can do (record, scenes).
     {
@@ -160,6 +163,7 @@ PluginEditor::~PluginEditor()
     daw.reset();
 
     processorRef.getSoundCheck().onChange = nullptr;
+    processorRef.getLiveHistory().onChange = nullptr;
 
     auto& map = processorRef.getMidiMap();
     map.onLearned = nullptr;
@@ -345,6 +349,21 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                            else
                                                                complete (describe (processorRef.setModuleFile (*type, file), false));
                                                        });
+                       })
+
+                       // (action, name?) -> { undo, redo, preset }: undo for Live mode (LiveHistory).
+                       // "undo", "redo", "label" (names the next step), "hold" / "release" (join every change
+                       // in between into one named step), "state".
+                       .withNativeFunction ("liveHistory", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           auto& history = processorRef.getLiveHistory();
+                           if (action == "undo")  history.undo();
+                           if (action == "redo")  history.redo();
+                           if (action == "label") history.label (args.size() > 1 ? args[1].toString() : juce::String());
+                           if (action == "hold")  history.hold (args.size() > 1 ? args[1].toString() : juce::String());
+                           if (action == "release") history.release();
+                           complete (describeLiveHistory());
                        })
 
                        // (action, on) -> { muted, dry }. "mute": the panic button; "dry": hear the mic without effects.
@@ -678,6 +697,35 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                        });
                        })
 
+                       // () -> { ok, error, tracks }: the sing-along rows (backing track and recordings)
+                       // become DAW tracks at their places, in one undo step (standalone app).
+                       .withNativeFunction ("singAlongToDaw", [this] (const auto&, auto complete)
+                       {
+                           if (daw == nullptr || ! DawBridge::isAvailable())
+                           {
+                               auto* result = new juce::DynamicObject();
+                               result->setProperty ("ok", false);
+                               result->setProperty ("error", "The DAW is only in the standalone app.");
+                               complete (juce::var (result));
+                               return;
+                           }
+
+                           auto& multitrack = processorRef.getMultitrack();
+                           const auto rate = multitrack.getSampleRate();
+                           std::vector<DawBridge::SingAlongRow> rows;
+                           int recording = 0;
+                           for (const auto& track : multitrack.getTracks())
+                           {
+                               if (! track->file.existsAsFile())
+                                   continue; // rendered copies (Practice) have no file
+                               rows.push_back ({ track->file,
+                                                 track->isTake ? "Recording " + juce::String (++recording) : track->name,
+                                                 (double) track->start / rate, (double) track->audio.getNumSamples() / rate,
+                                                 juce::Decibels::gainToDecibels (track->gain.load(), -60.0f), track->muted.load() });
+                           }
+                           complete (daw->addSingAlongTracks (rows));
+                       })
+
                        // (id, { gain?, muted? }) -> undefined
                        .withNativeFunction ("setTrack", [this] (const auto& args, auto complete)
                        {
@@ -800,6 +848,16 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
 void PluginEditor::resized()
 {
     webView->setBounds (getLocalBounds());
+}
+
+juce::var PluginEditor::describeLiveHistory()
+{
+    auto& history = processorRef.getLiveHistory();
+    auto* state = new juce::DynamicObject();
+    state->setProperty ("undo", history.getUndoName());
+    state->setProperty ("redo", history.getRedoName());
+    state->setProperty ("preset", processorRef.getCurrentProgram());
+    return juce::var (state);
 }
 
 void PluginEditor::openHelp (const juce::String& what)

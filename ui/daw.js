@@ -5805,9 +5805,13 @@ export function initDaw() {
     backdrop.hidden = false;
     ok.focus();
   });
+  // Switching is instant, as in Live's Tab or FL's Pattern/Song switch: it only asks when
+  // a recording (DAW, sing-along or looper) would be stopped by it.
+  const recordingNow = () => Boolean(screen.status?.recording)
+    || Boolean(document.querySelector(".studio.is-recording, .looper[data-state=recording], .looper[data-state=closing], .looper[data-state=overdubbing]"));
   const requestMode = async (toDaw) => {
     if (toDaw === screen.active) return;
-    if (await confirmSwitch(toDaw)) daw("mode", { daw: toDaw });
+    if (!recordingNow() || await confirmSwitch(toDaw)) daw("mode", { daw: toDaw });
   };
 
   const renderLiveTracks = () => {

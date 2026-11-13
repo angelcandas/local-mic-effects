@@ -90,6 +90,12 @@ public:
     struct LoopLayer { juce::File file; float gainDecibels = 0.0f; bool muted = false; };
     juce::var addLoopTracks (const std::vector<LoopLayer>&, double loopSeconds, int repeats, double bpm, int beatsPerBar);
 
+    // Live mode's sing-along rows as DAW tracks: each row (backing track or recording) on its
+    // own track at its place, with its level and mute. One undo step. -> { ok, error, tracks }
+    struct SingAlongRow { juce::File file; juce::String name; double startSeconds = 0.0, lengthSeconds = 0.0;
+                          float gainDecibels = 0.0f; bool muted = false; };
+    juce::var addSingAlongTracks (const std::vector<SingAlongRow>&);
+
     // The tests run outside the standalone app; this lets them switch DAW mode on.
     static inline bool availableForTesting = false;
 

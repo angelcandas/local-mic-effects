@@ -827,6 +827,30 @@ namespace
 
         void systemRequestedQuit() override
         {
+            // Loops live only in memory: say so before they're lost (Save WAV or Send to DAW keeps them).
+            auto* holder = mainWindow != nullptr ? mainWindow->pluginHolder.get() : pluginHolder.get();
+            auto* micfx = holder != nullptr ? dynamic_cast<PluginProcessor*> (holder->processor.get()) : nullptr;
+            if (! quitConfirmed && micfx != nullptr && micfx->getLooper().getNumLayers() > 0
+                && juce::ModalComponentManager::getInstance()->getNumModalComponents() == 0)
+            {
+                const auto layers = micfx->getLooper().getNumLayers();
+                auto options = juce::MessageBoxOptions::makeOptionsOkCancel (
+                    juce::MessageBoxIconType::WarningIcon, "Quit and lose the loop?",
+                    "The looper still holds " + juce::String (layers) + (layers == 1 ? " layer" : " layers")
+                        + ". Loops are not saved with the app: use Save WAV or Send to DAW in the looper to keep them.",
+                    "Quit", "Cancel", mainWindow.get());
+                juce::AlertWindow::showAsync (options, [] (int result)
+                {
+                    if (result == 1)
+                        if (auto* app = dynamic_cast<MicFXApp*> (juce::JUCEApplicationBase::getInstance()))
+                        {
+                            app->quitConfirmed = true;
+                            app->systemRequestedQuit();
+                        }
+                });
+                return;
+            }
+
             if (pluginHolder != nullptr)
                 pluginHolder->savePluginState();
 
@@ -848,6 +872,8 @@ namespace
         }
 
     private:
+        bool quitConfirmed = false;
+
         std::unique_ptr<juce::StandalonePluginHolder> createPluginHolder()
         {
             return std::make_unique<juce::StandalonePluginHolder> (appProperties.getUserSettings(),

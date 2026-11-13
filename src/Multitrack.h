@@ -1,9 +1,12 @@
 #pragma once
 
 #include <juce_audio_formats/juce_audio_formats.h>
+#include <juce_data_structures/juce_data_structures.h>
 #include <juce_events/juce_events.h>
 
 #include "analysis/Chords.h"
+
+#include <map>
 
 // A small multi-track player for singing along: a backing track plus the takes you
 // record, laid out on one timeline and mixed into the output while the transport plays.
@@ -51,6 +54,12 @@ public:
 
     // Synchronous version for tests. Returns the new track's id, or -1.
     int loadNow (const juce::File&, bool isTake, juce::int64 startSample);
+
+    // The sing-along rows that come from files (backing track and takes), with their place,
+    // volume and mute, so they come back after a restart. restore replaces every row;
+    // files that are gone are left out. Message thread.
+    juce::ValueTree saveSession() const;
+    void restoreSession (const juce::ValueTree&);
 
     void removeTrack (int id);
     void setTrackGain (int id, float gain);
@@ -107,6 +116,7 @@ private:
     int nextId = 1;
 
     std::vector<std::shared_ptr<Track>> tracks; // message thread, ordered by id
+    std::map<int, std::pair<float, bool>> pendingMix; // gain and mute for rows still loading
 
     juce::SpinLock liveLock;
     std::vector<Track*> live; // what the audio thread mixes

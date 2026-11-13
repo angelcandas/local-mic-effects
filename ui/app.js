@@ -793,6 +793,7 @@ class Rack {
 
   // Every control of the module, and its in/out gain, back to its default (the power stays on).
   resetModule(module) {
+    liveHistory("label", `Reset ${module.name}`);
     const key = MODULE_KEYS[module.id];
     for (const control of module.controls) {
       const params = [control.param, control.scaleParam].filter(Boolean);
@@ -981,6 +982,49 @@ class Rack {
 
 //==============================================================================
 const presetBar = new PresetBar(document.querySelector(".preset-bar"));
+
+//==============================================================================
+// Undo for Live mode (src/LiveHistory): every change to the sound is one named step.
+// Two buttons beside the preset bar, Ctrl+Z / Ctrl+Shift+Z (Cmd on a Mac).
+const liveHistory = Juce.getNativeFunction("liveHistory");
+const liveUndo = (() => {
+  const group = html("div", "live-undo");
+  const make = (action, glyph) => {
+    const b = html("button", "icon-button", glyph);
+    b.type = "button";
+    b.disabled = true;
+    b.addEventListener("click", () => run(action));
+    group.append(b);
+    return b;
+  };
+  const undoButton = make("undo", "↶");
+  const redoButton = make("redo", "↷");
+  document.querySelector(".preset-bar").append(group);
+  let last = { undo: "", redo: "" };
+  const show = (state) => {
+    if (!state || typeof state !== "object") return;
+    const loaded = state.undo && state.undo !== last.undo && state.undo.startsWith("Load preset") && !state.redo;
+    last = state;
+    undoButton.disabled = !state.undo;
+    redoButton.disabled = !state.redo;
+    undoButton.title = state.undo ? `Undo ${state.undo} (${keyText("Ctrl+Z")})` : "Nothing to undo";
+    redoButton.title = state.redo ? `Redo ${state.redo} (${keyText("Ctrl+Shift+Z")})` : "Nothing to redo";
+    undoButton.setAttribute("aria-label", undoButton.title);
+    redoButton.setAttribute("aria-label", redoButton.title);
+    if (loaded) recorderBar?.setStatus(`${state.undo.replace("Load preset", "Loaded")}. ${keyText("Ctrl+Z")} puts the sound before it back.`);
+    if (typeof state.preset === "number") presetBar.syncFromHost(state.preset);
+  };
+  function run(action) {
+    return liveHistory(action).then((state) => {
+      show(state);
+      const name = action === "undo" ? state?.redo : state?.undo;
+      if (name) recorderBar?.setStatus(`${action === "undo" ? "Undid" : "Redid"} ${name}.`);
+    });
+  }
+  window.__JUCE__.backend.addEventListener("liveHistory", show);
+  liveHistory("state").then(show);
+  return { run };
+})();
 const markModified = () => presetBar.markModified();
 
 const rack = new Rack({
@@ -1147,6 +1191,8 @@ class Tracks {
 
     studio.querySelectorAll(".add-track, .add-track-inline").forEach((button) =>
       button.addEventListener("click", () => this.loadBacking()));
+    this.openInDaw = studio.querySelector(".open-in-daw");
+    this.openInDaw.addEventListener("click", () => this.sendToDaw());
 
     this.toggleButton.addEventListener("click", () => {
       const collapsed = studio.classList.toggle("is-collapsed");
@@ -1193,7 +1239,17 @@ class Tracks {
     }
 
     this.container.classList.toggle("has-tracks", this.rows.size > 0);
+    this.openInDaw.hidden = this.rows.size === 0 || document.querySelector(".topbar .mode-switch").hidden;
     this.redraw();
+  }
+
+  // The backing track and every recording become DAW tracks, then the DAW opens.
+  async sendToDaw() {
+    const result = await Juce.getNativeFunction("singAlongToDaw")();
+    if (!result?.ok) return recorderBar.setStatus(result?.error || "Couldn't open the session in the DAW.", "is-error");
+    const count = result.tracks?.length ?? 0;
+    recorderBar.setStatus(`Added ${count} track${count === 1 ? "" : "s"} to the DAW project.`);
+    document.querySelector('.topbar .mode-switch [data-mode="daw"]')?.click();
   }
 
   createRow(track) {
@@ -1417,6 +1473,7 @@ micCheckButton.addEventListener("click", () => {
       micCheckButton.textContent = "No sound";
     } else {
       const gain = clamp(current + (MIC_CHECK_TARGET - peak), state.properties.start, state.properties.end);
+      liveHistory("label", "Mic check");
       state.sliderDragStarted();
       state.setNormalisedValue(toNormalised(state, gain));
       state.sliderDragEnded();
@@ -1432,7 +1489,8 @@ new SoundCheckPanel(document.querySelector(".sound-check"));
 
 // The "?" overlay with the Live keys.
 const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["Ctrl+← / →", "Previous / next preset"],
-                   ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"], ["M", "Mute output (panic)"],
+                   ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"],
+                   ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo any change to the sound (presets, knobs, scenes, resets)"], ["M", "Mute output (panic)"],
                    ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["F1", "The user manual"], ["Esc", "Close"]];
 function toggleLiveKeys(show) {
   let overlay = document.querySelector(".live-keys");
@@ -1462,7 +1520,9 @@ document.addEventListener("keydown", (event) => {
   if (isTyping(event) || event.altKey) return;
   // A whole-sound change never sits on a bare arrow key: Ctrl+← / → (Cmd on a Mac) steps presets.
   if (event.metaKey || event.ctrlKey) {
+    const letter = event.key.toLowerCase();
     if (event.key === "ArrowLeft" || event.key === "ArrowRight") { event.preventDefault(); presetBar.step(event.key === "ArrowLeft" ? -1 : 1); }
+    else if (letter === "z" || letter === "y") { event.preventDefault(); liveUndo.run(letter === "y" || event.shiftKey ? "redo" : "undo"); }
     return;
   }
   if (event.target.closest?.("[role=slider]") && event.key.startsWith("Arrow")) return;

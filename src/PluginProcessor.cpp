@@ -51,6 +51,9 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
         }
     }
 
+    liveHistory.getPreset = [this] { return currentPreset.load(); };
+    liveHistory.setPreset = [this] (int index) { currentPreset = index; };
+
     // MIDI learn's own actions: step through the factory presets, the panic mute.
     midiMap.onPresetStep = [this] (int delta)
     {
@@ -403,6 +406,8 @@ void PluginProcessor::setCurrentProgram (int index)
     if (! juce::isPositiveAndBelow (index, (int) presets.size()))
         return;
 
+    if (juce::MessageManager::existsAndIsCurrentThread())
+        liveHistory.label (juce::String ("Load preset ") + presets[(size_t) index].name);
     currentPreset = index;
     applyPreset (*this, presets[(size_t) index]);
 }
@@ -458,6 +463,9 @@ void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
         tree.appendChild (files, nullptr);
     if (juce::JUCEApplicationBase::isStandaloneApp() && (setlist.size() > 0 || setlist.getFile() != juce::File()))
         tree.appendChild (setlist.getSnapshot(), nullptr); // the app's setlist survives a restart
+    if (juce::JUCEApplicationBase::isStandaloneApp() && juce::MessageManager::existsAndIsCurrentThread())
+        if (auto singAlong = multitrack.saveSession(); singAlong.getNumChildren() > 0)
+            tree.appendChild (singAlong, nullptr); // the sing-along rows survive a restart
 
     if (auto xml = tree.createXml())
         copyXmlToBinary (*xml, destData);
@@ -478,6 +486,13 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                 tree.removeChild (saved, nullptr);
             }
 
+            if (const auto singAlong = tree.getChildWithName ("SINGALONG"); singAlong.isValid())
+            {
+                if (juce::JUCEApplicationBase::isStandaloneApp() && juce::MessageManager::existsAndIsCurrentThread())
+                    multitrack.restoreSession (singAlong);
+                tree.removeChild (singAlong, nullptr);
+            }
+
             const auto files = tree.getChildWithName ("MODULE_FILES");
             tree.removeChild (files, nullptr);
             for (int i = 0; i < chain.size(); ++i)
@@ -490,6 +505,7 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                 }
 
             state.replaceState (tree);
+            liveHistory.clear(); // the loaded sound is where undo starts
         }
     }
 }
