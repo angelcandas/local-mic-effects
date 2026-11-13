@@ -5314,6 +5314,7 @@ class DawScreen {
     else this.movePlayhead();
     if (status.recording || this.rows.querySelector(".rec-region")) this.updateRecording();
     this.pianoRoll?.setStatus(status);
+    this.clipEditor?.setStatus?.(status);
     if (this.dockTab === "patterns") this.patternsPanel.setStatus(status);
   }
 
@@ -5365,6 +5366,12 @@ class DawScreen {
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
                ["V / B / G", "Select, cut and gain tools"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Ctrl+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
+    ["Clip editor (Wave, W)", [["1 / 2 / 4", "Open the Warp, Hitpoints or Quantize section (the open one is the tool); Esc closes it"],
+                               ["Click / drag (no tool open)", "Move the playhead / scroll; in the ruler, drag to mark a loop range"],
+                               ["Warp: click", "Pin a warp tab where the audio plays now"], ["Warp: drag", "Move that moment of the audio; it stretches between the tabs either side"],
+                               ["Warp: drag a handle (ruler)", "Slide a tab along the audio"], ["Warp: Alt+click / double-click", "Remove a tab (Delete: the selected ones)"],
+                               ["Warp: ← / → (Shift)", "Nudge the selected tabs 1 ms (10 ms)"], ["Warp: Tab / Shift+Tab", "Select the next / previous tab"],
+                               ["Warp: Ctrl/Cmd at the press", "Flip Hold neighbours for one drag"], ["Ctrl/Cmd + scroll", "Zoom (or drag the overview box's edges)"]]],
     ["Patterns tab (after clicking in it)", [["- / =", "Previous / next pattern"], ["↑ / ↓", "Select the row above / below"],
                   ["Ctrl+Shift+← / →", "Rotate the selected row's steps"], ["Ctrl+C / V", "Copy / paste the selected row's steps"],
                   ["Right-click a row's light", "Solo the row (again: every row plays)"]]],
