@@ -208,12 +208,13 @@ Parameters::Parameters (Layout& l)
         decibels (l, key + "OutGain", name + " Out Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
     };
 
-    // (The denoiser, auto level, the resonance suppressor, the cabinet, the IR reverb and the amp
-    // came later: their gains are at the end with their other parameters.)
+    // (The denoiser, auto level, the resonance suppressor, the cabinet, the IR reverb, the amp
+    // and the opto compressor came later: their gains are at the end with their other parameters.)
     for (int i = 0; i < fx::numModuleTypes; ++i)
         if (const auto type = (fx::ModuleType) i;
             type != fx::ModuleType::denoise && type != fx::ModuleType::autoLevel && type != fx::ModuleType::smooth
-            && type != fx::ModuleType::cab && type != fx::ModuleType::irReverb && type != fx::ModuleType::amp)
+            && type != fx::ModuleType::cab && type != fx::ModuleType::irReverb && type != fx::ModuleType::amp
+            && type != fx::ModuleType::opto)
             moduleGains (type);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
@@ -341,4 +342,29 @@ Parameters::Parameters (Layout& l)
     number (l, "ampMaster", "Amp Master", 0.0f, 10.0f, 0.1f, 3.0f, "");
     decibels (l, "ampOutput", "Amp Output", -24.0f, 12.0f, 0.0f);
     moduleGains (fx::ModuleType::amp);
+
+    // Voice dynamics (VocalDynamics.h), after those. New choices default to the original
+    // behaviour, so saved sessions sound the same.
+    choice (l, "compStyle", "Comp Style", { "Clean", "Punch", "Glue" }, 0);
+    decibels (l, "compKnee", "Comp Knee", 0.0f, 24.0f, 0.0f);
+    percent (l, "compMix", "Comp Mix", 100.0f);
+    toggle (l, "compAutoMakeup", "Comp Auto Makeup");
+
+    toggle (l, "optoOn", "Opto On");
+    percent (l, "optoAmount", "Opto Amount", 30.0f);
+    decibels (l, "optoOutput", "Opto Output", -12.0f, 24.0f, 0.0f);
+    choice (l, "optoMode", "Opto Mode", { "Compress", "Limit" }, 0);
+    percent (l, "optoMix", "Opto Mix", 100.0f);
+    moduleGains (fx::ModuleType::opto);
+
+    decibels (l, "gateRange", "Gate Range", 6.0f, 80.0f, 80.0f);
+    number (l, "gateHold", "Gate Hold", 0.0f, 500.0f, 1.0f, 0.0f, "ms", 100.0f);
+    number (l, "gateRelease", "Gate Release", 10.0f, 2000.0f, 1.0f, 150.0f, "ms", 200.0f);
+    toggle (l, "gateFocus", "Gate Focus");
+
+    choice (l, "deessMode", "De-esser Mode", { "Classic", "Smart" }, 0);
+    percent (l, "deessAmount", "De-esser Amount", 50.0f);
+    decibels (l, "deessRange", "De-esser Range", 0.0f, 24.0f, 24.0f);
+    choice (l, "deessBand", "De-esser Band", { "Split", "Wide" }, 0);
+    toggle (l, "deessListen", "De-esser Listen");
 }
