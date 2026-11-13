@@ -14649,6 +14649,41 @@ static void testPatterns()
                "a block shorter than its pattern plays only what fits");
         edit.setPatternClip (block, 4.0, 8.0, 0);
 
+        // An offset (left trim): the block starts a beat into the pattern and repeats on its grid.
+        {
+            const auto sorted = [&]
+            {
+                auto e = daw::patterns::getBlockEvents (edit.getState(), drums, tempo);
+                std::sort (e.begin(), e.end(), [] (const auto& a, const auto& b) { return a.on < b.on || (a.on == b.on && a.pitch < b.pitch); });
+                return e;
+            };
+            edit.setPatternClip (block, 4.0, 4.0, 0);
+            edit.setPatternClipOffset (block, 5.0); // wraps into one pass: 1 beat
+            timeline = sorted();
+            check (near ((double) edit.getPatternClip (block)[daw::ids::offset], 1.0) && timeline.size() == 6 && near (timeline.front().on, 2.0)
+                       && near (timeline.back().on, tempo.toSeconds (7.0)) && timeline.back().pitch == 36,
+                   "a block with an offset starts mid-pattern and repeats on its grid (" + juce::String ((int) timeline.size()) + " notes)");
+            edit.getPatternClip (block).setProperty (daw::ids::offset, "1", nullptr); // as a saved project reads it
+            check (sorted().size() == 6 && near (sorted().front().on, 2.0), "(a text-typed offset too)");
+
+            // Cutting a block plays the same notes as before.
+            edit.setPatternClip (block, 4.0, 8.0, 0);
+            const auto whole = sorted();
+            const auto right = edit.splitPatternClip (block, 6.5);
+            const auto cut = sorted();
+            auto same = whole.size() == cut.size();
+            for (size_t i = 0; same && i < whole.size(); ++i)
+                same = whole[i].pitch == cut[i].pitch && std::abs (whole[i].on - cut[i].on) < 1.0e-9;
+            check (right >= 0 && same && near ((double) edit.getPatternClip (right)[daw::ids::start], 6.5)
+                       && near ((double) edit.getPatternClip (right)[daw::ids::offset], 3.5) && near ((double) edit.getPatternClip (block)[daw::ids::length], 2.5),
+                   "cutting a block plays the same notes, the right half carrying on in the pattern");
+            check (edit.splitPatternClip (block, 4.0) < 0 && edit.splitPatternClip (block, 20.0) < 0, "(a cut at the edge or outside does nothing)");
+            edit.removePatternClip (right);
+            edit.setPatternClipOffset (block, 0.0);
+            edit.setPatternClip (block, 4.0, 8.0, 0);
+            check (! edit.getPatternClip (block).hasProperty (daw::ids::offset), "(no offset is stored as none)");
+        }
+
         // Swing moves only the odd steps, by swing x step / 3.
         edit.setSteps (patternId, drums, 42, { { 1, 80 }, { 2, 80 } });
         edit.setPatternSwing (patternId, 1.0);
@@ -15069,6 +15104,23 @@ static void testPatterns()
             run ("undo");
             run ("undo");
             check ((int) edit.getPatternClip (blockId)[daw::ids::pattern] == (int) patternId && edit.getPatterns().size() == 1, "(undo)");
+
+            // Block editing: an offset, and the Cut tool.
+            check ((bool) run ("setPatternClip", args ({ { "id", blockId }, { "offset", 1.0 } }))["ok"]
+                       && near ((double) lastSession()["patternClips"][0]["offset"], 1.0), "setPatternClip takes an offset, described");
+            const auto block = edit.getPatternClip (blockId);
+            const auto at = (double) block[daw::ids::start] + 1.5;
+            const auto half = run ("splitPatternClip", args ({ { "id", blockId }, { "at", at } }));
+            check (half.isInt() && edit.getPatternClips().size() == 2 && edit.getUndoManager().getUndoDescription() == "Cut pattern block",
+                   "splitPatternClip cuts a block in one undo step");
+            check (! (bool) run ("splitPatternClip", args ({ { "id", blockId }, { "at", -5.0 } }))["ok"], "(not outside it)");
+            const auto copy = run ("addPatternClip", args ({ { "pattern", patternId }, { "start", 64.0 }, { "length", 2.0 }, { "offset", 0.5 }, { "mute", true } }));
+            check (copy.isInt() && near ((double) edit.getPatternClip (copy)[daw::ids::offset], 0.5) && (bool) edit.getPatternClip (copy)[daw::ids::mute],
+                   "addPatternClip takes an offset and a mute (a pasted block)");
+            run ("undo");
+            run ("undo");
+            run ("undo");
+            check (edit.getPatternClips().size() == 1 && ! edit.getPatternClip (blockId).hasProperty (daw::ids::offset), "(undo)");
         }
         run ("setPartMutes", args ({ { "pattern", patternId }, { "parts", list ({ args ({ { "track", kit }, { "muted", list ({}) } }) }) } }));
         run ("setPart", args ({ { "pattern", patternId }, { "track", kit }, { "levels", args ({ { "36", 1.0 } }) } }));
