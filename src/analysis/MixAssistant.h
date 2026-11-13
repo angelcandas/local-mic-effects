@@ -236,8 +236,9 @@ juce::String getStyleName (MixStyle);
 std::optional<Role> guessRoleFromName (const juce::String& trackName);
 
 // A guess from the name, then the sound: voice when mostly pitched; drums when short
-// unpitched hits; bass when nearly all of it is under 250 Hz; backing when it plays
-// most of the song; otherwise instrument, or other when it's silent.
+// unpitched hits; bass when nearly all of it is under 250 Hz; backing (a karaoke track)
+// when it covers the whole range (kick and bass, the band, cymbals) for most of the song;
+// otherwise instrument, or other when it's silent.
 Role guessRole (const juce::String& trackName, const Profile&, double songSeconds);
 
 // A MIDI track's role from its instrument: the built-in synths by id ("builtin:pad"),

@@ -21,7 +21,9 @@ public:
     struct Settings
     {
         double sampleRate = 48000.0;
-        int bitDepth = 24;          // 16 (dithered), 24, or 32 (float)
+        juce::String format = "wav"; // "wav", "aiff", "flac" or "ogg" (see formatExtension)
+        int bitDepth = 24;          // 16 (dithered), 24, or 32 (float, WAV only); ignored for ogg
+        int oggQuality = 8;         // ogg only: index into oggQualityNames (0 = smallest)
         double start = 0.0;         // seconds
         double end = -1.0;          // seconds; < 0 = the end of the last clip
         double tail = 2.0;          // seconds after `end` so reverb and echo ring out
@@ -37,6 +39,12 @@ public:
         float peakDecibels = -100.0f; // of the written file
         juce::Array<juce::File> files;
     };
+
+    // The file extension for a format name (unknown names give "wav"), the bit depths it can
+    // hold, and the names of ogg's quality steps (index = Settings::oggQuality).
+    static juce::String formatExtension (const juce::String& format);
+    static juce::Array<int> formatBitDepths (const juce::String& format);
+    static juce::StringArray oggQualityNames();
 
     // Called with 0..1. Return false to cancel.
     using Progress = std::function<bool (double)>;

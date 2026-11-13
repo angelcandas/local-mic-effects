@@ -169,6 +169,8 @@ public:
     // An effect plugin insert's running plugin (for its window), or null; and why it
     // didn't load (empty when it did, or when there's no such insert).
     InstrumentPtr getInsertPlugin (int insertId) const;
+    // The delay an insert adds right now, in samples (0 if it isn't playing).
+    int getInsertLatencySamples (int insertId) const;
     juce::String getInsertPluginError (int insertId) const;
     // Builds the graph again when a plugin now reports a different delay than it did (a
     // look-ahead switched on in its window), so latency compensation follows. Message
@@ -265,6 +267,7 @@ private:
         juce::String insertLayout; // insert ids in order: a different layout needs a new strip
         fx::FxChain chain;
         std::map<int, fx::Module*> modulesByInsertId;
+        std::map<int, juce::ValueTree> insertTrees; // the INSERT each module was made for
         std::vector<fx::modules::Pitch*> pitches; // its autotune / harmonizer inserts
         int latencyAtBuild = 0; // the chain's delay when the current graph was built (message thread)
 
@@ -452,6 +455,17 @@ private:
     int blockSize = 512;
 
     std::map<int, std::shared_ptr<Strip>> strips; // message thread: the current strip per id
+
+    // While rebuild() runs: every insert module of the graph being replaced, by insert id,
+    // with the INSERT it belongs to. A new chain takes over the module of an INSERT that
+    // is still there (on any track: a moved insert keeps running), instead of a fresh one.
+    struct RunningInsert
+    {
+        std::shared_ptr<fx::Module> module;
+        juce::ValueTree tree;
+    };
+    std::map<int, RunningInsert> runningInserts;
+    std::shared_ptr<fx::Module> takeRunningInsert (const juce::ValueTree& insert);
     std::map<int, AudioPool::Audio> lastClipAudio;
     std::map<int, warp::Map> lastClipMap; // the map of what each clip played in the last graph
 

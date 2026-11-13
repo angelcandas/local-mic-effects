@@ -82,7 +82,8 @@ double Map::getRateAt (double t) const noexcept
 
 juce::String Map::toString() const
 {
-    if (isIdentity())
+    // Markers that change nothing are still kept: they're warp tabs pinned, ready to drag.
+    if (markers.empty())
         return {};
 
     juce::StringArray parts;
@@ -1060,9 +1061,20 @@ Render::Render (std::shared_ptr<const juce::AudioBuffer<float>> sourceIn, double
         else
         {
             key << "|m" << juce::String (lo, 7) << ":" << juce::String (map.toSource (from + lo), 7);
-            for (const auto& m : map.getMarkers())
-                if (m.target > from + lo && m.target < from + hi)
-                    key << ";" << juce::String (m.target - from, 7) << ":" << juce::String (m.source, 7);
+            // A marker on the straight line between its neighbours changes nothing (a warp
+            // tab just pinned where the audio plays), so it doesn't change the key either.
+            const auto& all = map.getMarkers();
+            for (size_t i = 0; i < all.size(); ++i)
+            {
+                const auto& m = all[i];
+                if (m.target <= from + lo || m.target >= from + hi)
+                    continue;
+                const auto slopeBefore = i > 0 ? (m.target - all[i - 1].target) / (m.source - all[i - 1].source) : 1.0;
+                const auto slopeAfter = i + 1 < all.size() ? (all[i + 1].target - m.target) / (all[i + 1].source - m.source) : 1.0;
+                if (std::abs (slopeBefore - slopeAfter) < 1.0e-7)
+                    continue;
+                key << ";" << juce::String (m.target - from, 7) << ":" << juce::String (m.source, 7);
+            }
             key << ";" << juce::String (hi, 7) << ":" << juce::String (map.toSource (from + hi), 7);
         }
 

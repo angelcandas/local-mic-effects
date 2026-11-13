@@ -459,6 +459,42 @@ namespace
         return rideLoudnessChange (track, curve);
     }
 
+    // A finished backing (Role::backing): a wide, gentle dip (bell 3) centred where the voice
+    // is strongest between 1 and 4 kHz, as deep as the backing covers the voice there
+    // (none when the voice is 6 dB clear already, at most 2.5 dB). Not when the masking dip
+    // (bell 2) already sits within half an octave of it.
+    void planVocalPocket (fx::ParametricEq::Settings& eq, MixMove& move, const Masking& masking, const Profile& voice)
+    {
+        const auto voiceSpectrum = voice.getAverageSpectrum (&voice.active);
+        int centre = -1;
+        double cover = 0.0;
+        int count = 0;
+        for (int b = 0; b < numBands; ++b)
+        {
+            const auto hz = getBandCentre (b);
+            if (hz < 1000.0 || hz > 4000.0)
+                continue;
+            cover += masking.backingOverVoiceDb[(size_t) b];
+            ++count;
+            if (centre < 0 || voiceSpectrum[(size_t) b] > voiceSpectrum[(size_t) centre])
+                centre = b;
+        }
+        if (centre < 0 || count == 0 || masking.overlapSeconds <= 0.0)
+            return;
+
+        const auto hz = getBandCentre (centre);
+        if (eq.bells[1].db < 0.0f && std::abs (std::log2 (eq.bells[1].hz / hz)) < 0.5)
+            return;
+
+        const auto depth = roundTo (juce::jlimit (0.0, 2.5, 0.25 * (cover / count + 6.0)), 0.5);
+        if (depth < 1.0)
+            return;
+
+        eq.bells[2] = { (float) roundTo (hz, 10.0), (float) -depth, 0.7f };
+        move.reasons.add ("Vocal pocket " + formatDb (eq.bells[2].db) + " around " + formatHz (hz)
+                          + ", wide: a finished mix made for a voice that isn't there, so it makes room without touching its instruments");
+    }
+
     bool hasAny (const MixOptions& options, int trackId, std::initializer_list<fx::ModuleType> types)
     {
         const auto it = options.existingInserts.find (trackId);
@@ -1914,7 +1950,7 @@ juce::String getRoleName (Role role)
     {
         case Role::voice:        return "Voice";
         case Role::backingVocal: return "Background vocals";
-        case Role::backing:      return "Instrumental";
+        case Role::backing:      return "Backing track (karaoke)";
         case Role::guitar:       return "Guitar";
         case Role::piano:        return "Piano / keys";
         case Role::pad:          return "Pad / strings";
@@ -1957,6 +1993,11 @@ std::optional<Role> guessRoleFromName (const juce::String& trackName)
         return false;
     };
 
+    // A song with the voice taken out ("No vocals", "Sin voz", "Karaoke") before anything
+    // that hears "vocal" in it.
+    if (hasPart ({ "karaoke", "no vocal", "novocal", "no voice", "no vox", "sin voz", "sin voces", "without vocal", "minus vocal", "vocals off" }))
+        return Role::backing;
+
     const auto vocal = hasPart ({ "vocal", "voice", "vox", "voz", "sing", "cant" }) || hasWord ({ "vo", "vx" });
     if (hasPart ({ "harmon", "choir", "background", "bgv", "bvs", "bckvoc", "segunda", "coro", "adlib", "ad lib" })
         || hasWord ({ "bv", "bvox", "bg", "backs" })
@@ -1981,7 +2022,9 @@ std::optional<Role> guessRoleFromName (const juce::String& trackName)
         return Role::pad;
     if (hasPart ({ "synth", "arp", "pluck", "lead synth", "sintetizador" }))
         return Role::synth;
-    if (hasPart ({ "backing", "music", "beat", "instrumental", "karaoke", "pista", "song", "mix", "band", "playback" }))
+    if (hasPart ({ "backing", "music", "beat", "instrumental", "karaoke", "pista", "song", "mix", "band", "playback", "accomp", "acompa",
+                   "minus one", "minusone", "backtrack", "base musical" })
+        || hasWord ({ "inst", "instr", "bed", "base" }))
         return Role::backing;
     if (hasPart ({ "synth", "string", "pad", "violin", "cello", "viola", "sax", "trumpet", "brass", "horn", "flute", "flauta", "lead synth",
                    "arp", "pluck", "fx", "accordion", "acordeon", "harp", "marimba", "bells", "trombon", "orchestra", "other", "otros" }))
@@ -2036,13 +2079,16 @@ Role guessRole (const juce::String& trackName, const Profile& profile, double so
     // Drums are short unpitched hits (the level jumps from hop to hop); a bass has nearly
     // all of its energy under 250 Hz and next to nothing up top.
     const auto spectrum = profile.getAverageSpectrum();
-    double total = 0.0, low = 0.0, high = 0.0;
+    double total = 0.0, low = 0.0, high = 0.0, sub = 0.0, mid = 0.0;
     for (int b = 0; b < numBands; ++b)
     {
         const auto p = dbToPower (spectrum[(size_t) b]);
+        const auto hz = getBandCentre (b);
         total += p;
-        if (getBandCentre (b) <= 250.0) low += p;
-        if (getBandCentre (b) >= 5000.0) high += p;
+        if (hz <= 250.0) low += p;
+        if (hz <= 125.0) sub += p;
+        if (hz > 250.0 && hz < 4000.0) mid += p;
+        if (hz >= 5000.0) high += p;
     }
 
     double jumps = 0.0;
@@ -2052,14 +2098,20 @@ Role guessRole (const juce::String& trackName, const Profile& profile, double so
             jumps += std::abs (juce::jmax (-80.0f, profile.rmsDb[i]) - juce::jmax (-80.0f, profile.rmsDb[i - 1])), ++count;
     const auto meanJump = count > 0 ? jumps / count : 0.0;
 
+    // A finished backing (a karaoke track, the band on one track) covers the whole range at
+    // once: kick and bass down low, the band in the middle, cymbals up top, nearly all song.
+    const auto fullRange = total > 0.0 && sub / total >= 0.05 && mid / total >= 0.15 && high / total >= 0.003 && low / total <= 0.85;
+
     const auto pitched = profile.getPitchedFraction();
     if (pitched < 0.25 && meanJump > 4.0)
         return Role::drums;
     if (total > 0.0 && low / total > 0.85 && high / total < 0.01)
         return Role::bass;
+    if (fullRange && active > 0.8 * songSeconds)
+        return Role::backing; // a melody on top can read as pitched, but a voice has no kick under it
     if (pitched > 0.6)
         return Role::voice;
-    return active > 0.5 * songSeconds ? Role::backing : Role::instrument;
+    return fullRange && active > 0.5 * songSeconds ? Role::backing : Role::instrument;
 }
 
 //==============================================================================
@@ -2314,14 +2366,24 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
                                         + (fit && ! focusIsVoice ? " so " + leadName + " comes through" : " so the words come through"));
                 }
             }
+
+            // A finished backing is mixed for a voice that isn't there: a wide, gentle
+            // pocket where the voice is clearest (1-4 kHz), not cuts to each instrument.
+            if (role == Role::backing && (! fit || focusIsVoice))
+                planVocalPocket (eq, eqMove, masking, leadProfile);
         }
 
         double eqChange = 0.0;
         if (! eqMove.reasons.isEmpty())
         {
             eqMove.values = { { "peqOn", 1.0f }, { "peqLowCutOn", eq.lowCutOn ? 1.0f : 0.0f }, { "peqLowGain", 0.0f }, { "peqHighGain", 0.0f },
-                              { "peqHighCutOn", 0.0f }, { "peqBell1Gain", 0.0f }, { "peqBell3Gain", 0.0f },
+                              { "peqHighCutOn", 0.0f }, { "peqBell1Gain", 0.0f }, { "peqBell3Gain", eq.bells[2].db },
                               { "peqBell2Freq", eq.bells[1].hz }, { "peqBell2Gain", eq.bells[1].db }, { "peqBell2Q", eq.bells[1].q } };
+            if (eq.bells[2].db < 0.0f)
+            {
+                eqMove.values["peqBell3Freq"] = eq.bells[2].hz;
+                eqMove.values["peqBell3Q"] = eq.bells[2].q;
+            }
             if (eq.lowCutOn)
                 eqMove.values["peqLowCutFreq"] = eq.lowCutHz;
             plan.moves.push_back (eqMove);
@@ -2418,8 +2480,7 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
         }
 
         if (options.width && ! makeRoomOnly && ! colourWidth && ! juce::approximatelyEqual (targets.widthAmount, 100.0f)
-            && (role == Role::guitar || role == Role::piano || role == Role::pad || role == Role::synth || role == Role::instrument
-                || role == Role::backing))
+            && (role == Role::guitar || role == Role::piano || role == Role::pad || role == Role::synth || role == Role::instrument))
         {
             MixMove width;
             width.trackId = id;
@@ -2479,7 +2540,12 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             MixMove duck;
             duck.trackId = id;
             double whileSinging = 0.0;
-            const auto overall = planDuck (duck, profile, leadProfile, targets, whileSinging);
+            // A full backing is the whole band at once, so it's the one thing that can make
+            // room: it dips at least 2 dB under the voice (where the style dips at all).
+            auto duckTargets = targets;
+            if (role == Role::backing && targets.duckDb > 0.0f && (! fit || focusIsVoice))
+                duckTargets.duckDb = juce::jmax (targets.duckDb, 2.0f);
+            const auto overall = planDuck (duck, profile, leadProfile, duckTargets, whileSinging);
             if (! duck.ride.empty())
             {
                 plan.moves.push_back (duck);

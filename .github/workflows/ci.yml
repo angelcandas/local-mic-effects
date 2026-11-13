@@ -26,6 +26,11 @@ jobs:
           node-version: 22
       - name: Check every UI script for syntax errors
         run: for f in ui/*.js; do node --check "$f"; done
+      - name: Check every UI file is embedded in the app (release builds serve only those)
+        run: |
+          missing=0
+          for f in ui/*.js ui/*.css ui/*.html; do grep -q "^ *$f\$" CMakeLists.txt || { echo "::error::$f is not in juce_add_binary_data (CMakeLists.txt)"; missing=1; }; done
+          exit $missing
 
   linux:
     name: Linux build + tests
