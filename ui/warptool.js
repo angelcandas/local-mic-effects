@@ -14,6 +14,11 @@
 //   Ctrl/Cmd at the press         flips "Hold neighbours" (pin the note starts either side)
 //   Alt while dragging            no snap
 //
+// With several clips (lanes) and Edit: All clips, a click pins a tab at that moment in every
+// clip playing there, a drag moves them all by the same amount (each stretching between its
+// own neighbouring tabs) and Alt-click removes them all, in one undo step. Copy / Paste tabs
+// puts the active clip's tabs on the other clips at the same places on the timeline.
+//
 // Tabs are the clip's warp markers [[source, target], ...] (file seconds, rendered seconds)
 // as the session sends them; setWarp stores them (see src/daw/Warp.h). The waveform follows
 // the hand (the lane's drag/remap) and, while playing, the edit is heard (livePreview).
@@ -21,7 +26,10 @@ import { clamp, html } from "./widgets.js";
 import { livePreview, prefs, toSource, toTarget } from "./rhythm.js";
 
 const MAX_STRETCH = 7.9; // the engine drops a stretch over 8x (warp::Map)
-const GRAB_PX = 6, SNAP_PX = 8;
+const GRAB_PX = 6, SNAP_PX = 8, HANDLE_PX = 18;
+
+// Copied tabs, as timeline places: [[where the audio is on the timeline unwarped, where it plays]].
+let clipboard = null;
 
 export function createWarpTool(ctx) {
   const { screen, daw, RULER } = ctx;
@@ -46,7 +54,9 @@ export function createWarpTool(ctx) {
     selected = [];
     daw("clearWarp", { clips: [ctx.active().clip.id] });
   });
-  row.append(atHits, reset);
+  const copy = button("Copy tabs", "Copy the active clip's warp tabs (as places on the timeline)", () => copyTabs());
+  const paste = button("Paste tabs", "Put the copied tabs on the other clips (All clips) or on this one, at the same places on the timeline; tabs already there stay", () => pasteTabs());
+  row.append(atHits, reset, copy, paste);
   const hold = html("label", "rhythm-check");
   const holdBox = html("input");
   Object.assign(holdBox, { type: "checkbox", checked: prefs.get("holdNeighbours", false) });
@@ -61,6 +71,19 @@ export function createWarpTool(ctx) {
   const isSelected = (source) => selected.some((s) => Math.abs(s - source) < 1e-6);
   const perPx = () => ctx.perPx();
   const pointerY = (event) => event.clientY - ctx.wave.getBoundingClientRect().top;
+  // Where a tab's handle is: the ruler for one clip, the top of its lane with several.
+  const single = () => ctx.lanes.length < 2;
+  const inHandles = (event, lane) => {
+    const y = pointerY(event);
+    return single() ? y < RULER : y >= RULER + lane.top && y < RULER + lane.top + HANDLE_PX;
+  };
+  // Stores several clips' tabs in one undo step.
+  const storeAll = (entries) => {
+    if (!entries.length) return;
+    if (entries.length === 1) return store(entries[0].lane, entries[0].markers);
+    daw("setWarp", { id: entries[0].lane.clip.id, clips: entries.map(({ lane, markers }) => ({ id: lane.clip.id, markers: markers.length > 1 ? markers : [] })) });
+    screen.flushSession?.();
+  };
 
   // The tab under the pointer (by where it plays), within GRAB_PX.
   const tabAt = (lane, markers, renderedTime) => {
@@ -137,13 +160,16 @@ export function createWarpTool(ctx) {
     const time = lane.toRendered(ctx.timeAt(event.clientX));
     const markers = markersOf(lane);
     const index = tabAt(lane, markers, time);
+    if (lane !== ctx.active() && !ctx.editAll()) selected = [];
 
-    if (index >= 0 && (event.altKey || event.detail >= 2)) { removeTabs(lane, [index]); return true; }
-    if (inRuler) {
-      if (index >= 0) slideHandle(event, lane, markers, index);
-      else selectBox(event, lane);
+    if (ctx.editAll() && pointerY(event) >= RULER && !inHandles(event, lane)) {
+      if (event.altKey || event.detail >= 2) removeAllAt(ctx.timeAt(event.clientX));
+      else pressAll(event, lane);
       return true;
     }
+    if (index >= 0 && (event.altKey || event.detail >= 2)) { removeTabs(lane, [index]); return true; }
+    if (inHandles(event, lane) && index >= 0) { slideHandle(event, lane, markers, index); return true; }
+    if (inRuler) { selectBox(event, ctx.active()); return true; }
     press(event, lane, markers, index, time);
     return true;
   };
@@ -336,6 +362,134 @@ export function createWarpTool(ctx) {
     ctx.wave.addEventListener("pointercancel", up);
   };
 
+  //================================================================ every clip at once
+  // The lanes playing at a timeline moment (inside their window), not under time compare.
+  const lanesAt = (time) => ctx.lanes.filter((l) => !l.clip.timeBypass && time > l.clip.start + 1e-4 && time < l.clip.start + l.clip.length - 1e-4);
+
+  // Alt-click with All clips: the tabs at that moment go from every clip.
+  const removeAllAt = (time) => {
+    const entries = [];
+    for (const lane of lanesAt(time)) {
+      const markers = markersOf(lane);
+      const index = tabAt(lane, markers, lane.toRendered(time));
+      if (index < 0) continue;
+      const keep = markers.filter((_, i) => i !== index);
+      lane.settle(pictureOf(lane.map(), keep.length > 1 ? keep : []));
+      entries.push({ lane, markers: keep });
+    }
+    selected = [];
+    storeAll(entries);
+  };
+
+  // A click pins a tab at the same moment in every clip there; a drag moves them all together.
+  const pressAll = (event, under) => {
+    const raw = ctx.timeAt(event.clientX);
+    const { time: snappedRendered } = newTabTime(under, under.toRendered(raw), event);
+    const time = under.toTimeline(snappedRendered);
+    const plans = lanesAt(time).map((lane) => {
+      const before = lane.map();
+      const markers = withEdges(lane, markersOf(lane));
+      const index = addTab(lane, markers, lane.toRendered(time));
+      return { lane, before, markers, index, start: markers[index][1], bounds: bounds(markers, index) };
+    });
+    if (!plans.length) return;
+    // The shift every lane can take.
+    const low = Math.max(...plans.map((p) => p.bounds[0] - p.start)), high = Math.min(...plans.map((p) => p.bounds[1] - p.start));
+    let dragging = false, shift = 0, sentAt = 0, timer = 0, previewed = false;
+    const lines = [];
+    const next = (p, d) => p.markers.map((m, i) => (i === p.index ? [m[0], p.start + d] : m));
+    const preview = () => {
+      timer = 0;
+      if (!screen.status?.playing && !previewed) return;
+      previewed = true;
+      sentAt = performance.now();
+      daw("previewWarp", { id: under.clip.id, clips: plans.map((p) => ({ id: p.lane.clip.id, markers: next(p, shift) })) });
+    };
+    const move = (e) => {
+      if (!dragging && Math.abs(e.clientX - event.clientX) < 3) return;
+      if (!dragging) {
+        dragging = true;
+        busy = true;
+        screen.dragging = true;
+        for (const p of plans) { const line = html("div", "warp-tab is-dragging"); ctx.layer.append(line); lines.push(line); }
+      }
+      const landing = screen.snapTime(time + (e.clientX - event.clientX) * perPx(), e);
+      shift = clamp(landing - time, low, high);
+      plans.forEach((p, i) => {
+        Object.assign(lines[i].style, { left: `${ctx.xOf(time + shift)}px`, top: `${RULER + p.lane.top}px`, height: `${p.lane.height}px` });
+        p.lane.setDrag(Math.abs(shift) > 1e-4 ? pictureOf(p.before, next(p, shift)) : null);
+      });
+      if (!timer) timer = setTimeout(preview, Math.max(0, 120 - (performance.now() - sentAt)));
+      ctx.paintSoon();
+    };
+    const up = () => {
+      ctx.wave.removeEventListener("pointermove", move);
+      ctx.wave.removeEventListener("pointerup", up);
+      ctx.wave.removeEventListener("pointercancel", up);
+      clearTimeout(timer);
+      busy = false;
+      screen.dragging = false;
+      lines.forEach((l) => l.remove());
+      const moved = dragging && Math.abs(shift) > 1e-4;
+      if (dragging && !moved && previewed) daw("cancelPreview", {});
+      const entries = plans.map((p) => {
+        p.lane.setDrag(null);
+        const markers = next(p, moved ? shift : 0);
+        if (moved) p.lane.settle(pictureOf(p.before, markers));
+        return { lane: p.lane, markers };
+      });
+      const active = plans.find((p) => p.lane === ctx.active());
+      selected = active ? [active.markers[active.index][0]] : [];
+      storeAll(entries);
+      ctx.paintSoon();
+    };
+    ctx.wave.setPointerCapture?.(event.pointerId);
+    ctx.wave.addEventListener("pointermove", move);
+    ctx.wave.addEventListener("pointerup", up);
+    ctx.wave.addEventListener("pointercancel", up);
+  };
+
+  // Copy / paste: tabs as places on the timeline. A tab's audio moment sits on the timeline
+  // where the clip would play it unwarped (its file time from the clip's anchor).
+  const anchorOf = (lane) => lane.clip.start - lane.clip.offset;
+  const copyTabs = () => {
+    const lane = ctx.active();
+    const markers = markersOf(lane);
+    if (markers.length < 2) return ctx.toast("This clip has no warp tabs to copy.");
+    clipboard = { from: lane.clip.id, tabs: markers.map(([s, t]) => [s + anchorOf(lane), t + anchorOf(lane)]) };
+    ctx.toast(`${markers.length} warp tabs copied. Select other clips with this one, pick All clips and press Paste tabs.`);
+    update();
+  };
+  const pasteTabs = () => {
+    if (!clipboard) return;
+    const targets = (ctx.editAll() ? ctx.lanes : [ctx.active()]).filter((l) => l.clip.id !== clipboard.from && !l.clip.timeBypass);
+    if (!targets.length) return ctx.toast("Paste goes on other clips: select them with this one and pick All clips (or make another clip the active one).");
+    const entries = targets.map((lane) => {
+      const c = lane.clip, anchor = anchorOf(lane);
+      const markers = withEdges(lane, markersOf(lane));
+      for (const [sTime, tTime] of clipboard.tabs) {
+        const t = tTime - anchor, source = sTime - anchor;
+        if (t < c.offset - 1e-6 || t > c.offset + c.length + 1e-6) continue;
+        if (markers.some(([, mt]) => Math.abs(mt - t) < 0.002)) continue;
+        markers.push([source, t]);
+      }
+      markers.sort((x, y) => x[0] - y[0]);
+      // Keep only what the engine takes (time running forwards, within 8x).
+      const clean = [];
+      for (const m of markers) {
+        const last = clean[clean.length - 1];
+        if (last) {
+          const ds = m[0] - last[0], dt = m[1] - last[1];
+          if (ds < 1e-4 || dt < 1e-4 || dt / ds > MAX_STRETCH || ds / dt > MAX_STRETCH) continue;
+        }
+        clean.push(m);
+      }
+      lane.settle(pictureOf(lane.map(), clean));
+      return { lane, markers: clean };
+    });
+    storeAll(entries);
+  };
+
   //================================================================ hover
   const hoverLine = html("div", "warp-hover");
   const hover = (event) => {
@@ -345,7 +499,7 @@ export function createWarpTool(ctx) {
     const time = lane.toRendered(ctx.timeAt(event.clientX));
     const markers = markersOf(lane);
     const onTab = tabAt(lane, markers, time) >= 0;
-    const inRuler = pointerY(event) < RULER;
+    const inRuler = pointerY(event) < RULER || (!single() && inHandles(event, lane));
     ctx.wave.classList.toggle("is-on-tab", onTab);
     ctx.wave.classList.toggle("is-in-ruler", inRuler && !onTab);
     if (onTab || inRuler) { hoverLine.remove(); return; }
@@ -436,8 +590,10 @@ export function createWarpTool(ctx) {
         if (x < -40 || x > w + 40) return;
         const tab = html("div", "warp-tab");
         if (isSelected(s) && lane === ctx.active()) tab.classList.add("is-selected");
+        if (!single() && lane !== ctx.active() && !ctx.editAll()) tab.classList.add("is-other");
         if (!visible) tab.classList.add("is-quiet");
-        Object.assign(tab.style, { left: `${x}px`, top: `${lane === ctx.lanes[0] ? 0 : RULER + lane.top}px`, height: `${(lane === ctx.lanes[0] ? RULER : 0) + lane.top + lane.height}px` });
+        const fromRuler = single();
+        Object.assign(tab.style, { left: `${x}px`, top: `${fromRuler ? 0 : RULER + lane.top}px`, height: `${(fromRuler ? RULER : 0) + lane.height}px` });
         if (visible && i > 0) {
           const [ps, pt] = markers[i - 1];
           const f = free?.[i] && free?.[i - 1] && free.length === markers.length
@@ -461,6 +617,8 @@ export function createWarpTool(ctx) {
     reset.disabled = !n;
     atHits.disabled = !lane.hits.length || Boolean(c.timeBypass);
     bypassNote.hidden = !c.timeBypass;
+    copy.disabled = n < 2;
+    paste.disabled = !clipboard || (!ctx.editAll() && clipboard.from === c.id);
     selected = selected.filter((s) => (c.warp ?? []).some(([x]) => Math.abs(x - s) < 1e-6));
   };
 

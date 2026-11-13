@@ -3582,7 +3582,12 @@ class DawScreen {
     // Effects tab: the track's insert chain. Track tab: the clip, then pitch & time.
     const onTrackTab = this.dockTab === "track";
     const returnsKey = [...(session.returns ?? []), ...(session.groups ?? [])].map((r) => `${r.id}:${r.name}`).join(",");
-    const key = `${this.dockTab}|${owner?.id}|${found?.clip.id}|${owner?.name}|${returnsKey}|${(this.session.inputs ?? []).join(",")}`;
+    // The other audio clips selected with an audio clip: more lanes in its clip editor.
+    const laneClips = found && !found.clip.midi
+      ? this.selectedClipIds().filter((id) => id !== found.clip.id).map((id) => this.findClip(id)).filter((f) => f && !f.clip.midi)
+          .map((f) => ({ clip: f.clip, track: { ...f.track, colour: f.track.colour || trackColour(f.track, session.tracks.indexOf(f.track)) } }))
+      : [];
+    const key = `${this.dockTab}|${owner?.id}|${found?.clip.id}|${laneClips.map((f) => f.clip.id).join(",")}|${owner?.name}|${returnsKey}|${(this.session.inputs ?? []).join(",")}`;
     if (key !== this.inspectorKey) {
       this.inspectorKey = key;
       this.inspector.replaceChildren();
@@ -3598,7 +3603,7 @@ class DawScreen {
         this.clipPanel = !found ? null : found.clip.midi ? this.createPianoRoll(found.clip, found.track) : this.createClipPanel(found.clip);
         this.inspector.append(this.clipPanel?.element ?? this.createNoClipPanel(owner));
         if (found && !found.clip.midi) {
-          this.clipEditor = createClipEditor(this, found.track, found.clip, shared);
+          this.clipEditor = createClipEditor(this, found.track, found.clip, shared, laneClips);
           this.clipEditor.element.style.setProperty("--wave", trackColour(found.track, session.tracks.indexOf(found.track)));
           this.inspector.append(this.clipEditor.element);
         }
@@ -3611,7 +3616,7 @@ class DawScreen {
     }
 
     if (this.rhythmPanel && owner) this.rhythmPanel.update(owner);
-    if (this.clipEditor && found) this.clipEditor.update(found.track, found.clip);
+    if (this.clipEditor && found) this.clipEditor.update(found.track, found.clip, laneClips);
 
     if (found && this.clipPanel) this.clipPanel.update(found.clip, found.track);
     if (owner) this.rack?.update(owner);

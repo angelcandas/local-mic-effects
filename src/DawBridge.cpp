@@ -576,6 +576,29 @@ juce::var DawBridge::describeRanges (const std::vector<std::pair<double, double>
     return list;
 }
 
+// Warp markers as the page sends them: { markers } for clip `id`, or { clips: [{ id, markers }] }.
+static std::vector<std::pair<int, std::vector<daw::warp::Marker>>> parseWarpList (const juce::var& args, int id)
+{
+    const auto parse = [] (const juce::var& list)
+    {
+        std::vector<daw::warp::Marker> markers;
+        if (const auto* pairs = list.getArray())
+            for (const auto& pair : *pairs)
+                if (pair.isArray() && pair.size() == 2)
+                    markers.push_back ({ (double) pair[0], (double) pair[1] });
+        return markers;
+    };
+    std::vector<std::pair<int, std::vector<daw::warp::Marker>>> result;
+    if (const auto* clips = args["clips"].getArray(); clips != nullptr && args["clips"].size() > 0 && clips->getFirst().isObject())
+    {
+        for (const auto& entry : *clips)
+            result.emplace_back ((int) entry.getProperty ("id", -1), parse (entry["markers"]));
+    }
+    else
+        result.emplace_back (id, parse (args["markers"]));
+    return result;
+}
+
 // The note edits a page sends ({ start, end, pitch, shift, ... } each), in range.
 static std::vector<analysis::pitch::Note> parsePitchNotes (const juce::var& list)
 {
@@ -4434,12 +4457,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         }
         if (command == "previewWarp")
         {
-            std::vector<daw::warp::Marker> markers;
-            if (const auto* list = args["markers"].getArray())
-                for (const auto& pair : *list)
-                    if (pair.isArray() && pair.size() == 2)
-                        markers.push_back ({ (double) pair[0], (double) pair[1] });
-            engine.setPreviewWarp (id, daw::warp::Map (std::move (markers)));
+            for (const auto& [clipId, markers] : parseWarpList (args, id))
+                if (const auto other = edit.getClip (clipId); other.isValid() && ! daw::Edit::isMidiClip (other))
+                    engine.setPreviewWarp (clipId, daw::warp::Map (markers));
         }
         else
         {
@@ -4801,17 +4821,21 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     }
 
     // Warp markers: [[source, target], ...] in seconds (file time, rendered time). An
-    // empty list clears the warp.
+    // empty list clears the warp. Several clips in one undo step: { clips: [{ id, markers }] }
+    // (a linked partner of a clip already in the list follows that clip, not its own entry).
     if (command == "setWarp")
     {
-        std::vector<daw::warp::Marker> markers;
-        if (const auto* list = args["markers"].getArray())
-            for (const auto& pair : *list)
-                if (pair.isArray() && pair.size() == 2)
-                    markers.push_back ({ (double) pair[0], (double) pair[1] });
-
-        engine.cancelPreview (id);
-        edit.setEffectiveWarp (id, daw::warp::Map (std::move (markers)));
+        juce::Array<int> done;
+        for (const auto& [clipId, markers] : parseWarpList (args, id))
+        {
+            if (done.contains (clipId))
+                continue;
+            engine.cancelPreview (clipId);
+            edit.setEffectiveWarp (clipId, daw::warp::Map (markers));
+            done.add (clipId);
+            for (const auto& partner : daw::Edit::getLinkedClips (edit.getClip (clipId)))
+                done.add ((int) partner[ids::id]);
+        }
         ok();
         return;
     }
