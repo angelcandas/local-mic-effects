@@ -1560,6 +1560,17 @@ class DawScreen {
     start.innerHTML = `<svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="2" height="10" rx="0.5"/><path d="M13 3.5v9a.5.5 0 0 1-.8.4L6.3 8.4a.5.5 0 0 1 0-.8l5.9-4.5a.5.5 0 0 1 .8.4z"/></svg>`;
     this.playButton.innerHTML = `<svg class="icon-play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2.8v10.4a.6.6 0 0 0 .9.5l8.2-5.2a.6.6 0 0 0 0-1L4.9 2.3a.6.6 0 0 0-.9.5z"/></svg><svg class="icon-pause" viewBox="0 0 16 16" aria-hidden="true"><rect x="3.5" y="2.5" width="3" height="11" rx="0.8"/><rect x="9.5" y="2.5" width="3" height="11" rx="0.8"/></svg><span class="return-dot" title="Return on stop is on"></span>`;
     this.recordButton.innerHTML = `<span class="record-dot"></span><span class="record-label">Rec</span>`;
+    // Capture: the last minutes that came into the armed tracks, put on them. Right-click: how much.
+    this.captureSeconds = 0;
+    this.captureButton = button("capture-button", "Cap", "Capture: put what you just played on the armed tracks, even if you were not recording. Right-click: how much.", () => this.capture());
+    this.captureButton.setAttribute("aria-label", "Capture");
+    this.captureButton.addEventListener("contextmenu", (event) => {
+      event.preventDefault();
+      popMenu(event.clientX, event.clientY, ({ item }) => {
+        for (const [seconds, text] of [[30, "Last 30 seconds"], [60, "Last minute"], [180, "Last 3 minutes"], [0, "Everything kept"]])
+          item(text, () => { this.captureSeconds = seconds; this.capture(); }, { checked: this.captureSeconds === seconds });
+      });
+    });
     this.recordButton.setAttribute("aria-label", "Record");
     this.playButton.setAttribute("aria-label", "Play");
 
@@ -1577,7 +1588,7 @@ class DawScreen {
     mic.append(html("span", "mic-label", "Mic"), this.inputMeter.element, this.inputReadout);
 
     const buttons = html("div", "daw-transport-buttons");
-    buttons.append(start, this.playButton, this.recordButton);
+    buttons.append(start, this.playButton, this.recordButton, this.captureButton);
     // Song plays the arrangement; Pattern loops only the pattern you edit (the Patterns tab).
     this.modeSwitch = html("div", "segmented mode-switch");
     this.modeSwitch.setAttribute("role", "group");
@@ -1862,6 +1873,13 @@ class DawScreen {
     } else {
       await daw("record", { on: true });
     }
+  }
+
+  async capture() {
+    if (this.status.recording) return;
+    const result = await daw("capture", this.captureSeconds > 0 ? { seconds: this.captureSeconds } : {});
+    if (result?.ok) toast(`Captured ${formatDuration(result.seconds)} on ${result.tracks} track${result.tracks === 1 ? "" : "s"}`);
+    else toast(result?.error || "Couldn't capture", "is-error");
   }
 
   toggleLoop() {
@@ -4987,6 +5005,7 @@ class DawScreen {
     this.playButton.classList.toggle("is-playing", status.playing);
     this.root.classList.toggle("is-playing", status.playing);
     this.recordButton.setAttribute("aria-pressed", String(status.recording));
+    this.captureButton.disabled = status.recording || !(status.capture >= 0);
     this.root.classList.toggle("is-recording", status.recording);
     this.clockBars.textContent = this.barsBeats(status.position);
     this.clockTime.textContent = formatDuration(status.position);

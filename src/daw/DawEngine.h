@@ -4,6 +4,7 @@
 #include <juce_events/juce_events.h>
 
 #include "AudioPool.h"
+#include "CaptureRing.h"
 #include "Recorder.h"
 #include "Edit.h"
 #include "Instruments.h"
@@ -100,6 +101,30 @@ public:
     // The chord the harmonizer inserts follow (Chords mode), heard from the tracks
     // without pitch inserts and the MIDI being played; invalid when none follows. Any thread.
     analysis::Chord getHarmonyChord() const noexcept { return analysis::Chord::unpack (harmonyChord.load (std::memory_order_relaxed)); }
+
+    //==============================================================================
+    // Capture. The dry inputs of the armed audio tracks are kept for the last few
+    // minutes whether or not anything is recording, so a take nobody pressed Record
+    // for can still be put on the tracks. The memory is only used for armed inputs.
+    // Message thread unless noted.
+    static constexpr int maxCaptureInputs = 4;
+    static constexpr double defaultCaptureSeconds = 180.0;
+    void setCaptureSeconds (double seconds) noexcept { captureLength = juce::jmax (0.0, seconds); }
+    double getCaptureSeconds() const noexcept        { return captureLength.load(); }
+    // Seconds that capture() would take now (the most of any armed input), -1 when off.
+    double getCaptureAvailable() const noexcept;
+
+    struct CaptureResult
+    {
+        juce::String error;
+        double seconds = 0.0;
+        int tracks = 0; // armed tracks that got a clip
+    };
+
+    // Writes the newest `seconds` (0 = all of it) of each armed input to a WAV in `folder`
+    // and adds it to the armed tracks on that input, in one undo step. Where it sits: the
+    // music it was played to, when the playhead had been running; else at the playhead.
+    CaptureResult capture (const juce::File& folder, double seconds);
 
     //==============================================================================
     // Recording. Message thread.
@@ -366,7 +391,7 @@ private:
     void valueTreeRedirected (juce::ValueTree&) override                          { previews.clear(); triggerAsyncUpdate(); }
 
     void handleAsyncUpdate() override { rebuild(); }
-    void timerCallback() override     { collectGarbage(); collectPreviews(); drainRecordedMidi(); collectPatternNotes(); }
+    void timerCallback() override     { collectGarbage(); collectPreviews(); drainRecordedMidi(); collectPatternNotes(); syncCapture(); }
 
     void rebuild();
     std::shared_ptr<Strip> getStrip (const juce::ValueTree& trackOrMaster);
@@ -450,6 +475,15 @@ private:
     static constexpr int maxTakes = 16;
     std::array<TakeInput, maxTakes> takes;
     std::atomic<int> numTakes { 0 };
+    struct CaptureSlot
+    {
+        std::atomic<int> left { Edit::noInput }, right { Edit::noInput };
+        CaptureRing ring;
+    };
+    std::array<CaptureSlot, maxCaptureInputs> captures;
+    std::atomic<double> captureLength { defaultCaptureSeconds };
+    void syncCapture();
+
     std::atomic<bool> recordingAudio { false };
     std::vector<float> silence = std::vector<float> (8192, 0.0f); // a missing input (prepare() makes it a block long)
     std::atomic<bool> countingIn { false };

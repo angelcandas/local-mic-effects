@@ -32,6 +32,7 @@
 #include "Practice.h"
 #include "PitchTap.h"
 #include "SoundCheck.h"
+#include "CaptureRing.h"
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
 #include "instruments/Kit.h"
@@ -2424,6 +2425,117 @@ namespace
         folder.deleteRecursively();
     }
     //==========================================================================
+    void testCapture()
+    {
+        std::cout << "\nCapture\n";
+
+        constexpr double rate = 8000.0;
+        const auto push = [] (CaptureRing& ring, juce::int64 firstSample, int count, juce::int64 position)
+        {
+            std::vector<float> a ((size_t) count), b ((size_t) count);
+            for (int i = 0; i < count; ++i)
+            {
+                a[(size_t) i] = (float) (firstSample + i) * 1.0e-5f;
+                b[(size_t) i] = -a[(size_t) i];
+            }
+            const float* channels[] = { a.data(), b.data() };
+            ring.write (channels, count, position);
+        };
+
+        {
+            CaptureRing ring;
+            check (! ring.isOn() && ring.take (10.0).audio.getNumSamples() == 0, "off until configured");
+            ring.configure (rate, 2, 10.0);
+            check (ring.isOn() && ring.getAvailableSeconds() == 0.0, "on and empty");
+
+            push (ring, 0, 4000, -1);
+            check (std::abs (ring.getAvailableSeconds() - 0.5) < 1.0e-9, "counts what has been written");
+            auto all = ring.take (1000.0);
+            check (all.audio.getNumSamples() == 4000 && all.startPosition == -1, "takes all of a short ring, not placed");
+            check (all.audio.getSample (0, 0) == 0.0f && std::abs (all.audio.getSample (1, 3999) + 3999.0e-5f) < 1.0e-9f, "channels and order are kept");
+
+            // More than it keeps: only the newest 10 s remain.
+            for (juce::int64 at = 4000; at < 4000 + 15 * 8000; at += 800)
+                push (ring, at, 800, -1);
+            const auto end = 4000 + 15 * 8000;
+            auto kept = ring.take (1000.0);
+            check (kept.audio.getNumSamples() == (int) (10.0 * rate), "keeps only what it was asked to");
+            check (std::abs (kept.audio.getSample (0, kept.audio.getNumSamples() - 1) - (float) (end - 1) * 1.0e-5f) < 1.0e-6f
+                      && std::abs (kept.audio.getSample (0, 0) - (float) (end - kept.audio.getNumSamples()) * 1.0e-5f) < 1.0e-6f,
+                  "the newest audio, in order, across the wrap");
+            auto part = ring.take (2.0);
+            check (part.audio.getNumSamples() == 16000, "takes the newest part when asked for less");
+
+            ring.clear();
+            check (ring.getAvailableSeconds() == 0.0 && ring.take (5.0).audio.getNumSamples() == 0, "clear forgets");
+            push (ring, 0, 100000, -1); // longer than the whole ring in one write
+            check (ring.take (1000.0).audio.getNumSamples() == (int) (10.0 * rate), "a huge block keeps its tail");
+
+            ring.configure (rate, 2, 0.0);
+            check (! ring.isOn(), "zero turns it off");
+        }
+
+        // Where it was played: against the position of the run since it last jumped.
+        {
+            CaptureRing ring;
+            ring.configure (rate, 2, 30.0);
+            push (ring, 0, 8000 * 5, -1);           // 5 s while nothing played
+            juce::int64 position = 100000;
+            for (int i = 0; i < 10; ++i)             // then 4 s of playing, in blocks
+            {
+                push (ring, 40000 + i * 3200, 3200, position);
+                position += 3200;
+            }
+            // The newest 3 s of the 4 s run.
+            auto three = ring.take (3.0);
+            check (three.audio.getNumSamples() == 24000 && three.startPosition == position - 24000, "placed where it was played");
+            // Asking for more stops at the run's start: the 5 s before it weren't against the music.
+            auto more = ring.take (20.0);
+            check (more.audio.getNumSamples() == 32000 && more.startPosition == 100000, "stops where the playing began");
+
+            // A seek starts a new run.
+            position = 5000;
+            for (int i = 0; i < 10; ++i)
+            {
+                push (ring, 72000 + i * 3200, 3200, position);
+                position += 3200;
+            }
+            auto after = ring.take (20.0);
+            check (after.audio.getNumSamples() == 32000 && after.startPosition == 5000, "a jump of the playhead starts a new run");
+
+            // Stopped again: the whole of what's kept, not placed.
+            push (ring, 104000, 8000, -1);
+            auto stopped = ring.take (6.0);
+            check (stopped.audio.getNumSamples() == 48000 && stopped.startPosition == -1, "stopped: not placed");
+        }
+
+        // The WAV it is saved as.
+        {
+            CaptureRing ring;
+            ring.configure (rate, 3, 5.0);
+            std::vector<float> a (8000, 0.25f), b (8000, -0.25f), c (8000, 0.5f);
+            const float* channels[] = { a.data(), b.data(), c.data() };
+            ring.write (channels, 8000);
+            const auto taken = ring.take (5.0);
+            const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-capture-test");
+            const auto voice = folder.getChildFile ("voice.wav"), dry = folder.getChildFile ("dry.wav");
+            check (CaptureRing::writeWav (voice, taken.audio, 0, 2, rate).isEmpty() && CaptureRing::writeWav (dry, taken.audio, 2, 1, rate).isEmpty(),
+                   "writes the voice and the dry mic");
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+            std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (dry));
+            check (reader != nullptr && reader->numChannels == 1 && reader->lengthInSamples == 8000, "the dry file is one channel of the right length");
+            if (reader != nullptr)
+            {
+                juce::AudioBuffer<float> read (1, 8000);
+                reader->read (&read, 0, 8000, 0, true, false);
+                check (std::abs (read.getSample (0, 4000) - 0.5f) < 1.0e-4f, "and holds the dry mic");
+            }
+            reader.reset();
+            folder.deleteRecursively();
+        }
+    }
+
     void testLooper()
     {
         std::cout << "\nLive looper\n";
@@ -11144,7 +11256,8 @@ int main()
     // MICFX_TEST_ONLY=looper: just the Live looper.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "looper")
     {
-        testLooper();
+        testCapture();
+    testLooper();
         testMidiLearn();
         testScenes();
         testSetlist();
@@ -11186,6 +11299,14 @@ int main()
         testWarp();
         testLinkedTracks();
         testPitchNotes();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=capture: just Capture.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "capture")
+    {
+        testCapture();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }

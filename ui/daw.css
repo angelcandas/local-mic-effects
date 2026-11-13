@@ -2379,3 +2379,17 @@ body.is-daw .library-hint { display: none; }
 .tomidi-panel.is-running .tomidi-go { display: none; }
 .tomidi-panel.is-running .export-options { opacity: 0.55; pointer-events: none; }
 .tomidi-panel[data-what="drums"] .tomidi-key { display: none; }
+
+/* Capture: put the last minutes that came into the armed tracks on them. */
+.daw .capture-button {
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.daw .capture-button:hover:not(:disabled) { border-color: var(--accent); }
+.daw .capture-button:disabled { opacity: 0.45; cursor: default; }
