@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <mutex>
 #include <numeric>
 
 namespace analysis::rhythm
@@ -178,6 +179,108 @@ std::vector<Onset> findOnsets (const juce::AudioBuffer<float>& audio, double sam
     }
 
     return onsets;
+}
+
+std::vector<OnsetCandidate> findOnsetCandidates (const juce::AudioBuffer<float>& audio, double sampleRate)
+{
+    std::vector<OnsetCandidate> candidates;
+    const auto envelope = getOnsetEnvelope (audio, sampleRate);
+    const auto& e = envelope.values;
+    const auto hop = envelope.hopSeconds;
+    const auto numFrames = (int) e.size();
+    if (numFrames < 3)
+        return candidates;
+
+    const auto peak = *std::max_element (e.begin(), e.end());
+    if (peak <= 1.0e-6f)
+        return candidates;
+
+    // As findOnsets at full sensitivity, with peaks 20 ms apart (the filters space them more).
+    const auto delta = peak * marginForThreshold (0.0);
+    const auto spacing = (int) std::round (0.02 / hop);
+    const auto before = (int) std::round (0.1 / hop), after = (int) std::round (0.05 / hop);
+
+    const auto mono = mixToMono (audio);
+    const auto block = juce::jmax (1, (int) std::round (sampleRate * 0.001));
+    const auto blockPeak = [&] (int b)
+    {
+        float m = 0.0f;
+        for (int i = b * block; i < juce::jmin ((int) mono.size(), (b + 1) * block); ++i)
+            m = juce::jmax (m, std::abs (mono[(size_t) i]));
+        return m;
+    };
+
+    int lastPicked = -spacing;
+    for (int f = 0; f < numFrames; ++f)
+    {
+        const auto value = e[(size_t) f];
+        bool isPeak = value > delta;
+        for (int g = juce::jmax (0, f - spacing); isPeak && g <= juce::jmin (numFrames - 1, f + spacing); ++g)
+            if (e[(size_t) g] > value || (e[(size_t) g] == value && g < f))
+                isPeak = false;
+        if (! isPeak || f - lastPicked < spacing)
+            continue;
+
+        float mean = 0.0f;
+        int count = 0;
+        for (int g = juce::jmax (0, f - before); g <= juce::jmin (numFrames - 1, f + after); ++g, ++count)
+            mean += e[(size_t) g];
+        mean /= (float) juce::jmax (1, count);
+        const auto margin = juce::jmin (value, value - mean) / peak;
+        if (margin < marginForThreshold (0.0))
+            continue;
+
+        const auto centre = f * hop * sampleRate;
+        const auto searchFrom = juce::jmax (0, (int) ((centre - 0.025 * sampleRate) / block));
+        const auto searchTo = juce::jmin ((int) mono.size() / block, (int) ((centre + 0.04 * sampleRate) / block));
+        int loudest = searchFrom;
+        float loudestLevel = 0.0f;
+        for (int b = searchFrom; b < searchTo; ++b)
+            if (const auto level = blockPeak (b); level > loudestLevel)
+            {
+                loudest = b;
+                loudestLevel = level;
+            }
+        if (loudestLevel < 0.002f)
+            continue;
+
+        auto attack = loudest;
+        while (attack > searchFrom && blockPeak (attack - 1) > 0.15f * loudestLevel)
+            --attack;
+
+        const auto time = attack * block / sampleRate;
+        if (! candidates.empty() && time <= candidates.back().time + 1.0e-4)
+            continue;
+        candidates.push_back ({ time, value / peak, margin, loudestLevel });
+        lastPicked = f;
+    }
+
+    return candidates;
+}
+
+std::shared_ptr<const std::vector<OnsetCandidate>> findOnsetCandidatesCached (const juce::AudioBuffer<float>& source, double sampleRate)
+{
+    auto hash = (juce::int64) source.getNumSamples() * 31 + source.getNumChannels() * 7 + (juce::int64) sampleRate;
+    const auto stride = juce::jmax (1, source.getNumSamples() / 4096);
+    for (int ch = 0; ch < source.getNumChannels(); ++ch)
+        for (int i = 0; i < source.getNumSamples(); i += stride)
+            hash = hash * 1099511628211LL + (juce::int64) std::lround (source.getSample (ch, i) * 1.0e6f);
+
+    static std::mutex lock;
+    static std::vector<std::pair<juce::int64, std::shared_ptr<const std::vector<OnsetCandidate>>>> cache;
+    {
+        const std::lock_guard<std::mutex> guard (lock);
+        for (const auto& [key, found] : cache)
+            if (key == hash)
+                return found;
+    }
+
+    auto found = std::make_shared<const std::vector<OnsetCandidate>> (findOnsetCandidates (source, sampleRate));
+    const std::lock_guard<std::mutex> guard (lock);
+    cache.emplace_back (hash, found);
+    if (cache.size() > 16)
+        cache.erase (cache.begin());
+    return found;
 }
 
 //==============================================================================

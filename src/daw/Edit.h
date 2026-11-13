@@ -108,6 +108,7 @@ namespace ids
     MICFX_DAW_ID (viewState) // the page's view of the project (zoom, scroll...), JSON; not an edit
     MICFX_DAW_ID (beatsPerBar) MICFX_DAW_ID (MARKER) MICFX_DAW_ID (time)
     MICFX_DAW_ID (transpose) MICFX_DAW_ID (warp) MICFX_DAW_ID (warpBypass) MICFX_DAW_ID (timeBypass)
+    MICFX_DAW_ID (hitpoints) MICFX_DAW_ID (hitFilter) MICFX_DAW_ID (grooves) // hitpoints: see Hitpoints.h
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
@@ -423,6 +424,8 @@ public:
     // The map a clip plays with while its time compare is on (timeBypass): the window's two
     // ends where they are, straight in between, under the musical bend.
     static warp::Map getTimeBypassMap (const juce::ValueTree& clip);
+    // A clip's stored hitpoint filter and hand edits (Hitpoints.h text); empty text removes it.
+    void setClipHitpoints (int clipId, const juce::String& filter, const juce::String& edits);
     // What the clip's rendered copy needs: its warp map and its transpose plus its track's.
     static warp::Settings getWarpSettings (const juce::ValueTree& clip);
 

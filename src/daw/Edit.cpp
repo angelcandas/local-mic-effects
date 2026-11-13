@@ -1267,6 +1267,20 @@ void Edit::forPartners (int clipId, const std::function<void (int)>& apply)
     propagating = false;
 }
 
+void Edit::setClipHitpoints (int clipId, const juce::String& filter, const juce::String& edits)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid() || isMidiClip (clip))
+        return;
+    for (const auto& [id, text] : { std::pair { ids::hitFilter, filter }, std::pair { ids::hitpoints, edits } })
+    {
+        if (text.isEmpty())
+            clip.removeProperty (id, undoTarget);
+        else
+            clip.setProperty (id, text, undoTarget);
+    }
+}
+
 warp::Map Edit::getTimeBypassMap (const juce::ValueTree& clip)
 {
     const auto free = getClipWarp (clip);

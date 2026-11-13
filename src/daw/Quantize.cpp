@@ -1,4 +1,5 @@
 #include "Quantize.h"
+#include "Hitpoints.h"
 
 #include <algorithm>
 #include <cmath>
@@ -201,10 +202,26 @@ Result quantizeClips (Edit& edit, AudioPool& pool, const juce::Array<int>& clipI
             return true;
         };
 
-        // Linked tracks: the note starts of all the mics together, so every mic moves the
+        // The note starts: the clip's hitpoints, as the editor shows them. Linked tracks with
+        // no hand edits: the note starts of all the mics together, so every mic moves the
         // same way (the partners get this warp too).
-        auto heard = source;
-        if (const auto partners = Edit::getLinkedClips (edit.getClip (group.clips.getFirst())); ! partners.isEmpty())
+        const auto first = edit.getClip (group.clips.getFirst());
+        const auto partners = Edit::getLinkedClips (first);
+        std::vector<double> found;
+        if (partners.isEmpty() || hitpoints::hasEdits (first))
+        {
+            auto filter = hitpoints::getFilter (first);
+            if (! hitpoints::hasStored (first))
+                filter.threshold = 1.0 - juce::jlimit (0.0f, 1.0f, options.sensitivity);
+            const auto candidates = analysis::rhythm::findOnsetCandidatesCached (*source, rate);
+            const auto tempo = Edit::getTempoMapFor (first);
+            const auto hits = hitpoints::select (*candidates, from, to, filter, hitpoints::getEdits (first),
+                                                 [&] (double s) { return tempo.toBeats (group.map.toTarget (s) + group.timelineOffset); });
+            for (const auto t : hitpoints::enabledTimes (hits))
+                if (inWindow (t))
+                    found.push_back (t);
+        }
+        else
         {
             auto mix = std::make_shared<juce::AudioBuffer<float>> (1, source->getNumSamples());
             mix->clear();
@@ -217,14 +234,11 @@ Result quantizeClips (Edit& edit, AudioPool& pool, const juce::Array<int>& clipI
             for (const auto& partner : partners)
                 if (const auto audio = pool.loadNow (juce::File (partner[ids::file].toString())); audio != nullptr)
                     add (*audio);
-            heard = mix;
+            const auto onsets = analysis::rhythm::findOnsets (*mix, rate, from, to, options.sensitivity);
+            for (const auto& onset : onsets)
+                if (inWindow (onset.time))
+                    found.push_back (onset.time);
         }
-
-        const auto onsets = analysis::rhythm::findOnsets (*heard, rate, from, to, options.sensitivity);
-        std::vector<double> found;
-        for (const auto& onset : onsets)
-            if (inWindow (onset.time))
-                found.push_back (onset.time);
 
         result.onsets += (int) found.size();
 
@@ -251,9 +265,14 @@ Result quantizeClips (Edit& edit, AudioPool& pool, const juce::Array<int>& clipI
                 double step = 0.0;
                 const auto line = nearestLine (timeline, step);
 
-                if (std::abs (line - timeline) <= juce::jlimit (0.0, 0.5, options.catchRange) * step + 1.0e-9)
+                const auto off = std::abs (line - timeline);
+                const auto safe = off <= juce::jlimit (0.0, 0.5, options.safeRange) * step + 1.0e-9; // close enough already
+                if (! safe && off <= juce::jlimit (0.0, 0.5, options.catchRange) * step + 1.0e-9)
                 {
-                    const auto moved = naturalTarget + juce::jlimit (0.0, 1.0, options.strength) * (line - timeline);
+                    auto shift = juce::jlimit (0.0, 1.0, options.strength) * (line - timeline);
+                    if (options.maxMove > 0.0)
+                        shift = juce::jlimit (-options.maxMove, options.maxMove, shift);
+                    const auto moved = naturalTarget + shift;
                     if (add (point.source, moved))
                     {
                         result.moved += std::abs (moved - naturalTarget) > 1.0e-4 ? 1 : 0;
@@ -283,14 +302,21 @@ std::function<std::vector<analysis::rhythm::Onset>()> prepareHitpoints (const Ed
         return {};
 
     const auto map = Edit::getEffectiveWarp (clip);
-    const auto offset = (double) clip[ids::offset], length = (double) clip[ids::length];
-    const auto rate = pool.getSampleRate();
-    return [source, map, offset, length, rate, sensitivity]
+    std::optional<hitpoints::Filter> filter;
+    if (! hitpoints::hasStored (clip))
     {
-        auto onsets = analysis::rhythm::findOnsets (*source, rate, juce::jmax (0.0, map.toSource (offset)),
-                                                    map.toSource (offset + length), sensitivity);
-        for (auto& onset : onsets)
-            onset.time = map.toTarget (onset.time);
+        filter = hitpoints::Filter();
+        filter->threshold = 1.0 - juce::jlimit (0.0f, 1.0f, sensitivity);
+    }
+    auto find = hitpoints::prepare (clip, pool, filter);
+    if (! find)
+        return {};
+    return [find = std::move (find), map]
+    {
+        std::vector<analysis::rhythm::Onset> onsets;
+        for (const auto& hit : find())
+            if (hit.isEnabled())
+                onsets.push_back ({ map.toTarget (hit.time), hit.strength });
         return onsets;
     };
 }

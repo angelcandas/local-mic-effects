@@ -38,10 +38,14 @@ struct Options
     // pass closes `strength` of the distance that's left. Off, every pass starts from the
     // audio as played before any free warp.
     bool iterative = false;
+
+    double safeRange = 0.0;    // 0..0.5 of a grid step: note starts already this close stay put
+    double maxMove = 0.0;      // seconds: the farthest a note start moves (0: no limit)
 };
 
-// Note starts (hitpoints) in what a clip shows, as times in its rendered copy, strongest
-// first is not implied: in time order. Sensitivity 0..1.
+// Note starts (hitpoints) in what a clip shows, as times in its rendered copy, in time
+// order: the clip's stored hitpoints (filter and hand edits, see Hitpoints.h), or with none
+// stored, the automatic ones at this sensitivity (0..1). Disabled ones are left out.
 std::vector<analysis::rhythm::Onset> findHitpoints (const Edit&, AudioPool&, int clipId, float sensitivity = 0.5f);
 
 // The same, split so the analysis can run off the message thread: call this on the message
@@ -55,7 +59,9 @@ struct Result
     int moved = 0;  // pulled towards the grid
 };
 
-// Warps the clips so their onsets land on `grid` (timeline seconds, sorted). Clips that
+// Warps the clips so their onsets land on `grid` (timeline seconds, sorted). The onsets are
+// the clips' hitpoints as the editor shows them (Hitpoints.h; options.sensitivity sets the
+// filter of a clip with none stored; linked tracks with no hand edits use all mics together). Clips that
 // play one stretch of the same take together (split or strip-silenced pieces) share one
 // warp, so they stay in time with each other and render once. Quantizing again starts
 // from the unwarped audio, so a new strength or grid replaces the old result (unless

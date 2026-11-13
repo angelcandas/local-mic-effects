@@ -4,6 +4,7 @@
 #include "daw/BackingVocals.h"
 
 #include "daw/Quantize.h"
+#include "daw/Hitpoints.h"
 #include "daw/ClipTools.h"
 #include "daw/Patterns.h"
 #include "daw/Loops.h"
@@ -316,7 +317,7 @@ namespace
             { "addReturn", "Add return" }, { "removeReturn", "Delete return" }, { "moveReturn", "Move return" },
             { "tempo", "Tempo" }, { "tempoMap", "Tempo change" }, { "beatsPerBar", "Time signature" }, { "loop", "Loop range" },
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
-            { "quantize", "Quantize" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
+            { "quantize", "Quantize" }, { "setHitpoints", "Hitpoints" }, { "hitpointAction", "Hitpoints" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
             { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
@@ -612,6 +613,7 @@ juce::var DawBridge::describeSession()
                            { "mute", (bool) clip.getProperty (ids::mute, false) },
                            { "transpose", number (clip, ids::transpose) }, { "warp", markers }, { "warpBypass", (bool) clip.getProperty (ids::warpBypass, false) },
                            { "timeBypass", (bool) clip.getProperty (ids::timeBypass, false) },
+                           { "hitsEdited", daw::hitpoints::hasStored (clip) },
                            // Musical clips: the whole map (file -> rendered time, with the bend) and the free warp
                            // alone (file -> straight time), for the editor's tabs and stretch factors.
                            { "timeMap", daw::Edit::isMusical (clip) ? describeMarkers (daw::Edit::getEffectiveWarp (clip), number (clip, ids::offset), number (clip, ids::length)) : juce::var() },
@@ -741,6 +743,14 @@ juce::var DawBridge::describeSession()
                   markers.add (marker);
               }
               return juce::var (markers);
+          }() },
+        // Grooves saved from clips' hitpoints, for quantize: [{ name, bars, count }].
+        { "grooves", [this]
+          {
+              juce::Array<juce::var> grooves;
+              for (const auto& g : daw::hitpoints::parseGrooves (edit.getState()[ids::grooves].toString()))
+                  grooves.add (object ({ { "name", g.name }, { "bars", g.bars }, { "count", (int) g.offsets.size() } }));
+              return juce::var (grooves);
           }() },
         { "metronomeVolume", engine.getMetronomeVolume() },
         { "recent", describeRecentProjects() },
@@ -4063,7 +4073,19 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         const auto songEnd = (double) engine.getLength() / engine.getSampleRate() + 10.0;
         std::vector<double> grid;
 
-        if (const auto leader = edit.getTrack (arg (args, "groove", -1)); leader.isValid())
+        if (const auto name = args["savedGroove"].toString(); name.isNotEmpty())
+        {
+            // A groove saved from a clip's hitpoints (hitpointAction groove).
+            const auto grooves = daw::hitpoints::parseGrooves (edit.getState()[ids::grooves].toString());
+            const auto it = std::find_if (grooves.begin(), grooves.end(), [&] (const auto& g) { return g.name == name; });
+            if (it == grooves.end())
+            {
+                complete (error ("No saved groove called " + name));
+                return;
+            }
+            grid = daw::hitpoints::makeGrid (*it, edit.getTempoMap(), edit.getBeatsPerBar(), 0.0, songEnd);
+        }
+        else if (const auto leader = edit.getTrack (arg (args, "groove", -1)); leader.isValid())
         {
             const auto tempo = daw::rhythm::analyseTrack (edit, engine.getAudioPool(), (int) leader[ids::id]);
             if (tempo.beats.size() < 4)
@@ -4083,6 +4105,8 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         options.catchRange = juce::jlimit (0.0, 0.5, arg (args, "catch", 0.5));
         options.sensitivity = juce::jlimit (0.0f, 1.0f, arg (args, "sensitivity", 0.5f));
         options.iterative = arg (args, "iterative", false);
+        options.safeRange = juce::jlimit (0.0, 0.5, arg (args, "safe", 0.0));
+        options.maxMove = juce::jlimit (0.0, 2.0, arg (args, "maxMove", 0.0));
 
         const auto result = daw::rhythm::quantizeClips (edit, engine.getAudioPool(), clips, grid, options);
 
@@ -4286,28 +4310,251 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     }
 
     // Note starts in a clip (args.id), in its rendered copy's time: [[time, strength], ...].
+    // A clip's hitpoints (where its notes start): { hits: [[time, strength, state, source, peak]],
+    // filter: { threshold, minLength (s), beats }, edited }. time: the clip's rendered time;
+    // source: file seconds; state: "auto", "added", "locked" or "disabled" (shown grey; nothing
+    // uses those). The stored filter, unless { threshold, minLength, beats } preview another
+    // (not stored); a clip with nothing stored takes { sensitivity } (0..1) as the old knob did.
+    // Analysed off the message thread (once per take; the filter is quick).
     if (command == "hitpoints")
     {
-        // Analysed off the message thread: a long take takes a moment, and the page waits.
-        auto find = daw::rhythm::prepareHitpoints (edit, engine.getAudioPool(), id, juce::jlimit (0.0f, 1.0f, arg (args, "sensitivity", 0.5f)));
+        const auto clip = edit.getClip (id);
+        auto filter = daw::hitpoints::getFilter (clip);
+        if (! daw::hitpoints::hasStored (clip) && args.hasProperty ("sensitivity"))
+            filter.threshold = 1.0 - juce::jlimit (0.0, 1.0, arg (args, "sensitivity", 0.5));
+        if (args.hasProperty ("threshold")) filter.threshold = juce::jlimit (0.0, 1.0, arg (args, "threshold", 0.5));
+        if (args.hasProperty ("minLength")) filter.minLength = juce::jlimit (0.0, 2.0, arg (args, "minLength", 0.05));
+        if (args.hasProperty ("beats"))     filter.beats = juce::jlimit (0.0, 4.0, arg (args, "beats", 0.0));
+
+        auto find = daw::hitpoints::prepare (clip, engine.getAudioPool(), filter);
+        const auto describeFilter = object ({ { "threshold", filter.threshold }, { "minLength", filter.minLength }, { "beats", filter.beats } });
+        const auto edited = daw::hitpoints::hasEdits (clip);
         if (! find)
         {
-            complete (object ({ { "ok", true }, { "hits", juce::Array<juce::var>() } }));
+            complete (object ({ { "ok", true }, { "hits", juce::Array<juce::var>() }, { "filter", describeFilter }, { "edited", edited } }));
             return;
         }
-        juce::Thread::launch ([find = std::move (find), complete, weak = std::weak_ptr<bool> (alive)]
+        const auto map = daw::Edit::getEffectiveWarp (clip);
+        juce::Thread::launch ([find = std::move (find), map, describeFilter, edited, complete, weak = std::weak_ptr<bool> (alive)]
         {
-            auto hits = std::make_shared<std::vector<analysis::rhythm::Onset>> (find());
-            juce::MessageManager::callAsync ([hits, complete, weak]
+            auto hits = std::make_shared<std::vector<daw::hitpoints::Hit>> (find());
+            juce::MessageManager::callAsync ([hits, map, describeFilter, edited, complete, weak]
             {
                 if (auto flag = weak.lock(); flag == nullptr || ! *flag)
                     return;
                 juce::Array<juce::var> list;
-                for (const auto& onset : *hits)
-                    list.add (juce::Array<juce::var> { onset.time, onset.strength });
-                complete (object ({ { "ok", true }, { "hits", list } }));
+                for (const auto& h : *hits)
+                {
+                    using daw::hitpoints::State;
+                    const auto* state = h.state == State::added ? "added" : h.state == State::locked ? "locked" : h.state == State::disabled ? "disabled" : "auto";
+                    list.add (juce::Array<juce::var> { map.toTarget (h.time), h.strength, state, h.time, h.peak });
+                }
+                complete (object ({ { "ok", true }, { "hits", list }, { "filter", describeFilter }, { "edited", edited } }));
             });
         });
+        return;
+    }
+
+    // Stores a clip's hitpoints: { filter: { threshold, minLength, beats } or null (back to the
+    // default), edits: [[source, "added"|"disabled"|"locked"], ...] or null (back to automatic) }.
+    // Either can be left out to keep it. Undoable.
+    if (command == "setHitpoints")
+    {
+        const auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+        {
+            complete (error ("No such audio clip"));
+            return;
+        }
+        auto filterText = clip[ids::hitFilter].toString();
+        auto editsText = clip[ids::hitpoints].toString();
+        if (args.hasProperty ("filter"))
+        {
+            const auto f = args["filter"];
+            if (f.isObject())
+            {
+                daw::hitpoints::Filter filter;
+                filter.threshold = juce::jlimit (0.0, 1.0, (double) f.getProperty ("threshold", 0.5));
+                filter.minLength = juce::jlimit (0.0, 2.0, (double) f.getProperty ("minLength", 0.05));
+                filter.beats = juce::jlimit (0.0, 4.0, (double) f.getProperty ("beats", 0.0));
+                filterText = daw::hitpoints::toString (filter);
+            }
+            else
+                filterText = {};
+        }
+        if (args.hasProperty ("edits"))
+        {
+            std::vector<daw::hitpoints::HandEdit> edits;
+            if (const auto* list = args["edits"].getArray())
+                for (const auto& e : *list)
+                    if (e.isArray() && e.size() == 2)
+                    {
+                        const auto state = e[1].toString();
+                        using daw::hitpoints::State;
+                        edits.push_back ({ (double) e[0], state == "disabled" ? State::disabled : state == "locked" ? State::locked : State::added });
+                    }
+            editsText = daw::hitpoints::toString (edits);
+        }
+        edit.setClipHitpoints (id, filterText, editsText);
+        ok();
+        return;
+    }
+
+    // Uses a clip's hitpoints (the enabled ones, as shown): { id, action, ... }
+    //   split               cuts the clip at each, with 5 ms fades -> { clips: [ids] }
+    //   markers             a project marker at each -> { count }
+    //   groove { name, bars? }  saves the groove (PROJECT grooves) -> { name, count }
+    //   warp { clips? }     pins a warp tab at each where it plays now; with `clips`, every
+    //                       one of them at the same timeline places -> { count }
+    //   midi { pitch?, velocity? (0: from each hit's level), length? (s), track? } a MIDI note at
+    //                       each, on that MIDI track or a new one under the clip's -> { track, clip, count }
+    if (command == "hitpointAction")
+    {
+        const auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+        {
+            complete (error ("No such audio clip"));
+            return;
+        }
+        const auto action = args["action"].toString();
+        const auto hits = daw::hitpoints::enabledTimes (daw::hitpoints::get (clip, engine.getAudioPool()));
+        const auto map = daw::Edit::getEffectiveWarp (clip);
+        const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+        std::vector<double> onTimeline; // inside the clip, not at its very edges
+        for (const auto t : hits)
+            if (const auto at = map.toTarget (t) - offset + start; at > start + 0.01 && at < start + length - 0.01)
+                onTimeline.push_back (at);
+
+        if (onTimeline.empty())
+        {
+            complete (error ("No note starts in this clip: lower the Threshold in its Hitpoints."));
+            return;
+        }
+
+        if (action == "split")
+        {
+            juce::Array<juce::var> made { id };
+            auto current = id;
+            constexpr double fade = 0.005;
+            for (const auto at : onTimeline)
+            {
+                const auto right = edit.splitClip (current, at);
+                if (right < 0)
+                    continue;
+                const auto left = edit.getClip (current);
+                edit.setClipFades (current, (double) left.getProperty (ids::fadeIn, 0.0), fade);
+                edit.setClipFades (right, fade, (double) edit.getClip (right).getProperty (ids::fadeOut, 0.0));
+                made.add (right);
+                current = right;
+            }
+            complete (object ({ { "ok", true }, { "clips", made } }));
+            return;
+        }
+        if (action == "markers")
+        {
+            for (const auto at : onTimeline)
+                edit.addMarker (at);
+            complete (object ({ { "ok", true }, { "count", (int) onTimeline.size() } }));
+            return;
+        }
+        if (action == "groove")
+        {
+            auto grooves = daw::hitpoints::parseGrooves (edit.getState()[ids::grooves].toString());
+            auto name = args["name"].toString().removeCharacters ("=|:").trim().substring (0, 40);
+            if (name.isEmpty())
+                name = clip[ids::name].toString().removeCharacters ("=|:").trim().substring (0, 30) + " groove";
+            auto groove = daw::hitpoints::makeGroove (name, onTimeline, edit.getTempoMap(), edit.getBeatsPerBar(), arg (args, "bars", 1));
+            grooves.erase (std::remove_if (grooves.begin(), grooves.end(), [&] (const auto& g) { return g.name == name; }), grooves.end());
+            const auto count = (int) groove.offsets.size();
+            grooves.push_back (std::move (groove));
+            edit.getState().setProperty (ids::grooves, daw::hitpoints::toString (grooves), &edit.getUndoManager());
+            complete (object ({ { "ok", true }, { "name", name }, { "count", count } }));
+            return;
+        }
+        if (action == "warp")
+        {
+            juce::Array<int> targets;
+            if (const auto* list = args["clips"].getArray())
+                for (const auto& c : *list)
+                    targets.addIfNotAlreadyThere ((int) c);
+            if (targets.isEmpty())
+                targets.add (id);
+            int count = 0;
+            for (const auto target : targets)
+            {
+                const auto other = edit.getClip (target);
+                if (! other.isValid() || daw::Edit::isMidiClip (other))
+                    continue;
+                // Each clip's own map: the same timeline places, pinned where they play now.
+                const auto otherMap = daw::Edit::getEffectiveWarp (other);
+                const auto os = (double) other[ids::start], oo = (double) other[ids::offset], ol = (double) other[ids::length];
+                auto markers = otherMap.getMarkers();
+                std::vector<daw::warp::Marker> kept;
+                for (const auto& m : markers)
+                    if (m.target >= oo - 1.0e-6 && m.target <= oo + ol + 1.0e-6)
+                        kept.push_back (m);
+                if (kept.empty())
+                    kept = { { otherMap.toSource (oo), oo }, { otherMap.toSource (oo + ol), oo + ol } };
+                for (const auto at : onTimeline)
+                {
+                    const auto rendered = at - os + oo;
+                    if (rendered <= oo || rendered >= oo + ol)
+                        continue;
+                    if (std::any_of (kept.begin(), kept.end(), [&] (const auto& m) { return std::abs (m.target - rendered) < 0.002; }))
+                        continue;
+                    kept.push_back ({ otherMap.toSource (rendered), rendered });
+                    ++count;
+                }
+                engine.cancelPreview (target);
+                edit.setEffectiveWarp (target, daw::warp::Map (std::move (kept)));
+            }
+            complete (object ({ { "ok", true }, { "count", count } }));
+            return;
+        }
+        if (action == "midi")
+        {
+            auto track = edit.getTrack (arg (args, "track", -1));
+            if (! track.isValid() || ! daw::Edit::isMidiTrack (track))
+            {
+                const auto info = processor.getPluginHost().findInstrument ("builtin:beat");
+                if (! info.has_value())
+                {
+                    complete (error ("The drum instrument isn't available."));
+                    return;
+                }
+                const auto owner = daw::Edit::getOwnerTrack (clip);
+                track = edit.addMidiTrack ((clip[ids::name].toString() + " hits").substring (0, 60), *info, edit.getTracks().indexOf (owner) + 1);
+            }
+            const auto trackId = (int) track[ids::id];
+            const auto midiClip = edit.addMidiClip (trackId, start, length, clip[ids::name].toString() + " hits");
+            if (! midiClip.isValid())
+            {
+                complete (error ("Couldn't add the MIDI clip."));
+                return;
+            }
+            const auto pitch = juce::jlimit (0, 127, arg (args, "pitch", 36));
+            const auto fixed = juce::jlimit (0, 127, arg (args, "velocity", 0));
+            const auto noteLength = juce::jlimit (0.01, 4.0, arg (args, "length", 0.1));
+            const auto all = daw::hitpoints::get (clip, engine.getAudioPool());
+            auto loudest = 1.0e-6f;
+            for (const auto& h : all)
+                loudest = juce::jmax (loudest, h.peak);
+            int count = 0;
+            for (const auto& h : all)
+            {
+                if (! h.isEnabled())
+                    continue;
+                const auto at = map.toTarget (h.time) - offset + start;
+                if (at < start || at >= start + length)
+                    continue;
+                const auto velocity = fixed > 0 ? fixed : juce::jlimit (1, 127, (int) std::round (127.0 * std::sqrt (h.peak / loudest)));
+                edit.addNote ((int) midiClip[ids::id], pitch, at - start, juce::jmin (noteLength, start + length - at), velocity);
+                ++count;
+            }
+            complete (object ({ { "ok", true }, { "track", trackId }, { "clip", (int) midiClip[ids::id] }, { "count", count } }));
+            return;
+        }
+        complete (error ("Unknown hitpoint action: " + action));
         return;
     }
 
