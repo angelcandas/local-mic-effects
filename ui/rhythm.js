@@ -21,6 +21,41 @@ export const ALGORITHMS = [
 
 const STEPS = [[1, "1/4 (beats)"], [0.5, "1/8"], [1 / 3, "1/8 triplets"], [0.25, "1/16"], ["bar", "Bars"]];
 
+// While the song plays, a drag can be heard before it's let go: `send` passes what the
+// drag would store ({ markers } for previewWarp, { notes } for previewPitchNotes) at most
+// every 120 ms and only when it changed, and the clip plays it (not stored, not an undo
+// step). `end(stored)`: the drag is over; when it stored nothing (back where it started),
+// the preview is cancelled, otherwise the real edit replaces it.
+export function livePreview(daw, screen, command, id) {
+  let last = "", pending = null, timer = 0, sentAt = 0, sent = false;
+  const flush = () => {
+    timer = 0;
+    if (!pending) return;
+    const text = JSON.stringify(pending);
+    const args = pending;
+    pending = null;
+    if (text === last) return;
+    last = text;
+    sentAt = performance.now();
+    sent = true;
+    daw(command, { id, ...args });
+  };
+  return {
+    send(args) {
+      if (!screen.status?.playing && !sent) return;
+      pending = args;
+      if (!timer) timer = setTimeout(flush, Math.max(0, 120 - (performance.now() - sentAt)));
+    },
+    end(stored) {
+      clearTimeout(timer);
+      timer = 0;
+      pending = null;
+      if (sent && !stored) daw("cancelPreview", { id });
+      sent = false;
+    },
+  };
+}
+
 // Warp maps as the session sends them: [[source, target], ...] in seconds.
 export function toSource(markers, target) {
   if (!markers?.length) return target;
@@ -448,6 +483,8 @@ export function createClipEditor(screen, track, clip, ui) {
     };
     screen.dragging = true;
     wave.setPointerCapture?.(event.pointerId);
+    const live = livePreview(daw, screen, "previewWarp", id);
+    const withTarget = (t) => markers.map((m, i) => (i === index ? [m[0], t] : m));
 
     const move = (e) => {
       const free = startTarget + (e.clientX - event.clientX) * perPx;
@@ -456,6 +493,7 @@ export function createClipEditor(screen, track, clip, ui) {
       target = clamp(snapped, low, high);
       place(target);
       drag = Math.abs(target - startTarget) > 1e-4 ? stretchTo(target) : null;
+      live.send({ markers: withTarget(target) });
       paintSoon();
     };
     const up = () => {
@@ -464,7 +502,9 @@ export function createClipEditor(screen, track, clip, ui) {
       wave.removeEventListener("pointercancel", up);
       screen.dragging = false;
       line.remove();
-      if (Math.abs(target - startTarget) > 1e-4) {
+      const moved = Math.abs(target - startTarget) > 1e-4;
+      live.end(moved);
+      if (moved) {
         // Keep the predicted picture until the real one is rendered.
         const settled = stretchTo(target), earlier = remap;
         remap = earlier ? (t) => earlier(settled(t)) : settled;

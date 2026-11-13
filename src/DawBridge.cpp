@@ -2307,9 +2307,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             return;
         }
         const juce::File file (clip[ids::file].toString());
-        const auto settings = daw::Edit::getWarpSettings (clip);
+        const auto settings = engine.getPlaybackSettings (clip); // with a preview being dragged, if any
         auto& pool = engine.getAudioPool();
-        const auto ready = pool.get (file, settings) != nullptr;
+        const auto ready = pool.get (file, settings) != nullptr && pool.isReady (file, settings);
         complete (object ({ { "ok", true }, { "ready", ready },
                             { "ranges", describeRanges (ready ? std::vector<std::pair<double, double>>() : pool.getRenderingRanges (file, settings)) } }));
         return;
@@ -2796,9 +2796,50 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    // Previews while dragging (see DawEngine::setPreviewWarp): the clip plays markers
+    // ({ markers }, as setWarp) or notes ({ notes }, as setPitchNotes) that aren't stored,
+    // so a loop being listened to follows the hand. Not an undo step, never saved; the real
+    // setWarp / setPitchNotes or cancelPreview ({ id }, or none for every clip) ends it.
+    if (command == "previewWarp" || command == "previewPitchNotes")
+    {
+        const auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+        {
+            complete (error ("No such audio clip"));
+            return;
+        }
+        if (command == "previewWarp")
+        {
+            std::vector<daw::warp::Marker> markers;
+            if (const auto* list = args["markers"].getArray())
+                for (const auto& pair : *list)
+                    if (pair.isArray() && pair.size() == 2)
+                        markers.push_back ({ (double) pair[0], (double) pair[1] });
+            engine.setPreviewWarp (id, daw::warp::Map (std::move (markers)));
+        }
+        else
+        {
+            if (! daw::Edit::getLinkedClips (clip).isEmpty())
+            {
+                complete (error ("Notes on linked tracks can't be edited one by one: unlink the track first."));
+                return;
+            }
+            engine.setPreviewNotes (id, analysis::pitch::fromString (analysis::pitch::toString (parsePitchNotes (args["notes"]))));
+        }
+        ok();
+        return;
+    }
+    if (command == "cancelPreview")
+    {
+        engine.cancelPreview (args.hasProperty ("id") ? id : -1);
+        ok();
+        return;
+    }
+
     if (command == "setPitchNotes")
     {
         const auto clip = edit.getClip (id);
+        engine.cancelPreview (id);
         if (! daw::Edit::getLinkedClips (clip).isEmpty())
         {
             complete (error ("Notes on linked tracks can't be edited one by one: unlink the track first."));
@@ -2859,7 +2900,10 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "clearWarp")
     {
         for (auto clip : clipsFrom (args))
+        {
+            engine.cancelPreview (clip);
             edit.setClipWarp (clip, {});
+        }
         ok();
         return;
     }
@@ -2874,6 +2918,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                 if (pair.isArray() && pair.size() == 2)
                     markers.push_back ({ (double) pair[0], (double) pair[1] });
 
+        engine.cancelPreview (id);
         edit.setEffectiveWarp (id, daw::warp::Map (std::move (markers)));
         ok();
         return;
