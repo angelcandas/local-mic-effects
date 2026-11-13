@@ -31,7 +31,7 @@ const GRIDS = [["bar", "Bar"], [1, "Beat"], [0.5, "1/2 beat"], [0.25, "1/4 beat"
 const SCALE_STEPS = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10] };
 // Auto Mix's track roles (the bridge sends the same list with its tags).
 const AUTOMIX_ROLES = [
-  { key: "voice", name: "Voice" }, { key: "background", name: "Background vocals" }, { key: "instrumental", name: "Instrumental" },
+  { key: "voice", name: "Voice" }, { key: "background", name: "Background vocals" }, { key: "instrumental", name: "Backing track (karaoke)" },
   { key: "guitar", name: "Guitar" }, { key: "piano", name: "Piano / keys" }, { key: "pad", name: "Pad / strings" }, { key: "synth", name: "Synth lead" }, { key: "bass", name: "Bass" }, { key: "drums", name: "Drums" },
   { key: "instrument", name: "Other instrument" }, { key: "other", name: "Leave as is" },
 ];
