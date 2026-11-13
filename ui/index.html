@@ -323,6 +323,34 @@
         </div>
       </div>
     </div>
+    <div class="songmap-panel ai-plugin" hidden data-accent="map">
+      <header class="ai-head">
+        <span class="ai-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="2" y="8" width="7" height="8" rx="1.5" /><rect x="10.5" y="8" width="4.5" height="8" rx="1.5" /><rect x="16.5" y="8" width="5.5" height="8" rx="1.5" /></svg></span>
+        <div class="ai-title"><strong>Song map</strong><small>Sections, bars and the tempo of the playing</small></div>
+        <span class="ai-led" title="Ready"></span>
+        <button class="mini songmap-close" title="Close" aria-label="Close">×</button>
+      </header>
+      <div class="ai-body">
+        <details class="ai-about"><summary>How it works</summary><p class="automix-intro">Listens to the song offline: follows its beats, finds where each bar starts (where the chords change and the low end hits), then compares every bar with every other. Where the music changes, a section starts; sections that sound alike get the same letter. The loudest part that comes back is the chorus, the other repeated parts are verses, a one-off in the middle is the bridge. For a take played without a click, the tempo map can follow the playing, so the grid, the click and quantize line up with it. Nothing leaves your computer.</p></details>
+        <div class="export-options">
+          <label>Listen to <select class="dropdown" name="source"><option value="mix">The whole song (the mix)</option><option value="clip" hidden>A clip</option></select></label>
+        </div>
+        <div class="songmap-summary" hidden></div>
+        <div class="songmap-strip" hidden></div>
+        <div class="songmap-list" hidden></div>
+        <div class="export-options songmap-options" hidden>
+          <label class="check"><input type="checkbox" name="markers" checked /> Put the sections on the ruler (replaces the ones from before)</label>
+          <label class="check" title="Bar lines land on the played downbeats; clips stay where they are"><input type="checkbox" name="follow" /> Follow the performance: the tempo map follows the playing</label>
+        </div>
+        <div class="export-bar"><div></div></div>
+        <div class="export-footer">
+          <span class="export-result songmap-result"></span>
+          <button class="tool songmap-cancel">Cancel</button>
+          <button class="tool songmap-detect">Find sections</button>
+          <button class="tool is-accent songmap-apply" disabled>Apply</button>
+        </div>
+      </div>
+    </div>
     <div class="key-panel" hidden>
       <div class="export-head">
         <strong>Song key</strong>

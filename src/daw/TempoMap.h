@@ -61,7 +61,9 @@ public:
     // `downbeats` (seconds, the start of each bar, in order), with one tempo step per bar.
     // A bar line that is clearly misplaced (its two bars swing apart while the pair keeps
     // the pace) moves to the middle. The music before the first downbeat becomes whole
-    // lead-in bars at a tempo close to the first bar's (their count goes to `leadInBars`).
+    // lead-in bars at a tempo close to the first bar's (their count goes to `leadInBars`);
+    // when it starts too soon for that (under about two thirds of a bar after 0 s), the
+    // first bar of music joins the lead-in and the bar lines start at the second downbeat.
     // Fewer than two downbeats give a steady 120 BPM.
     static TempoMap fromDownbeats (std::vector<double> downbeats, int beatsPerBar, int* leadInBars = nullptr);
 

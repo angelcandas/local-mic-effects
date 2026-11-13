@@ -6,6 +6,7 @@
 #include "daw/Quantize.h"
 #include "daw/ClipTools.h"
 #include "daw/Patterns.h"
+#include "daw/Loops.h"
 #include "instruments/InstrumentProcessor.h"
 #include "instruments/Kit.h"
 
@@ -13,6 +14,7 @@
 #include "dsp/FxModules.h"
 
 #include <map>
+#include <optional>
 #include <numeric>
 #include <variant>
 
@@ -181,6 +183,16 @@ struct DawBridge::ToMidiJob
     std::vector<analysis::tomidi::Note> notes;
 };
 
+struct DawBridge::SongMapJob
+{
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> cancel { false }, finished { false };
+    analysis::structure::SongMap map;
+    juce::String error;
+    double offset = 0.0;
+    int clip = -1;
+};
+
 // One "backingVocals" build. Chord times are the lead file's own seconds.
 struct DawBridge::BackingJob
 {
@@ -305,7 +317,7 @@ namespace
             { "tempo", "Tempo" }, { "tempoMap", "Tempo change" }, { "beatsPerBar", "Time signature" }, { "loop", "Loop range" },
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
             { "quantize", "Quantize" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
-            { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "clearMuteSolo", "Clear mute and solo" },
+            { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
             { "setPart", "Pattern row" }, { "editPattern", "Edit pattern" }, { "setSteps", "Steps" },
@@ -390,6 +402,8 @@ DawBridge::~DawBridge()
         stemJob->cancel = true;
     if (keyJob != nullptr)
         keyJob->cancel = true;
+    if (songMapJob != nullptr)
+        songMapJob->cancel = true;
     if (toMidiJob != nullptr)
         toMidiJob->cancel = true;
     if (backingJob != nullptr)
@@ -695,7 +709,15 @@ juce::var DawBridge::describeSession()
           {
               juce::Array<juce::var> markers;
               for (const auto& m : edit.getMarkers())
-                  markers.add (object ({ { "id", (int) m[ids::id] }, { "name", m[ids::name].toString() }, { "time", number (m, ids::time) } }));
+              {
+                  auto marker = object ({ { "id", (int) m[ids::id] }, { "name", m[ids::name].toString() }, { "time", number (m, ids::time) } });
+                  if (daw::Edit::isSection (m))
+                      for (const auto& [key, value] : std::initializer_list<std::pair<const char*, juce::var>> {
+                               { "length", number (m, ids::length) }, { "section", m[ids::section].toString() },
+                               { "letter", (int) m[ids::letter] }, { "colour", m[ids::colour].toString() } })
+                          marker.getDynamicObject()->setProperty (key, value);
+                  markers.add (marker);
+              }
               return juce::var (markers);
           }() },
         { "metronomeVolume", engine.getMetronomeVolume() },
@@ -1202,6 +1224,14 @@ void DawBridge::tick()
             emit ("dawKey", object ({ { "state", "analysing" }, { "progress", keyJob->progress.load() } }));
     }
 
+    if (songMapJob != nullptr)
+    {
+        if (songMapJob->finished)
+            finishSongMap();
+        else
+            emit ("dawSongMap", object ({ { "state", "analysing" }, { "progress", songMapJob->progress.load() } }));
+    }
+
     if (toMidiJob != nullptr)
     {
         if (toMidiJob->finished)
@@ -1322,7 +1352,7 @@ namespace
     }
 }
 
-juce::var DawBridge::importAudio (const juce::File& file, int trackId, double start)
+juce::var DawBridge::importAudio (const juce::File& file, int trackId, double start, bool match)
 {
     // Check the file before copying it anywhere. Only the header is read: the audio
     // itself loads in the background (AudioPool), so a long song doesn't freeze the app.
@@ -1343,14 +1373,30 @@ juce::var DawBridge::importAudio (const juce::File& file, int trackId, double st
     if (start < 0.0)
         start = (double) engine.getPosition() / engine.getSampleRate();
     start = juce::jmax (0.0, start);
+
+    // A loop: on the nearest bar, at the project's tempo.
+    const auto tempo = edit.getTempoMap();
+    const auto perBar = edit.getBeatsPerBar();
+    const auto loop = match ? daw::loops::findLoop (file, perBar) : std::nullopt;
+    if (loop)
+        start = tempo.toSeconds (juce::jmax (0.0, std::round (tempo.toBeats (start) / perBar) * perBar));
+
     const auto clip = edit.addClip (trackId, source, start, std::get<double> (length));
     sessionChanged = true;
 
     if (! clip.isValid())
         return error ("Couldn't add " + file.getFileName() + " to the track.");
 
-    return object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId }, { "clip", clip[ids::id] },
-                     { "start", start } });
+    auto reply = object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId }, { "clip", clip[ids::id] },
+                           { "start", start } });
+    if (loop)
+    {
+        edit.setClipMusical ((int) clip[ids::id], true, loop->bpm);
+        reply.getDynamicObject()->setProperty ("loop", object ({ { "from", std::round (loop->bpm * 10.0) / 10.0 },
+                                                                 { "to", std::round (tempo.getBpmAt (start) * 10.0) / 10.0 },
+                                                                 { "bars", loop->bars }, { "found", loop->from } }));
+    }
+    return reply;
 }
 
 juce::var DawBridge::addStemTracks (const juce::ValueTree& clip, int trackId,
@@ -2921,6 +2967,245 @@ juce::var DawBridge::handleKey (const juce::var& args)
 }
 
 //==============================================================================
+// "songMap" { action, ... }: the song's sections, bars and tempo (analysis::structure).
+//   detect  { clip? }   listen to the whole mix, or to one audio clip (an imported song),
+//                       in the background; "dawSongMap" brings the result
+//   cancel
+//   get                 the last result (describeSongMap)
+//   apply   { markers, follow }  as one undo step: the sections become ruler sections
+//                       (replacing the ones there are), and/or "Follow the performance":
+//                       the tempo map follows the played beats, bar lines on the downbeats
+//                       -> { ok, sections, leadInBars }
+//   clear               remove the section markers
+namespace
+{
+    juce::String getSectionColour (const analysis::structure::Section& s)
+    {
+        if (s.kind == "intro" || s.kind == "outro") return "#7d8799";
+        if (s.kind == "verse")  return "#4f8cff";
+        if (s.kind == "chorus") return "#ff7a45";
+        if (s.kind == "bridge") return "#b26bff";
+        static const char* letters[] = { "#2bb5a0", "#e0b23a", "#e05a8a", "#6fbf4a", "#5aa6e0", "#c07a4a" };
+        return letters[juce::jlimit (0, 5, s.letter % 6)];
+    }
+}
+
+juce::var DawBridge::handleSongMap (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+
+    if (action == "detect")
+    {
+        if (songMapJob != nullptr)
+            return error ("Already listening to the song.");
+
+        auto job = std::make_shared<SongMapJob>();
+        const auto beatsPerBar = edit.getBeatsPerBar();
+        const auto clipId = arg (args, "clip", -1);
+
+        if (clipId >= 0)
+        {
+            const auto clip = edit.getClip (clipId);
+            if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+                return error ("Pick an audio clip (a song or a recording) to map.");
+
+            const juce::File file (clip[ids::file].toString());
+            const auto warpSettings = daw::Edit::getWarpSettings (clip);
+            auto audio = engine.getAudioPool().get (file, warpSettings);
+            if (audio == nullptr) // not decoded yet (nothing has played it): decode it now
+                audio = engine.getAudioPool().loadNow (file, warpSettings);
+            if (audio == nullptr)
+                return error ("The clip's audio can't be read.");
+
+            const auto rate = engine.getAudioPool().getSampleRate();
+            const auto offset = juce::jmax ((juce::int64) 0, (juce::int64) std::llround ((double) clip[ids::offset] * rate));
+            const auto length = juce::jmin ((juce::int64) audio->getNumSamples() - offset,
+                                            (juce::int64) std::llround ((double) clip[ids::length] * rate));
+            if (length < (juce::int64) (rate * 4.0))
+                return error ("The clip is too short to map: it needs a few bars of music.");
+
+            job->clip = clipId;
+            job->offset = (double) clip[ids::start];
+            songMapJob = job;
+
+            juce::Thread::launch ([job, audio, rate, offset, length, beatsPerBar]
+            {
+                juce::AudioBuffer<float> region (audio->getNumChannels(), (int) length);
+                for (int ch = 0; ch < region.getNumChannels(); ++ch)
+                    region.copyFrom (ch, 0, *audio, ch, (int) offset, (int) length);
+                job->progress = 0.2;
+
+                analysis::structure::Options options;
+                options.beatsPerBar = beatsPerBar;
+                job->map = analysis::structure::analyse (region, rate, options, [job] { return ! job->cancel.load(); });
+                job->finished = true;
+            });
+        }
+        else
+        {
+            // The whole song as it sounds: the session rendered offline (like an export).
+            double songSeconds = 0.0;
+            for (const auto& track : edit.getTracks())
+                for (const auto& clip : track)
+                    if (clip.hasType (ids::CLIP))
+                        songSeconds = juce::jmax (songSeconds, (double) clip[ids::start] + (double) clip[ids::length]);
+            songSeconds = juce::jmax (songSeconds, daw::patterns::getBlocksEnd (edit.getState(), edit.getTempoMap()));
+            if (songSeconds < 4.0)
+                return error ("Add a few bars of music first (or pick a clip to map).");
+
+            engine.captureInstrumentStates();
+            const auto snapshot = edit.getState().createCopy();
+            const auto rate = 48000.0;
+            songMapJob = job;
+
+            juce::Thread::launch ([job, snapshot, rate, songSeconds, beatsPerBar]
+            {
+                constexpr int blockSize = 4096;
+                const auto total = (juce::int64) std::llround (songSeconds * rate);
+                juce::AudioBuffer<float> mix (1, (int) total);
+                {
+                    daw::Edit copy;
+                    copy.replaceState (snapshot);
+                    daw::DawEngine offline (copy, false);
+                    offline.prepare (rate, blockSize);
+                    offline.loadAllNow();
+                    offline.seek (0);
+                    offline.play();
+
+                    juce::AudioBuffer<float> buffer (2, blockSize);
+                    for (juce::int64 done = 0; done < total && ! job->cancel; done += blockSize)
+                    {
+                        const auto n = (int) juce::jmin ((juce::int64) blockSize, total - done);
+                        offline.process (buffer, 2, n);
+                        auto* out = mix.getWritePointer (0, (int) done);
+                        const auto* left = buffer.getReadPointer (0);
+                        const auto* right = buffer.getReadPointer (1);
+                        for (int i = 0; i < n; ++i)
+                            out[i] = 0.5f * (left[i] + right[i]);
+                        job->progress = 0.6 * (double) (done + n) / (double) total;
+                    }
+                }
+
+                if (! job->cancel)
+                {
+                    analysis::structure::Options options;
+                    options.beatsPerBar = beatsPerBar;
+                    job->map = analysis::structure::analyse (mix, rate, options, [job] { return ! job->cancel.load(); });
+                }
+                job->finished = true;
+            });
+        }
+
+        emit ("dawSongMap", object ({ { "state", "analysing" }, { "progress", 0.0 } }));
+        return error ({});
+    }
+
+    if (action == "cancel")
+    {
+        if (songMapJob != nullptr)
+            songMapJob->cancel = true;
+        return error ({});
+    }
+
+    if (action == "get")
+        return describeSongMap();
+
+    if (action == "clear")
+    {
+        edit.getUndoManager().beginNewTransaction ("Remove song sections");
+        edit.setSongSections ({});
+        return error ({});
+    }
+
+    if (action == "apply")
+    {
+        if (! lastSongMap.has_value())
+            return error ("Map the song first.");
+
+        const auto& map = *lastSongMap;
+        const auto markers = arg (args, "markers", true), follow = arg (args, "follow", false);
+
+        if (follow)
+        {
+            if (! map.hasBeats())
+                return error ("No steady beat was found, so there is no performance tempo to follow.");
+
+            // Clips tied to bars and beats would move with the new tempo map, and the
+            // performance must stay where it was played.
+            for (const auto& track : edit.getTracks())
+                for (const auto& clip : track)
+                    if (clip.hasType (ids::CLIP) && ! daw::Edit::isMidiClip (clip) && daw::Edit::isMusical (clip))
+                        return error ("\"" + clip[ids::name].toString() + "\" follows the tempo (musical mode), so it would move. "
+                                      "Turn musical mode off on it first, or add only the sections.");
+        }
+
+        edit.getUndoManager().beginNewTransaction (follow ? "Follow the performance" : "Song sections");
+        auto leadIn = 0;
+        if (follow)
+        {
+            std::vector<double> beats;
+            for (auto b : map.beats)
+                beats.push_back (b + lastSongMapOffset);
+
+            // Bar lines start at 0 s: a performance that starts later gets whole lead-in bars.
+            leadIn = edit.setTempoMapFromBeats (beats, map.firstDownbeat);
+        }
+
+        if (markers)
+        {
+            std::vector<daw::Edit::SectionMarker> sections;
+            for (const auto& s : map.sections)
+                sections.push_back ({ s.name, s.kind, getSectionColour (s), s.letter, s.start + lastSongMapOffset, s.end - s.start });
+            edit.setSongSections (sections);
+        }
+        edit.getUndoManager().beginNewTransaction();
+
+        return object ({ { "ok", true }, { "sections", markers ? (int) map.sections.size() : 0 }, { "leadInBars", leadIn } });
+    }
+
+    return error ("Unknown song map action: " + action);
+}
+
+void DawBridge::finishSongMap()
+{
+    auto job = std::move (songMapJob);
+
+    if (job->cancel || job->map.cancelled)
+    {
+        emit ("dawSongMap", object ({ { "state", "cancelled" } }));
+        return;
+    }
+
+    lastSongMap = std::move (job->map);
+    lastSongMapOffset = job->offset;
+    lastSongMapClip = job->clip;
+    emit ("dawSongMap", describeSongMap());
+}
+
+juce::var DawBridge::describeSongMap() const
+{
+    if (! lastSongMap.has_value())
+        return object ({ { "state", "none" } });
+
+    const auto& map = *lastSongMap;
+    juce::Array<juce::var> sections;
+    for (const auto& s : map.sections)
+        sections.add (object ({ { "name", s.name }, { "kind", s.kind }, { "letter", s.getLetterName() }, { "bars", s.bars },
+                                { "firstBar", s.firstBar }, { "start", s.start + lastSongMapOffset }, { "end", s.end + lastSongMapOffset },
+                                { "level", s.loudnessDb }, { "colour", getSectionColour (s) } }));
+
+    juce::Array<juce::var> barTempos;
+    for (auto t : map.getBarTempos())
+        barTempos.add (std::round (t * 10.0) / 10.0);
+
+    return object ({ { "state", "ready" }, { "source", lastSongMapClip >= 0 ? "clip" : "mix" }, { "clip", lastSongMapClip },
+                     { "hasBeats", map.hasBeats() }, { "bpm", map.bpm }, { "confidence", map.tempoConfidence },
+                     { "drift", map.getTempoDrift() }, { "beatsPerBar", map.beatsPerBar }, { "bars", map.getNumBars() },
+                     { "firstDownbeat", map.downbeats.empty() ? 0.0 : map.downbeats.front() + lastSongMapOffset },
+                     { "barTempos", barTempos }, { "sections", sections } });
+}
+
+//==============================================================================
 // "takes" { action, ... }: take lanes and comping.
 //   show      { track, on }        unfold (or fold) the track's take lanes
 //   listen    { track, take }      hear one take instead of the comp (take -1: the comp)
@@ -4261,7 +4546,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         const auto trackId = arg (args, "track", -1);
         withChooser ("Import audio", juce::File::getSpecialLocation (juce::File::userMusicDirectory), getAudioFilePatterns(),
                      Flags::openMode | Flags::canSelectFiles,
-                     [this, trackId] (const juce::File& file) { return importAudio (file, trackId); },
+                     [this, trackId] (const juce::File& file) { return importAudio (file, trackId, -1.0, matchLoops); },
                      complete);
         return;
     }
@@ -4288,7 +4573,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             return;
         }
 
-        constexpr double maxSeconds = 30.0;
+        // In tempo (the library's "Match loops" switch): a loop is stretched to the project's
+        // tempo, repeats, and starts on the next bar while the song plays.
+        const auto sync = arg (args, "sync", false);
+        const auto loop = sync ? daw::loops::findLoop (file, edit.getBeatsPerBar()) : std::nullopt;
+
+        const auto maxSeconds = loop ? 130.0 : 30.0;
         const auto channels = (int) juce::jlimit (1u, 2u, reader->numChannels);
         const auto sourceLength = (int) juce::jmin (reader->lengthInSamples, (juce::int64) (maxSeconds * reader->sampleRate));
         juce::AudioBuffer<float> source (channels, sourceLength);
@@ -4312,9 +4602,62 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             }
         }
 
+        if (loop)
+        {
+            // The stretch takes a moment: off the message thread, then started at the next bar.
+            const auto rate = engine.getSampleRate();
+            const auto tempoMap = edit.getTempoMap();
+            const auto perBar = edit.getBeatsPerBar();
+            auto shared = std::make_shared<juce::AudioBuffer<float>> (std::move (audio));
+            const auto bars = loop->bars;
+            juce::Thread::launch ([this, shared, rate, tempoMap, perBar, bars, gain, complete, weak = std::weak_ptr<bool> (alive),
+                                   from = loop->bpm]
+            {
+                // The loop's length at the tempo where the song is now.
+                const auto sourceSeconds = shared->getNumSamples() / rate;
+                const auto targetSeconds = bars * perBar * 60.0 / tempoMap.getBpmAt (0.0);
+                daw::warp::Settings settings;
+                settings.map = daw::warp::Map ({ { 0.0, 0.0 }, { sourceSeconds, targetSeconds } });
+                settings.algorithm = daw::warp::Algorithm::drums;
+                auto stretched = std::abs (targetSeconds - sourceSeconds) < 1.0e-4 ? *shared : daw::warp::render (*shared, rate, settings);
+                stretched.setSize (stretched.getNumChannels(), juce::jmax (1, (int) std::lround (targetSeconds * rate)), true, true);
+
+                juce::MessageManager::callAsync ([this, stretched = std::move (stretched), rate, tempoMap, perBar, gain, complete, weak, from,
+                                                  targetSeconds]() mutable
+                {
+                    if (auto flag = weak.lock(); flag == nullptr || ! *flag)
+                        return;
+                    auto delay = 0;
+                    if (engine.isPlaying())
+                    {
+                        const auto now = (double) engine.getPosition() / rate;
+                        const auto beats = tempoMap.toBeats (now);
+                        const auto nextBar = std::ceil (beats / perBar - 1.0e-6) * perBar;
+                        delay = (int) std::lround ((tempoMap.toSeconds (nextBar) - now) * rate);
+                    }
+                    engine.startPreview (std::move (stretched), gain, true, delay);
+                    complete (object ({ { "ok", true }, { "seconds", targetSeconds }, { "loop", true }, { "from", std::round (from * 10.0) / 10.0 },
+                                        { "to", std::round (tempoMap.getBpmAt (0.0) * 10.0) / 10.0 } }));
+                });
+            });
+            return;
+        }
+
         const auto seconds = audio.getNumSamples() / engine.getSampleRate();
         engine.startPreview (std::move (audio), gain);
         complete (object ({ { "ok", true }, { "seconds", seconds }, { "cut", reader->lengthInSamples > sourceLength } }));
+        return;
+    }
+
+    if (command == "matchLoops")
+    {
+        // The library's "Match loops to the tempo" switch, kept in the settings.
+        if (args.hasProperty ("on"))
+        {
+            matchLoops = (bool) args["on"];
+            settings.setValue ("dawMatchLoops", matchLoops);
+        }
+        complete (object ({ { "ok", true }, { "on", matchLoops } }));
         return;
     }
 
@@ -4322,7 +4665,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         const juce::File file (args["file"].toString());
         complete (juce::File::isAbsolutePath (args["file"].toString()) && file.existsAsFile()
-                      ? importAudio (file, arg (args, "track", -1), arg (args, "start", -1.0))
+                      ? importAudio (file, arg (args, "track", -1), arg (args, "start", -1.0), arg (args, "match", matchLoops))
                       : error ("That file isn't there any more."));
         return;
     }
@@ -4445,6 +4788,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "toMidi")
     {
         complete (handleToMidi (args));
+        return;
+    }
+
+    if (command == "songMap")
+    {
+        complete (handleSongMap (args));
         return;
     }
 
