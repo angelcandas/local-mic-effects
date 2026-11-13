@@ -140,6 +140,8 @@ set(MICFX_DSP_SOURCES
     src/daw/DawEngine.cpp
     src/daw/Edit.cpp
     src/daw/Patterns.cpp
+    src/daw/Loops.cpp
+    src/daw/Loops.h
     src/daw/Patterns.h
     src/daw/Exporter.cpp
     src/daw/Instruments.cpp

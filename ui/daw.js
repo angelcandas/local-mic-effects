@@ -6,7 +6,7 @@ import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, isControlShown } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
 import { FX_PRESETS, createPresetPicker, presetParams } from "./fxpresets.js";
-import { LibraryBrowser } from "./browser.js";
+import { LibraryBrowser, loopText } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
 import { BackingVocals } from "./backing.js";
@@ -2249,6 +2249,7 @@ class DawScreen {
   async importAudio() {
     const result = await daw("import", { track: this.selectedTrack ?? -1 });
     if (result?.ok && typeof result.track === "number") this.showWhenDrawn({ track: result.track, clip: result.clip, start: result.start });
+    if (result?.loop) toast(loopText(result.loop), "", "undo");
   }
 
   // Selects a track (and clip) that was just added, once a session that holds it arrives.
@@ -5219,7 +5220,7 @@ class DawScreen {
         }
         return daw(command, args);
       },
-      toast: (message, kind) => toast(message, kind),
+      toast: (...args) => toast(...args),
       onEvent: (name, handler) => window.__JUCE__.backend.addEventListener(name, handler),
       // The app's settings (Favourites and Recent): pref(key) reads, pref(key, text) writes.
       pref: (...args) => Juce.getNativeFunction("uiPref")(...args).catch(() => ""),
