@@ -10199,8 +10199,69 @@ static void testPatterns()
         check (rms (out[0], 0, (size_t) (0.2 * sampleRate)) > 0.01f && rms (out[0], (size_t) (2.0 * sampleRate), (size_t) (2.2 * sampleRate)) > 0.01f
                    && rms (out[0], (size_t) (4.0 * sampleRate), (size_t) (4.2 * sampleRate)) > 0.01f,
                "the pattern plays from its start, pass after pass");
-        check (engine.startRecording (folder).isNotEmpty(), "recording waits for Song mode (this PR)");
         engine.stop();
+
+        // Pattern recording (the looper): what's played goes into the pattern, pass after pass.
+        {
+            edit.setPartDrum (patternId, drums, true);
+            edit.setTrackArm (audio, true);
+            check (engine.startRecording (folder).isNotEmpty(), "pattern mode records MIDI tracks only");
+            edit.setTrackArm (drums, true); // the armed audio track sits it out
+            engine.setMidiRecordingLatency (480); // 10 ms
+            engine.seek (0);
+            edit.getUndoManager().beginNewTransaction();
+            check (engine.startRecording (folder).isEmpty() && engine.isPatternRecording(), "records in pattern mode with a MIDI track armed");
+
+            const auto at = [] (double seconds) { return (int) std::llround (seconds * sampleRate); };
+            const auto before = daw::patterns::getPatternEvents (pattern, drums).size();
+            // A clap a little after beat 2 (step 8), and a kick just before the loop's end
+            // (step 16 wraps to step 0, where a kick already is).
+            renderWithMidi (engine, 2.5, { { at (1.03), juce::MidiMessage::noteOn (1, 39, (juce::uint8) 100) },
+                                           { at (1.1), juce::MidiMessage::noteOff (1, 39) },
+                                           { at (1.985), juce::MidiMessage::noteOn (1, 36, (juce::uint8) 100) },
+                                           { at (2.05), juce::MidiMessage::noteOff (1, 36) } });
+            engine.collectPatternNotes();
+            const auto part = edit.getPart (patternId, drums);
+            juce::ValueTree clap;
+            for (const auto& n : part)
+                if ((int) n[daw::ids::pitch] == 39)
+                    clap = n;
+            check (clap.isValid() && near ((double) clap[daw::ids::time], 2.0) && near ((double) clap[daw::ids::length], 0.25),
+                   "a played note lands on the nearest step, one step long on a drum part ("
+                       + clap[daw::ids::time].toString() + ")");
+            check (daw::patterns::getPatternEvents (pattern, drums).size() == before + 1, "a note already on that step isn't added twice");
+
+            const auto recorded = engine.finishPatternRecording();
+            check (recorded == 1 && ! engine.isPatternRecording() && engine.isPlaying() && edit.getUndoManager().getUndoDescription() == "Record pattern",
+                   "finishing keeps playing, and the recording is one undo step");
+            edit.getUndoManager().undo();
+            check (daw::patterns::getPatternEvents (pattern, drums).size() == before, "undo removes what was recorded");
+            edit.getUndoManager().redo();
+            check (daw::patterns::getPatternEvents (pattern, drums).size() == before + 1, "redo puts it back");
+
+            // Unsnapped, on a one-row part: the played time and length.
+            edit.setPartDrum (patternId, drums, false);
+            engine.setPatternSnap (false);
+            engine.seek (0);
+            check (engine.startRecording (folder).isEmpty(), "records again");
+            renderWithMidi (engine, 1.0, { { at (0.31), juce::MidiMessage::noteOn (1, 50, (juce::uint8) 70) },
+                                           { at (0.61), juce::MidiMessage::noteOff (1, 50) } });
+            engine.stopRecording();
+            juce::ValueTree tom;
+            for (const auto& n : edit.getPart (patternId, drums))
+                if ((int) n[daw::ids::pitch] == 50)
+                    tom = n;
+            check (tom.isValid() && near ((double) tom[daw::ids::time], 0.6, 0.002) && near ((double) tom[daw::ids::length], 0.6, 0.002)
+                       && (int) tom[daw::ids::velocity] == 70 && ! engine.isPlaying(),
+                   "without snap a note keeps its time and length (" + tom[daw::ids::time].toString() + ")");
+            edit.getUndoManager().undo(); // the second recording
+            edit.getUndoManager().undo(); // the drum switch
+            edit.getUndoManager().undo(); // the first recording
+            engine.setPatternSnap (true);
+            edit.setTrackArm (drums, false);
+            edit.setTrackArm (audio, false);
+            check (daw::patterns::getPatternEvents (pattern, drums).size() == before, "(undo both recordings)");
+        }
         engine.setPatternMode (-1);
         check (engine.getPatternMode() == -1 && engine.getPosition() == (juce::int64) (5.0 * sampleRate) && engine.getLength() == (juce::int64) (6.0 * sampleRate),
                "Song mode puts the playhead back where it was");
@@ -10211,6 +10272,33 @@ static void testPatterns()
         check (engine.getPatternMode() == -1 && engine.getPosition() == (juce::int64) (5.0 * sampleRate), "removing the pattern goes back to Song mode");
         edit.getUndoManager().undo();
         render (engine, 1.0);
+
+        // A block to MIDI clips and back.
+        {
+            edit.getUndoManager().beginNewTransaction();
+            const auto clips = edit.patternClipToMidiClips (block);
+            const auto clip = edit.getClip (clips[0]);
+            int notes = 0;
+            for (const auto& n : clip)
+                notes += n.hasType (daw::ids::NOTE) ? 1 : 0;
+            check (clips.size() == 1 && ! edit.getPatternClip (block).isValid() && near ((double) clip[daw::ids::start], 2.0)
+                       && near ((double) clip[daw::ids::length], 4.0) && notes == 12,
+                   "a block becomes MIDI clips with the same notes (" + juce::String (notes) + ")");
+            engine.rebuildNow();
+            check (engine.getLength() == (juce::int64) (6.0 * sampleRate), "which play over the same stretch");
+
+            edit.getUndoManager().beginNewTransaction();
+            const auto made = edit.midiClipToPattern (clips[0]);
+            const auto madePattern = edit.getPattern (made);
+            const auto madeBlock = edit.getPatternClips().getLast();
+            check (made > 0 && ! edit.getClip (clips[0]).isValid() && near (daw::Edit::getPatternLength (madePattern), 8.0)
+                       && daw::patterns::getPatternEvents (madePattern, drums).size() == 12
+                       && near ((double) madeBlock[daw::ids::start], 4.0) && near ((double) madeBlock[daw::ids::length], 8.0),
+                   "and a MIDI clip becomes a pattern with a block in its place");
+            edit.getUndoManager().undo();
+            edit.getUndoManager().undo();
+            check (edit.getPatternClip (block).isValid() && ! edit.getPattern (made).isValid(), "both undo in one step each");
+        }
 
         // Audition: one track's instrument, without arming it.
         engine.addLiveMidi (juce::MidiMessage::noteOn (1, 36, (juce::uint8) 110), drums);
@@ -10340,6 +10428,28 @@ static void testPatterns()
         check (ok (run ("patternMode", args ({ { "pattern", -1 } }))) && processor.getDawEngine().getPatternMode() == -1, "and back to Song mode");
         check (ok (run ("liveNote", args ({ { "note", 36 }, { "velocity", 100 }, { "track", kit } }))), "liveNote takes a track");
         run ("liveNote", args ({ { "note", 36 }, { "velocity", 0 }, { "track", kit } }));
+
+        check (! ok (run ("patternRecord", args ({ { "on", true }, { "track", kit } }))), "patternRecord needs Pattern mode");
+        run ("patternMode", args ({ { "pattern", patternId } }));
+        check (ok (run ("patternRecord", args ({ { "on", true }, { "track", kit }, { "snap", true } })))
+                   && (bool) edit.getTrack (kit)[daw::ids::arm] && (bool) lastSession()["patternRecording"],
+               "patternRecord arms the row's track and records");
+        check (ok (run ("patternRecord", args ({ { "on", false } }))) && ! (bool) lastSession()["patternRecording"], "and stops");
+        check (ok (run ("patternRecord", args ({ { "on", true } }))), "(again, with the track still armed)");
+        run ("transport", args ({ { "action", "stop" } }));
+        run ("record", args ({ { "on", false } }));
+        run ("patternMode", args ({ { "pattern", -1 } }));
+        edit.setTrackArm (kit, false);
+
+        const auto converted = run ("patternToClips", args ({ { "id", blockId } }));
+        check (ok (converted) && converted["clips"].size() == 1 && lastSession()["patternClips"].size() == 0, "patternToClips");
+        const auto back = run ("clipToPattern", args ({ { "id", converted["clips"][0] } }));
+        check (back.isInt() && edit.getPart ((int) back, kit).isValid() && (bool) edit.getPart ((int) back, kit)[daw::ids::drum],
+               "clipToPattern makes a drum pattern from a kit's clip");
+        run ("undo");
+        run ("undo");
+        session = lastSession();
+        check (session["patternClips"].size() == 1 && session["patterns"].size() == 1, "(undo both)");
 
         const auto copy = run ("makePatternUnique", args ({ { "id", blockId } }));
         check (copy.isInt() && (int) copy != (int) patternId && lastSession()["patterns"].size() == 2, "makePatternUnique");
