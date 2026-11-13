@@ -21,6 +21,41 @@ export const ALGORITHMS = [
 
 const STEPS = [[1, "1/4 (beats)"], [0.5, "1/8"], [1 / 3, "1/8 triplets"], [0.25, "1/16"], ["bar", "Bars"]];
 
+// While the song plays, a drag can be heard before it's let go: `send` passes what the
+// drag would store ({ markers } for previewWarp, { notes } for previewPitchNotes) at most
+// every 120 ms and only when it changed, and the clip plays it (not stored, not an undo
+// step). `end(stored)`: the drag is over; when it stored nothing (back where it started),
+// the preview is cancelled, otherwise the real edit replaces it.
+export function livePreview(daw, screen, command, id) {
+  let last = "", pending = null, timer = 0, sentAt = 0, sent = false;
+  const flush = () => {
+    timer = 0;
+    if (!pending) return;
+    const text = JSON.stringify(pending);
+    const args = pending;
+    pending = null;
+    if (text === last) return;
+    last = text;
+    sentAt = performance.now();
+    sent = true;
+    daw(command, { id, ...args });
+  };
+  return {
+    send(args) {
+      if (!screen.status?.playing && !sent) return;
+      pending = args;
+      if (!timer) timer = setTimeout(flush, Math.max(0, 120 - (performance.now() - sentAt)));
+    },
+    end(stored) {
+      clearTimeout(timer);
+      timer = 0;
+      pending = null;
+      if (sent && !stored) daw("cancelPreview", { id });
+      sent = false;
+    },
+  };
+}
+
 // Warp maps as the session sends them: [[source, target], ...] in seconds.
 export function toSource(markers, target) {
   if (!markers?.length) return target;
@@ -176,6 +211,10 @@ export function createClipEditor(screen, track, clip, ui) {
   const clipTempoLabel = html("label", "tempo");
   clipTempoLabel.append(clipTempo, html("span", "", "BPM"));
 
+  // Compare: hear the clip without its pitch changes (its timing stays), to judge an edit.
+  const original = button("tool", "Original", "Hear the clip without its pitch changes (transpose and note edits) to compare; its timing stays. Switch back to hear them again", () => {
+    daw("setWarpBypass", { id, bypass: !current.warpBypass });
+  });
   const fit = button("tool", "Fit", "Show the whole clip", () => { if (mode === "notes") notesView?.fit(); else { view = null; draw(); } });
   const status = html("span", "clip-editor-status");
 
@@ -191,7 +230,7 @@ export function createClipEditor(screen, track, clip, ui) {
   };
   const waveTab = viewButton("wave", "Wave", "The clip's waveform: warp its timing");
   const notesTab = viewButton("notes", "Notes", "The clip's sung notes: move, straighten and shape each one (a single voice or instrument line)");
-  bar.append(views, quantize, unwarp, musical, clipTempoLabel, status, fit);
+  bar.append(views, quantize, unwarp, musical, clipTempoLabel, original, status, fit);
 
   const wave = html("div", "clip-editor-wave");
   wave.title = "Drag a note start (faint line) to move just that note, or anywhere to stretch. Double-click a marker to remove it. Ctrl/Cmd + scroll to zoom";
@@ -234,8 +273,11 @@ export function createClipEditor(screen, track, clip, ui) {
   const timeAt = (clientX) => { const [a, b] = span(); return a + (clientX - wave.getBoundingClientRect().left) / width() * (b - a); };
   const xOf = (time) => { const [a, b] = span(); return (time - a) / (b - a) * width(); };
 
-  // Waveform peaks for the view, asked for again while the copy is still rendering.
-  let shownPeaks = null, asking = null, retry = 0, disposed = false;
+  // Waveform peaks for the view, asked for again while the copy is still rendering. Until
+  // the new peaks come, the old picture stays, stretched to where the edit puts it (see
+  // `remap`), and only the stretches still rendering are shaded (`pending`, rendered time).
+  let shownPeaks = null, asking = null, retry = 0, disposed = false, pending = [], frame = 0;
+  let remap = null, drag = null; // new time -> time in the picture we have (settled edits, the one being dragged)
   const fetchPeaks = async () => {
     const [a, b] = span();
     const audioKey = current.audioKey || current.file;
@@ -247,13 +289,19 @@ export function createClipEditor(screen, track, clip, ui) {
     if (disposed) return;
     if (result?.max) {
       shownPeaks = { key, ...result };
+      remap = null;
+      pending = [];
       setStatus();
       paint();
     } else {
-      // Still decoding or rendering the new pitch/timing: try again shortly.
-      setStatus("Rendering…");
+      // Still decoding or rendering the new pitch/timing: see how far it has got, try again shortly.
+      if (!shownPeaks) setStatus("Rendering…");
+      const state = await daw("renderState", { id });
+      if (disposed) return;
+      pending = state?.ok && !state.ready ? state.ranges ?? [] : [];
+      paint();
       clearTimeout(retry);
-      retry = setTimeout(() => { if (!disposed && element.isConnected) fetchPeaks(); }, 400);
+      retry = setTimeout(() => { if (!disposed && element.isConnected) fetchPeaks(); }, state?.ready ? 150 : 400);
     }
   };
   const setStatus = (text = "") => {
@@ -286,12 +334,15 @@ export function createClipEditor(screen, track, clip, ui) {
 
     const result = shownPeaks;
     if (!result) return;
+    const back = remap ? (drag ? (t) => remap(drag(t)) : remap) : drag ?? ((t) => t);
     const gain = Math.pow(10, (current.gain || 0) / 20);
     const middle = ruler + (h - ruler) / 2, reach = (h - ruler) / 2 - ratio;
     context.fillStyle = colour;
     for (let x = 0; x < w; ++x) {
-      const t = a + x * perPixel - result.start;
-      const i0 = Math.floor(t / result.seconds), i1 = Math.max(i0 + 1, Math.floor((t + perPixel) / result.seconds));
+      // Where this column came from in the picture we have (the same place unless an edit moved it).
+      const from = back(a + x * perPixel), until = back(a + (x + 1) * perPixel);
+      const t = Math.min(from, until) - result.start;
+      const i0 = Math.floor(t / result.seconds), i1 = Math.max(i0 + 1, Math.floor((t + Math.abs(until - from)) / result.seconds));
       let lo = Infinity, hi = -Infinity;
       for (let i = Math.max(0, i0); i < Math.min(i1, result.max.length); ++i) {
         lo = Math.min(lo, result.min[i]);
@@ -301,7 +352,17 @@ export function createClipEditor(screen, track, clip, ui) {
       const top = middle - clamp(hi * gain, -1, 1) * reach, bottom = middle - clamp(lo * gain, -1, 1) * reach;
       context.fillRect(x, Math.min(top, middle - 0.5 * ratio), 1, Math.max(ratio, bottom - top));
     }
+
+    // The stretches still rendering: shaded, so the rest can be heard and judged already.
+    if (pending.length) {
+      context.fillStyle = "rgba(255,255,255,0.14)";
+      for (const [from, to] of pending) {
+        const x0 = Math.max(0, (from - a) / perPixel), x1 = Math.min(w, (to - a) / perPixel);
+        if (x1 > x0) context.fillRect(x0, ruler, x1 - x0, h - ruler);
+      }
+    }
   };
+  const paintSoon = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; paint(); }); };
 
   // Note starts (hitpoints), found in the background for the clip as it plays now.
   let hits = [], hitsKey = "";
@@ -410,8 +471,20 @@ export function createClipEditor(screen, track, clip, ui) {
     const place = (target) => { line.style.left = `${xOf(target)}px`; };
     place(startTarget);
     let target = startTarget;
+    // The picture follows the hand: the stretch between the neighbours is squeezed on one
+    // side of the marker and spread on the other (outside them it stays put, or slides when
+    // there's no neighbour on that side).
+    const before = index > 0 ? markers[index - 1][1] : -Infinity;
+    const after = index < markers.length - 1 ? markers[index + 1][1] : Infinity;
+    const stretchTo = (moved) => (t) => {
+      if (t <= before || t >= after) return t;
+      if (t <= moved) return Number.isFinite(before) ? before + (t - before) * (startTarget - before) / (moved - before) : t - (moved - startTarget);
+      return Number.isFinite(after) ? startTarget + (t - moved) * (after - startTarget) / (after - moved) : t - (moved - startTarget);
+    };
     screen.dragging = true;
     wave.setPointerCapture?.(event.pointerId);
+    const live = livePreview(daw, screen, "previewWarp", id);
+    const withTarget = (t) => markers.map((m, i) => (i === index ? [m[0], t] : m));
 
     const move = (e) => {
       const free = startTarget + (e.clientX - event.clientX) * perPx;
@@ -419,6 +492,9 @@ export function createClipEditor(screen, track, clip, ui) {
       const snapped = screen.snapTime(timeline, e) - current.start + current.offset;
       target = clamp(snapped, low, high);
       place(target);
+      drag = Math.abs(target - startTarget) > 1e-4 ? stretchTo(target) : null;
+      live.send({ markers: withTarget(target) });
+      paintSoon();
     };
     const up = () => {
       wave.removeEventListener("pointermove", move);
@@ -426,10 +502,17 @@ export function createClipEditor(screen, track, clip, ui) {
       wave.removeEventListener("pointercancel", up);
       screen.dragging = false;
       line.remove();
-      if (Math.abs(target - startTarget) > 1e-4) {
+      const moved = Math.abs(target - startTarget) > 1e-4;
+      live.end(moved);
+      if (moved) {
+        // Keep the predicted picture until the real one is rendered.
+        const settled = stretchTo(target), earlier = remap;
+        remap = earlier ? (t) => earlier(settled(t)) : settled;
         markers[index][1] = target;
         daw("setWarp", { id, markers });
       }
+      drag = null;
+      paintSoon();
       screen.flushSession?.();
     };
     wave.addEventListener("pointermove", move);
@@ -449,6 +532,11 @@ export function createClipEditor(screen, track, clip, ui) {
     clipTempoLabel.hidden = !c.musical;
     if (document.activeElement !== clipTempo) clipTempo.value = c.clipTempo ? String(Math.round(c.clipTempo * 100) / 100) : "";
     unwarp.disabled = !(c.warp?.length);
+    const changesPitch = Math.abs((c.transpose || 0) + (t.transpose || 0)) > 1e-4 || Boolean(c.pitchEdited);
+    original.classList.toggle("is-accent", Boolean(c.warpBypass));
+    original.setAttribute("aria-pressed", String(Boolean(c.warpBypass)));
+    original.textContent = c.warp?.length ? "Original pitch" : "Original";
+    original.disabled = !changesPitch && !c.warpBypass;
     const count = c.warp?.length ?? 0;
     hint.textContent = count ? `${count} warp markers. Drag a note start or a marker to move it; double-click a marker to remove it.`
                              : "Drag a note start (faint line) to move just that note, or anywhere in the clip to stretch it.";
@@ -469,7 +557,7 @@ export function createClipEditor(screen, track, clip, ui) {
   return {
     element,
     update,
-    dispose: () => { disposed = true; clearTimeout(retry); resize.disconnect(); notesView?.dispose(); },
+    dispose: () => { disposed = true; clearTimeout(retry); cancelAnimationFrame(frame); resize.disconnect(); notesView?.dispose(); },
   };
 }
 

@@ -1,0 +1,95 @@
+/* The Patterns tab (the rack) and the Patterns lane (ui/patterns.js). */
+
+.daw .mode-switch { flex: none; }
+.daw.pattern-mode .mode-switch { border-color: var(--accent); }
+
+/* ---------- Patterns lane, under the ruler / tempo track ---------- */
+
+.pattern-row {
+  position: sticky;
+  top: var(--pattern-top, 30px);
+  z-index: 3;
+  display: flex;
+  border-bottom: 1px solid var(--line);
+  background: var(--panel);
+}
+.pattern-row[hidden] { display: none; }
+.pattern-corner { justify-content: space-between; gap: 6px; }
+.pattern-lane { position: relative; flex: none; min-height: 34px; cursor: copy; overflow: hidden; }
+.pl-block {
+  position: absolute;
+  box-sizing: border-box;
+  overflow: hidden;
+  border: 1px solid color-mix(in srgb, var(--pat) 80%, #000);
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--pat) 38%, var(--panel));
+  cursor: grab;
+  outline: none;
+}
+.pl-block.is-muted { opacity: 0.4; }
+.pl-block.is-selected { border-color: var(--text); box-shadow: 0 0 0 1px var(--text); }
+.pl-block:focus-visible { box-shadow: 0 0 0 2px var(--accent-2); }
+.pl-name { position: absolute; left: 6px; top: 2px; color: #fff; font: 600 10.5px var(--mono); pointer-events: none; text-shadow: 0 1px 2px rgba(0, 0, 0, 0.6); }
+.pl-preview { position: absolute; left: 0; bottom: 2px; pointer-events: none; opacity: 0.8; }
+.pl-edge { position: absolute; top: 0; right: 0; bottom: 0; width: 7px; cursor: ew-resize; background: rgba(255, 255, 255, 0.12); }
+.pl-seam { position: absolute; top: 0; bottom: 0; width: 0; border-left: 1px dashed rgba(255, 255, 255, 0.35); pointer-events: none; }
+
+/* ---------- Patterns tab ---------- */
+
+.patterns-panel { display: flex; flex: 1 0 640px; flex-direction: column; gap: 8px; min-width: 0; min-height: 0; }
+.pat-bar { display: flex; flex: none; align-items: center; flex-wrap: wrap; gap: 6px; }
+.pat-bar .dropdown { min-width: 0; height: 28px; padding-top: 0; padding-bottom: 0; font-size: 11.5px; }
+.pat-picker { width: 130px; }
+.pat-length { width: 92px; }
+.pat-stepsize { width: 104px; }
+.pat-tool { height: 28px; padding: 0 10px; font-size: 11.5px; }
+.pat-colour { width: 14px; height: 14px; padding: 0; border: 1px solid rgba(255, 255, 255, 0.4); border-radius: 50%; cursor: pointer; }
+.pat-name { width: 130px; height: 28px; padding: 0 8px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); color: var(--text); font-size: 12px; }
+.pat-swing { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
+.pat-swing input { width: 80px; }
+.pat-swing-value { min-width: 32px; font-family: var(--mono); }
+.pat-spacer { flex: 1; }
+
+.pat-rack { flex: 1; min-height: 0; overflow: auto; padding-bottom: 6px; }
+.pat-track { margin-bottom: 8px; }
+.pat-track.is-muted { opacity: 0.45; }
+.pat-head-row { display: flex; align-items: center; gap: 6px; height: 22px; }
+.pat-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--track); flex: none; }
+.pat-track-name { max-width: 180px; overflow: hidden; border: 0; background: none; color: var(--text); font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; cursor: pointer; }
+.pat-mute, .pat-add-sound, .pat-more {
+  height: 18px; padding: 0 6px; border: 1px solid var(--line); border-radius: 5px; background: var(--panel);
+  color: var(--muted); font-size: 10.5px; cursor: pointer;
+}
+.pat-mute:hover, .pat-add-sound:hover, .pat-more:hover { color: var(--text); border-color: var(--line-strong); }
+.pat-mute.is-on { border-color: var(--warn); background: var(--warn); color: #1b1500; }
+
+.pat-row { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
+.pat-label {
+  flex: none; width: 84px; overflow: hidden; padding: 0 6px; border: 0; border-radius: 6px; background: var(--panel-raised);
+  color: var(--muted); font-size: 11.5px; line-height: 24px; text-align: left; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+}
+.pat-label:hover { color: var(--text); }
+.pat-label.is-fixed { cursor: default; }
+.pat-steps { display: grid; grid-template-columns: repeat(var(--steps), 24px); gap: 2px; touch-action: none; user-select: none; }
+.pat-step {
+  position: relative; width: 24px; height: 24px; padding: 0; border: 1px solid var(--line); border-radius: 4px;
+  background: #0f1219; cursor: pointer;
+}
+.pat-step.is-alt { background: #171b25; }
+.pat-step:hover { border-color: var(--line-strong); }
+.pat-step.is-on {
+  border-color: color-mix(in srgb, var(--track) 70%, #fff);
+  background: color-mix(in srgb, var(--track) calc(var(--vel, 0.8) * 100%), #0f1219);
+}
+.pat-step.is-now { box-shadow: inset 0 0 0 2px rgba(255, 255, 255, 0.55); }
+.pat-step:not(.is-on).is-now { background: rgba(255, 255, 255, 0.12); }
+
+.pat-melody { position: relative; flex: none; height: 24px; border: 1px solid var(--line); border-radius: 4px; background: #0f1219; overflow: hidden; }
+.pat-melody i { position: absolute; height: 3px; border-radius: 1px; background: var(--track); transform: translateY(-50%); }
+
+.pat-foot { display: flex; align-items: center; gap: 10px; padding-top: 4px; }
+.pat-hint { color: var(--faint); font-size: 11.5px; }
+.pat-empty { max-width: 520px; margin: auto; text-align: center; }
+.pat-empty h3 { margin: 0 0 6px; }
+.pat-empty p { margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.5; }
+.pat-empty-actions { display: flex; justify-content: center; gap: 8px; }

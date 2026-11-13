@@ -44,6 +44,27 @@ public:
     // copy that's wanted now isn't stuck behind renders nobody will hear.
     Audio get (const juce::File&, const warp::Settings&);
     Audio loadNow (const juce::File&, const warp::Settings&);
+
+    // What playback should hear while a copy renders (DawEngine). `focus`: where the
+    // playhead is, seconds into the copy (negative: nowhere near), so the pieces ahead of it
+    // render first, then those behind. `previous`: what the clip plays now, when it has the
+    // same map (so the same length and timing): a copy with many pieces to render is then
+    // handed out early, once the pieces covering the next few seconds from the focus are
+    // done, with the previous audio standing in for the rest (an interim copy, replaced by
+    // the finished one when it lands, with onLoaded each time). Null while nothing is ready.
+    struct Hint
+    {
+        double focus = -1.0;
+        Audio previous;
+    };
+    Audio getForPlayback (const juce::File&, const warp::Settings&, const Hint&);
+    static constexpr double interimAhead = 4.0;    // seconds from the focus ready before an interim copy
+    static constexpr int interimMinimumLeft = 2;   // pieces still to come for an interim copy to be worth it
+
+    // True when the finished copy is cached (not an interim one, and not rendering).
+    bool isReady (const juce::File&, const warp::Settings&) const;
+    int getInterimsPublished() const noexcept { return interimsPublished; } // tests
+    size_t getPendingWarps() const noexcept { return warpsPending.size(); } // tests
     static juce::String getWarpKey (const juce::File&, const warp::Settings&);
     void releaseUnusedWarps (const std::set<juce::String>& keysInUse);
 
@@ -61,6 +82,13 @@ public:
     void setPieceCacheBytes (size_t);        // the cache's limit (tests)
     static int getWarpThreads() noexcept;
 
+    // Just a stretch of a copy ([from, to] seconds into it, at most maxAudition long), for
+    // hearing an edit at once: renders (or finds) only the pieces it touches on the warp
+    // threads, then calls `done` on the message thread with that stretch's audio. A newer
+    // call drops the older one (its `done` never comes). Not for linked settings.
+    static constexpr double maxAudition = 1.5;
+    void renderRange (const juce::File&, const warp::Settings&, double from, double to, std::function<void (juce::AudioBuffer<float>&&)> done);
+
     bool isLoading() const noexcept { return ! pending.empty() || ! warpsPending.empty(); }
     juce::String getError (const juce::File&) const;
 
@@ -68,7 +96,8 @@ public:
     std::function<void (const juce::String&)> onError;
 
 private:
-    Audio getLinked (const juce::File&, const warp::Settings&);
+    Audio request (const juce::File&, const warp::Settings&, const Hint&);
+    Audio getLinked (const juce::File&, const warp::Settings&, double focus);
     void installWarp (const juce::String& key, juce::AudioBuffer<float>&&);
     void install (const juce::String& path, double rate, juce::AudioBuffer<float>&&, const juce::String& error);
 
@@ -80,6 +109,8 @@ private:
     std::map<juce::String, Audio> warps;       // by getWarpKey()
     std::vector<juce::String> warpOrder;       // oldest first, for releaseUnusedWarps()
     std::set<juce::String> warpsPending;
+    std::map<juce::String, Audio> interims;    // pending key -> its interim copy (see Hint)
+    int interimsPublished = 0;
     // A render in flight: its cancel flag and which stretches of the copy are still to come.
     struct Job
     {
@@ -101,11 +132,13 @@ private:
     juce::String getPiecePrefix (const juce::String& files) const;
     juce::AudioBuffer<float> renderNow (const std::shared_ptr<const juce::AudioBuffer<float>>& source, double rate, const warp::Settings&,
                                         const juce::String& prefix, const std::function<bool()>& keepGoing, const CancelFlag&,
-                                        int helpers);
+                                        int helpers, double focus = -1.0, Audio previous = {},
+                                        std::function<void (juce::AudioBuffer<float>&&)> interim = {});
 
     juce::ThreadPool loader { juce::ThreadPoolOptions{}.withThreadName ("MicFX audio pool").withNumberOfThreads (1) };
     juce::ThreadPool warpPool { juce::ThreadPoolOptions{}.withThreadName ("MicFX warp").withNumberOfThreads (getWarpThreads()) };
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
+    std::shared_ptr<std::atomic<int>> auditionId = std::make_shared<std::atomic<int>> (0);
 
     JUCE_DECLARE_NON_COPYABLE (AudioPool)
 };

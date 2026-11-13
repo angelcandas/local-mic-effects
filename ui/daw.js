@@ -11,6 +11,7 @@ import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
 import { decorateAiPanels } from "./aiviews.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
+import { createPatternLane, createPatternsPanel } from "./patterns.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
 
@@ -40,7 +41,7 @@ const prefs = {
   set(key, value) { try { localStorage.setItem(`micfx.daw.${key}`, JSON.stringify(value)); } catch { /* no storage */ } },
 };
 
-const DOCK_TABS = ["effects", "track", "mixer"];
+const DOCK_TABS = ["effects", "track", "patterns", "mixer"];
 const MIXER_HEIGHT = 400; // px: the bottom panel opens at least this tall for the mixer
 const TRACK_COLOURS = ["#8c7bff", "#3fd9c6", "#ffb547", "#ff6fb1", "#5aafff", "#9be15d", "#ff8a5c", "#c78bff"];
 
@@ -1569,7 +1570,17 @@ class DawScreen {
 
     const buttons = html("div", "daw-transport-buttons");
     buttons.append(start, this.playButton, this.recordButton);
-    const centre = zone("zone-transport", buttons, clock, this.loopButton, mic);
+    // Song plays the arrangement; Pattern loops only the pattern you edit (the Patterns tab).
+    this.modeSwitch = html("div", "segmented mode-switch");
+    this.modeSwitch.setAttribute("role", "group");
+    this.modeSwitch.setAttribute("aria-label", "What plays");
+    for (const [mode, text, title] of [["song", "Song", "Play the whole song"],
+                                       ["pattern", "Pattern", "Loop only the pattern you are editing in the Patterns tab"]]) {
+      const b = button("mode-button", text, title, () => this.setPatternMode(mode === "pattern"));
+      b.dataset.mode = mode;
+      this.modeSwitch.append(b);
+    }
+    const centre = zone("zone-transport", buttons, clock, this.loopButton, this.modeSwitch, mic);
 
     //---------------------------------------------------------------- right: tools, features, view
     this.tools = html("div", "segmented tools");
@@ -1744,6 +1755,13 @@ class DawScreen {
     this.playButton.classList.toggle("returns-on-stop", this.returnOnStop);
     this.metronomeButton.setAttribute("aria-pressed", String(s.metronome));
     this.loopButton.setAttribute("aria-pressed", String(s.loop.on));
+    const inPattern = (s.patternMode ?? -1) >= 0;
+    for (const b of this.modeSwitch.children) {
+      const on = (b.dataset.mode === "pattern") === inPattern;
+      b.classList.toggle("is-selected", on);
+      b.setAttribute("aria-pressed", String(on));
+    }
+    this.root.classList.toggle("pattern-mode", inPattern);
     this.snapButton.setAttribute("aria-pressed", String(this.snap));
     this.followButton.setAttribute("aria-pressed", String(this.follow));
     this.tempoButton.setAttribute("aria-pressed", String(!!this.showTempo));
@@ -1898,6 +1916,15 @@ class DawScreen {
     this.tempoRow.append(tempoCorner, this.tempoLane.element);
     this.tempoRow.hidden = true;
 
+    // The patterns lane (ui/patterns.js), under the tempo track: shown once there is a pattern.
+    this.patternRow = html("div", "pattern-row");
+    const patternCorner = html("div", "corner pattern-corner");
+    patternCorner.append(html("span", "tempo-corner-name", "Patterns"),
+                         button("tool", "Edit", "Open the pattern in the Patterns tab", () => this.openPatterns()));
+    this.patternLane = createPatternLane(this, daw, { popMenu, openPatterns: () => this.openPatterns() });
+    this.patternRow.append(patternCorner, this.patternLane.element);
+    this.patternRow.hidden = true;
+
     this.rows = html("div", "track-rows");
     // The returns and the master, pinned to the bottom of the view (sticky).
     this.pinned = html("div", "pinned-rows");
@@ -1911,7 +1938,7 @@ class DawScreen {
 
     this.cutGuide = html("div", "cut-guide");
     this.cutGuide.hidden = true;
-    this.inner.append(rulerRow, this.tempoRow, this.rows, this.pinned, this.loopShade, this.playhead, this.cutGuide);
+    this.inner.append(rulerRow, this.tempoRow, this.patternRow, this.rows, this.pinned, this.loopShade, this.playhead, this.cutGuide);
 
     // Scrolling by hand while playing switches Follow off, so you can look around
     // (and edit) elsewhere while the song keeps playing.
@@ -2115,6 +2142,7 @@ class DawScreen {
       session.tracks.map(({ inserts, ...track }) => [track, inserts.length]),
       (session.returns ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
       (session.groups ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
+      session.patterns, session.patternClips, this.selectedPatternClip,
       session.master.volume, session.master.inserts.length, session.tempo, session.tempoMap, this.showTempo, session.loop, session.beatsPerBar, session.markers,
       this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight, this.takes.version,
       this.headWidth, [...this.trackHeights], [...this.folded],
@@ -2139,6 +2167,10 @@ class DawScreen {
     }
     this.tempoRow.hidden = !this.showTempo;
     if (this.showTempo) this.tempoLane.update(session, width);
+    const hasPatterns = (session.patterns?.length ?? 0) > 0;
+    this.patternRow.hidden = !hasPatterns;
+    this.inner.style.setProperty("--pattern-top", `${30 + (this.showTempo ? 46 : 0)}px`);
+    if (hasPatterns) this.patternLane.update(session, width);
     this.renderRuler(width);
     this.showLoop(session.loop);
     this.renderMarkers();
@@ -3557,6 +3589,7 @@ class DawScreen {
   buildInspector() {
     this.inspector = this.root.querySelector(".inspector");
     this.inspectorKey = "";
+    this.patternsPanel = createPatternsPanel(this, daw, { popMenu });
 
     // The bar above the effects panel: drag to resize, double-click or its button to fold away.
     const main = this.root.querySelector(".daw-main");
@@ -3637,7 +3670,23 @@ class DawScreen {
     if (found.clip.midi) this.pianoRoll?.element.focus();
   }
 
-  // Picks the bottom panel's tab: "effects", "track" or "mixer".
+  // Pattern mode loops the selected pattern (made when there is none); Song mode plays the arrangement.
+  async setPatternMode(on) {
+    if (!on) return void daw("patternMode", { pattern: -1 });
+    const id = await this.patternsPanel.ensurePattern();
+    if (typeof id !== "number" || id < 0) return;
+    this.selectedPattern = id;
+    await daw("patternMode", { pattern: id });
+    this.openPatterns();
+  }
+
+  // Shows the Patterns tab (the rack for the selected pattern).
+  openPatterns() {
+    this.setDockTab("patterns");
+    this.setDock(true);
+  }
+
+  // Picks the bottom panel's tab: "effects", "track", "patterns" or "mixer".
   setDockTab(tab, save = true) {
     if (tab === this.dockTab) return;
     if (tab !== "mixer" && this.dockTab) this.tabBeforeMixer = tab;
@@ -3838,6 +3887,22 @@ class DawScreen {
     }
     const found = this.findClip(this.selectedClip);
     if (!found) this.selectedClip = null;
+
+    if (this.dockTab === "patterns") {
+      // The pattern rack keeps itself (it redraws only when its pattern or tracks change).
+      if (this.inspectorKey !== "patterns") {
+        this.inspectorKey = "patterns";
+        this.inspector.replaceChildren(this.patternsPanel.element);
+        this.clipPanel?.dispose?.();
+        this.clipEditor?.dispose?.();
+        this.clipPanel = this.rhythmPanel = this.clipEditor = null;
+        this.rack = null;
+        this.chainGains = null;
+      }
+      this.patternsPanel.update(session);
+      this.watchInserts(-1);
+      return;
+    }
 
     // Rebuild only when what's shown changes, so knobs keep working mid-drag.
     // Effects tab: the track's insert chain. Track tab: the clip, then pitch & time.
@@ -4833,6 +4898,7 @@ class DawScreen {
     else this.movePlayhead();
     if (status.recording || this.rows.querySelector(".rec-region")) this.updateRecording();
     this.pianoRoll?.setStatus(status);
+    if (this.dockTab === "patterns") this.patternsPanel.setStatus(status);
   }
 
   tickMeters(elapsed) {

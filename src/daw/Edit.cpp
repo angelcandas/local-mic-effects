@@ -1240,6 +1240,14 @@ warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
     if (getLinkedClips (clip).isEmpty())
         settings.notes = getClipNotes (clip);
 
+    // Compare switch: the clip plays without its pitch changes (transpose and note edits),
+    // but keeps its timing, so its length and place don't move.
+    if ((bool) clip.getProperty (ids::warpBypass, false))
+    {
+        settings.semitones = 0.0;
+        settings.notes.clear();
+    }
+
     // Linked: rendered with its partners' files, so they all stay in phase.
     if (! settings.isNeutral())
         if (const auto partners = getLinkedClips (clip); ! partners.isEmpty())

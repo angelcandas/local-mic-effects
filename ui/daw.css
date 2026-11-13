@@ -1467,8 +1467,8 @@ body.library-dragging * { cursor: grabbing !important; }
 .clip-editor-side .rhythm-algorithm-row { margin-top: 0; }
 .rhythm-key-info, .rhythm-algorithm-info { margin: 0; line-height: 1.35; }
 .clip-editor-main { display: flex; flex: 1; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; }
-.clip-editor-bar { display: flex; flex: none; align-items: center; gap: 6px; }
-.clip-editor-bar > .tool { height: 26px; padding: 0 10px; font-size: 11px; }
+.clip-editor-bar { display: flex; flex: none; flex-wrap: wrap; align-items: center; gap: 6px; }
+.clip-editor-bar > .tool { height: 26px; padding: 0 10px; font-size: 11px; white-space: nowrap; }
 .clip-editor-bar .rhythm-check { white-space: nowrap; }
 .clip-editor-bar [hidden] { display: none; }
 .clip-editor-bar .tempo { display: flex; align-items: center; gap: 4px; color: var(--muted); font-size: 11px; }

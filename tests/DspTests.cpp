@@ -4933,6 +4933,28 @@ namespace
                    "the session shows them, and the clip plays another rendered copy");
             run ("undo");
             check (lastSession()["tracks"][0]["clips"][0]["stretch"].toString() == "mix", "and they undo");
+
+            // Previews while dragging: played, not stored, not an undo step.
+            {
+                const auto undoName = edit.getUndoManager().getUndoDescription();
+                const auto stored = edit.getClip (clipId)[daw::ids::warp].toString();
+                auto moved = juce::Array<juce::var> { juce::var (juce::Array<juce::var> { 0.0, 0.0 }), juce::var (juce::Array<juce::var> { 0.5, 1.2 }) };
+                auto& engine = processor.getDawEngine();
+                check (ok (run ("previewWarp", args ({ { "id", clipId }, { "markers", moved } }))) && engine.hasPreview (clipId)
+                           && std::abs (engine.getPlaybackSettings (edit.getClip (clipId)).map.toTarget (0.5) - 1.2) < 1.0e-9,
+                       "previewWarp plays markers that aren't stored");
+                check (edit.getClip (clipId)[daw::ids::warp].toString() == stored
+                           && edit.getUndoManager().getUndoDescription() == undoName,
+                       "the session and undo don't see a preview");
+                check (ok (run ("renderState", args ({ { "id", clipId } })))
+                           && ok (run ("cancelPreview", args ({ { "id", clipId } }))) && ! engine.hasPreview (clipId),
+                       "renderState follows the preview, cancelPreview ends it");
+                check (ok (run ("previewPitchNotes", args ({ { "id", clipId }, { "notes", juce::Array<juce::var>() } }))) && engine.hasPreview (clipId)
+                           && ok (run ("setWarp", args ({ { "id", clipId }, { "markers", moved } }))) && ! engine.hasPreview (clipId),
+                       "previewPitchNotes completes, and the real edit ends the preview");
+                check (! ok (run ("previewWarp", args ({ { "id", 99999 } }))), "previewWarp refuses a clip that isn't there");
+                run ("undo");
+            }
             check (ok (run ("setClip", args ({ { "id", clipId }, { "musical", true }, { "clipTempo", 100.0 } }))),
                    "setClip switches musical mode on with the clip's tempo");
             const auto musical = lastSession()["tracks"][0]["clips"][0];
@@ -6703,6 +6725,150 @@ namespace
     }
 
     // Renders in pieces: an edit renders only the pieces it changed.
+    // Dragging while the song plays (fluid editing PR 3): previews that the engine plays but
+    // never stores, renders that start at the playhead, interim copies for big changes.
+    void testLivePreview()
+    {
+        std::cout << "\nLive preview while dragging\n";
+        namespace pitch = analysis::pitch;
+        using daw::warp::Map;
+
+        const auto phrase = makeMelody();
+        const auto repeats = 10; // 21 s
+        juce::AudioBuffer<float> take (2, phrase.getNumSamples() * repeats);
+        for (int r = 0; r < repeats; ++r)
+            for (int ch = 0; ch < 2; ++ch)
+                take.copyFrom (ch, r * phrase.getNumSamples(), phrase, 0, 0, phrase.getNumSamples());
+        const auto seconds = take.getNumSamples() / sampleRate;
+
+        const auto folder = juce::File::createTempFile ("micfx-live-preview");
+        folder.createDirectory();
+        const auto file = folder.getChildFile ("take.wav");
+        writeWav (file, take, sampleRate);
+
+        daw::Edit edit;
+        const auto trackId = (int) edit.addTrack ("Voice")[daw::ids::id];
+        const auto clipId = (int) edit.addClip (trackId, file, 0.0, seconds)[daw::ids::id];
+        edit.getUndoManager().clearUndoHistory();
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        engine.loadAllNow();
+        auto& pool = engine.getAudioPool();
+        const auto clip = [&] { return edit.getClip (clipId); };
+        const auto settle = [&] (int limit = 60000)
+        {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (20); // the rebuild that asks for it
+            for (int i = 0; i < limit && pool.isLoading(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (20); // the last rebuild
+        };
+        const auto stateBefore = edit.getState().toXmlString();
+
+        // A marker preview plays, but nothing is stored and nothing can be undone.
+        const Map dragged ({ { 0.0, 0.0 }, { 5.0, 5.4 }, { seconds, seconds } });
+        engine.setPreviewWarp (clipId, dragged);
+        check (engine.hasPreview (clipId) && engine.getPlaybackSettings (clip()).map == dragged, "a warp preview is what the clip plays");
+        settle();
+        check (pool.isReady (file, engine.getPlaybackSettings (clip())), "its copy renders");
+        check (edit.getState().toXmlString() == stateBefore && ! edit.getUndoManager().canUndo(), "a preview never touches the project or undo");
+
+        // Rapid previews (a drag every 120 ms): each one's render goes stale and is cancelled,
+        // and nothing is left pending once the hand stops.
+        for (int k = 1; k <= 12; ++k)
+        {
+            engine.setPreviewWarp (clipId, Map ({ { 0.0, 0.0 }, { 5.0, 5.0 + 0.03 * k }, { seconds, seconds } }));
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (15);
+        }
+        const Map last ({ { 0.0, 0.0 }, { 5.0, 5.0 + 0.03 * 12 }, { seconds, seconds } });
+        settle();
+        check (pool.getPendingWarps() == 0 && ! pool.isLoading(), "after rapid previews nothing is left pending");
+        check (pool.isReady (file, engine.getPlaybackSettings (clip())), "the last preview's copy is ready");
+
+        // The real edit replaces the preview, and finds its copy already made.
+        edit.setEffectiveWarp (clipId, last);
+        check (! engine.hasPreview (clipId), "storing the edit ends the preview");
+        check (pool.isReady (file, daw::Edit::getWarpSettings (clip())), "the stored edit plays at once (the preview rendered it)");
+        engine.setPreviewWarp (clipId, dragged);
+        engine.cancelPreview (clipId);
+        check (! engine.hasPreview (clipId) && engine.getPlaybackSettings (clip()).map == last, "cancelPreview goes back to what's stored");
+        edit.getUndoManager().undo();
+        check (daw::Edit::getEffectiveWarp (clip()).isIdentity(), "undo takes the stored edit back as usual");
+        settle();
+
+        // Every note up two semitones, with the playhead at 12 s: the pieces from the playhead
+        // on render first; an interim copy (new audio near the playhead, the old elsewhere)
+        // is heard before the whole copy is done, at the same length.
+        auto notes = pitch::findNotes (*pitch::analyseCached (take, sampleRate));
+        check (notes.size() > 20, "the take has notes");
+        for (auto& n : notes)
+            n.shift = 2.0f;
+        const auto focus = 12.2;
+        engine.seek ((juce::int64) (focus * sampleRate));
+        const auto interimsBefore = pool.getInterimsPublished();
+        engine.setPreviewNotes (clipId, notes);
+        const auto settings = engine.getPlaybackSettings (clip());
+        check (settings.hasNoteEdits(), "a notes preview is what the clip plays");
+
+        auto aheadFirst = false, sawWindowDone = false;
+        daw::AudioPool::Audio interim;
+        for (int i = 0; i < 60000 && ! pool.isReady (file, settings); ++i)
+        {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+            const auto ranges = pool.getRenderingRanges (file, settings);
+            if (! sawWindowDone && ! ranges.empty())
+            {
+                const auto covers = [&] (double a, double b) { return std::any_of (ranges.begin(), ranges.end(), [&] (const auto& r) { return r.second > a && r.first < b; }); };
+                if (! covers (focus, focus + 3.0))
+                {
+                    sawWindowDone = true;
+                    aheadFirst = covers (0.0, 1.0);
+                }
+            }
+            if (interim == nullptr && ! pool.isReady (file, settings))
+                interim = pool.getForPlayback (file, settings, {});
+        }
+        const auto whole = pool.get (file, settings);
+        check (sawWindowDone && aheadFirst, "the pieces after the playhead render before the ones behind it");
+        check (interim != nullptr && pool.getInterimsPublished() == interimsBefore + 1, "an interim copy is handed out while the rest renders");
+        const auto plain = pool.get (file);
+        if (interim != nullptr && whole != nullptr && plain != nullptr)
+        {
+            check (interim->getNumSamples() == whole->getNumSamples(), "the interim copy is as long as the finished one");
+            const auto from = (int) (focus * sampleRate), n = (int) (2.5 * sampleRate);
+            auto near = 0.0f, far = 0.0f;
+            for (int i = 0; i < n; ++i)
+            {
+                near = juce::jmax (near, std::abs (interim->getSample (0, from + i) - whole->getSample (0, from + i)));
+                far = juce::jmax (far, std::abs (interim->getSample (0, i + (int) (0.5 * sampleRate)) - plain->getSample (0, i + (int) (0.5 * sampleRate))));
+            }
+            check (near < 1.0e-5f, "near the playhead the interim copy is the new audio (" + juce::String (near, 6) + ")");
+            check (far < 1.0e-5f, "far behind it, the old audio stands in (" + juce::String (far, 6) + ")");
+        }
+        check (pool.getPendingWarps() == 0, "nothing pending once the copy is done");
+        check (edit.getState().toXmlString().contains ("pitchNotes") == false, "the notes preview isn't stored");
+
+        // A change of map gets no interim copy (the old audio's timing would be wrong).
+        const auto interimsMid = pool.getInterimsPublished();
+        engine.setPreviewWarp (clipId, Map ({ { 0.0, 0.0 }, { 9.0, 9.6 }, { seconds, seconds } }));
+        settle();
+        check (pool.getInterimsPublished() == interimsMid, "a new map waits for the finished copy");
+        engine.cancelPreview (-1);
+        check (! engine.hasPreview (clipId), "cancelPreview with no clip ends them all");
+
+        // A rebuild (each publish while dragging makes one) stays cheap with many tracks.
+        for (int t = 0; t < 12; ++t)
+            edit.addClip ((int) edit.addTrack ("Track " + juce::String (t))[daw::ids::id], file, 0.0, seconds);
+        engine.loadAllNow();
+        const auto started = juce::Time::getMillisecondCounterHiRes();
+        for (int k = 0; k < 20; ++k)
+            engine.rebuildNow();
+        const auto each = (juce::Time::getMillisecondCounterHiRes() - started) / 20.0;
+        std::cout << "  (a graph rebuild with 13 audio tracks: " << juce::String (each, 2) << " ms)\n";
+        check (each < 100.0, "a graph rebuild stays cheap (" + juce::String (each, 2) + " ms)");
+
+        folder.deleteRecursively();
+    }
+
     void testSegments()
     {
         std::cout << "\nWarp renders in pieces (edits render only what they change)\n";
@@ -6954,6 +7120,51 @@ namespace
                 same = juce::exactlyEqual (again->getSample (0, i), first->getSample (0, i));
             check (same && pool.getPiecesRendered() == rendered, "undo puts the old copy together from cached pieces (none rendered)");
 
+            // Hearing one edited note: only the pieces it touches render, the stretch matches
+            // the finished copy, and a newer ask drops the older.
+            {
+                auto heard = notes;
+                heard.notes[19].shift = 3.0f;
+                const auto from = heard.notes[19].start, to = heard.notes[19].end;
+                const auto stretch = [&] (const daw::warp::Settings& s, double a, double b, int wait)
+                {
+                    std::shared_ptr<juce::AudioBuffer<float>> got;
+                    pool.renderRange (file, s, a, b, [&got] (juce::AudioBuffer<float>&& audio) { got = std::make_shared<juce::AudioBuffer<float>> (std::move (audio)); });
+                    for (int i = 0; i < wait && got == nullptr; ++i)
+                        juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+                    return got;
+                };
+
+                rendered = pool.getPiecesRendered();
+                const auto got = stretch (heard, from, to, 4000);
+                const auto cost = pool.getPiecesRendered() - rendered;
+                check (got != nullptr && cost >= 1 && cost <= 3 && got->getNumSamples() == (int) std::llround (juce::jmin (to, from + 1.5) * sampleRate) - (int) std::llround (from * sampleRate),
+                       "hearing a note renders only " + juce::String (cost) + " piece(s), at the stretch's length");
+
+                const auto whole = pool.loadNow (file, heard);
+                auto worst = 0.0f;
+                if (got != nullptr && whole != nullptr)
+                {
+                    const auto first = (int) std::llround (from * sampleRate), n = got->getNumSamples();
+                    const auto a = got->getRMSLevel (0, 0, n), b = whole->getRMSLevel (0, first, n);
+                    worst = std::abs (juce::Decibels::gainToDecibels (a / juce::jmax (1.0e-6f, b)));
+                    check (a > 0.01f && worst < 1.5f, "the heard stretch sounds like the finished copy (" + juce::String (worst, 2) + " dB apart)");
+                }
+
+                rendered = pool.getPiecesRendered();
+                const auto repeat = stretch (heard, from, to, 4000);
+                check (repeat != nullptr && pool.getPiecesRendered() == rendered, "hearing it again finds the pieces cached");
+
+                bool first = false, second = false;
+                auto other = notes;
+                other.notes[3].shift = -1.0f;
+                pool.renderRange (file, other, 0.0, 1.0, [&first] (juce::AudioBuffer<float>&&) { first = true; });
+                pool.renderRange (file, heard, from, to, [&second] (juce::AudioBuffer<float>&&) { second = true; });
+                for (int i = 0; i < 4000 && ! second; ++i)
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+                check (second && ! first, "a newer ask drops the older one");
+            }
+
             daw::warp::Settings a, b;
             a.map = Map ({ { 0.0, 0.5 } });
             b.map = Map ({ { 0.0, 0.75 } });
@@ -6977,7 +7188,7 @@ namespace
             check (pool.get (file, third) == nullptr, "a new copy renders in the background");
             const auto ranges = pool.getRenderingRanges (file, third);
             check (! ranges.empty() && ranges.front().first < 1.0e-6, "the stretches still to render are known");
-            for (int i = 0; i < 2000 && pool.getPiecesRendered() - rendered < 2; ++i)
+            for (int i = 0; i < 30000 && pool.getPiecesRendered() - rendered < 2; ++i)
                 juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
             const auto partial = pool.getRenderingRanges (file, third);
             pool.releaseUnusedWarps ({ daw::AudioPool::getWarpKey (file, notes) }); // moved on: cancel it
@@ -9740,10 +9951,19 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=bridge: just the DAW screen's commands.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "bridge")
+    {
+        testDawBridge();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=segments: warp renders in pieces (and the warp tests around them).
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "segments")
     {
         testSegments();
+        testLivePreview();
         testWarp();
         testLinkedTracks();
         testPitchNotes();
@@ -9811,6 +10031,7 @@ int main()
     testLinkedTracks();
     testWarp();
     testSegments();
+    testLivePreview();
     testPitchNotes();
     testCoach();
     testPractice();

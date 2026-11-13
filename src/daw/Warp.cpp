@@ -1111,6 +1111,24 @@ juce::AudioBuffer<float> Render::renderPiece (size_t index, const std::function<
     return piece;
 }
 
+juce::AudioBuffer<float> Render::cutPiece (size_t index, const juce::AudioBuffer<float>& copy) const
+{
+    const auto& c = *context;
+    if (index >= pieces.size())
+        return {};
+    const auto fade = (int) std::round (crossfadeSeconds * c.sampleRate);
+    const auto first = (int) std::llround (starts[index] * c.sampleRate);
+    const auto next = index + 1 < pieces.size() ? (int) std::llround (starts[index + 1] * c.sampleRate) : length;
+    const auto count = juce::jmax (0, next - first + (index + 1 < pieces.size() ? fade : 0));
+
+    juce::AudioBuffer<float> part (getNumChannels(), count);
+    part.clear();
+    const auto from = juce::jmax (0, first), to = juce::jmin (copy.getNumSamples(), first + count);
+    for (int ch = 0; ch < part.getNumChannels() && copy.getNumChannels() > 0 && to > from; ++ch)
+        part.copyFrom (ch, from - first, copy, juce::jmin (ch, copy.getNumChannels() - 1), from, to - from);
+    return part;
+}
+
 juce::AudioBuffer<float> Render::assemble (const std::vector<std::shared_ptr<const juce::AudioBuffer<float>>>& parts) const
 {
     const auto& c = *context;
