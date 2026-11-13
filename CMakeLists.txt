@@ -45,6 +45,9 @@ juce_add_binary_data(MicFX_WebUI
         ui/daw.js
         ui/mixcheck.js
         ui/rhythm.js
+        ui/clipeditor.js
+        ui/warptool.js
+        ui/pitchedit.js
         ui/tempo.js
         ui/patterns.js
         ui/patterns.css

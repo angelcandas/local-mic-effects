@@ -1267,6 +1267,22 @@ void Edit::forPartners (int clipId, const std::function<void (int)>& apply)
     propagating = false;
 }
 
+warp::Map Edit::getTimeBypassMap (const juce::ValueTree& clip)
+{
+    const auto free = getClipWarp (clip);
+    const auto effective = getEffectiveWarp (clip);
+    if (free.getMarkers().empty())
+        return effective;
+
+    const auto offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+    const auto from = effective.toSource (offset), to = effective.toSource (offset + length);
+    if (to - from < 1.0e-3)
+        return effective;
+
+    const warp::Map straight ({ { from, free.toTarget (from) }, { to, free.toTarget (to) } });
+    return isMusical (clip) ? warp::compose (straight, getMusicalMap (clip)) : straight;
+}
+
 warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
 {
     warp::Settings settings;
@@ -1285,6 +1301,11 @@ warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
         settings.semitones = 0.0;
         settings.notes.clear();
     }
+
+    // Time compare: the free warp is replaced by the straight line between the window's two
+    // ends, so the clip keeps its place and length (a musical clip keeps its bend).
+    if ((bool) clip.getProperty (ids::timeBypass, false))
+        settings.map = getTimeBypassMap (clip);
 
     // Linked: rendered with its partners' files, so they all stay in phase.
     if (! settings.isNeutral())

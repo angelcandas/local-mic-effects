@@ -526,6 +526,23 @@ juce::var DawBridge::describeInstrument (const juce::ValueTree& track) const
                      { "windowOpen", instrumentWindows.count (trackId) > 0 } });
 }
 
+// A warp map's markers as [[source, target], ...], only those near a clip's window (from
+// offset to offset + length, rendered time) plus one either side, so the page interpolates
+// it exactly there (a musical map runs from -1e5 to 1e5 s).
+static juce::var describeMarkers (const daw::warp::Map& map, double offset, double length)
+{
+    const auto& markers = map.getMarkers();
+    juce::Array<juce::var> list;
+    for (size_t i = 0; i < markers.size(); ++i)
+    {
+        const auto before = i + 1 < markers.size() && markers[i + 1].target < offset - 1.0;
+        const auto after = i > 0 && markers[i - 1].target > offset + length + 1.0;
+        if (! before && ! after)
+            list.add (juce::Array<juce::var> { markers[i].source, markers[i].target });
+    }
+    return list;
+}
+
 juce::var DawBridge::describeRanges (const std::vector<std::pair<double, double>>& ranges)
 {
     juce::Array<juce::var> list;
@@ -579,6 +596,11 @@ juce::var DawBridge::describeSession()
                            { "fadeIn", number (clip, ids::fadeIn) }, { "fadeOut", number (clip, ids::fadeOut) },
                            { "mute", (bool) clip.getProperty (ids::mute, false) },
                            { "transpose", number (clip, ids::transpose) }, { "warp", markers }, { "warpBypass", (bool) clip.getProperty (ids::warpBypass, false) },
+                           { "timeBypass", (bool) clip.getProperty (ids::timeBypass, false) },
+                           // Musical clips: the whole map (file -> rendered time, with the bend) and the free warp
+                           // alone (file -> straight time), for the editor's tabs and stretch factors.
+                           { "timeMap", daw::Edit::isMusical (clip) ? describeMarkers (daw::Edit::getEffectiveWarp (clip), number (clip, ids::offset), number (clip, ids::length)) : juce::var() },
+                           { "freeWarp", daw::Edit::isMusical (clip) ? describeMarkers (daw::Edit::getClipWarp (clip), number (clip, ids::offset), number (clip, ids::length)) : juce::var() },
                            { "stretch", daw::warp::getAlgorithmKey (warpSettings.algorithm) }, { "formant", warpSettings.formant },
                            { "musical", daw::Edit::isMusical (clip) }, { "clipTempo", daw::Edit::getClipTempo (clip) },
                            { "pitchEdited", ! warpSettings.notes.empty() || ((bool) clip.getProperty (ids::warpBypass, false) && ! daw::Edit::getClipNotes (clip).empty()) },
@@ -3849,7 +3871,22 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         if (auto clip = edit.getClip (id); clip.isValid() && ! daw::Edit::isMidiClip (clip))
         {
-            clip.setProperty (daw::ids::warpBypass, (bool) args.getProperty ("bypass", false), nullptr);
+            // { bypass }: pitch; { time }: timing (linked partners too, so they stay in phase).
+            if (args.hasProperty ("bypass"))
+                clip.setProperty (daw::ids::warpBypass, (bool) args.getProperty ("bypass", false), nullptr);
+            if (args.hasProperty ("time"))
+            {
+                auto clips = daw::Edit::getLinkedClips (clip);
+                clips.add (clip);
+                for (auto c : clips)
+                {
+                    engine.cancelPreview ((int) c[daw::ids::id]);
+                    if ((bool) args["time"])
+                        c.setProperty (daw::ids::timeBypass, true, nullptr);
+                    else
+                        c.removeProperty (daw::ids::timeBypass, nullptr);
+                }
+            }
             ok();
         }
         else

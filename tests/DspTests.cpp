@@ -6629,6 +6629,77 @@ namespace
         folder.deleteRecursively();
     }
 
+    void testTimeBypass()
+    {
+        std::cout << "\nWarp tabs and the time compare switch\n";
+        using daw::warp::Map;
+        using daw::warp::Marker;
+
+        // A tab pinned where the audio already plays changes no piece of the render.
+        auto take = std::make_shared<juce::AudioBuffer<float>> (1, (int) (6.0 * sampleRate));
+        juce::Random random (7);
+        for (int i = 0; i < take->getNumSamples(); ++i)
+            take->setSample (0, i, 0.3f * (random.nextFloat() * 2.0f - 1.0f) * (float) (0.5 + 0.5 * std::sin (i * 0.0004)));
+        daw::warp::Settings plain, tabbed;
+        plain.map = Map ({ { 0.0, 0.0 }, { 2.0, 2.4 }, { 6.0, 6.4 } });
+        const auto at = 1.3; // between the first two: on the line 0 -> 2.4
+        tabbed.map = Map ({ { 0.0, 0.0 }, { at, at * 1.2 }, { 2.0, 2.4 }, { 6.0, 6.4 } });
+        const daw::warp::Render a (take, sampleRate, plain), b (take, sampleRate, tabbed);
+        auto sameKeys = a.getPieces().size() == b.getPieces().size() && ! a.getPieces().empty();
+        for (size_t k = 0; sameKeys && k < a.getPieces().size(); ++k)
+            sameKeys = a.getPieces()[k].key == b.getPieces()[k].key;
+        check (sameKeys, "a tab added on the line between its neighbours keeps every piece's key ("
+                             + juce::String ((int) a.getPieces().size()) + " pieces), so nothing renders again");
+
+        // Moving the middle tab changes only the pieces near it.
+        daw::warp::Settings moved;
+        moved.map = Map ({ { 0.0, 0.0 }, { at, at * 1.2 + 0.2 }, { 2.0, 2.4 }, { 6.0, 6.4 } });
+        const daw::warp::Render c (take, sampleRate, moved);
+        auto changedLate = false;
+        for (size_t k = 0; k < c.getPieces().size() && k < b.getPieces().size(); ++k)
+            if (c.getPieces()[k].from > 3.5 && c.getPieces()[k].key != b.getPieces()[k].key)
+                changedLate = true;
+        check (! changedLate, "dragging a tab leaves the pieces past its next tab as they were");
+
+        // Time compare: the window keeps its place and length, the free warp's bends go.
+        daw::Edit edit;
+        const auto track = (int) edit.addTrack ("Voice")[daw::ids::id];
+        const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-time-bypass.wav");
+        const auto clipId = (int) edit.addClip (track, file, 1.0, 6.0)[daw::ids::id];
+        edit.setClipWarp (clipId, Map ({ { 0.0, 0.0 }, { 2.0, 3.0 }, { 6.0, 6.0 } }));
+        auto clip = edit.getClip (clipId);
+        clip.setProperty (daw::ids::timeBypass, true, nullptr);
+        auto map = daw::Edit::getWarpSettings (clip).map;
+        const auto effective = daw::Edit::getEffectiveWarp (clip);
+        const auto offset = (double) clip[daw::ids::offset], length = (double) clip[daw::ids::length];
+        check (std::abs (map.toTarget (effective.toSource (offset)) - offset) < 1e-9
+                   && std::abs (map.toTarget (effective.toSource (offset + length)) - (offset + length)) < 1e-9
+                   && std::abs (map.toTarget (2.0) - 2.0) < 1e-9,
+               "time compare: the window's ends stay where they play, and the tab's bend is gone");
+        check (daw::Edit::getWarpSettings (clip).map.getMarkers().size() == 2 && daw::Edit::getClipWarp (clip).getMarkers().size() == 3,
+               "the tabs themselves are kept, ready for when compare is off");
+
+        // A musical clip keeps its bend under the compare.
+        edit.setTempo (135.0);
+        edit.setClipMusical (clipId, true, 120.0);
+        clip = edit.getClip (clipId);
+        const auto bend = daw::Edit::getMusicalMap (clip);
+        map = daw::Edit::getWarpSettings (clip).map;
+        const auto eff = daw::Edit::getEffectiveWarp (clip);
+        const auto from = eff.toSource ((double) clip[daw::ids::offset]), to = eff.toSource ((double) clip[daw::ids::offset] + (double) clip[daw::ids::length]);
+        const auto free = daw::Edit::getClipWarp (clip);
+        auto worst = 0.0;
+        for (auto s = from; s <= to; s += (to - from) / 16.0)
+        {
+            const auto straight = free.toTarget (from) + (s - from) * (free.toTarget (to) - free.toTarget (from)) / (to - from);
+            worst = std::max (worst, std::abs (map.toTarget (s) - bend.toTarget (straight)));
+        }
+        check (worst < 1e-6, "a musical clip under time compare still follows the project tempo (worst "
+                                 + juce::String (worst * 1000.0, 4) + " ms)");
+        clip.removeProperty (daw::ids::timeBypass, nullptr);
+        check (daw::Edit::getWarpSettings (clip).map == daw::Edit::getEffectiveWarp (clip), "compare off: the tabs play again");
+    }
+
     void testLinkedTracks()
     {
         std::cout << "\nLinked tracks (multi-mic warping stays in phase)\n";
@@ -13713,6 +13784,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "segments")
     {
         testSegments();
+        testTimeBypass();
         testLivePreview();
         testWarp();
         testLinkedTracks();
@@ -13821,6 +13893,7 @@ int main()
     testClipTools();
     testTempoMap();
     testMusicalMode();
+    testTimeBypass();
     testLinkedTracks();
     testWarp();
     testSegments();
