@@ -846,7 +846,7 @@ class Rack {
     header.append(step, html("h2", "", module.name), activity.element);
     if (module.id === "echo") {
       const tap = html("button", "card-tap", "Tap");
-      tap.title = "Tap the beat a few times to set the echo time";
+      tap.title = "Tap the beat a few times to set the echo time (with Sync on, the tempo the echo follows)";
       tap.addEventListener("click", () => this.tapEcho(tap));
       header.append(tap);
     }
@@ -968,11 +968,19 @@ class Rack {
     if (this.echoTaps.length < 2) return;
     const gaps = this.echoTaps.slice(1).map((t, i) => t - this.echoTaps[i]);
     const ms = clamp(gaps.reduce((a, b) => a + b, 0) / gaps.length, 20, 1500);
-    const state = Juce.getSliderState("delayTime");
-    state.sliderDragStarted();
-    state.setNormalisedValue(toNormalised(state, ms));
-    state.sliderDragEnded();
-    button.textContent = `${Math.round(ms)} ms`;
+    // The tapped beat is also the tempo a synced echo follows.
+    const bpm = Math.round((60000 / ms) * 10) / 10;
+    Juce.getNativeFunction("echoTapTempo")(bpm).catch(() => {});
+    const synced = Math.round(Juce.getComboBoxState("delaySync")?.getChoiceIndex?.() ?? 0) > 0;
+    if (synced) {
+      button.textContent = `${Math.round(bpm)} bpm`;
+    } else {
+      const state = Juce.getSliderState("delayTime");
+      state.sliderDragStarted();
+      state.setNormalisedValue(toNormalised(state, ms));
+      state.sliderDragEnded();
+      button.textContent = `${Math.round(ms)} ms`;
+    }
     clearTimeout(this.tapLabelTimer);
     this.tapLabelTimer = setTimeout(() => { button.textContent = "Tap"; }, 2500);
     this.onUserChange();

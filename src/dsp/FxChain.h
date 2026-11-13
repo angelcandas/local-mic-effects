@@ -148,6 +148,13 @@ public:
         return true;
     }
 
+    // Hands the tempo (bpm, 0 for none) to every module (see Module::setTempo).
+    void setTempo (double bpm) noexcept
+    {
+        for (auto& module : modules)
+            module->setTempo (bpm);
+    }
+
     // Gain before and after the modules (the chain's input and output trims), in dB.
     // Any thread; they glide over ~50 ms on the audio thread.
     void setGains (float inputDecibels, float outputDecibels) noexcept

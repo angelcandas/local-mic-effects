@@ -82,6 +82,11 @@ public:
     juce::StringArray getChainOrder() const;
     void setChainOrder (const juce::StringArray& keys);
 
+    // The tempo Live's synced echo follows: the echo card's tap (0 clears it), else the
+    // host's, else the looper's. Any thread.
+    void setEchoTapTempo (double bpm) noexcept               { echoTapTempo.store (bpm); }
+    double getLiveTempo() noexcept;
+
     // Files the Live chain's effects play through (the cabinet's and the IR reverb's
     // impulse responses), by module key. Kept in the plugin state; the effect's choice
     // switches to "your file" when one loads. Returns why a file can't be used (empty
@@ -173,6 +178,7 @@ private:
 
     juce::dsp::Gain<float> inputGain, outputGain;
     fx::FxChain chain { fx::FxChain::getAllTypes() };
+    std::atomic<double> echoTapTempo { 0.0 };
     fx::modules::Pitch& pitchModule;
     fx::modules::AutoLevel& autoLevelModule;
     juce::dsp::Limiter<float> limiter;

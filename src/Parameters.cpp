@@ -208,13 +208,13 @@ Parameters::Parameters (Layout& l)
         decibels (l, key + "OutGain", name + " Out Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
     };
 
-    // (The denoiser, auto level, the resonance suppressor, the cabinet, the IR reverb, the amp
-    // and the opto compressor came later: their gains are at the end with their other parameters.)
+    // (The denoiser, auto level, the resonance suppressor, the cabinet, the IR reverb, the amp,
+    // the opto compressor and the plate came later: their gains are at the end with their other parameters.)
     for (int i = 0; i < fx::numModuleTypes; ++i)
         if (const auto type = (fx::ModuleType) i;
             type != fx::ModuleType::denoise && type != fx::ModuleType::autoLevel && type != fx::ModuleType::smooth
             && type != fx::ModuleType::cab && type != fx::ModuleType::irReverb && type != fx::ModuleType::amp
-            && type != fx::ModuleType::opto)
+            && type != fx::ModuleType::opto && type != fx::ModuleType::plate)
             moduleGains (type);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
@@ -367,4 +367,29 @@ Parameters::Parameters (Layout& l)
     decibels (l, "deessRange", "De-esser Range", 0.0f, 24.0f, 24.0f);
     choice (l, "deessBand", "De-esser Band", { "Split", "Wide" }, 0);
     toggle (l, "deessListen", "De-esser Listen");
+
+    // Space (Space.h), after those: the echo's tempo sync, duck and cuts, and the plate.
+    choice (l, "delaySync", "Echo Sync", fx::modules::Echo::getSyncNames(), 0);
+    percent (l, "delayDuck", "Echo Duck", 0.0f);
+    hertz (l, "delayLowCut", "Echo Low Cut", 20.0f, 2000.0f, fx::Echo::defaultLowCutHz, 200.0f);
+    hertz (l, "delayHighCut", "Echo High Cut", 1000.0f, 20000.0f, fx::Echo::defaultHighCutHz, 5000.0f);
+
+    toggle (l, "plateOn", "Plate On");
+    percent (l, "plateMix", "Plate Mix", 20.0f);
+    number (l, "plateDecay", "Plate Decay", 0.3f, 6.0f, 0.01f, 1.8f, "s", 1.8f);
+    number (l, "platePreDelay", "Plate Pre-delay", 0.0f, fx::PlateReverb::maxPreDelayMs, 1.0f, 20.0f, "ms", 40.0f);
+    percent (l, "plateDamping", "Plate Damping", 40.0f);
+    hertz (l, "plateLowCut", "Plate Low Cut", 20.0f, 1000.0f, 150.0f, 150.0f);
+    hertz (l, "plateHighCut", "Plate High Cut", 1000.0f, 20000.0f, 9000.0f, 6000.0f);
+    percent (l, "plateMod", "Plate Modulation", 30.0f);
+    percent (l, "plateWidth", "Plate Width", 100.0f);
+    percent (l, "plateDuck", "Plate Duck", 0.0f);
+    moduleGains (fx::ModuleType::plate);
+
+    // Colour (Colour.h), after those: saturation types and tone, doubler modes.
+    choice (l, "satType", "Saturation Type", { "Warm", "Tape", "Tube", "Clip" }, 0);
+    number (l, "satTone", "Saturation Tone", -100.0f, 100.0f, 1.0f, 0.0f, "%");
+    choice (l, "doublerMode", "Doubler Mode", { "Classic", "Micro shift", "Double track" }, 0);
+    number (l, "doublerDetune", "Doubler Detune", 0.0f, 20.0f, 0.1f, 8.0f, "ct");
+    number (l, "doublerDelay", "Doubler Delay", 1.0f, 40.0f, 0.1f, 12.0f, "ms");
 }

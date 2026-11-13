@@ -330,6 +330,13 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                        })
                        // (moduleKey, action) -> { file, name, error?, cancelled? }. The file a Live effect plays
                        // through (cabinet, IR reverb): "get", "choose" (a file chooser) or "clear".
+                       // (bpm) -> null. The echo card's tap tempo, for a synced echo (0 forgets it).
+                       .withNativeFunction ("echoTapTempo", [this] (const auto& args, auto complete)
+                       {
+                           processorRef.setEchoTapTempo (args.size() > 0 ? juce::jlimit (0.0, 400.0, (double) args[0]) : 0.0);
+                           complete ({});
+                       })
+
                        .withNativeFunction ("moduleFile", [this] (const auto& args, auto complete)
                        {
                            const auto key = args.size() > 0 ? args[0].toString() : juce::String();

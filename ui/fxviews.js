@@ -798,9 +798,18 @@ const views = {
                    svg("line", { class: "grid dashed", x1: W / 2 - H / 2, y1: H, x2: W / 2 + H / 2, y2: 0 }));
     const curve = path(element, "fx-curve");
     const marker = dot(element);
+    // The curves of src/dsp/Colour.h (ColourSaturation::shape); Warm is fx::Saturation.
+    const curves = {
+      1: (x) => Math.tanh(x + 0.12) - Math.tanh(0.12),
+      2: (x) => (x >= 0 ? Math.tanh(1.3 * x) / 1.3 : Math.tanh(0.75 * x) / 0.75),
+      3: (x) => { const t = clamp(x / 1.5, -1, 1); return t - (t * t * t) / 3; },
+    };
     const shape = (x) => {
-      const drive = Math.pow(10, get("satDrive") / 20), makeup = 1 / Math.pow(drive, 0.7), mix = get("satMix") / 100;
-      return x + mix * (Math.tanh(drive * x) * makeup - x);
+      const drive = Math.pow(10, get("satDrive") / 20), mix = get("satMix") / 100;
+      const curve = curves[Math.round(get("satType") ?? 0)];
+      // The new types are level-matched: drawn with the gain that keeps a small signal level.
+      const wet = curve ? curve(drive * x) / Math.sqrt(drive) : Math.tanh(drive * x) / Math.pow(drive, 0.7);
+      return x + mix * (wet - x);
     };
     const at = (x) => [W / 2 + x * (H / 2 - 4), H / 2 - clamp(shape(x), -1.1, 1.1) * (H / 2 - 4)];
     let peak = 0;
