@@ -213,16 +213,24 @@ def main():
         if sys.platform != "darwin":
             print("Skipping the check: Core ML can only run on a Mac.")
         else:
-            print("Checking against the original (the first run builds the GPU version, which takes a while)…")
-            loaded = ct.models.MLModel(str(args.out), compute_units=ct.ComputeUnit.CPU_AND_GPU)
-            out = loaded.predict({"x": x.numpy(), "xt": xt.numpy()})
-            for name, expected in (("x_out", reference[0]), ("xt_out", reference[1])):
-                got = np.asarray(out[name]).reshape(expected.shape)
-                want = expected.numpy()
-                error = np.linalg.norm(got - want) / max(np.linalg.norm(want), 1e-12)
-                snr = -20 * np.log10(max(error, 1e-12))
-                verdict = "ok" if snr > 30 else "LOW: stems may sound worse, try --fp32"
-                print(f"  {name}: {snr:.1f} dB match with the original ({verdict})")
+            cpu_ok = True
+            # CPU only first: it says whether the conversion itself is right. Then the GPU (the first run
+            # builds the GPU version, which takes a while); a virtual machine's GPU can be unreliable.
+            for label, units in (("CPU", ct.ComputeUnit.CPU_ONLY), ("CPU and GPU", ct.ComputeUnit.CPU_AND_GPU)):
+                print(f"Checking against the original, on {label}…")
+                loaded = ct.models.MLModel(str(args.out), compute_units=units)
+                out = loaded.predict({"x": x.numpy(), "xt": xt.numpy()})
+                for name, expected in (("x_out", reference[0]), ("xt_out", reference[1])):
+                    got = np.asarray(out[name]).reshape(expected.shape)
+                    want = expected.numpy()
+                    error = np.linalg.norm(got - want) / max(np.linalg.norm(want), 1e-12)
+                    snr = -20 * np.log10(max(error, 1e-12)) if np.isfinite(error) else float("-inf")
+                    good = snr > 30
+                    if units == ct.ComputeUnit.CPU_ONLY and not good:
+                        cpu_ok = False
+                    print(f"  {name}: {snr:.1f} dB match with the original ({'ok' if good else 'LOW: stems may sound worse, try --fp32'})")
+            if not cpu_ok:
+                sys.exit("The converted model doesn't match the original even on the CPU, so it isn't usable.")
 
     print("Done. The next 'Split into stems' in MicFX runs on the GPU.")
 
