@@ -316,13 +316,13 @@ namespace
             } },
             { "Transport", {
                 { "play",      "Play / pause",           "Space",        true },
-                { "stop",      "Stop",                   "Enter",        true },
+                { "stop",      "Stop",                   "Num 0",        true },
                 { "record",    "Record",                 "R",            true },
                 { "", "", "", false },
                 { "start",     "Go to the start",        "Home",         true },
                 { "end",       "Go to the end",          "End",          true },
                 { "", "", "", false },
-                { "loop",      "Loop",                   "L",            true },
+                { "loop",      "Loop range",             "L",            true },
                 { "metronome", "Click (metronome)",      "C",            true },
             } },
         };
