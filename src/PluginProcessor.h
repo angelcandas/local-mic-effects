@@ -73,6 +73,14 @@ public:
     // The Live chain, for the effect cards' live readings (module meters are atomics).
     fx::FxChain& getLiveChain() noexcept                    { return chain; }
 
+    // The order the Live chain's effects play in, as module keys, first to last. Set takes
+    // any list: unknown keys are skipped, missing ones keep their standard places after
+    // the listed ones (an empty list is the standard order). Autotune, pitch shift and
+    // harmonizer are one module ("pitch"), so they move together. Kept in the plugin state
+    // and in each setlist song; loading a factory preset sets its order. Message thread.
+    juce::StringArray getChainOrder() const;
+    void setChainOrder (const juce::StringArray& keys);
+
     // Files the Live chain's effects play through (the cabinet's and the IR reverb's
     // impulse responses), by module key. Kept in the plugin state; the effect's choice
     // switches to "your file" when one loads. Returns why a file can't be used (empty

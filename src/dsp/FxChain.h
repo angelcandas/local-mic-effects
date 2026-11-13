@@ -99,6 +99,55 @@ public:
         return false;
     }
 
+    //==============================================================================
+    // The order the modules play in (Live mode: the singer reorders the one chain while
+    // it runs). Indices into the list, a permutation of 0..size()-1; empty is the order
+    // they were added in. Message thread. A change while playing dips the sound for a few
+    // milliseconds around the swap, so it doesn't click; the audio thread picks it up
+    // without waiting.
+    void setOrder (std::vector<int> order)
+    {
+        if (! isPermutation (order))
+        {
+            order.clear();
+            for (int i = 0; i < size(); ++i)
+                order.push_back (i);
+        }
+        if (order == getOrder())
+            return; // no change: no dip
+
+        wantedOrder = order;
+
+        const juce::SpinLock::ScopedLockType lock (orderLock);
+        pendingOrder = wantedOrder;
+        orderPending.store (true, std::memory_order_release);
+    }
+
+    // The order set last (the order they were added in, if none). Message thread.
+    std::vector<int> getOrder() const
+    {
+        if (! wantedOrder.empty())
+            return wantedOrder;
+        std::vector<int> order;
+        for (int i = 0; i < size(); ++i)
+            order.push_back (i);
+        return order;
+    }
+
+    bool isPermutation (const std::vector<int>& order) const
+    {
+        if ((int) order.size() != size())
+            return false;
+        std::vector<bool> seen ((size_t) size(), false);
+        for (const auto index : order)
+        {
+            if (! juce::isPositiveAndBelow (index, size()) || seen[(size_t) index])
+                return false;
+            seen[(size_t) index] = true;
+        }
+        return true;
+    }
+
     // Gain before and after the modules (the chain's input and output trims), in dB.
     // Any thread; they glide over ~50 ms on the audio thread.
     void setGains (float inputDecibels, float outputDecibels) noexcept
@@ -127,6 +176,19 @@ public:
                 modules[i]->prepare (spec);
 
         std::fill (running.begin(), running.end(), false);
+
+        // Not playing now: the order goes straight in. The dip around a later change is
+        // ~2.5 ms each way.
+        orderFadeStep = 1.0f / (float) juce::jmax (1.0, spec.sampleRate * 0.0025);
+        orderFade = 1.0f;
+        orderFading = 0;
+        {
+            const juce::SpinLock::ScopedLockType lock (orderLock);
+            playingOrder = wantedOrder;
+            playingOrder.reserve ((size_t) size());
+            pendingOrder.reserve ((size_t) size());
+            orderPending.store (false, std::memory_order_relaxed);
+        }
     }
 
     void reset()
@@ -143,8 +205,19 @@ public:
         applyGain (block, inputSmoothed, inputGain);
         raisePeak (inputPeak, blockPeak (block));
 
-        for (auto& module : modules)
-            module->process (context);
+        if (playingOrder.empty())
+        {
+            for (auto& module : modules)
+                module->process (context);
+        }
+        else
+        {
+            for (const auto index : playingOrder)
+                modules[(size_t) index]->process (context);
+        }
+
+        if (orderFading != 0 || orderPending.load (std::memory_order_acquire))
+            fadeAroundReorder (block);
 
         applyGain (block, outputSmoothed, outputGain);
         raisePeak (outputPeak, blockPeak (block));
@@ -159,6 +232,52 @@ public:
     }
 
 private:
+    // Audio thread: fades out, takes the new order (if the message thread isn't writing
+    // it just now; else tries again next block, still silent), fades back in.
+    void fadeAroundReorder (juce::dsp::AudioBlock<float>& block) noexcept
+    {
+        if (orderFading == 0)
+            orderFading = -1;
+
+        const auto numSamples = (int) block.getNumSamples();
+        const auto numChannels = (int) block.getNumChannels();
+
+        for (int i = 0; i < numSamples; ++i)
+        {
+            if (orderFading == -1 && orderFade <= 0.0f)
+            {
+                const juce::SpinLock::ScopedTryLockType lock (orderLock);
+                if (lock.isLocked() && orderPending.load (std::memory_order_acquire))
+                {
+                    playingOrder.assign (pendingOrder.begin(), pendingOrder.end()); // reserved: no allocation
+                    orderPending.store (false, std::memory_order_relaxed);
+                    orderFading = 1;
+                }
+                else if (lock.isLocked())
+                {
+                    orderFading = 1; // nothing new after all
+                }
+            }
+
+            orderFade = juce::jlimit (0.0f, 1.0f, orderFade + (float) orderFading * orderFadeStep);
+            for (int ch = 0; ch < numChannels; ++ch)
+                block.getChannelPointer ((size_t) ch)[i] *= orderFade;
+
+            if (orderFading == 1 && orderFade >= 1.0f)
+            {
+                orderFading = 0;
+                // Another change came in while fading back: dip again from here.
+                if (orderPending.load (std::memory_order_acquire))
+                    orderFading = -1;
+                else
+                {
+                    orderFade = 1.0f;
+                    return;
+                }
+            }
+        }
+    }
+
     static void applyGain (juce::dsp::AudioBlock<float>& block, juce::SmoothedValue<float>& smoothed,
                            const std::atomic<float>& target) noexcept
     {
@@ -172,6 +291,14 @@ private:
 
     std::vector<std::shared_ptr<Module>> modules;
     std::vector<bool> running; // per module: added already prepared, prepare() skips it
+
+    std::vector<int> wantedOrder;   // message thread
+    std::vector<int> pendingOrder;  // under orderLock
+    std::vector<int> playingOrder;  // audio thread (empty: the order they were added in)
+    juce::SpinLock orderLock;
+    std::atomic<bool> orderPending { false };
+    float orderFade = 1.0f, orderFadeStep = 0.01f; // audio thread
+    int orderFading = 0;                           // audio thread: -1 out, 1 in, 0 none
 
     std::atomic<float> inputGain { 1.0f }, outputGain { 1.0f };
     std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };

@@ -349,9 +349,21 @@ button { font: inherit; color: inherit; }
 
 .step {
   min-width: 18px;
+  padding: 3px 2px;
+  border-radius: 4px;
   color: var(--cat);
   font: 600 10.5px/1 var(--mono);
+  cursor: grab;
+  touch-action: none;
 }
+
+.step:hover, .step:focus-visible { background: color-mix(in srgb, var(--cat) 18%, transparent); outline: none; }
+
+/* Cards already on screen don't replay their entrance when the chain is reordered. */
+.card.is-settled:not(.is-flashing) { animation: none; }
+.card.is-dragging { opacity: 0.45; }
+.card.drop-before { border-left-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.card.drop-after { border-right-color: var(--accent); box-shadow: inset -3px 0 0 var(--accent); }
 
 .desc {
   margin: 2px 0 6px;
