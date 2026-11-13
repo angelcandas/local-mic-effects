@@ -1,0 +1,58 @@
+/* Effect devices (devices.js): the title bar extras, selection and renaming. The card
+   itself (.insert) is styled in daw.css. */
+
+/* Selected (click its title; Shift-click for several). */
+.insert.is-selected { border-color: color-mix(in srgb, var(--cat, var(--accent)) 70%, var(--line-strong)); box-shadow: 0 0 0 1px color-mix(in srgb, var(--cat, var(--accent)) 55%, transparent); }
+.insert.is-selected .insert-head .insert-name { color: var(--text); }
+.device-chain:focus { outline: none; }
+
+/* Title bar buttons: A/B, ⋯, and the delay badge. Small, quiet until hovered or used. */
+.insert-ab, .insert-more {
+  flex: none;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: transparent;
+  color: var(--faint);
+  font: 600 9.5px var(--mono);
+  line-height: 16px;
+  cursor: pointer;
+}
+.insert-more { font-size: 12px; letter-spacing: 0.5px; }
+.insert-ab:hover, .insert-more:hover, .insert-more[aria-expanded="true"] { border-color: var(--line-strong); color: var(--text); }
+.insert-ab.is-used { border-color: var(--cat, var(--accent)); color: var(--cat, var(--accent)); }
+.insert-ab[aria-pressed="true"] { background: color-mix(in srgb, var(--cat, var(--accent)) 18%, transparent); }
+.insert-ab:not(.is-used), .insert-more { visibility: hidden; }
+.insert:hover .insert-ab, .insert:focus-within .insert-ab, .insert.is-selected .insert-ab,
+.insert:hover .insert-more, .insert:focus-within .insert-more, .insert.is-selected .insert-more { visibility: visible; }
+
+.insert-latency {
+  flex: none;
+  padding: 0 4px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--faint);
+  font: 500 9px var(--mono);
+  line-height: 15px;
+  white-space: nowrap;
+}
+.insert-latency[hidden] { display: none; }
+
+/* A name of its own reads in italics, so it's clear it isn't the effect's. */
+.insert.is-renamed .insert-head .insert-name { font-style: italic; }
+.insert-name-entry {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  padding: 0 5px;
+  border: 1px solid var(--accent);
+  border-radius: 5px;
+  background: var(--bg, #111);
+  color: var(--text);
+  font: 650 12px var(--sans, inherit);
+}
+
+.insert.is-folded .insert-ab, .insert.is-folded .insert-more, .insert.is-folded .insert-latency, .insert.is-folded .insert-name-entry { display: none; }
+@media (prefers-reduced-motion: reduce) { .insert { transition: none; } }
