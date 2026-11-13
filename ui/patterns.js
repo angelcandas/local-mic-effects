@@ -248,7 +248,7 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
       if (!view.named) item("Rows per note (drum view)", () => daw("setPart", { pattern: pattern.id, track: track.id, drum: !view.drum,
         ...(view.drum ? {} : { rows: [part?.stepNote ?? DEFAULT_NOTE] }) }), { checked: view.drum });
       item("Edit notes in the piano roll", () => openRoll(track));
-      item("Show this track in the Track tab", () => { screen.select?.(track.id, null); screen.setDockTab("effects"); });
+      item("Show this track's effects", () => { screen.select?.(track.id, null); screen.setDockTab("effects"); });
       item("Clear this track in the pattern", () => daw("editPattern", { pattern: pattern.id, track: track.id, remove: (part?.notes ?? []).map((n) => n.id) }));
     });
   };

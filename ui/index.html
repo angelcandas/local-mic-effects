@@ -36,14 +36,14 @@
     </div>
 
     <div class="preset-bar">
-      <button class="icon-button" data-preset-step="-1" aria-label="Previous preset">‹</button>
+      <button class="icon-button" data-preset-step="-1" aria-label="Previous preset" title="Previous preset (Ctrl+←)">‹</button>
       <button class="preset-button" aria-haspopup="true" aria-expanded="false">
         <span class="preset-label">Preset</span>
         <span class="preset-name">—</span>
         <span class="preset-modified" title="Changed since the preset was loaded">•</span>
         <span class="chevron">▾</span>
       </button>
-      <button class="icon-button" data-preset-step="1" aria-label="Next preset">›</button>
+      <button class="icon-button" data-preset-step="1" aria-label="Next preset" title="Next preset (Ctrl+→)">›</button>
       <div class="preset-menu" hidden></div>
     </div>
 
@@ -57,7 +57,7 @@
       </button>
       <button class="chip dry-button" type="button" aria-pressed="false" title="Hold to hear your voice without effects (or hold D)">Hold for dry</button>
       <button class="chip loop-toggle" type="button" aria-pressed="false" title="Show or hide the looper">
-        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 6.2A5 5 0 1 0 13 9" /><path d="M13.2 3.2v3.3H9.9" /></svg>Loop
+        <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 6.2A5 5 0 1 0 13 9" /><path d="M13.2 3.2v3.3H9.9" /></svg>Looper
       </button>
       <button class="chip practice-toggle" type="button" aria-pressed="false" title="Practice: sing along to any song and see how close you get">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 12h3M6 8h4M11 4h3" /><path d="M2 14c3-1 5-5 7-7s3-3 5-3" stroke-dasharray="1.5 2" /></svg>Practice
@@ -106,7 +106,7 @@
         <h2>Output</h2>
         <div class="knob" data-param="outputGain" data-label="Gain" data-bipolar></div>
         <div class="meter" data-meter="output"></div>
-        <button class="level-button panic-button" type="button" aria-pressed="false" title="Mute the output now (M)">Mute</button>
+        <button class="level-button panic-button" type="button" aria-pressed="false" title="Mute output now (M)">Mute output</button>
         <p class="limiter-note">Limited at −1 dB</p>
       </section>
     </aside>
@@ -135,7 +135,7 @@
       <div class="dock-splitter" role="separator" aria-orientation="horizontal" aria-label="Drag to resize the bottom panel" tabindex="0">
         <div class="dock-tabs" role="tablist" aria-label="Bottom panel">
           <button class="dock-tab" type="button" role="tab" data-tab="effects" title="The track's insert effects">Effects</button>
-          <button class="dock-tab" type="button" role="tab" data-tab="track" title="The selected clip, pitch &amp; time, quantize and tempo">Track</button>
+          <button class="dock-tab" type="button" role="tab" data-tab="track" title="The selected clip, pitch &amp; time, quantize and tempo">Clip</button>
           <button class="dock-tab" type="button" role="tab" data-tab="patterns" title="Patterns: a step sequencer for drum kits and instruments">Patterns</button>
           <button class="dock-tab" type="button" role="tab" data-tab="mixer" title="Mixer: every track, the returns and the master side by side (Tab)">Mixer</button>
         </div>
@@ -252,7 +252,7 @@
         <label class="automix-target" hidden title="How loud the master gets">Loudness <select class="dropdown" name="masterLufs"><option value="-14">Streaming (-14 LUFS)</option><option value="-10">Loud (-10 LUFS)</option><option value="-16">Dynamic (-16 LUFS)</option></select></label>
         <label class="automix-focus" hidden title="The track to fit in or clean up">Track <select class="dropdown" name="focus"><option value="0">The lead voice</option></select></label>
         <p class="automix-mode-intro" hidden></p>
-        <label class="automix-style">Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="hiphop">Hip-hop</option><option value="rnb">R&amp;B</option><option value="acoustic">Acoustic</option><option value="electronic">Electronic</option><option value="jazz">Jazz</option><option value="lofi">Lo-fi</option><option value="coaching">Coaching (voice up front)</option><option value="speech">Speech / podcast (music bed)</option></select></label>
+        <label class="automix-style">Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="hiphop">Hip-hop</option><option value="rnb">R&amp;B</option><option value="acoustic">Acoustic</option><option value="electronic">Electronic</option><option value="jazz">Jazz</option><option value="lofi">Lo-fi</option><option value="coaching">Voice up front</option><option value="speech">Speech / podcast (music bed)</option></select></label>
         <div class="automix-effects" role="group" aria-label="Effects Auto Mix may add">
           <span>May add</span>
           <label class="check"><input type="checkbox" name="eq" checked> EQ</label>
@@ -304,7 +304,7 @@
       <div class="ai-body">
         <details class="ai-about"><summary>How it works</summary><p class="automix-intro">Measures every track and the whole mix, then says in plain words what is off (loudness, peaks, balance, stereo, clipping, hum, masking...) and why it matters. Fix buttons run the matching Auto Mix move as one undo step. Nothing plays while it listens.</p></details>
         <div class="export-options">
-          <label title="The kind of song it is judged as">Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="hiphop">Hip-hop</option><option value="rnb">R&amp;B</option><option value="acoustic">Acoustic</option><option value="electronic">Electronic</option><option value="jazz">Jazz</option><option value="lofi">Lo-fi</option><option value="coaching">Coaching (voice up front)</option><option value="speech">Speech / podcast (music bed)</option></select></label>
+          <label title="The kind of song it is judged as">Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="hiphop">Hip-hop</option><option value="rnb">R&amp;B</option><option value="acoustic">Acoustic</option><option value="electronic">Electronic</option><option value="jazz">Jazz</option><option value="lofi">Lo-fi</option><option value="coaching">Voice up front</option><option value="speech">Speech / podcast (music bed)</option></select></label>
           <label title="How loud the finished song should be">Target <select class="dropdown" name="target"><option value="-14">Streaming (-14 LUFS)</option><option value="-16">Dynamic / podcast (-16 LUFS)</option><option value="-10">Loud (-10 LUFS)</option></select></label>
         </div>
         <div class="mixcheck-score" hidden>

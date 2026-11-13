@@ -18,7 +18,7 @@ import { createPatternsPanel } from "./patterns.js";
 import { createPatternLane, drawGhosts } from "./patternlane.js";
 import { createDrawTool } from "./drawtool.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs } from "./rhythm.js";
-import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
+import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, IS_MAC, keyText, polar, releaseFocus, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
 
@@ -1626,7 +1626,7 @@ class DawScreen {
       this.renderTransport();
       this.renderArrange(true);
     });
-    this.tempoButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Track</span>');
+    this.tempoButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Tempo</span>');
     const songTempo = html("div", "tb-joined");
     songTempo.append(tempo, tap);
 
@@ -1676,7 +1676,7 @@ class DawScreen {
     this.recordButton.innerHTML = `<span class="record-dot"></span><span class="record-label">Rec</span>`;
     // Capture: the last minutes that came into the armed tracks, put on them. Right-click: how much.
     this.captureSeconds = 0;
-    this.captureButton = button("capture-button", "Cap", "Capture: put what you just played on the armed tracks, even if you were not recording. Right-click: how much.", () => this.capture());
+    this.captureButton = button("capture-button", "Capture", "Capture: put what you just played on the armed tracks, even if you were not recording. Right-click: how much.", () => this.capture());
     this.captureButton.setAttribute("aria-label", "Capture");
     this.captureButton.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -1692,7 +1692,7 @@ class DawScreen {
     clock.title = "Click to type a bar or time to go to";
     clock.addEventListener("click", (event) => { if (event.target === clock || !event.target.closest("input")) this.editClock(); });
     clock.append((this.clockBars = html("span", "clock-bars", "1.1")), (this.clockTime = html("span", "clock-time", "0:00.0")));
-    this.loopButton = iconButton("toggle", "loop", "Loop the marked range (L). Drag on the ruler to mark it.", () => this.toggleLoop());
+    this.loopButton = iconButton("toggle", "loop", "Loop range on / off (L). Drag on the ruler to mark it.", () => this.toggleLoop());
 
     // The mic meter next to Record: "am I too loud to record?"
     this.inputMeter = new Level(false, "input");
@@ -1746,14 +1746,14 @@ class DawScreen {
     this.autoMixButton = iconButton("tool has-label automix-button", "automix", "Auto Mix: listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix());
     this.autoMixButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Auto Mix</span>');
     this.mixCheckButton = iconButton("tool has-label mixcheck-button", "mixcheck", "Mix Check: a report on the mix in plain words, with Fix buttons", () => this.mixCheck.toggle());
-    this.mixCheckButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Check</span>');
+    this.mixCheckButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Mix Check</span>');
     this.buildActivity();
 
     // The mixer is a tab of the bottom panel: this shows or hides it.
     this.viewTabs = iconButton("toggle mixer-button", "mixer", "Mixer (Tab / X)", () => this.run("toggleView"));
     this.libraryButton = iconButton("toggle", "library", "Show / hide the library (Shift+B)", () => this.library.toggle());
     this.dockButton = iconButton("toggle", "panel", "Show / hide the bottom panel (E)", () => this.run("toggleDock"));
-    this.pianoButton = iconButton("tool", "piano", "Play MIDI from the computer keyboard (M)", () => this.togglePiano());
+    this.pianoButton = iconButton("tool", "piano", "Play MIDI from the computer keyboard (Ctrl+K)", () => this.togglePiano());
     const help = iconButton("tool", "help", "Keyboard shortcuts (?)", () => this.toggleShortcuts());
     this.moreButton = iconButton("tool tb-more", "more", "More", (event) => this.openMoreMenu(event.currentTarget));
     this.moreButton.hidden = true;
@@ -2636,10 +2636,10 @@ class DawScreen {
       switches[key] = b;
       return b;
     };
-    toggles.append(toggle("mute", "M", "Mute (0)"), toggle("solo", "S", "Solo (S) · Alt+click: solo only this track"),
+    toggles.append(toggle("mute", "M", "Mute (M)"), toggle("solo", "S", "Solo (S) · Alt+click: solo only this track"),
                    toggle("arm", "●", isMidi ? "Arm to record from your MIDI keyboard (you hear it while armed)" : "Arm for recording (A)"));
     const monitor = isMidi
-      ? toggle("monitor", "In", "Play this track's instrument from your MIDI keyboard")
+      ? toggle("monitor", "Mon", "Monitor: play this track's instrument from your MIDI keyboard (I)")
       : button("tt tt-monitor", "Off", "", () => {
           const next = { off: "in", in: "auto", auto: "off" }[monitorMode(current())];
           this.eachStep(this.tracksFor(track.id), (id, more) => daw("setTrack", { id, monitorMode: next, continue: more }));
@@ -2754,11 +2754,11 @@ class DawScreen {
       for (const [key, b] of Object.entries(switches)) b.setAttribute("aria-pressed", String(Boolean(latest[key])));
       if (!isMidi) {
         const mode = monitorMode(latest);
-        monitor.textContent = { in: "In", auto: "Auto", off: "Off" }[mode];
+        monitor.textContent = { in: "Mon", auto: "Auto", off: "Off" }[mode];
         monitor.dataset.mode = mode;
         monitor.setAttribute("aria-pressed", String(mode !== "off"));
-        monitor.title = `Monitor: ${{ in: "In: always hear the input", auto: "Auto: hear the input while the track is armed", off: "Off: don't hear the input" }[mode]}`
-          + ` (${inputText(latest.input, this.session.inputs)}, through this track's effects). Click: In → Auto → Off.`;
+        monitor.title = `Monitor: ${{ in: "Mon: always hear the input", auto: "Auto: hear the input while the track is armed", off: "Off: don't hear the input" }[mode]}`
+          + ` (${inputText(latest.input, this.session.inputs)}, through this track's effects). Click: Mon → Auto → Off.`;
       }
       if (document.activeElement !== name) name.value = latest.name;
       volume.update(latest.volume);
@@ -3407,7 +3407,7 @@ class DawScreen {
       const monitor = !strip.toggles.monitor && strip.element.querySelector(".tt-monitor");
       if (monitor) {
         const mode = monitorMode(track);
-        monitor.textContent = { in: "In", auto: "Auto", off: "Off" }[mode];
+        monitor.textContent = { in: "Mon", auto: "Auto", off: "Off" }[mode];
         monitor.dataset.mode = mode;
         monitor.setAttribute("aria-pressed", String(mode !== "off"));
       }
@@ -3554,7 +3554,7 @@ class DawScreen {
       row.append(html("span", "", text), select);
       return row;
     };
-    element.append(labelled("In", left), labelled("Right", right));
+    element.append(labelled("Input", left), labelled("Right", right));
     const ensure = (select, value) => {
       if (![...select.options].some((o) => o.value === value)) select.append(new Option(`${Number(value) + 1} · (not connected)`, value));
       select.value = value;
@@ -3613,7 +3613,7 @@ class DawScreen {
     const toggles = {};
     const buttons = html("div", "strip-toggles");
     const keys = isMaster ? [] : isReturn ? [["mute", "M", "Mute"], ["solo", "S", "Solo"]]
-                                          : [["mute", "M", "Mute"], ["solo", "S", "Solo"], ["arm", "●", "Arm"], ["monitor", "In", "Monitor"]];
+                                          : [["mute", "M", "Mute"], ["solo", "S", "Solo"], ["arm", "●", "Arm"], ["monitor", "Mon", "Monitor"]];
     for (const [key, text, title] of keys) {
       if (key === "monitor" && track.kind !== "midi") {
         // In / Auto / Off, as on the track header.
@@ -5415,27 +5415,27 @@ class DawScreen {
   // what Ableton Live, Cubase and Logic Pro share (Space, M, S, R, Ctrl+Z/S/D/N/O, Q...);
   // where they differ, the most obvious one wins. Ctrl is Cmd on a Mac (keyText).
   static SHORTCUTS = [
-    ["Transport", [["Space", "Play / pause"], ["Enter / Num 0", "Stop and go back to the start"], ["R / Num *", "Record on the armed tracks"],
+    ["Transport", [["Space", "Play / pause (always, even when a button has focus)"], ["Num 0", "Stop and go back to the start"], ["R / Num *", "Record on the armed tracks"],
                    ["← / →", "Move the playhead a beat (Shift: a bar)"], ["Home / End", "Go to the start / end of the song"],
-                   ["L / Num /", "Loop on / off"], ["C", "Click (metronome) on / off"], ["F", "Follow the playhead on / off"],
+                   ["L / Num /", "Loop range on / off"], ["C", "Click (metronome) on / off"], ["F", "Follow the playhead on / off"],
                    ["K / Insert", "Add a marker at the playhead"], ["[ / ]", "Previous / next marker"], ["T", "Tap tempo"],
                    ["Click the clock", "Type a bar or time to go to"]]],
     ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["Ctrl+Shift+T", "New MIDI track"], ["Ctrl+Shift+D", "Duplicate the selected track"],
                 ["Ctrl+G", "Group the selected tracks (Shift+click several)"], ["Ctrl+Shift+G", "Ungroup"], ["Ctrl+R", "Rename the selected track"], ["Ctrl+Delete", "Delete the selected track"],
-                ["0", "Mute the selected track"], ["S", "Solo the selected track"], ["Alt+click S", "Solo only that track"],
+                ["M / 0", "Mute the selected track"], ["S", "Solo the selected track"], ["Alt+click S", "Solo only that track"],
                 ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track (In / Off; the header button also has Auto)"],
                 ["Double-click a value / Enter", "Type a value (volume, pan, sends, knobs)"], ["Ctrl+click a slider", "Reset it"],
                 ["Q / Ctrl+U", "Quantize the selected clip (or track), with the Pitch & time settings"]]],
-    ["Computer keyboard piano", [["M", "Turn the computer keyboard into a MIDI keyboard on / off (toolbar piano button)"],
+    ["Computer keyboard piano", [["Ctrl+K", "Turn the computer keyboard into a MIDI keyboard on / off (toolbar piano button)"],
                                  ["A S D F G H J K", "White keys, C to C (; adds one more)"], ["W E T Y U O P", "Black keys"],
                                  ["Z / X", "Octave down / up"], ["C / V", "Velocity down / up"],
-                                 ["While on", "Opens a floating piano and plays the armed (or selected) MIDI track. Single-key shortcuts (R, Space, S...) are off; Ctrl / Cmd ones still work. Esc closes it."]]],
+                                 ["While on", "Opens a floating piano and plays the armed (or selected) MIDI track. Single-letter shortcuts (R, S...) are off; Space, Shift+letter and Ctrl / Cmd ones still work. Esc closes it."]]],
     ["Clips", [["Shift / Ctrl+click", "Add a clip (or a track header) to the selection"], ["Drag on an empty lane", "Select the clips in a box"],
                ["Ctrl+A", "Select every clip"], [", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
                ["V / B / G / P", "Select, cut, gain and draw tools"], ["Draw tool", "Click places the picked pattern or sound, drag paints copies, right-click (or right-drag) erases"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
-               ["Ctrl+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
+               ["Ctrl+L", "Loop this clip (sets the loop range to it)"], ["Alt+drag", "Move or trim without snapping"]]],
     ["Clip editor (Wave, W)", [["1 / 2 / 4", "Open the Warp, Hitpoints or Quantize section (the open one is the tool); Esc closes it"],
                                ["Click / drag (no tool open)", "Move the playhead / scroll; in the ruler, drag to mark a loop range"],
                                ["Warp: click", "Pin a warp tab where the audio plays now"], ["Warp: drag", "Move that moment of the audio; it stretches between the tabs either side"],
@@ -5446,7 +5446,7 @@ class DawScreen {
                   ["Ctrl+Shift+← / →", "Rotate the selected row's steps"], ["Ctrl+C / V", "Copy / paste the selected row's steps"],
                   ["Right-click a row's light", "Solo the row (again: every row plays)"]]],
     ["File", [["Ctrl+N", "New project"], ["Ctrl+O", "Open a project"], ["Ctrl+S", "Save (Shift: save as)"],
-              ["Ctrl+I", "Import audio"], ["Ctrl+Shift+R / Ctrl+B", "Export (bounce)"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"]]],
+              ["Ctrl+I", "Import audio"], ["Ctrl+Shift+R", "Export (bounce)"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"]]],
     ["View", [["Tab / X", "Tracks / mixer"], ["E / Shift+Tab", "Show / hide the effects panel"], ["Shift+B / Ctrl+Alt+B", "Show / hide the library"],
               ["Ctrl+F", "Search the library"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"],
               ["Z / Shift+Z", "Zoom to the selected clip / the whole song"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
@@ -5552,7 +5552,7 @@ class DawScreen {
       this.pianoVelocity = html("span", "piano-readout");
       controls.append(this.pianoVelocity);
       step("+", "Velocity up (V)", () => this.pianoSet("velocity", 20));
-      head.append(controls, button("mini", "×", "Turn the keyboard piano off (M)", () => this.togglePiano(false)));
+      head.append(controls, button("mini", "×", "Turn the keyboard piano off (Ctrl+K or Esc)", () => this.togglePiano(false)));
       const keys = html("div", "piano-keys");
       const names = Object.fromEntries(Object.entries(DawScreen.PIANO).map(([code, n]) => [n, code]));
       const label = (code) => (code === "Semicolon" ? ";" : code.slice(3));
@@ -5657,22 +5657,18 @@ class DawScreen {
       if (this.pianoRelease(code)) event.preventDefault();
       return;
     }
-    if (!this.piano.on) {
-      if (code === "KeyM" && !event.ctrlKey && !event.metaKey && !event.altKey && !event.shiftKey && !isTyping(event)) {
-        event.preventDefault(); event.stopPropagation(); if (!event.repeat) this.togglePiano(true);
-      }
-      return;
-    }
+    if (!this.piano.on) return; // Ctrl+K (onKey) or the toolbar button turns it on
     if (isTyping(event) || event.ctrlKey || event.metaKey) return; // Ctrl / Cmd shortcuts still work
+    // Space and Shift+letter keep their shortcuts while the piano is on (Live's rule).
+    if (event.altKey || event.shiftKey || event.key === " ") return;
     event.stopPropagation(); // every other single key is the piano's while it's on
-    if (event.altKey || event.shiftKey) return;
     if (code in DawScreen.PIANO) {
       event.preventDefault();
       if (!event.repeat) this.pianoPress(code);
-    } else if (["KeyZ", "KeyX", "KeyC", "KeyV", "KeyM", "Escape"].includes(code)) {
+    } else if (["KeyZ", "KeyX", "KeyC", "KeyV", "Escape"].includes(code)) {
       event.preventDefault();
       if (event.repeat) return;
-      if (code === "KeyM" || code === "Escape") return this.togglePiano(false);
+      if (code === "Escape") return this.togglePiano(false);
       if (code === "KeyZ") this.pianoSet("octave", -1);
       else if (code === "KeyX") this.pianoSet("octave", 1);
       else this.pianoSet("velocity", code === "KeyC" ? -20 : 20);
@@ -5851,7 +5847,7 @@ class DawScreen {
         daw("addMarker", { time: snapped });
       });
       item("Loop this bar", () => daw("loop", { on: true, start: barStart, end: barEnd }));
-      item("Loop", () => this.toggleLoop(), { checked: Boolean(loop.on), shortcut: "L" });
+      item("Loop range", () => this.toggleLoop(), { checked: Boolean(loop.on), shortcut: "L" });
       if (track) {
         rule();
         item("Track…", () => this.openTrackMenu(track, x, y), { hint: "The track's own menu (or right-click its header)" });
@@ -5871,10 +5867,10 @@ class DawScreen {
       item("Delete", () => this.deleteSelected(), { danger: true, shortcut: "Delete" });
       rule();
       item("Mute", () => this.run("muteClip"), { checked: Boolean(clip.mute), shortcut: "Shift+M" });
-      item("Loop the clip", () => this.run("loopClip"), { shortcut: "Ctrl+L" });
+      item("Loop this clip", () => this.run("loopClip"), { shortcut: "Ctrl+L" });
       item("Zoom to the clip", () => this.run("zoomClip"), { shortcut: "Z" });
       if (audio) {
-        item("Edit pitch and timing", () => this.openClipEditor(), { shortcut: "W", hint: "The clip's waveform on the Track tab: transpose it, drag notes in time" });
+        item("Edit pitch and timing", () => this.openClipEditor(), { shortcut: "W", hint: "The clip's waveform on the Clip tab: transpose it, drag notes in time" });
         item("Keep as a take", () => daw("takes", { action: "fromClip", clip: clip.id }), { hint: "Copy this clip into a new take lane, so you can record over it and still pick parts of it" });
         heading("Audio");
         for (const [label, command, hint] of AUDIO_PROCESSES)
@@ -6107,7 +6103,6 @@ class DawScreen {
       else if (key === "n") command("new");
       else if (key === "o") command("open");
       else if (key === "i") command("import");
-      else if (key === "b") command("export");
       else if (key === "d") command("duplicate");
       else if (key === "g") command("groupTracks");
       else if (key === "e") command("split");
@@ -6120,6 +6115,7 @@ class DawScreen {
       else if (key === "v") command("paste");
       else if (key === "f") command("searchLibrary");
       else if (key === "a") command("selectAll");
+      else if (key === "k") { handled(); if (!event.repeat) this.togglePiano(); }
       else if (event.key === "Delete" || event.key === "Backspace") command("deleteTrack");
     }
     else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { handled(); this.nudgeSelected(event.key === "ArrowLeft" ? -step : step); }
@@ -6128,8 +6124,7 @@ class DawScreen {
     else if (code === "NumpadMultiply") command("record");
     else if (code === "NumpadDivide") command("loop");
     else if (onSlider && event.key.startsWith("Arrow")) return;
-    else if (event.key === " ") { if (event.target.closest?.("button, [role=slider]")) return; command("play"); }
-    else if (event.key === "Enter") { if (event.target.closest?.("button")) return; command("stop"); }
+    else if (event.key === " ") { releaseFocus(event); command("play"); } // Space always plays, whatever has focus
     else if (event.key === "ArrowLeft") { handled(); this.seek(Math.ceil(this.status.position / step - 1e-6) * step - step); }
     else if (event.key === "ArrowRight") { handled(); this.seek(Math.floor(this.status.position / step + 1e-6) * step + step); }
     else if (event.key === "ArrowUp") { handled(); event.shiftKey ? this.setRowHeight(this.rowHeight + 12) : this.selectTrackBy(-1); }
@@ -6166,7 +6161,7 @@ class DawScreen {
     else if (event.key === "]") command("nextMarker");
     else if (key === "t") command("tapTempo");
     else if (key === "s") command("soloTrack");
-    else if (key === "0") command("muteTrack");
+    else if (key === "m" || key === "0") command("muteTrack");
     else if (key === "q") command("quantize");
     else if (key === "l") command("loop");
     else if (key === "c") command("metronome");
