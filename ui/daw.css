@@ -2367,3 +2367,17 @@ body.is-daw .library-hint { display: none; }
 
 .strip.is-group .strip-name { color: var(--text); font-weight: 600; }
 .strip.is-group { background: color-mix(in srgb, var(--track-color) 6%, var(--panel)); }
+
+/* Capture: put the last minutes that came into the armed tracks on them. */
+.daw .capture-button {
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line-strong);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 12px;
+  cursor: pointer;
+}
+.daw .capture-button:hover:not(:disabled) { border-color: var(--accent); }
+.daw .capture-button:disabled { opacity: 0.45; cursor: default; }

@@ -124,6 +124,16 @@ The panel at the bottom of the window is a small multi-track player:
 - Disk access and file decoding run on background threads, so they don't add load to the audio thread.
 - The session (which tracks are loaded) isn't saved yet when you quit.
 
+### Capture (never lose a take)
+
+Live mode keeps the last 3 minutes of your voice (processed and the raw mic) in memory, always. Forgot
+to press Record? **Capture** in the transport bar saves the newest 30 s, 1 min, 3 min or everything as a
+take on a new track row (aligned to the backing track if it was playing). "Keep" sets how much is kept
+(1 to 5 minutes, or off; about 35 MB per minute per channel at 48 kHz, in memory only, never on disk
+until you capture). In DAW mode **Cap** puts what came into the armed audio tracks on them (right-click for
+how much), at the place it was played against, or at the playhead if the song wasn't playing. MIDI input is
+not captured yet.
+
 ### Looper (Live mode)
 
 **Loop** in the top bar opens the looper above the transport. It stacks up to four layers of your

@@ -936,6 +936,12 @@ select.dropdown {
 .recorder .pill { flex: none; white-space: nowrap; }
 .recorder .pill:disabled { opacity: 0.5; cursor: default; }
 
+.capture { display: flex; align-items: center; gap: 6px; flex: none; color: var(--muted); }
+.capture-select { padding: 2px 4px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); font-size: 12px; }
+.capture-select:disabled { opacity: 0.5; }
+.capture-readout { min-width: 64px; font: 12px/1 var(--mono); font-variant-numeric: tabular-nums; color: var(--faint); white-space: nowrap; }
+.capture.is-off .capture-button { opacity: 0.5; }
+
 .record-folder { display: flex; align-items: center; gap: 6px; min-width: 0; color: var(--muted); }
 .record-caption { color: var(--faint); white-space: nowrap; }
 .record-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }

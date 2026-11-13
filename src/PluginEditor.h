@@ -56,6 +56,7 @@ private:
     // Recording folder and "also save the dry mic" are app-wide preferences, not
     // part of the plugin state, so they survive across sessions and projects.
     juce::File getRecordingFolder();
+    juce::var describeCapture();
     juce::var describeRecorderSettings();
     juce::var describeTracks();
     juce::var describeLooper (bool withOverview);

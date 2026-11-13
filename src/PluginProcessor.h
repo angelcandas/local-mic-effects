@@ -4,6 +4,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "Parameters.h"
+#include "CaptureRing.h"
 #include "Looper.h"
 #include "MidiMap.h"
 #include "PitchTap.h"
@@ -80,6 +81,15 @@ public:
     // limiter) and plays its layers under it. Its playback is in recorded takes.
     Looper& getLooper() noexcept                            { return looper; }
 
+    // Capture (Live mode): the last minutes of the processed voice (left, right) and the
+    // raw mic, always kept, so a take nobody pressed Record for can still be saved.
+    // setCaptureSeconds (message thread): how much to keep, 0 = off (and no memory used).
+    // Channels of the ring: 0 and 1 the processed output, 2 the dry mic.
+    static constexpr double defaultCaptureSeconds = 180.0;
+    CaptureRing& getCapture() noexcept                      { return liveCapture; }
+    void setCaptureSeconds (double seconds);
+    double getCaptureSeconds() const noexcept               { return captureSeconds.load(); }
+
     // Scenes: snapshots of the Live sound, recalled with a glide. Message thread.
     Scenes& getScenes() noexcept                            { return scenes; }
 
@@ -149,6 +159,8 @@ private:
     juce::dsp::Limiter<float> limiter;
 
     Recorder recorder;
+    CaptureRing liveCapture;
+    std::atomic<double> captureSeconds { defaultCaptureSeconds };
     Multitrack multitrack;
     Looper looper;
     PitchTap pitchTap;

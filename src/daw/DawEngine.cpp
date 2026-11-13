@@ -1324,6 +1324,141 @@ int DawEngine::finishPatternRecording()
     return (int) notes.size();
 }
 
+void DawEngine::syncCapture()
+{
+    const auto seconds = captureLength.load();
+    std::vector<Edit::Input> wanted;
+
+    if (seconds > 0.0)
+        for (const auto& track : edit.getTracks())
+            if ((bool) track[ids::arm] && ! Edit::isMidiTrack (track))
+                if (const auto input = Edit::getTrackInput (track); input.left != Edit::noInput
+                      && std::find (wanted.begin(), wanted.end(), input) == wanted.end() && (int) wanted.size() < maxCaptureInputs)
+                    wanted.push_back (input);
+
+    const auto numChannelsOf = [] (const Edit::Input& input) { return input.isStereo() ? 2 : 1; };
+    std::vector<bool> placed (wanted.size(), false);
+
+    // Slots already on a wanted input stay (and keep their audio); the others are freed.
+    for (auto& slot : captures)
+    {
+        const Edit::Input held { slot.left.load(), slot.right.load() };
+        const auto found = slot.ring.isOn() ? std::find (wanted.begin(), wanted.end(), held) : wanted.end();
+
+        if (found != wanted.end() && ! placed[(size_t) (found - wanted.begin())])
+        {
+            placed[(size_t) (found - wanted.begin())] = true;
+            slot.ring.configure (sampleRate, numChannelsOf (held), seconds); // a change of length or rate
+        }
+        else if (slot.ring.isOn())
+        {
+            slot.ring.configure (sampleRate, 1, 0.0);
+        }
+    }
+
+    for (size_t i = 0; i < wanted.size(); ++i)
+    {
+        if (placed[i])
+            continue;
+
+        for (auto& slot : captures)
+        {
+            if (slot.ring.isOn())
+                continue;
+
+            slot.left = wanted[i].left;
+            slot.right = wanted[i].right;
+            slot.ring.configure (sampleRate, numChannelsOf (wanted[i]), seconds);
+            break;
+        }
+    }
+}
+
+double DawEngine::getCaptureAvailable() const noexcept
+{
+    auto best = -1.0;
+    for (const auto& slot : captures)
+        if (slot.ring.isOn())
+            best = juce::jmax (best, slot.ring.getAvailableSeconds());
+    return best;
+}
+
+DawEngine::CaptureResult DawEngine::capture (const juce::File& folder, double seconds)
+{
+    CaptureResult result;
+    syncCapture(); // the armed tracks as they are now
+
+    if (isRecording())
+        return { "Stop recording first.", 0.0, 0 };
+
+    const auto tracks = edit.getTracks();
+    const auto anyArmed = std::any_of (tracks.begin(), tracks.end(), [] (const auto& t) { return (bool) t[ids::arm] && ! Edit::isMidiTrack (t); });
+
+    if (! anyArmed)
+        return { "Arm an audio track first: Capture keeps what comes into the armed tracks.", 0.0, 0 };
+
+    if (captureLength.load() <= 0.0)
+        return { "Capture is off. Turn it on to keep the last minutes.", 0.0, 0 };
+
+    struct Taken { Edit::Input input; CaptureRing::Result audio; };
+    std::vector<Taken> taken;
+
+    for (auto& slot : captures)
+        if (slot.ring.isOn())
+            if (auto audio = slot.ring.take (seconds > 0.0 ? seconds : 1.0e9); audio.audio.getNumSamples() > 0)
+                taken.push_back ({ { slot.left.load(), slot.right.load() }, std::move (audio) });
+
+    if (taken.empty())
+        return { "Nothing captured yet: Capture starts when a track is armed.", 0.0, 0 };
+
+    const auto stamp = juce::Time::getCurrentTime().formatted ("%Y-%m-%d %H-%M-%S");
+    const auto latency = recordingLatency.load();
+    const auto here = position.load();
+    std::vector<std::pair<Edit::Input, std::pair<juce::File, std::vector<Edit::RecordedPass>>>> files;
+
+    for (auto& item : taken)
+    {
+        const auto label = taken.size() > 1 ? " In " + juce::String (item.input.left + 1) + (item.input.isStereo() ? "-" + juce::String (item.input.right + 1) : juce::String()) : juce::String();
+        const auto file = folder.getChildFile ("MicFX capture " + stamp + label + ".wav").getNonexistentSibling();
+
+        if (const auto error = CaptureRing::writeWav (file, item.audio.audio, 0, item.audio.audio.getNumChannels(), sampleRate); error.isNotEmpty())
+            return { error, 0.0, 0 };
+
+        // Where it was played: to the music (minus the interface's round trip, as a recording),
+        // or at the playhead when nothing was playing.
+        auto start = item.audio.startPosition >= 0 ? item.audio.startPosition - latency : here;
+        auto offset = juce::int64 (0);
+        auto length = (juce::int64) item.audio.audio.getNumSamples();
+
+        if (start < 0) // before the song's start: skip that part of the file
+        {
+            offset = -start;
+            length += start;
+            start = 0;
+        }
+
+        if (length <= 0)
+            continue;
+
+        files.push_back ({ item.input, { file, { Edit::RecordedPass { (double) start / sampleRate, (double) offset / sampleRate,
+                                                                       (double) length / sampleRate } } } });
+        result.seconds = juce::jmax (result.seconds, (double) length / sampleRate);
+    }
+
+    edit.getUndoManager().beginNewTransaction ("Capture");
+
+    for (const auto& [input, placement] : files)
+        for (const auto& track : edit.getTracks())
+            if ((bool) track[ids::arm] && ! Edit::isMidiTrack (track) && Edit::getTrackInput (track) == input)
+            {
+                edit.addRecording ((int) track[ids::id], placement.first, placement.second);
+                ++result.tracks;
+            }
+
+    edit.getUndoManager().beginNewTransaction();
+    return result;
+}
+
 Recorder::Take DawEngine::stopRecording()
 {
     if (patternRecording.load())
@@ -1734,6 +1869,19 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     {
         return index >= 0 && index < numInputs && inputs[index] != nullptr ? inputs[index] : nullptr;
     };
+
+    // Capture: the raw inputs of the armed tracks, always, with the playhead while it runs.
+    for (auto& slot : captures)
+    {
+        if (! slot.ring.isOn())
+            continue;
+
+        const auto* left = inputChannel (slot.left.load (std::memory_order_relaxed));
+        const auto* right = inputChannel (slot.right.load (std::memory_order_relaxed));
+        const float* channels[] = { left != nullptr ? left : silence.data(),
+                                    right != nullptr ? right : silence.data() };
+        slot.ring.write (channels, numSamples, isPlaying ? blockStart : -1);
+    }
 
     // The dry takes: the raw inputs from the record start on (not during the count-in).
     if (isPlaying && recordingAudio.load())

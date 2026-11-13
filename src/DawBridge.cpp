@@ -745,6 +745,7 @@ juce::var DawBridge::describeStatus()
         { "length", (double) engine.getLength() / rate },
         { "playing", engine.isPlaying() },
         { "recording", engine.isRecording() },
+        { "capture", engine.getCaptureAvailable() },
         { "recordStart", (double) engine.getRecordStart() / rate },
         { "input", peakToDecibels (processor.inputPeak.exchange (0.0f)) },
         { "master", masterPeak },
@@ -3014,6 +3015,17 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             complete (object ({ { "ok", true }, { "file", take.file.getFullPathName() }, { "dropped", take.droppedAudio } }));
         }
 
+        return;
+    }
+
+    // "capture" { seconds? }: puts the last minutes that came into the armed tracks on them (see
+    // DawEngine::capture). Answers { ok, error, seconds, tracks }.
+    if (command == "capture")
+    {
+        engine.setRecordingLatency (roundTripLatency());
+        const auto result = engine.capture (getRecordingFolder(), (double) arg (args, "seconds", 0.0));
+        complete (object ({ { "ok", result.error.isEmpty() }, { "error", result.error },
+                            { "seconds", result.seconds }, { "tracks", result.tracks } }));
         return;
     }
 
