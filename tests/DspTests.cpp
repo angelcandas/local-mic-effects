@@ -4937,13 +4937,13 @@ namespace
             // Previews while dragging: played, not stored, not an undo step.
             {
                 const auto undoName = edit.getUndoManager().getUndoDescription();
-                const auto stored = lastSession()["tracks"][0]["clips"][0]["warp"];
+                const auto stored = edit.getClip (clipId)[daw::ids::warp].toString();
                 auto moved = juce::Array<juce::var> { juce::var (juce::Array<juce::var> { 0.0, 0.0 }), juce::var (juce::Array<juce::var> { 0.5, 1.2 }) };
                 auto& engine = processor.getDawEngine();
                 check (ok (run ("previewWarp", args ({ { "id", clipId }, { "markers", moved } }))) && engine.hasPreview (clipId)
                            && std::abs (engine.getPlaybackSettings (edit.getClip (clipId)).map.toTarget (0.5) - 1.2) < 1.0e-9,
                        "previewWarp plays markers that aren't stored");
-                check (juce::JSON::toString (lastSession()["tracks"][0]["clips"][0]["warp"]) == juce::JSON::toString (stored)
+                check (edit.getClip (clipId)[daw::ids::warp].toString() == stored
                            && edit.getUndoManager().getUndoDescription() == undoName,
                        "the session and undo don't see a preview");
                 check (ok (run ("renderState", args ({ { "id", clipId } })))
@@ -9914,6 +9914,14 @@ int main()
         testMidiLearn();
         testScenes();
         testSetlist();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=bridge: just the DAW screen's commands.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "bridge")
+    {
+        testDawBridge();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
