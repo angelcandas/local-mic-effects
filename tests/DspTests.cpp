@@ -4303,6 +4303,21 @@ namespace
             check (near (clips[0][ids::fadeOut], daw::Edit::compFadeSeconds) && near (clips[2][ids::fadeIn], daw::Edit::compFadeSeconds),
                    "the old take fades out and back in under the new one");
 
+            // Two clips on the track, recording over only the first: both go into Take 1.
+            {
+                daw::Edit two;
+                const auto track2 = (int) two.addTrack ("Vocal")[ids::id];
+                two.addClip (track2, first, 0.0, 2.0, 0.0);
+                two.addClip (track2, first, 3.0, 2.0, 0.0);
+                two.addRecording (track2, second, { { 0.0, 0.0, 1.0 } });
+                const auto t = two.getTakes (track2);
+                int inFirst = 0;
+                for (const auto& c : t[0])
+                    if (c.hasType (ids::CLIP))
+                        ++inFirst;
+                check (t.size() == 2 && inFirst == 2, "every clip already on the track becomes part of Take 1, not only the first");
+            }
+
             // Comping by hand.
             undo.beginNewTransaction();
             edit.compTake (take1, 1.5, 2.5);
