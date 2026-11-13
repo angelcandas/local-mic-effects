@@ -208,12 +208,13 @@ Parameters::Parameters (Layout& l)
         decibels (l, key + "OutGain", name + " Out Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
     };
 
-    // (The denoiser, auto level and the resonance suppressor came later: their gains are
-    // at the end with their other parameters.)
+    // (The denoiser, auto level, the resonance suppressor, the cabinet and the IR reverb
+    // came later: their gains are at the end with their other parameters.)
     for (int i = 0; i < fx::numModuleTypes; ++i)
-        if ((fx::ModuleType) i != fx::ModuleType::denoise && (fx::ModuleType) i != fx::ModuleType::autoLevel
-            && (fx::ModuleType) i != fx::ModuleType::smooth)
-            moduleGains ((fx::ModuleType) i);
+        if (const auto type = (fx::ModuleType) i;
+            type != fx::ModuleType::denoise && type != fx::ModuleType::autoLevel && type != fx::ModuleType::smooth
+            && type != fx::ModuleType::cab && type != fx::ModuleType::irReverb)
+            moduleGains (type);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
     // they already had (their In/Out gains are in the loop above).
@@ -310,4 +311,22 @@ Parameters::Parameters (Layout& l)
     choice (l, "smoothStereo", "Smooth Stereo", { "Linked", "Mid/Side" }, 0);
     choice (l, "smoothResolution", "Smooth Resolution", { "Fast (5 ms)", "Balanced (11 ms)", "Quality (21 ms)" }, 1);
     moduleGains (fx::ModuleType::smooth);
+
+    // Speaker cabinet (Cabinet.h) and convolution reverb (Convolver.h), after those. Their
+    // impulse response files aren't parameters: see PluginProcessor's module files.
+    toggle (l, "cabOn", "Cab On");
+    choice (l, "cabModel", "Cab Model", fx::modules::Cab::getModelChoices(), (int) fx::Cabinet::Model::closed4x12);
+    choice (l, "cabMic", "Cab Mic", fx::Cabinet::getMicNames(), (int) fx::Cabinet::Mic::offAxis);
+    hertz (l, "cabLowCut", "Cab Low Cut", 20.0f, 500.0f, 20.0f, 100.0f);
+    hertz (l, "cabHighCut", "Cab High Cut", 1000.0f, 20000.0f, 20000.0f, 6000.0f);
+    percent (l, "cabMix", "Cab Mix", 100.0f);
+    moduleGains (fx::ModuleType::cab);
+
+    toggle (l, "irvOn", "IR Reverb On");
+    choice (l, "irvSpace", "IR Reverb Space", fx::modules::IrReverb::getSpaceChoices(), 1);
+    percent (l, "irvMix", "IR Reverb Mix", 25.0f);
+    number (l, "irvPreDelay", "IR Reverb Pre-delay", 0.0f, 200.0f, 1.0f, 0.0f, "ms", 40.0f);
+    hertz (l, "irvLowCut", "IR Reverb Low Cut", 20.0f, 1000.0f, 150.0f, 150.0f);
+    hertz (l, "irvHighCut", "IR Reverb High Cut", 1000.0f, 20000.0f, 12000.0f, 6000.0f);
+    moduleGains (fx::ModuleType::irReverb);
 }

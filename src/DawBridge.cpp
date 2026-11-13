@@ -283,7 +283,7 @@ namespace
             { "duplicate", "Duplicate clip" }, { "pasteClip", "Paste clip" }, { "setClip", "Clip change" },
             { "normaliseClip", "Normalise clip" }, { "stripSilence", "Strip silence" }, { "addMidiClip", "Add MIDI clip" },
             { "editNotes", "Edit notes" }, { "addInsert", "Add effect" }, { "removeInsert", "Remove effect" },
-            { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "pasteInserts", "Paste effects" },
+            { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "insertFile", "Load effect file" }, { "pasteInserts", "Paste effects" },
             { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
             { "groupTracks", "Group tracks" }, { "ungroup", "Ungroup tracks" }, { "setGroup", "Move to group" },
             { "addReturn", "Add return" }, { "removeReturn", "Delete return" }, { "moveReturn", "Move return" },
@@ -451,10 +451,13 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
     {
         auto* values = new juce::DynamicObject();
         for (int i = 0; i < insert.getNumProperties(); ++i)
-            if (const auto name = insert.getPropertyName (i); name != ids::id && name != ids::type)
+            if (const auto name = insert.getPropertyName (i); name != ids::id && name != ids::type && name != ids::file)
                 values->setProperty (name, number (insert, name));
 
-        list.add (object ({ { "id", (int) insert[ids::id] }, { "type", insert[ids::type].toString() }, { "values", juce::var (values) } }));
+        auto entry = object ({ { "id", (int) insert[ids::id] }, { "type", insert[ids::type].toString() }, { "values", juce::var (values) } });
+        if (insert.hasProperty (ids::file))
+            entry.getDynamicObject()->setProperty ("file", insert[ids::file].toString());
+        list.add (entry);
     }
 
     return list;
@@ -3211,6 +3214,50 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "removeInsert") { edit.removeInsert (id); ok(); return; }
     if (command == "moveInsert")   { edit.moveInsert (id, arg (args, "index", 0)); ok(); return; }
     if (command == "setInsert")    { edit.setInsertValue (id, args["param"].toString(), args["value"]); ok(); return; }
+
+    // { id, path? } -> { ok, file, error?, cancelled? }: the impulse response a cab or IR
+    // reverb insert plays through. No path: a file chooser; path "": cleared. Loading one
+    // also turns the effect's choice to "your file".
+    if (command == "insertFile")
+    {
+        const auto insert = edit.getInsert (id);
+        const auto type = insert.isValid() ? daw::Edit::moduleTypeFromKey (insert[ids::type].toString()) : std::nullopt;
+        auto probe = type.has_value() ? fx::createModule (*type) : nullptr;
+
+        if (probe == nullptr || ! probe->usesFile())
+        {
+            complete (error ("This effect doesn't use files."));
+            return;
+        }
+
+        const auto apply = [this, id, choice = probe->getFileChoice(), check = std::shared_ptr<fx::Module> (std::move (probe))] (const juce::File& file)
+        {
+            if (file != juce::File())
+                if (const auto problem = check->loadFile (file); problem.isNotEmpty())
+                    return error (problem);
+
+            edit.setInsertFile (id, file);
+            if (file != juce::File() && choice.valueId.isNotEmpty())
+                edit.setInsertValue (id, choice.valueId, choice.index);
+
+            sessionChanged = true;
+            return object ({ { "ok", true }, { "file", file.getFullPathName() } });
+        };
+
+        if (args.hasProperty ("path"))
+        {
+            const auto path = args["path"].toString();
+            complete (apply (path.isEmpty() ? juce::File() : juce::File (path)));
+            return;
+        }
+
+        const juce::File current (insert[ids::file].toString());
+        withChooser ("Load an impulse response",
+                     current.existsAsFile() ? current.getParentDirectory() : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+                     fx::ImpulseFile::getWildcard(), juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                     apply, complete);
+        return;
+    }
     if (command == "loadPreset")   { loadPresetInto (arg (args, "track", -1), arg (args, "preset", -1)); ok(); return; }
 
     //================================================================ clips

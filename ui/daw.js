@@ -14,7 +14,7 @@ import { MixCheckView } from "./mixcheck.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createPatternLane, createPatternsPanel } from "./patterns.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs } from "./rhythm.js";
-import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
+import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
 
@@ -1133,6 +1133,13 @@ class InsertCard {
   createControl(control) {
     // The autotune key picker and tuner, and the reverb picture, are Live-screen extras.
     if (control.type === "keys") control = { type: "choice", param: control.param, label: "Key" };
+    if (control.type === "file") {
+      const picker = createFilePicker({ label: control.label, load: () => daw("insertFile", { id: this.insert.id }),
+                                        clear: () => daw("insertFile", { id: this.insert.id, path: "" }) });
+      this.filePicker = picker;
+      picker.update(this.insert.file);
+      return picker.element;
+    }
     if (control.type !== "knob" && control.type !== "choice" && control.type !== "toggle") return null;
 
     const info = parameterInfo[control.param] ?? { min: 0, max: 1, skew: 1, step: 0, label: "" };
@@ -1178,6 +1185,7 @@ class InsertCard {
     for (const { param, element } of this.switches)
       element.setAttribute("aria-pressed", String((insert.values[param] ?? 0) >= 0.5));
     for (const { param, widget } of this.controls) widget.update(insert.values[param]);
+    this.filePicker?.update(insert.file);
     this.view?.update();
     for (const { power, row } of this.parts) row.hidden = (insert.values[power] ?? 0) < 0.5;
     for (const [control, element] of this.conditional)

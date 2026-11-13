@@ -286,8 +286,12 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         {
             const auto& modules = it->second->modulesByInsertId;
             if (const auto module = modules.find ((int) tree[ids::id]); module != modules.end())
-                if (auto* value = module->second->findValue (property.toString()))
+            {
+                if (property == ids::file)
+                    loadInsertFile (*module->second, tree);
+                else if (auto* value = module->second->findValue (property.toString()))
                     value->store ((float) tree[property]);
+            }
 
             // Switching autotune or pitch shift on or off changes the track's delay, so
             // the latency compensation is worked out again.
@@ -513,6 +517,20 @@ void DawEngine::updateMix()
         setStripTargets (*it->second, edit.getMaster(), true, false);
 }
 
+void DawEngine::loadInsertFile (fx::Module& module, const juce::ValueTree& insert)
+{
+    if (! module.usesFile())
+        return;
+
+    const auto path = insert[ids::file].toString();
+    const auto file = juce::File::isAbsolutePath (path) ? juce::File (path) : juce::File();
+    if (file == module.getFile())
+        return;
+
+    if (const auto error = module.loadFile (file); error.isNotEmpty())
+        juce::Logger::writeToLog ("[MicFX DAW] " + error);
+}
+
 std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& trackOrMaster)
 {
     const auto id = (int) trackOrMaster[ids::id];
@@ -556,6 +574,9 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
         if (previousModules != nullptr)
             if (const auto it = previousModules->find ((int) insert[ids::id]); it != previousModules->end() && it->second->getType() == *type)
                 module.carryStateFrom (*it->second);
+
+        if (module.usesFile())
+            loadInsertFile (module, insert); // before prepare, so it plays from the first block
 
         strip->modulesByInsertId[(int) insert[ids::id]] = &module;
         if (auto* pitch = dynamic_cast<fx::modules::Pitch*> (&module))

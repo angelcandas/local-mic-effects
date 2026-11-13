@@ -321,7 +321,7 @@ juce::ValueTree Edit::addReturn (const juce::String& name, std::optional<fx::Mod
         auto insert = addInsert ((int) bus[ids::id], *effect);
 
         // A return carries only the effect: fully wet, the dry signal stays on the track.
-        for (const auto* wet : { "reverbMix", "chorusMix", "flangerMix", "phaserMix", "delayMix", "doublerMix" })
+        for (const auto* wet : { "reverbMix", "irvMix", "chorusMix", "flangerMix", "phaserMix", "delayMix", "doublerMix" })
             if (insert.hasProperty (wet))
                 insert.setProperty (wet, 100.0f, nullptr);
     }
@@ -1853,6 +1853,17 @@ void Edit::setInsertValue (int insertId, const juce::String& valueId, float valu
 {
     if (auto insert = getInsert (insertId); insert.isValid() && insert.hasProperty (juce::Identifier (valueId)))
         insert.setProperty (juce::Identifier (valueId), value, undoTarget);
+}
+
+void Edit::setInsertFile (int insertId, const juce::File& file)
+{
+    if (auto insert = getInsert (insertId); insert.isValid())
+    {
+        if (file == juce::File())
+            insert.removeProperty (ids::file, undoTarget);
+        else
+            insert.setProperty (ids::file, file.getFullPathName(), undoTarget);
+    }
 }
 
 juce::ValueTree Edit::getInsert (int insertId) const
