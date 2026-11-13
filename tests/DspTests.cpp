@@ -5338,6 +5338,41 @@ namespace
                    "the comp plays the newest pass, and the last full one after it");
         }
 
+        // Punch: records only inside the loop range, from a pre-roll before it.
+        {
+            daw::Edit edit;
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+            const auto vocal = (int) edit.addTrack ("Vocal")[ids::id];
+            edit.setTrackArm (vocal, true);
+            const auto bar = 4.0 * 60.0 / edit.getTempo();
+            edit.setLoop (false, 2.0 * bar, 3.0 * bar);
+            engine.setPunch (true);
+            engine.setPreRollBars (1);
+            engine.rebuildNow();
+            engine.seek ((juce::int64) (5.0 * bar * sampleRate)); // the playhead doesn't matter
+
+            const auto mic = makeVoice (200.0f, 4.0 * bar);
+            check (engine.startRecording (folder).isEmpty(), "records with Punch on");
+            check (std::abs ((double) engine.getPosition() / sampleRate - bar) < 0.01, "plays from one bar before the punch range");
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            bool punchedOutEarly = false, punchedOut = false;
+            for (size_t start = 0; start + blockSize <= mic.size() && ! punchedOut; start += blockSize)
+            {
+                buffer.copyFrom (0, 0, mic.data() + start, blockSize);
+                engine.process (buffer, 2, blockSize, buffer.getReadPointer (0));
+                punchedOut = engine.isPunchedOut();
+                punchedOutEarly = punchedOutEarly || (punchedOut && engine.getPosition() < (juce::int64) (3.0 * bar * sampleRate));
+            }
+            check (punchedOut && ! punchedOutEarly, "says when the playhead has passed the punch range");
+            engine.stopRecording();
+
+            const auto found = edit.getTrack (vocal).getChildWithName (ids::CLIP);
+            check (found.isValid() && std::abs ((double) found[ids::start] - 2.0 * bar) < 0.01
+                       && std::abs ((double) found[ids::length] - bar) < 0.02,
+                   "the take covers just the punch range");
+        }
+
         // Auto Comp: two takes, each in tune where the other is off.
         {
             const auto fileA = folder.getChildFile ("a.wav"), fileB = folder.getChildFile ("b.wav");
@@ -15688,6 +15723,14 @@ int main()
         testLiveHistory();
         testSingAlongSession();
         testTimeRange();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=takes: just recording, take lanes and punch.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "takes")
+    {
+        testTakes();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }

@@ -106,6 +106,7 @@ void DawEngine::prepare (double newSampleRate, int maximumBlockSize)
     recordingAudio = false;
     countingIn = false;
     recordingMidi = false;
+    punchEnd = -1;
     updateTempo();
 
     // Fresh strips: every chain (and instrument) is prepared for the new rate and block
@@ -1378,14 +1379,17 @@ juce::String DawEngine::startRecording (const juce::File& folder)
 
     recordingMidi = armedMidi;
 
-    const auto start = position.load();
+    // Punch: records only inside the loop range, from a pre-roll before it.
+    const auto punching = punch.load() && ! inPattern && loopEnd.load() > loopStart.load();
+    const auto start = punching ? loopStart.load() : position.load();
     recordStart = start;
+    punchEnd = punching ? loopEnd.load() : (juce::int64) -1;
 
     // Loop recording: starting inside the loop with it on, playback wraps as usual and
     // every pass becomes a take (audio only: MIDI takes run straight on).
-    loopRecording = armedAudio && ! armedMidi && loopOn.load() && start >= loopStart.load() && start < loopEnd.load();
+    loopRecording = ! punching && armedAudio && ! armedMidi && loopOn.load() && start >= loopStart.load() && start < loopEnd.load();
 
-    if (const auto bars = countInBars.load(); bars > 0)
+    if (const auto bars = punching ? preRollBars.load() : countInBars.load(); bars > 0)
     {
         countingIn = true;
         const auto tempo = edit.getTempoMap();
@@ -1706,7 +1710,8 @@ Recorder::Take DawEngine::stopRecording()
 
     playing = false;
     countingIn = false;
-    const auto stopAt = position.load();
+    const auto punchedAt = punchEnd.exchange (-1);
+    const auto stopAt = punchedAt >= 0 ? juce::jmin (position.load(), punchedAt) : position.load();
     const auto wasRecordingMidi = recordingMidi.exchange (false);
     drainRecordedMidi();
 
@@ -1880,6 +1885,8 @@ void DawEngine::renderClick (const TempoMap& tempo, juce::AudioBuffer<float>& ou
     const auto counting = countingIn.load();
     const auto start = recordStart.load();
     const auto clickOn = metronome.load();
+    const auto onlyRecording = clickOnlyRecording.load();
+    const auto recording = recordingAudio.load() || recordingMidi.load();
     const auto barLength = (juce::int64) beatsPerBar.load();
     const auto volume = metronomeVolume.load();
 
@@ -1895,7 +1902,7 @@ void DawEngine::renderClick (const TempoMap& tempo, juce::AudioBuffer<float>& ou
 
         if (t == nextAt)
         {
-            if (clickOn || (counting && t < start))
+            if ((clickOn && (! onlyRecording || recording)) || (counting && t < start))
             {
                 const auto downbeat = ((nextBeat % barLength) + barLength) % barLength == 0;
                 clickPhase = 0.0f;
@@ -2123,8 +2130,11 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     {
         const auto start = recordStart.load();
         const auto skip = (int) juce::jlimit ((juce::int64) 0, (juce::int64) numSamples, start - blockStart);
+        const auto stopAt = punchEnd.load();
+        const auto count = stopAt < 0 ? numSamples - skip
+                                      : (int) juce::jlimit ((juce::int64) 0, (juce::int64) (numSamples - skip), stopAt - (blockStart + skip));
 
-        if (skip < numSamples)
+        if (count > 0)
         {
             for (int t = 0; t < numTakes.load (std::memory_order_acquire); ++t)
             {
@@ -2136,7 +2146,7 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
                 const auto* right = inputChannel (take.input.right);
                 const float* channels[] = { left != nullptr ? left + skip : silence.data(),
                                             right != nullptr ? right + skip : silence.data() };
-                take.recorder->write (channels, nullptr, numSamples - skip, blockStart + skip);
+                take.recorder->write (channels, nullptr, count, blockStart + skip);
             }
         }
     }

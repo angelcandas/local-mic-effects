@@ -2558,3 +2558,7 @@ body.is-daw .library-hint { display: none; }
 /* Dragging a track header to move the track. */
 .track-drop-line { position: absolute; left: 0; right: 0; z-index: 6; height: 2px; background: var(--accent-2); pointer-events: none; }
 .track-row.is-moving { opacity: 0.55; }
+
+/* Punch: the loop range is where Record records. */
+.loop-band.is-punch { border-color: var(--danger, #ff5a6a); background: rgba(255, 90, 106, 0.16); }
+.loop-shade.is-punch { background: rgba(255, 90, 106, 0.05); }

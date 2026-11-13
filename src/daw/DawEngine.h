@@ -233,6 +233,19 @@ public:
     void setCountInBars (int bars) noexcept { countInBars = juce::jlimit (0, 4, bars); }
     int getCountInBars() const noexcept     { return countInBars.load(); }
 
+    // Punch: with it on and a loop range marked, startRecording() plays from `preRollBars`
+    // before the range (the music and the click as a count-in), records only inside the
+    // range, and isPunchedOut() turns true once the playhead passes its end (the caller
+    // then stops). The take lands like any other (take lanes over audio already there).
+    void setPunch (bool on) noexcept          { punch = on; }
+    bool getPunch() const noexcept            { return punch.load(); }
+    void setPreRollBars (int bars) noexcept   { preRollBars = juce::jlimit (0, 4, bars); }
+    int getPreRollBars() const noexcept       { return preRollBars.load(); }
+    bool isPunchedOut() const noexcept        { return punchEnd.load() >= 0 && position.load() >= punchEnd.load() && isRecording(); }
+    // The click only while recording (and in the count-in), not while just playing.
+    void setClickOnlyRecording (bool on) noexcept { clickOnlyRecording = on; }
+    bool getClickOnlyRecording() const noexcept   { return clickOnlyRecording.load(); }
+
     // Message thread. Peak level (linear) of a track's (or a return's) output, or the
     // master's with Edit::masterId, since the last call: left and right, or the louder.
     std::pair<float, float> takePeaks (int trackId);
@@ -582,6 +595,9 @@ private:
 
     std::atomic<bool> metronome { false };
     std::atomic<int> countInBars { 0 };
+    std::atomic<bool> punch { false }, clickOnlyRecording { false };
+    std::atomic<int> preRollBars { 1 };
+    std::atomic<juce::int64> punchEnd { -1 }; // where a punch recording stops writing, or -1
     std::atomic<int> beatsPerBar { 4 };
     std::atomic<float> metronomeVolume { 1.0f };
     float clickPhase = 0.0f, clickIncrement = 0.0f, clickLevel = 0.0f, clickDecay = 0.0f; // audio thread

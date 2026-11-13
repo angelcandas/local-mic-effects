@@ -152,6 +152,7 @@ const ICONS = {
   key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>',
   click: '<path d="M8 21h8l-2-16h-4zM12 17l4-9"/>',
   countin: '<path d="M4 8h3v8M12 8h4v3h-4v5h4M3 3h2M19 3h2"/><path d="M19 8v8"/>',
+  punch: '<path d="M4 18V6M20 18V6"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/>',
   loop: '<path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/>',
   snap: '<path d="M6 3v8a6 6 0 0 0 12 0V3h-4v8a2 2 0 0 1-4 0V3zM6 7h4M14 7h4"/>',
   returnstop: '<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-4"/>',
@@ -1240,7 +1241,17 @@ class DawScreen {
     volumeRow.append(html("span", "", "Click volume"), this.clickVolume);
     const countRow = html("label", "tb-popover-row");
     countRow.append(html("span", "", "Count-in"), this.countIn);
-    this.clickPopover.append(volumeRow, countRow);
+    this.preRoll = html("select", "dropdown pre-roll");
+    this.preRoll.title = "With Punch on, Record starts this far before the loop range, with the music";
+    ["No pre-roll", "1 bar", "2 bars", "4 bars"].forEach((text, i) => this.preRoll.append(new Option(text, [0, 1, 2, 4][i])));
+    this.preRoll.addEventListener("change", () => daw("preRoll", { bars: Number(this.preRoll.value) }));
+    const preRollRow = html("label", "tb-popover-row");
+    preRollRow.append(html("span", "", "Pre-roll (Punch)"), this.preRoll);
+    this.clickOnlyRecording = Object.assign(html("input"), { type: "checkbox" });
+    this.clickOnlyRecording.addEventListener("change", () => daw("clickOnlyRecording", { on: this.clickOnlyRecording.checked }));
+    const onlyRow = html("label", "tb-popover-row");
+    onlyRow.append(html("span", "", "Click only while recording"), this.clickOnlyRecording);
+    this.clickPopover.append(volumeRow, countRow, preRollRow, onlyRow);
     const click = html("div", "tb-joined click-group");
     click.append(this.metronomeButton, this.clickMore, this.clickPopover);
 
@@ -1299,7 +1310,10 @@ class DawScreen {
       b.dataset.mode = mode;
       this.modeSwitch.append(b);
     }
-    const centre = zone("zone-transport", buttons, clock, this.loopButton, this.modeSwitch, mic);
+    this.punchButton = iconButton("toggle", "punch", "Punch: Record plays from a pre-roll and records only inside the loop range (Shift+R)", () => this.togglePunch());
+    const loopPunch = html("div", "tb-joined");
+    loopPunch.append(this.loopButton, this.punchButton);
+    const centre = zone("zone-transport", buttons, clock, loopPunch, this.modeSwitch, mic);
 
     //---------------------------------------------------------------- right: tools, features, view
     this.tools = html("div", "segmented tools");
@@ -1486,6 +1500,9 @@ class DawScreen {
     this.playButton.classList.toggle("returns-on-stop", this.returnOnStop);
     this.metronomeButton.setAttribute("aria-pressed", String(s.metronome));
     this.loopButton.setAttribute("aria-pressed", String(s.loop.on));
+    this.punchButton.setAttribute("aria-pressed", String(Boolean(s.punch)));
+    this.preRoll.value = String(s.preRoll ?? 1);
+    this.clickOnlyRecording.checked = Boolean(s.clickOnlyRecording);
     const inPattern = (s.patternMode ?? -1) >= 0;
     for (const b of this.modeSwitch.children) {
       const on = (b.dataset.mode === "pattern") === inPattern;
@@ -1593,6 +1610,18 @@ class DawScreen {
     const result = await daw("capture", this.captureSeconds > 0 ? { seconds: this.captureSeconds } : {});
     if (result?.ok) toast(`Captured ${formatDuration(result.seconds)} on ${result.tracks} track${result.tracks === 1 ? "" : "s"}`);
     else toast(result?.error || "Couldn't capture", "is-error");
+  }
+
+  // Punch needs a range: without one, it marks the next 4 bars from the playhead.
+  togglePunch() {
+    const on = !this.session?.punch;
+    const loop = this.session.loop;
+    if (on && !(loop.end > loop.start)) {
+      const start = this.snapTime(this.status.position);
+      daw("loop", { on: false, start, end: start + this.beatsFrom(start, 4 * this.beatsPerBar) });
+    }
+    daw("punch", { on });
+    toast(on ? "Punch on: Record plays from the pre-roll and records only inside the loop range." : "Punch off.");
   }
 
   toggleLoop() {
@@ -2318,6 +2347,7 @@ class DawScreen {
     for (const element of [this.loopBand, this.loopShade]) {
       element.hidden = !visible;
       element.classList.toggle("is-on", loop.on);
+      element.classList.toggle("is-punch", Boolean(this.session?.punch));
       element.style.width = `${(loop.end - loop.start) * this.zoom}px`;
     }
     this.loopBand.style.left = `${loop.start * this.zoom}px`;
@@ -5230,7 +5260,7 @@ class DawScreen {
   // what Ableton Live, Cubase and Logic Pro share (Space, M, S, R, Ctrl+Z/S/D/N/O, Q...);
   // where they differ, the most obvious one wins. Ctrl is Cmd on a Mac (keyText).
   static SHORTCUTS = [
-    ["Transport", [["Space", "Play / pause (always, even when a button has focus)"], ["Num 0", "Stop and go back to the start"], ["R / Num *", "Record on the armed tracks"],
+    ["Transport", [["Space", "Play / pause (always, even when a button has focus)"], ["Num 0", "Stop and go back to the start"], ["R / Num *", "Record on the armed tracks"], ["Shift+R", "Punch on / off: record only inside the loop range, after a pre-roll"],
                    ["← / →", "Move the playhead a beat (Shift: a bar)"], ["Home / End", "Go to the start / end of the song"],
                    ["L / Num /", "Loop range on / off"], ["C", "Click (metronome) on / off"], ["F", "Follow the playhead on / off"],
                    ["K / Insert", "Add a marker at the playhead"], ["[ / ]", "Previous / next marker"], ["T", "Tap tempo"],
@@ -6039,6 +6069,7 @@ class DawScreen {
       else if (key === "z") command("zoomFit");
       else if (key === "b") command("toggleLibrary");
     }
+    else if (key === "r" && event.shiftKey) { handled(); this.togglePunch(); }
     else if (key === "r") command("record");
     else if (key === "k") command("addMarker");
     else if (key === "z") command("zoomSelection");

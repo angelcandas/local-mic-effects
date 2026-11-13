@@ -387,6 +387,9 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
     }
 
     engine.setMetronomeVolume ((float) settings.getDoubleValue ("dawClickVolume", 1.0));
+    engine.setPunch (settings.getBoolValue ("dawPunch", false));
+    engine.setPreRollBars (settings.getIntValue ("dawPreRoll", 1));
+    engine.setClickOnlyRecording (settings.getBoolValue ("dawClickOnlyRecording", false));
 
     processor.getPluginHost().onScanFinished = [this]
     {
@@ -800,6 +803,9 @@ juce::var DawBridge::describeSession()
                             { "end", number (state, ids::loopEnd) } }) },
         { "metronome", engine.getMetronome() },
         { "countIn", engine.getCountInBars() },
+        { "punch", engine.getPunch() },
+        { "preRoll", engine.getPreRollBars() },
+        { "clickOnlyRecording", engine.getClickOnlyRecording() },
         { "canUndo", undo.canUndo() },
         { "canRedo", undo.canRedo() },
         { "undoName", undo.getUndoDescription() },
@@ -1141,6 +1147,13 @@ void DawBridge::tick()
 
     if (processor.isDawMode())
     {
+        // Punch out: past the end of the punch range, stop and keep the take.
+        if (engine.isPunchedOut())
+        {
+            engine.stopRecording();
+            sessionChanged = true;
+        }
+
         // Stop at the end of the song, unless recording or looping (pattern mode always loops).
         if (engine.isPlaying() && ! engine.isRecording() && engine.getPatternMode() < 0 && engine.getLength() > 0 && engine.getPosition() >= engine.getLength()
             && ! (bool) edit.getState().getProperty (ids::loopOn, false))
@@ -5030,6 +5043,16 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "loop")      { edit.setLoop (args["on"], args["start"], args["end"]); ok(); return; }
     if (command == "metronome") { engine.setMetronome (args["on"]); sessionChanged = true; ok(); return; }
     if (command == "countIn")   { engine.setCountInBars (args["bars"]); sessionChanged = true; ok(); return; }
+    if (command == "punch")     { engine.setPunch (args["on"]); settings.setValue ("dawPunch", engine.getPunch()); sessionChanged = true; ok(); return; }
+    if (command == "preRoll")   { engine.setPreRollBars (args["bars"]); settings.setValue ("dawPreRoll", engine.getPreRollBars()); sessionChanged = true; ok(); return; }
+    if (command == "clickOnlyRecording")
+    {
+        engine.setClickOnlyRecording (args["on"]);
+        settings.setValue ("dawClickOnlyRecording", engine.getClickOnlyRecording());
+        sessionChanged = true;
+        ok();
+        return;
+    }
     if (command == "beatsPerBar") { edit.setBeatsPerBar (args["beats"]); ok(); return; }
     if (command == "metronomeVolume")
     {
