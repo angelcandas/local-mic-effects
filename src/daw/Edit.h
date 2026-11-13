@@ -15,6 +15,10 @@
 //
 //   PROJECT  version, tempo, tempoChanges, beatsPerBar, loopOn, loopStart, loopEnd, viewState
 //     MARKER  id, name, time
+//             (a song section from the song map also has length (seconds), colour, section
+//              (its kind: "intro", "verse", "chorus", "bridge", "outro", "part") and letter
+//              (0 = A: sections that sound alike share it); market item 18's arrangement
+//              ranges can adopt these as they are)
 //     MASTER  volume (dB)
 //       INSERTS
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value,
@@ -115,6 +119,7 @@ namespace ids
     MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight) MICFX_DAW_ID (polarity) MICFX_DAW_ID (nudge)
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
     MICFX_DAW_ID (PATTERN) MICFX_DAW_ID (PART) MICFX_DAW_ID (PATTERNCLIP) MICFX_DAW_ID (track) MICFX_DAW_ID (drum)
+    MICFX_DAW_ID (section) MICFX_DAW_ID (letter)
     MICFX_DAW_ID (rows) MICFX_DAW_ID (stepNote) MICFX_DAW_ID (step) MICFX_DAW_ID (swing) MICFX_DAW_ID (pattern) MICFX_DAW_ID (row)
     MICFX_DAW_ID (muted) MICFX_DAW_ID (levels)
 #undef MICFX_DAW_ID
@@ -270,6 +275,18 @@ public:
     void setMarkerTime (int markerId, double timeSeconds);
     void setMarkerName (int markerId, const juce::String& name);
     juce::Array<juce::ValueTree> getMarkers() const; // in time order
+
+    // Song sections: markers with a length (see MARKER above). Setting them replaces the
+    // section markers there are; plain markers stay.
+    struct SectionMarker
+    {
+        juce::String name, kind, colour;
+        int letter = 0;
+        double start = 0.0, length = 0.0;
+    };
+    void setSongSections (const std::vector<SectionMarker>&);
+    juce::Array<juce::ValueTree> getSongSections() const; // in time order
+    static bool isSection (const juce::ValueTree& marker) { return marker.hasProperty (ids::section); }
 
     //==============================================================================
     // MIDI tracks, instruments and notes.
