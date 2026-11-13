@@ -227,4 +227,51 @@ Exporter::Result Exporter::exportStems (const juce::File& folder, Progress progr
 
     return combined;
 }
+
+Exporter::Result Exporter::exportTrack (int trackId, const juce::File& file, Progress progress)
+{
+    auto session = snapshot.createCopy();
+    bool found = false;
+
+    for (auto child : session)
+    {
+        if (child.hasType (ids::TRACK))
+        {
+            const auto isTarget = (int) child[ids::id] == trackId;
+            found = found || isTarget;
+            child.setProperty (ids::solo, false, nullptr);
+            child.setProperty (ids::mute, ! isTarget, nullptr);
+
+            if (isTarget)
+            {
+                child.setProperty (ids::volume, 0.0f, nullptr);
+                child.setProperty (ids::pan, 0.0f, nullptr);
+                child.setProperty (ids::output, Edit::masterId, nullptr);
+                child.removeProperty (ids::group, nullptr);
+                for (int i = child.getNumChildren(); --i >= 0;)
+                    if (child.getChild (i).hasType (ids::SEND))
+                        child.removeChild (i, nullptr);
+            }
+        }
+        else if (child.hasType (ids::RETURN))
+        {
+            child.setProperty (ids::mute, true, nullptr);
+        }
+        else if (child.hasType (ids::MASTER))
+        {
+            child.setProperty (ids::volume, 0.0f, nullptr);
+            child.setProperty (ids::pan, 0.0f, nullptr);
+            Edit::getInserts (child).removeAllChildren (nullptr);
+        }
+    }
+
+    if (! found)
+    {
+        Result result;
+        result.error = "There's no such track.";
+        return result;
+    }
+
+    return render (session, file, progress, 0.0, 1.0);
+}
 }

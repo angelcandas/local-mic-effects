@@ -29,3 +29,9 @@ When a new feature needs a name, check this list first and add the word here in 
 | **Recording** | A row of Live mode's sing-along list | |
 | **Capture** | Keeps what you just played even if you were not recording (toolbar button "Capture") | "Cap" |
 | **Voice up front** | The Auto Mix and Mix Check style for a dry, upfront voice (stored as `coaching`) | "Coaching" |
+| **Range** | Time marked across tracks with the Range tool (key 2) | the loop range, a clip selection |
+| **Punch** | Record only inside the loop range, after a **Pre-roll** (toolbar switch, Shift+R) | |
+| **Bounce to a new track** | Renders one track through its effects to audio on a new track (Ctrl+B) | Export |
+| **Locate** | Points clips at audio files that moved | |
+| **Settings** | The app's settings window (Ctrl+,) | the audio settings dialog |
+| **Welcome card** | The first-run steps: audio, Mic check, Sound check | |

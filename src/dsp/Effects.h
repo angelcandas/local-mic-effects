@@ -3,6 +3,7 @@
 #include <juce_dsp/juce_dsp.h>
 
 #include "Biquad.h"
+#include "Space.h"
 
 #include <array>
 #include <cmath>
@@ -533,16 +534,25 @@ private:
 
 //==============================================================================
 // Feedback delay with darkening repeats and an optional ping-pong mode.
+//
+// The repeats darken through a one-pole low-pass at the high cut (5 kHz by default, as
+// it always was). Moving either cut off its default also filters the repeats you hear
+// (a low cut from 20 Hz up, a high cut away from 5 kHz); duck dips them while you sing.
+// At the defaults the output is exactly the original echo's.
 class Echo
 {
 public:
+    static constexpr float defaultHighCutHz = 5000.0f, defaultLowCutHz = 20.0f;
+
     void prepare (const juce::dsp::ProcessSpec& spec)
     {
         sampleRate = spec.sampleRate;
         line.setMaximumDelayInSamples ((int) std::ceil (sampleRate * 1.6));
         line.prepare (spec);
         delaySamples.reset (sampleRate, 0.15);
-        damping = 1.0f - detail::timeCoefficient (sampleRate, 1.0 / (juce::MathConstants<double>::twoPi * 5000.0));
+        lastHighCut = lastLowCut = -1.0f;
+        setTone (lowCutHz, highCutHz);
+        ducker.prepare (sampleRate);
         reset();
     }
 
@@ -550,6 +560,9 @@ public:
     {
         line.reset();
         feedbackState = {};
+        for (auto& f : toneLow) f.reset();
+        for (auto& f : toneHigh) f.reset();
+        ducker.reset();
         delaySamples.setCurrentAndTargetValue (delaySamples.getTargetValue());
     }
 
@@ -560,6 +573,28 @@ public:
         mix = newMix;
         pingPong = newPingPong;
     }
+
+    void setTone (float newLowCutHz, float newHighCutHz) noexcept
+    {
+        lowCutHz = newLowCutHz;
+        highCutHz = newHighCutHz;
+        filtered = lowCutHz > defaultLowCutHz + 0.5f || std::abs (highCutHz - defaultHighCutHz) > 0.5f;
+
+        if (highCutHz != lastHighCut)
+        {
+            lastHighCut = highCutHz;
+            damping = 1.0f - detail::timeCoefficient (sampleRate, 1.0 / (juce::MathConstants<double>::twoPi * (double) highCutHz));
+            for (auto& f : toneHigh) f.setup (Biquad::Type::lowPass, sampleRate, highCutHz, 0.707);
+        }
+
+        if (lowCutHz != lastLowCut)
+        {
+            lastLowCut = lowCutHz;
+            for (auto& f : toneLow) f.setup (Biquad::Type::highPass, sampleRate, lowCutHz, 0.707);
+        }
+    }
+
+    void setDuck (float newDuck) noexcept { duck = newDuck; }
 
     void process (const Context& context) noexcept
     {
@@ -590,8 +625,16 @@ public:
                     line.pushSample ((int) ch, dry[ch] + feedback * feedbackState[ch]);
             }
 
+            if (filtered)
+                for (size_t ch = 0; ch < numChannels; ++ch)
+                    echoes[ch] = toneLow[ch].process (0, toneHigh[ch].process (0, echoes[ch]));
+
+            auto wet = mix;
+            if (duck > 0.0f)
+                wet *= ducker.next (std::max (std::abs (dry[0]), std::abs (dry[numChannels > 1 ? 1 : 0])), duck);
+
             for (size_t ch = 0; ch < numChannels; ++ch)
-                block.setSample ((int) ch, (int) i, dry[ch] + mix * echoes[ch]);
+                block.setSample ((int) ch, (int) i, dry[ch] + wet * echoes[ch]);
         }
     }
 
@@ -599,9 +642,12 @@ private:
     juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> line;
     juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> delaySamples;
     std::array<float, 2> feedbackState {};
+    std::array<Biquad, 2> toneLow, toneHigh;
+    Ducker ducker;
     double sampleRate = 44100.0;
-    float damping = 0.5f, feedback = 0.35f, mix = 0.25f;
-    bool pingPong = false;
+    float damping = 0.5f, feedback = 0.35f, mix = 0.25f, duck = 0.0f;
+    float lowCutHz = defaultLowCutHz, highCutHz = defaultHighCutHz, lastLowCut = -1.0f, lastHighCut = -1.0f;
+    bool pingPong = false, filtered = false;
 };
 
 //==============================================================================
