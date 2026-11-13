@@ -21,6 +21,7 @@ namespace
 MidiMap::MidiMap (juce::AudioProcessorValueTreeState& s, Looper& l, juce::File f)
     : state (s), looper (l), file (std::move (f))
 {
+    kept.ensureSize (4096); // removeMapped never allocates on the audio thread
     if (file.existsAsFile())
         setMappings (fromVar (juce::JSON::parse (file.loadFileAsString())));
 
@@ -100,9 +101,14 @@ void MidiMap::publish()
 {
     const juce::SpinLock::ScopedLockType lock (tableLock);
     tableSize = 0;
+    dawKeyCount = 0;
     for (const auto& m : mappings)
+    {
         if (const auto command = looperCommand (m.target); command && tableSize < (int) table.size())
             table[(size_t) tableSize++] = { key (m.source, m.channel, m.number), *command };
+        if (m.target.startsWith ("daw:") && dawKeyCount < (int) dawKeys.size())
+            dawKeys[(size_t) dawKeyCount++] = key (m.source, m.channel, m.number);
+    }
 }
 
 void MidiMap::save() const
@@ -148,7 +154,44 @@ std::vector<MidiMap::Mapping> MidiMap::fromVar (const juce::var& value)
 }
 
 //==============================================================================
-void MidiMap::process (const juce::MidiBuffer& midi) noexcept
+void MidiMap::removeMapped (juce::MidiBuffer& midi) noexcept
+{
+    const juce::SpinLock::ScopedTryLockType lock (tableLock);
+    if (! lock.isLocked() || dawKeyCount == 0)
+        return;
+
+    const auto mapped = [this] (int k)
+    {
+        for (int i = 0; i < dawKeyCount; ++i)
+            if (dawKeys[(size_t) i] == k)
+                return true;
+        return false;
+    };
+
+    kept.clear();
+    bool removed = false;
+    for (const auto metadata : midi)
+    {
+        const auto message = metadata.getMessage();
+        auto k = -1;
+        if (message.isController())                       k = key (Source::cc, message.getChannel(), message.getControllerNumber());
+        else if (message.isNoteOn() || message.isNoteOff()) k = key (Source::note, message.getChannel(), message.getNoteNumber());
+        else if (message.isProgramChange())               k = key (Source::program, message.getChannel(), message.getProgramChangeNumber());
+
+        if (k >= 0 && mapped (k))
+            removed = true;
+        else
+            kept.addEvent (metadata.data, metadata.numBytes, metadata.samplePosition);
+    }
+
+    if (removed) // the kept messages are fewer than before, so this fits without allocating
+    {
+        midi.clear();
+        midi.addEvents (kept, 0, -1, 0);
+    }
+}
+
+void MidiMap::process (const juce::MidiBuffer& midi, bool live) noexcept
 {
     for (const auto metadata : midi)
     {
@@ -176,7 +219,9 @@ void MidiMap::process (const juce::MidiBuffer& midi) noexcept
             last = (juce::uint8) event.value;
         }
 
-        if (pressed && learnTarget.isEmpty()) // while learning, a pedal only teaches
+        event.live = live;
+
+        if (live && pressed && learnTarget.isEmpty()) // while learning, a pedal only teaches
         {
             const juce::SpinLock::ScopedTryLockType lock (tableLock);
             if (lock.isLocked())
@@ -222,7 +267,7 @@ void MidiMap::drain()
         }
 
         for (const auto& m : mappings)
-            if (m.sameSource (source) && ! isAudioThreadAction (m.target))
+            if (m.sameSource (source) && ! isAudioThreadAction (m.target) && m.target.startsWith ("daw:") != event.live)
                 apply (m, event);
 
         if (event.source == Source::cc)
@@ -237,6 +282,23 @@ void MidiMap::apply (const Mapping& m, const Event& event)
 {
     const auto previous = event.source == Source::cc ? (int) lastCcMessage[(size_t) ((event.channel - 1) * 128 + event.number)] : 0;
     const auto pressed = event.source != Source::cc || (event.value >= 64 && previous < 64);
+
+    if (m.target.startsWith ("daw:"))
+    {
+        const auto name = m.target.fromFirstOccurrenceOf (":", false, false);
+        if (onDaw == nullptr)
+            return;
+        if (name == "volume" || name == "pan")
+        {
+            if (event.source == Source::cc)
+                onDaw (name, (float) event.value / 127.0f);
+        }
+        else if (pressed)
+        {
+            onDaw (name, 1.0f);
+        }
+        return;
+    }
 
     if (m.target.startsWith ("action:"))
     {

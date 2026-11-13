@@ -8,6 +8,7 @@ import { FX_PRESETS, presetParams } from "./fxpresets.js";
 import { DeviceChain } from "./devices.js";
 import { LibraryBrowser, loopText } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
+import { markLearnable } from "./midilearn.js";
 import { TakeLanes } from "./takes.js";
 import { BackingVocals } from "./backing.js";
 import { decorateAiPanels } from "./aiviews.js";
@@ -908,6 +909,7 @@ class DawScreen {
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
     window.__JUCE__.backend.addEventListener("dawExport", (progress) => this.onExport(progress));
     window.__JUCE__.backend.addEventListener("dawBounce", (event) => this.onBounce(event));
+    window.__JUCE__.backend.addEventListener("dawMidi", (event) => this.onMidiControl(event));
     window.__JUCE__.backend.addEventListener("dawStems", (event) => this.onStems(event));
     window.__JUCE__.backend.addEventListener("dawRebalance", (event) => this.onRebalance(event));
     window.__JUCE__.backend.addEventListener("dawToMidi", (event) => this.onToMidi(event));
@@ -1188,6 +1190,9 @@ class DawScreen {
       html("span", "tb-sep"),
       (this.undoButton = iconButton("tool", "undo", "Undo (Ctrl+Z)", () => daw("undo"))),
       (this.redoButton = iconButton("tool", "redo", "Redo (Ctrl+Shift+Z)", () => daw("redo"))));
+    markLearnable(this.undoButton, "daw:undo", "DAW · Undo");
+    markLearnable(this.redoButton, "daw:redo", "DAW · Redo");
+    this.undoButton.addEventListener("contextmenu", (event) => { event.preventDefault(); this.openUndoHistory(this.undoButton); });
     document.querySelector(".topbar .brand")?.append(project);
 
     //---------------------------------------------------------------- left: song
@@ -1259,7 +1264,7 @@ class DawScreen {
     const left = zone("zone-song", songTempo, this.signature, this.keyButton, this.songMapButton, this.tempoButton, click);
 
     //---------------------------------------------------------------- centre: transport
-    const start = button("transport-button", "", "Back to the start (Enter)", () => daw("transport", { action: "stop" }));
+    const start = button("transport-button", "", "Stop and back to the start (Num 0)", () => daw("transport", { action: "stop" }));
     this.playButton = button("transport-button play-button", "", "Play / pause (Space). Right-click: return on stop", () => this.togglePlay());
     this.playButton.addEventListener("contextmenu", (event) => {
       event.preventDefault();
@@ -1312,6 +1317,11 @@ class DawScreen {
       this.modeSwitch.append(b);
     }
     this.punchButton = iconButton("toggle", "punch", "Punch: Record plays from a pre-roll and records only inside the loop range (Shift+R)", () => this.togglePunch());
+    // MIDI learn (the MIDI chip): pedals, pads and faders can drive these.
+    for (const [element, target, label] of [[start, "daw:stop", "Stop"], [this.playButton, "daw:play", "Play / pause"],
+                                            [this.recordButton, "daw:record", "Record"], [this.loopButton, "daw:loop", "Loop range"],
+                                            [this.punchButton, "daw:punch", "Punch"], [this.metronomeButton, "daw:metronome", "Click"]])
+      markLearnable(element, target, `DAW · ${label}`);
     const loopPunch = html("div", "tb-joined");
     loopPunch.append(this.loopButton, this.punchButton);
     const centre = zone("zone-transport", buttons, clock, loopPunch, this.modeSwitch, mic);
@@ -1527,7 +1537,7 @@ class DawScreen {
     const what = (name) => (name ? ` ${name.charAt(0).toLowerCase()}${name.slice(1)}` : "");
     this.undoButton.disabled = !s.canUndo;
     this.redoButton.disabled = !s.canRedo;
-    this.undoButton.title = s.canUndo ? `Undo${what(s.undoName)} (Ctrl+Z)` : "Nothing to undo";
+    this.undoButton.title = s.canUndo ? `Undo${what(s.undoName)} (Ctrl+Z). Right-click: the history` : "Nothing to undo";
     this.redoButton.title = s.canRedo ? `Redo${what(s.redoName)} (Ctrl+Shift+Z)` : "Nothing to redo";
     this.undoButton.setAttribute("aria-label", this.undoButton.title.replace(/ \(.*\)$/, ""));
     this.redoButton.setAttribute("aria-label", this.redoButton.title.replace(/ \(.*\)$/, ""));
@@ -2557,6 +2567,11 @@ class DawScreen {
     row.update = (latest) => {
       row.track = latest;
       row.classList.toggle("is-selected", this.isTrackSelected(latest.id));
+      // MIDI learn: the selected track's volume and pan stand for "the selected track's".
+      for (const [slider, target, label] of [[volume, "daw:volume", "Selected track · Volume"], [pan, "daw:pan", "Selected track · Pan"]]) {
+        if (this.selectedTrack === latest.id) markLearnable(slider.element, target, label);
+        else { delete slider.element.dataset.learn; delete slider.element.dataset.learnLabel; }
+      }
       row.classList.toggle("is-muted", Boolean(latest.mute));
       row.classList.toggle("is-armed", Boolean(latest.arm));
       for (const [key, b] of Object.entries(switches)) b.setAttribute("aria-pressed", String(Boolean(latest[key])));
@@ -4304,6 +4319,47 @@ class DawScreen {
     this.syncExportFormat();
   }
 
+  // A pedal, pad or fader mapped with MIDI learn (the MIDI chip) to a DAW control.
+  onMidiControl(event) {
+    if (!this.active || !event) return;
+    const track = this.selectedTrackObject();
+    switch (event.action) {
+      case "play": this.togglePlay(); break;
+      case "stop": daw("transport", { action: "stop" }); break;
+      case "record": this.toggleRecord(); break;
+      case "loop": this.toggleLoop(); break;
+      case "metronome": daw("metronome", { on: !this.session?.metronome }); break;
+      case "punch": this.togglePunch(); break;
+      case "undo": daw("undo"); break;
+      case "redo": daw("redo"); break;
+      case "marker": this.addMarker(); break;
+      case "marker.next": this.jumpMarker(1); break;
+      case "marker.previous": this.jumpMarker(-1); break;
+      case "volume": if (track) daw("setTrack", { id: track.id, volume: Fader.toDecibels(clamp(event.value)), continue: true }); break;
+      case "pan": if (track) daw("setTrack", { id: track.id, pan: Math.round((event.value * 2 - 1) * 100) / 100, continue: true }); break;
+    }
+  }
+
+  // Missing audio: pick the file (or a folder) and the clips point at it again.
+  async locateMissing(path) {
+    const result = await daw("locate", path ? { path } : {});
+    if (!result || result.cancelled) return;
+    if (!result.ok) return toast(result.error || "Couldn't find the missing files there.", "is-error");
+    toast(`Found ${result.relinked} file${result.relinked === 1 ? "" : "s"}.${result.missing ? ` ${result.missing} still missing.` : ""}`, "", "undo");
+  }
+
+  // The undo history: the last 30 named steps, newest first. Picking one undoes back to
+  // just before it.
+  openUndoHistory(anchor) {
+    const list = this.session?.undoList ?? [];
+    const box = anchor.getBoundingClientRect();
+    popMenu(box.left, box.bottom + 4, ({ item, heading }) => {
+      heading(list.length ? "Undo back to before…" : "Nothing to undo");
+      list.forEach((name, i) => item(name || "Edit", () => daw("undo", { steps: i + 1 }),
+                                     { hint: i === 0 ? "The last change (Ctrl+Z)" : `Undoes ${i + 1} steps`, indent: true }));
+    }, anchor);
+  }
+
   // Bounce to a new track: the track through its effects to audio on a new track under it
   // (the source muted). Within a marked time range, just that range; else the whole song.
   async bounceTrack(id = this.selectedTrackObject()?.id) {
@@ -5085,6 +5141,7 @@ class DawScreen {
     } else if (project.missing > 0) {
       this.banner.hidden = false;
       this.banner.append(html("span", "", `${project.missing} audio file${project.missing === 1 ? " is" : "s are"} missing (moved or deleted outside MicFX). Those clips play silence.`),
+                         button("tool is-accent", "Locate…", "Pick the folder they are in now: each missing file found there (or below) by name comes back", () => this.locateMissing()),
                          button("tool", "Show project folder", "", () => daw("reveal", { path: project.path })));
     }
   }
@@ -5288,7 +5345,7 @@ class DawScreen {
     ["Transport", [["Space", "Play / pause (always, even when a button has focus)"], ["Num 0", "Stop and go back to the start"], ["R / Num *", "Record on the armed tracks"], ["Shift+R", "Punch on / off: record only inside the loop range, after a pre-roll"],
                    ["← / →", "Move the playhead a beat (Shift: a bar)"], ["Home / End", "Go to the start / end of the song"],
                    ["L / Num /", "Loop range on / off"], ["C", "Click (metronome) on / off"], ["F", "Follow the playhead on / off"],
-                   ["K / Insert", "Add a marker at the playhead"], ["[ / ]", "Previous / next marker"], ["T", "Tap tempo"],
+                   ["K / Insert", "Add a marker at the playhead"], ["[ / ]", "Previous / next marker"], ["Shift+1 … 9", "Go to marker 1 to 9"], ["T", "Tap tempo"],
                    ["Click the clock", "Type a bar or time to go to"]]],
     ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["Ctrl+Shift+T", "New MIDI track"], ["Ctrl+Shift+D", "Duplicate the selected track"],
                 ["Ctrl+G", "Group the selected tracks (Shift+click several)"], ["Ctrl+B", "Bounce the selected track to a new audio track"], ["Ctrl+Shift+G", "Ungroup"], ["Ctrl+R", "Rename the selected track"], ["Ctrl+Delete", "Delete the selected track"],
@@ -5794,6 +5851,10 @@ class DawScreen {
   openClipMenu(clip, x, y) {
     const audio = !clip.midi;
     popMenu(x, y, ({ item, rule, heading }) => {
+      if (audio && clip.missing) {
+        item("Locate the missing file…", () => this.locateMissing(clip.file), { hint: `Find ${clip.file.split(/[\\/]/).pop()}; the others missing from that folder come back too` });
+        rule();
+      }
       item("Split at the playhead", () => this.splitSelected(), { shortcut: "Ctrl+E" });
       item("Duplicate", () => this.duplicateSelected(), { shortcut: "Ctrl+D" });
       item("Copy", () => this.copySelected(false), { shortcut: "Ctrl+C" });
@@ -6098,6 +6159,14 @@ class DawScreen {
       else if (key === "z") command("zoomFit");
       else if (key === "b") command("toggleLibrary");
       else if (key === "r") { handled(); this.togglePunch(); }
+      else if (/^Digit[1-9]$/.test(code)) {
+        // Shift+1 to Shift+9: jump to the first nine markers, in time order.
+        handled();
+        const markers = [...(this.session?.markers ?? [])].sort((a, b) => a.time - b.time);
+        const marker = markers[Number(code.slice(5)) - 1];
+        if (marker) this.seek(marker.time);
+        else toast(markers.length ? `There are only ${markers.length} markers.` : "No markers yet. K adds one at the playhead.");
+      }
     }
     else if (key === "r") command("record");
     else if (key === "k") command("addMarker");

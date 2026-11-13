@@ -4120,6 +4120,30 @@ namespace
         send ({ juce::MidiMessage::noteOn (1, 38, (juce::uint8) 90) });
         check (action == "record", "actions for the page are passed on");
 
+        // DAW mode: "daw:" targets act there (and the mapped messages don't reach the
+        // instruments); Live targets wait for Live mode.
+        {
+            map.setMappings ({ { Source::note, 1, 40, "daw:play" }, { Source::cc, 1, 7, "daw:volume" }, { Source::note, 1, 41, "action:record" } });
+            std::vector<std::pair<juce::String, float>> dawEvents;
+            map.onDaw = [&] (const juce::String& name, float v) { dawEvents.push_back ({ name, v }); };
+            action = {};
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::noteOn (1, 40, (juce::uint8) 100), 0);
+            midi.addEvent (juce::MidiMessage::noteOff (1, 40), 10);
+            midi.addEvent (juce::MidiMessage::controllerEvent (1, 7, 127), 20);
+            midi.addEvent (juce::MidiMessage::noteOn (1, 41, (juce::uint8) 100), 30);
+            midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 40);
+            map.process (midi, false);
+            map.removeMapped (midi);
+            map.drain();
+            check (dawEvents.size() == 2 && dawEvents[0].first == "play" && dawEvents[1].first == "volume" && dawEvents[1].second > 0.99f,
+                   "in DAW mode a pad plays and a fader sets the volume");
+            check (action.isEmpty(), "Live mode's mappings stay quiet in DAW mode");
+            check (midi.getNumEvents() == 2, "the mapped messages are taken out of what the instruments get");
+            map.onDaw = nullptr;
+            map.setMappings ({});
+        }
+
         // A looper footswitch acts on the audio thread, in the block it arrives in.
         auto& looper = processor.getLooper();
         map.setMappings ({ { Source::cc, 1, 80, "action:looper.main" }, { Source::cc, 1, 81, "action:looper.undo" } });
@@ -15310,6 +15334,19 @@ static void testBounce()
                "from where the bounce started, with the source muted");
         dawEdit.getUndoManager().undo();
         check (dawEdit.getTracks().size() == count && ! (bool) dawEdit.getTrack (source)[daw::ids::mute], "one undo takes it back");
+
+        // Locate: a file moved into another folder comes back by name.
+        const auto moved = folder.getChildFile ("moved");
+        moved.createDirectory();
+        const auto lost = folder.getChildFile ("lost.wav");
+        writeWav (lost, tone, sampleRate);
+        const auto clipId = (int) dawEdit.addClip (source, lost, 0.0, 1.0)[daw::ids::id];
+        lost.moveFileTo (moved.getChildFile ("lost.wav"));
+        const auto relinked = bridge.relinkMissing (folder);
+        check ((bool) relinked["ok"] && (int) relinked["relinked"] == 1
+                   && dawEdit.getClip (clipId)[daw::ids::file].toString() == moved.getChildFile ("lost.wav").getFullPathName(),
+               "Locate finds a missing file in a subfolder by name");
+        check (! (bool) bridge.relinkMissing (folder)["relinked"], "nothing left to find");
     }
     DawBridge::availableForTesting = false;
     folder.deleteRecursively();

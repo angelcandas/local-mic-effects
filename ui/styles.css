@@ -1133,7 +1133,9 @@ body.is-dry .chain { opacity: 0.45; filter: grayscale(0.7); transition: opacity 
   font: 600 11px var(--mono);
   text-align: center;
 }
-body.is-daw .dry-button, body.is-daw .keys-button, body.is-daw .loop-toggle, body.is-daw .midi-button, body.is-daw .setlist-button { display: none; }
+body.is-daw .dry-button, body.is-daw .keys-button, body.is-daw .loop-toggle, body.is-daw .setlist-button { display: none; }
+/* DAW mode: the MIDI learn banner sits at the foot, clear of the transport it maps. */
+body.is-daw .learn-banner { top: auto; bottom: 40px; }
 
 /* ---------- Per-effect presets and in/out gain (card footer; DAW inserts use the same parts) ---------- */
 

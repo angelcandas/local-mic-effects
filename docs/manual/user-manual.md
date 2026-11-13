@@ -36,9 +36,17 @@ MicFX comes as a **standalone app** and as **AU and VST3 plug-ins** (the Live ef
 2. JUCE mutes the input at first to prevent feedback. Click **Settings…** in the yellow bar and untick **Mute audio input**. **Wear headphones.**
 3. Open **File → Audio settings…** (or **Options → Audio/MIDI Settings** in the title bar). Pick your microphone or interface and set the buffer size. 128 samples at 48 kHz is about 2.7 ms per buffer. Smaller is quicker but needs more CPU.
 
+The first time, a **welcome card** walks you through three steps: **Audio settings…** and **I'm wearing headphones** (which unmutes the mic), **Mic check** and **Sound check**. **Settings → Help → Show the welcome card** brings it back.
+
 After every rebuild the app's signature changes, so macOS asks for microphone access again.
 
-The **Options** button in the title bar also has JUCE's **Save current state…**, **Load a saved state…** and **Reset to default state**. They save or load the whole Live sound as a file. Scenes and setlist songs (3.4, 3.5) are the better way to keep a sound.
+### The audio status strip and Settings
+
+At the bottom right of both modes a strip shows the audio device, sample rate, buffer, the round-trip latency and the CPU load ("Scarlett 2i2 · 48 kHz · 128 · 5.4 ms round trip · CPU 12 %"). Click it for the audio settings. It turns **amber** for 10 seconds after a dropout (try a larger buffer) and when the input is muted, and **red** when no audio device is open.
+
+**File → Settings…** (**Ctrl+,**) gathers the app's choices in one window: **Audio** (device and buffer advice), **Recording** (the recordings folder, a dry copy of the mic), **Look** (UI size, 80 to 150 %) and **Help**.
+
+The **Options** button in the title bar also has **Save the Live sound to a file…**, **Load a Live sound from a file…** and **Reset the Live sound**. Scenes and setlist songs (3.4, 3.5) are the better way to keep a sound.
 
 ## 2.4 Updating
 
@@ -142,6 +150,10 @@ The effect file (IR) belongs to the card and is not saved inside scenes or prese
 
 Press **Sound check** under the input meter. Choose a style and a length (10, 15 or 20 s), press **Start** and sing. MicFX sets the chain for your voice, microphone and room, shows **what changed and why**, and gives advice on the input gain. You can switch **Before / After**, **Revert**, **Save as scene**, or **Keep** the result.
 
+### Undo
+
+Every change to the Live sound is an undo step: a knob turn (one step once your hand stops), a preset, a card reset, Mic check and a kept Sound check. Use the **↶ ↷** buttons on the preset bar, **Ctrl+Z**, and **Ctrl+Shift+Z** or **Ctrl+Y**. The tooltip says what will be undone ("Undo: Load preset Pop Tune"). Presets now move with **Ctrl+← / →** so the arrows alone never swap your sound.
+
 ## 3.2 Sing along and record
 
 The panel at the bottom of the window is a small multi-track player.
@@ -154,7 +166,8 @@ The panel at the bottom of the window is a small multi-track player.
 - Each row has **M** (mute), a volume slider (double-click for 0 dB) and **×** (remove from the session; the file stays on disk).
 - Takes contain only your voice, never the backing track. They are shifted earlier by your interface's round-trip latency so they line up with what you heard.
 - Takes are 24-bit WAV files in `~/Music/MicFX Recordings`. **Change…** picks another folder. **Save dry mic** also writes your unprocessed voice to a second, aligned file so you can reprocess it later.
-- The list of loaded tracks is not saved when you quit.
+- The list is kept: it comes back after switching to the DAW and back, and after a restart.
+- **Open in DAW** puts the backing track and every recording on their own DAW tracks, at the same places and levels, to edit and mix them there.
 
 ### Capture: never lose a take
 
@@ -206,6 +219,8 @@ Pedals, knobs, pads and keys on any MIDI controller can drive the Live screen. I
 
 A knob (CC) moves a value and "picks up" so the sound never jumps. A pedal, pad or key flips a switch or steps through a choice. You can map the looper's buttons, previous and next preset, each scene and previous and next scene, previous and next song, Mute and Record. Mappings belong to the app (`MIDI mappings.json`), not to presets.
 
+**In DAW mode** the same **MIDI** chip maps the DAW's play, stop, record, loop range, Punch, click, undo and redo, and the **selected track's** volume and pan (click the selected track's volume or pan slider while learning). Mapped keys and pads drive the DAW and don't play the instrument; Live mappings stay quiet while you are in the DAW.
+
 ## 3.7 Practice any song
 
 ![The Practice view](images/practice-view.png)
@@ -246,15 +261,22 @@ Switch **Live / DAW** at the top of the window.
 
 - **Inputs and stereo tracks.** The app opens every input of your interface (up to 16). Each audio track picks what it records: one input (mono), a neighbouring pair, or any two inputs as left and right. Tracks on different inputs record at the same time, each into its own WAV.
 - **Loop recording**: set a loop range on the ruler (**L** toggles it), start recording inside it, and every pass becomes a **take** (see 4.7).
+- **Punch in and out**: turn on **Punch** next to the loop button (**Shift+R**). The loop range turns red. Press Record anywhere: playback starts a **pre-roll** before the range (1 bar by default, with the music and the click), only the range is recorded, and it stops at the end of the range. The take lands in take lanes so you can comp it. Set the pre-roll in the click's popover (the arrow next to the click button).
+- **Click only while recording** (also in the click's popover) keeps the metronome quiet while you just listen.
 
 ### Editing clips
 
 - Drag clips to move them (also to another track). Drag edges to trim and the top corners to fade.
 - **Ctrl+E** splits at the playhead, **Ctrl+D** duplicates, **Delete** removes, **Ctrl+X / C / V** cut, copy and paste.
-- Edits snap to the beat. Hold **Alt** to drag freely.
-- Tools: **V** Select, **B** Cut (click a clip to split it there), **G** Gain (drag a clip up or down).
-- **Ctrl+Z / Ctrl+Shift+Z** undo and redo every edit.
-- Drag on the ruler to mark a loop, **K** adds a marker, **[ / ]** jump between markers, **T** taps the tempo.
+- **Snap and grid**: edits snap to the grid next to the magnet button: **Adaptive** (follows the zoom), Bar, 1/2 to 1/32, and triplets. **Ctrl+1 / Ctrl+2** make it finer or coarser, **Ctrl+3** switches triplets, **Ctrl+4** turns snap on and off. Clips also snap to other clips' edges, markers, the playhead and the loop range. Hold **Alt** to drag freely.
+- Tools: **V** (or **1**) Select, **2** Range, **B** Cut (click a clip to split it there), **G** Gain (drag a clip up or down).
+- **Range tool**: drag across one or more tracks to mark a stretch of time (Shift+click moves an end). Then **Delete** clears what's inside, **Ctrl+Shift+Delete** deletes the time (the rest of the song moves left), **Ctrl+E** splits at both ends, **Ctrl+D** duplicates it after itself, **Ctrl+L** loops it, and right-click has **Insert silence** and more. **Esc** clears it.
+- **Crossfade**: right-click the first of two clips that touch, **Crossfade with the next clip**.
+- **Reorder tracks** by dragging a track header up or down.
+- **Bounce to a new track** (track menu or **Ctrl+B**): renders the track through its effects or instrument to audio on a new track under it and mutes the original. With a range marked, only that range. It frees the CPU a heavy plug-in uses.
+- **Ctrl+Z / Ctrl+Shift+Z** undo and redo every edit. **Right-click the undo button** for the last 30 steps and go back to any of them.
+- Drag on the ruler to mark a loop, **K** adds a marker, **[ / ]** jump between markers, **Shift+1 … 9** go to the first nine markers, **T** taps the tempo. Right-click a marker for **Loop to the next marker**.
+- **Missing audio files** (moved or deleted outside MicFX): the banner's **Locate…** asks for the folder they are in now and finds each one by name, in subfolders too. A missing clip's menu has **Locate the missing file…**.
 - The **↔** and **↕** sliders (or Ctrl+scroll and Alt+scroll) zoom time and track height. **Follow** keeps the playhead in view while playing.
 
 ## 4.2 The bottom panel
@@ -346,7 +368,7 @@ Double-click an audio clip (or press **W**) to open the **clip editor** on the C
 - **+ MIDI** adds a MIDI track with a built-in synth. Drop another instrument from the library on a track to use it. **VST3** instruments (and **AU** on macOS) are found by a scan of the usual folders (**Rescan plug-ins**). Open-source ones like Surge XT, Dexed, Vital or OB-Xd work, and so do commercial ones like Kontakt, which opens in its own window from the ♫ button on the track. Their settings are saved in the project.
 - **Arm** a MIDI track to play it from your MIDI keyboard (every MIDI input is open) and record. The take becomes a MIDI clip, and the sustain pedal is kept.
 - **Computer keyboard piano**: press **Ctrl+K** (or the toolbar piano button) to turn the computer keyboard into a MIDI keyboard. **A S D F G H J K** are the white keys and **W E T Y U O P** the black keys. **Z / X** change octave and **C / V** change velocity. While it is on, single-letter shortcuts are off; Space, Shift+letter and Ctrl shortcuts still work. **Esc** or **Ctrl+K** closes it.
-- Double-click a MIDI track's lane for an empty clip, then edit its notes in the **piano roll** on the Clip tab: click to add, drag to move, drag the end to resize, double-click to delete, box-select, **↑ / ↓** to transpose, **Q** to quantize to the grid.
+- Double-click a MIDI track's lane for an empty clip, then edit its notes in the **piano roll** on the Clip tab: click to add, drag to move, drag the end to resize, double-click to delete, box-select, **↑ / ↓** to transpose, **Q** to quantize to the grid, **Ctrl+C / X / V** to copy, cut and paste notes at the playhead. When the song has a key (4.17), its notes' rows are tinted and the root a little more.
 
 ### The MicFX instruments
 
@@ -471,6 +493,7 @@ Space, R, Home and M mean the same in both modes. Where the big DAWs agree (Spac
 | Space | Play / pause (always, whatever has focus) |
 | Keypad 0 | Stop and go to start |
 | R or keypad * | Record on armed tracks |
+| Shift+R | Punch on / off |
 | L or keypad / | Loop range on / off |
 | C | Click (metronome) on / off |
 | F | Follow the playhead on / off |
@@ -483,7 +506,8 @@ Space, R, Home and M mean the same in both modes. Where the big DAWs agree (Spac
 | A | Arm the selected track |
 | I | Monitor the mic on the selected track |
 | Q or Ctrl+U | Quantize |
-| V, B, G | Select, cut and gain tools |
+| V (1), 2, B, G | Select, range, cut and gain tools |
+| Ctrl+1 / 2 / 3 / 4 | Finer grid / coarser grid / triplets / snap on-off |
 | W | Edit the selected clip's pitch and timing |
 | Ctrl+E | Split at the playhead |
 | Ctrl+D | Duplicate |
@@ -492,6 +516,9 @@ Space, R, Home and M mean the same in both modes. Where the big DAWs agree (Spac
 | Ctrl+Z, Ctrl+Shift+Z | Undo, redo |
 | Ctrl+N, O, S, I | New, open, save, import |
 | Ctrl+Shift+R | Export |
+| Ctrl+B | Bounce the selected track to a new track |
+| Shift+1 … 9 | Go to marker 1 to 9 |
+| Ctrl+, | Settings |
 | Tab or X | Tracks / mixer |
 | E | Show / hide the effects panel |
 | Shift+B | Show / hide the library |
