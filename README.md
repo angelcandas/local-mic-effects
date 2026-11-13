@@ -13,7 +13,7 @@ Builds as a **standalone app**, plus **AU** and **VST3** plugins from the same c
 | Category | Effects |
 | --- | --- |
 | Clean-up | High-pass · **Denoise** · Noise Gate · EQ · **Parametric EQ** · Compressor · De-esser |
-| Pitch | **Autotune** · Pitch Shift (with formant) · Harmonizer (2 voices) |
+| Pitch | **Autotune** · Pitch Shift (with formant) · Harmonizer (up to 4 voices, follows the song's chords) |
 | Character | Exciter · Saturation · Radio · Bitcrusher · Robot · Filter · Auto-wah |
 | Modulation | Tremolo · Vibrato · Chorus · Flanger · Phaser |
 | Space | Doubler · Echo (ping-pong) · Reverb · Stereo Width |
@@ -43,6 +43,33 @@ They also appear as programs in DAWs.
 
 The Pitch Shift and Harmonizer use the same engine, so they're tuned too when Autotune is on.
 Chromatic works for any song. Pick the song's key and scale for a tighter, more musical tune.
+
+### Harmonizer
+
+Up to four extra voices, picked in one of three ways (**Mode**):
+
+- **Intervals**: a fixed number of semitones from your voice (+4 = a major third).
+- **Scale**: the interval as steps of the Autotune key and scale, so a "third" is major or minor as
+  the key needs.
+- **Chords**: notes of the chord that is playing now. **Style** puts the voices on the next chord
+  notes above you, below you, alternating, or the chord's bass note under you with the others above.
+
+Where the chords come from (**Chords from**, Live mode):
+
+- **Backing track**: when you load a backing track, MicFX works out its chords (the same chroma
+  analysis as key detection, plus a best path that doesn't let drum hits split a chord). The voices
+  then change exactly when the song does.
+- **Instrument input**: a guitar or keyboard on input 2 of the audio interface, followed as you play
+  (about 0.1 to 0.3 s to settle on a new chord).
+- **MIDI keys**: the chord you hold on a MIDI keyboard (one key alone plays the key's triad on it), kept
+  after you let go. Held keys also win over the backing track or input 2 while they're down.
+
+In DAW mode a harmonizer insert listens to the tracks without pitch inserts (read slightly ahead) and
+to the MIDI being played; held MIDI keys win while they're down.
+
+**Humanize** gives each voice its own small delay and pitch drift so they sound like separate singers,
+**Spread** places them across the stereo field, and **Formant** makes the voices sound bigger or smaller
+than you.
 
 ### Denoise
 
@@ -141,6 +168,36 @@ vocal) without splitting.
   (Application Support/MicFX/Practice), so opening it again is instant.
 - Timing is measured against what you hear: the audio interface's latency is taken off.
 
+### Scenes (Live mode)
+
+The bar above the effects keeps **scenes**: the sound of each part of a song (verse, chorus,
+bridge), up to eight. A scene holds every setting except the input gain.
+
+- **+ Scene** saves the current sound. Click a scene (or **[** / **]**) to go there: knobs glide over
+  the **Glide** time, effects that come on switch on at the start, effects that go off switch off at
+  the end, and choices change at once.
+- When you change the sound, the active scene shows a dot: **Save to …** puts the changes into it.
+  Double-click a scene to rename it; right-click to save into it or delete it.
+- Scenes are saved with the plug-in state (the DAW session, or the app's last state). With MIDI learn,
+  a pedal or pad can step through scenes or jump to one.
+
+### Setlists (standalone app)
+
+**Setlist** in the top bar opens the show's songs, in order. Each song keeps its sound (every
+setting but the input gain), its scenes, the looper's tempo, a key, a backing track, lyrics and notes.
+
+- Set up a song (sound, scenes, tempo, backing track), then **+ Add the current sound as a song**.
+  **Save the sound to this song** updates it later. Name, key and mode, BPM, backing track, lyrics
+  (type them or load a .txt / .lrc file) and notes are edited below the list.
+- Click a song to load it: its sound changes at once, its scenes replace the scene bar, the looper
+  takes its tempo, the autotune takes its key (and major or minor, when the scale is major or minor),
+  and its backing track replaces the tracks in the player.
+- **Page Down / Page Up** (what most page-turner pedals send) go to the next and previous song, with
+  no wrap at the ends. With MIDI learn, a pedal can do the same.
+- **Stage view** shows the song's name, key, tempo and notes and its lyrics in large type. Lyrics in
+  .lrc form (`[01:02.50] words`) follow the backing track line by line.
+- Setlists are saved as `.micfxset` files; the last few are under **Recent**.
+
 ### MIDI learn (Live mode)
 
 Pedals, knobs, pads and keys on any MIDI controller can drive the Live screen. In the app every
@@ -156,7 +213,8 @@ effects).
   on screen, so the sound never jumps. On a choice, its position picks the option.
 - A **pedal, pad, key or program change** flips a switch, steps through a choice, or flips a knob
   between its two ends. A pedal acts when pressed, not when released.
-- **Buttons**: the looper's (Loop, stop, undo, redo, clear), previous/next preset, Mute and Record.
+- **Buttons**: the looper's (Loop, stop, undo, redo, clear), previous/next preset, the scenes (each
+  one, and previous/next), the setlist's previous/next song, Mute and Record.
   Looper pedals act in the audio block they arrive in, so a footswitch closes a loop on time.
 - Mappings belong to the app (`MIDI mappings.json` next to its settings), not to the presets, and
   work while the window is closed.
@@ -446,6 +504,8 @@ src/Looper.*            the Live looper: four layers, overdub, undo/redo, bar-lo
 src/MidiMap.*           MIDI learn: CC / note / program change -> parameters and actions
 src/PitchTap.h          the singer's pitch before the effects, every 5 ms, for the Practice view
 src/Practice.*          Practice view: song preparation (stems, melody, cache), live scoring
+src/Scenes.*            Live scenes: snapshots of the sound, recalled with a glide
+src/Setlist.*           the setlist: songs with sound, scenes, tempo, key, backing track, lyrics
 src/daw/                DAW mode: Edit (the session as an undoable ValueTree), AudioPool (decoded
                         clip audio), DawEngine (tracks + inserts + master bus, lock-free graph swap,
                         dry recording, metronome), Project (.micfx folders, autosave, recovery),
@@ -474,6 +534,8 @@ ui/app.js, styles.css   the interface (Live mode)
 ui/looper.js            the Live looper panel
 ui/practice.js, .css    the Practice view (Live mode)
 ui/midilearn.js         MIDI learn mode on the Live screen
+ui/scenes.js            the Live scene bar
+ui/setlist.js           the setlist drawer and stage view (standalone)
 ui/daw.js, daw.css      the DAW screen: tracks, clips, inserts, mixer, transport
 ui/browser.js           the DAW screen's library sidebar (files, effects, instruments, presets)
 ui/widgets.js           helpers shared by both screens

@@ -2836,6 +2836,175 @@ namespace
         processor.outputMuted = false;
     }
     //==========================================================================
+    void testScenes()
+    {
+        std::cout << "\nScenes (Live mode)\n";
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& scenes = processor.getScenes();
+        auto& state = processor.getState();
+        const auto get = [&] (const char* id) { auto* p = state.getParameter (id); return p->convertFrom0to1 (p->getValue()); };
+        const auto set = [&] (const char* id, float v) { auto* p = state.getParameter (id); p->setValueNotifyingHost (p->convertTo0to1 (v)); };
+
+        set ("satDrive", 2.0f); set ("reverbOn", 0.0f); set ("delayOn", 1.0f); set ("filterType", 0.0f); set ("inputGain", 0.0f);
+        check (scenes.add ("Verse") == 0 && scenes.getActive() == 0 && ! scenes.isModified(), "the current sound is saved as a scene");
+        set ("satDrive", 8.0f);
+        check (scenes.isModified(), "moving a knob marks the active scene as changed");
+        set ("reverbOn", 1.0f); set ("delayOn", 0.0f); set ("filterType", 2.0f); set ("inputGain", 6.0f);
+        check (scenes.add() == 1 && scenes.getName (1) == "Scene 2", "a second scene, named for its place");
+
+        scenes.setGlideSeconds (1.0);
+        scenes.recall (0);
+        check (get ("filterType") == 0.0f && get ("delayOn") > 0.5f, "choices and effects coming on change at once");
+        check (get ("reverbOn") > 0.5f && scenes.isGliding(), "effects going off wait for the end of the glide");
+        scenes.advance (0.5);
+        check (get ("satDrive") > 3.0f && get ("satDrive") < 7.0f, "knobs glide (" + juce::String (get ("satDrive"), 2) + " half way)");
+        scenes.advance (0.6);
+        check (std::abs (get ("satDrive") - 2.0f) < 0.01f && get ("reverbOn") < 0.5f && ! scenes.isGliding() && ! scenes.isModified(),
+               "and arrive at the scene, with the reverb now off");
+        check (std::abs (get ("inputGain") - 6.0f) < 0.01f, "the input gain is left alone, as presets do");
+
+        scenes.setGlideSeconds (0.0);
+        scenes.step (1);
+        check (scenes.getActive() == 1 && get ("satDrive") > 7.9f, "next scene, instantly with no glide");
+        scenes.step (1);
+        check (scenes.getActive() == 0, "next wraps round to the first");
+
+        set ("satDrive", 5.0f);
+        scenes.update (1);
+        scenes.recall (1);
+        check (std::abs (get ("satDrive") - 5.0f) < 0.01f, "save puts the current sound into a scene");
+        scenes.rename (1, "  Chorus ");
+        check (scenes.getName (1) == "Chorus", "rename");
+
+        // MIDI: a pad recalls a scene.
+        processor.getMidiMap().setMappings ({ { MidiMap::Source::note, 1, 40, "action:scene.1" } });
+        {
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::noteOn (1, 40, (juce::uint8) 100), 0);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            buffer.clear();
+            processor.processBlock (buffer, midi);
+            processor.getMidiMap().drain();
+        }
+        check (scenes.getActive() == 0 && std::abs (get ("satDrive") - 2.0f) < 0.01f, "a mapped pad recalls scene 1");
+        processor.getMidiMap().clear();
+
+        // Saved with the plug-in state.
+        juce::MemoryBlock saved;
+        processor.getStateInformation (saved);
+        PluginProcessor restored;
+        restored.setStateInformation (saved.getData(), (int) saved.getSize());
+        check (restored.getScenes().size() == 2 && restored.getScenes().getName (1) == "Chorus" && restored.getScenes().getActive() == 0,
+               "scenes are saved with the plug-in state");
+
+        const auto copy = scenes.copyScenes();
+        scenes.remove (0);
+        check (scenes.size() == 1 && scenes.getActive() == -1, "removing the active scene leaves none active");
+        scenes.replaceScenes (copy);
+        check (scenes.size() == 2 && scenes.getActive() == 0, "a set of scenes can be swapped in (for setlist songs)");
+        for (int i = 0; i < Scenes::maxScenes; ++i)
+            scenes.add();
+        check (scenes.size() == Scenes::maxScenes, "at most eight scenes");
+    }
+    void testSetlist()
+    {
+        std::cout << "\nSetlist (Live, standalone)\n";
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& setlist = processor.getSetlist();
+        auto& scenes = processor.getScenes();
+        auto& looper = processor.getLooper();
+        auto& state = processor.getState();
+        const auto get = [&] (const char* id) { auto* p = state.getParameter (id); return p->convertFrom0to1 (p->getValue()); };
+        const auto set = [&] (const char* id, float v) { auto* p = state.getParameter (id); p->setValueNotifyingHost (p->convertTo0to1 (v)); };
+
+        // Song 1: a drive, one scene, 90 BPM.
+        set ("satDrive", 3.0f); set ("tuneScale", 1.0f); set ("tuneKey", 0.0f);
+        scenes.add ("Verse");
+        looper.setTempo (90.0, 4);
+        looper.setTempoLocked (true);
+        check (setlist.addSong ("  Opener ") == 0 && setlist.getCurrent() == 0 && setlist.isDirty(), "the current sound is added as a song");
+
+        // Song 2: another sound, two scenes, no tempo lock.
+        set ("satDrive", 9.0f);
+        scenes.add ("Chorus");
+        looper.setTempoLocked (false);
+        check (setlist.addSong() == 1 && setlist.describe()["songs"][1]["name"].toString() == "Song 2", "a song without a name is named for its place");
+        setlist.setSongInfo (1, juce::var (new juce::DynamicObject()));
+        {
+            auto* fields = new juce::DynamicObject();
+            fields->setProperty ("key", 9);
+            fields->setProperty ("minor", true);
+            fields->setProperty ("lyrics", "[00:01.00] one\n[00:02.00] two");
+            setlist.setSongInfo (1, juce::var (fields));
+        }
+        const auto song2 = setlist.describe()["songs"][1];
+        check ((int) song2["key"] == 9 && (bool) song2["minor"] && song2["scenes"].size() == 2, "a song keeps its key, mode and scenes");
+
+        set ("inputGain", 5.0f);
+        juce::String warning;
+        check (setlist.loadSong (0, warning) && warning.isEmpty(), "load the first song");
+        check (std::abs (get ("satDrive") - 3.0f) < 0.01f && scenes.size() == 1 && scenes.getName (0) == "Verse",
+               "its sound and its scenes come back");
+        check (looper.isTempoLocked() && std::abs (looper.getBpm() - 90.0) < 0.01, "and the looper's tempo");
+        check (std::abs (get ("inputGain") - 5.0f) < 0.01f, "the input gain is left alone");
+
+        check (setlist.step (1, warning) && setlist.getCurrent() == 1, "next song");
+        check (std::abs (get ("satDrive") - 9.0f) < 0.01f && scenes.size() == 2, "the second song's sound and scenes");
+        check ((int) get ("tuneKey") == 9 && (int) get ("tuneScale") == 2, "its key sets the autotune (A minor)");
+        check (! setlist.step (1, warning) && setlist.getCurrent() == 1, "no wrap past the last song");
+
+        // A missing backing track is reported, not fatal.
+        {
+            auto* fields = new juce::DynamicObject();
+            fields->setProperty ("backing", juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-missing.wav").getFullPathName());
+            setlist.setSongInfo (0, juce::var (fields));
+        }
+        warning.clear();
+        check (setlist.loadSong (0, warning) && warning.contains ("isn't there"), "a missing backing track is a warning");
+
+        setlist.moveSong (0, 1);
+        check (setlist.getCurrent() == 1 && setlist.describe()["songs"][1]["name"].toString() == "Opener", "moving keeps the loaded song");
+
+        // Save and open again.
+        const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-test.micfxset");
+        check (setlist.save (file).isEmpty() && ! setlist.isDirty() && setlist.getName() == "micfx-test", "saved as a .micfxset file");
+        setlist.clear();
+        check (setlist.size() == 0 && setlist.getName() == "New setlist", "new, empty setlist");
+        check (setlist.open (file).isEmpty() && setlist.size() == 2 && setlist.getCurrent() == -1, "opened again, with nothing loaded");
+        const auto reopened = setlist.describe()["songs"];
+        check (reopened[0]["name"].toString() == "Song 2" && reopened[0]["lyrics"].toString().contains ("[00:02.00] two")
+                   && reopened[0]["scenes"].size() == 2 && std::abs ((double) reopened[1]["tempo"] - 90.0) < 0.01,
+               "with every song's details");
+        check (setlist.step (-1, warning) && setlist.getCurrent() == 1, "previous with nothing loaded starts at the last song");
+
+        // A scene glide still running doesn't land on top of the next song's sound.
+        check (setlist.loadSong (0, warning), "load a song with two scenes");
+        scenes.setGlideSeconds (2.0);
+        set ("satDrive", 6.0f);
+        scenes.recall (1); // to the Chorus (9)
+        scenes.advance (0.5);
+        check (scenes.isGliding(), "a scene glide is running");
+        check (setlist.loadSong (1, warning) && ! scenes.isGliding() && std::abs (get ("satDrive") - 3.0f) < 0.01f,
+               "a song change finishes the glide first, then puts in the song's sound");
+
+        // The setlist as it stands is kept with the app's state.
+        const auto snapshot = setlist.getSnapshot();
+        Setlist other (processor, scenes, looper, processor.getMultitrack());
+        other.restore (snapshot);
+        check (other.size() == 2 && other.getCurrent() == 1 && other.getFile() == file && ! other.isDirty(),
+               "a snapshot brings back the songs, the file and the loaded song");
+
+        setlist.removeSong (1);
+        check (setlist.size() == 1 && setlist.getCurrent() == -1, "removing the loaded song");
+        check (setlist.open (juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-nothing.micfxset")).isNotEmpty(),
+               "a file that isn't a setlist is refused");
+        file.deleteFile();
+    }
+    //==========================================================================
     // Renders `seconds` of the engine in device-sized blocks; returns {left, right}.
     std::array<std::vector<float>, 2> render (daw::DawEngine& engine, double seconds)
     {
@@ -6791,6 +6960,373 @@ namespace
         folder.deleteRecursively();
     }
 
+
+    //==========================================================================
+    void testHarmonies()
+    {
+        std::cout << "\nChords and chord-following harmonies\n";
+        using analysis::Chord;
+        const std::initializer_list<int> maj { 0, 4, 7 }, min { 0, 3, 7 }, dom7 { 0, 4, 7, 10 };
+
+        // Chord shapes from note sets.
+        {
+            const auto fromNotes = [] (std::initializer_list<int> notes, int keyMask = 0)
+            {
+                std::bitset<128> held;
+                for (auto n : notes)
+                    held.set ((size_t) n);
+                return analysis::chordFromNotes (held, keyMask).getName();
+            };
+
+            auto allRight = true;
+            juce::String wrong;
+            for (int root = 0; root < 12; ++root)
+            {
+                for (int quality = 0; quality < Chord::numQualities; ++quality)
+                {
+                    std::bitset<128> held;
+                    for (auto interval : Chord::getIntervals (quality))
+                        held.set ((size_t) (48 + root + interval));
+                    const auto found = analysis::chordFromNotes (held);
+                    // An augmented triad is symmetric: any of its notes names it.
+                    const auto same = found.quality == quality && (found.root == root || quality == Chord::augmented);
+                    if (! same) { allRight = false; wrong << Chord { root, quality, -1 }.getName() << "->" << found.getName() << " "; }
+                }
+            }
+            check (allRight, "every chord shape on every root is named from its notes " + wrong);
+            check (fromNotes ({ 57, 60, 64, 67 }) == "Am7" && fromNotes ({ 52, 60, 67 }) == "C/E" && fromNotes ({ 60, 67 }) == "C5",
+                   "seventh chords, inversions and power chords: " + fromNotes ({ 57, 60, 64, 67 }) + ", " + fromNotes ({ 52, 60, 67 })
+                       + ", " + fromNotes ({ 60, 67 }));
+            const auto cMajor = analysis::getKeyMask (0, false);
+            check (fromNotes ({ 62 }, cMajor) == "Dm" && fromNotes ({ 67 }, cMajor) == "G" && fromNotes ({ 71 }, cMajor) == "Bdim"
+                       && fromNotes ({ 62 }) == "D",
+                   "one key held: the key's triad on it (Dm, G, Bdim in C major; D with no key)");
+            check (Chord::unpack (Chord { 9, Chord::minor7, 0 }.pack()) == Chord { 9, Chord::minor7, 0 } && Chord::unpack (-1).root < 0,
+                   "chords pack into one int for the audio thread and back");
+        }
+
+        // A backing track: C, Am, F, G7, C (1.5 s each), with drums.
+        const std::vector<std::pair<int, int>> expected { { 0, Chord::major }, { 9, Chord::minor }, { 5, Chord::major },
+                                                          { 7, Chord::dominant7 }, { 0, Chord::major } };
+        const auto song = makeChords ({ chord (60, maj), chord (57, min), chord (53, maj), chord (55, dom7), chord (60, maj) },
+                                      sampleRate, 1.5, 0.0, true);
+        const auto chordSamples = (juce::int64) (1.5 * sampleRate);
+
+        {
+            const auto start = juce::Time::getMillisecondCounterHiRes();
+            const auto segments = analysis::detectChords (song, sampleRate);
+            const auto ms = juce::Time::getMillisecondCounterHiRes() - start;
+
+            auto rightAtMiddles = true, onTime = true;
+            juce::String names;
+            for (size_t c = 0; c < expected.size(); ++c)
+            {
+                const auto found = analysis::chordAt (segments, (juce::int64) c * chordSamples + chordSamples / 2);
+                names << found.getName() << " ";
+                rightAtMiddles = rightAtMiddles && found.root == expected[c].first && found.quality == expected[c].second;
+
+                // Each change lands within 0.2 s of where the chord starts.
+                if (c > 0)
+                {
+                    const auto change = (juce::int64) c * chordSamples;
+                    onTime = onTime && analysis::chordAt (segments, change + (juce::int64) (0.2 * sampleRate)).root == expected[c].first
+                                    && analysis::chordAt (segments, change - (juce::int64) (0.2 * sampleRate)).root == expected[c - 1].first;
+                }
+            }
+            check (rightAtMiddles, "a backing track's chords, offline: " + names + "(" + juce::String (ms, 0) + " ms for 7.5 s)");
+            check (onTime, "each chord change is placed within 0.2 s");
+            check (segments.size() <= expected.size() + 1, "held chords aren't split by drum hits (" + juce::String ((int) segments.size()) + " segments)");
+            juce::AudioBuffer<float> silence (2, (int) sampleRate);
+            silence.clear();
+            check (analysis::detectChords (silence, sampleRate).empty(), "silence has no chords");
+        }
+
+        // The same, live: the follower hears it block by block.
+        {
+            analysis::ChordFollower follower;
+            follower.prepare (sampleRate);
+            std::vector<float> mono ((size_t) blockSize);
+            juce::String names;
+            auto right = 0;
+            auto worstDelay = 0.0;
+
+            for (size_t c = 0; c < expected.size(); ++c)
+            {
+                double changedAfter = -1.0;
+                for (juce::int64 at = (juce::int64) c * chordSamples; at + blockSize <= (juce::int64) (c + 1) * chordSamples; at += blockSize)
+                {
+                    for (int i = 0; i < blockSize; ++i)
+                        mono[(size_t) i] = song.getSample (0, (int) at + i);
+                    follower.pushAudio (mono.data(), blockSize);
+                    const auto now = follower.getChord();
+                    if (changedAfter < 0.0 && now.root == expected[c].first && now.quality == expected[c].second)
+                        changedAfter = (double) (at + blockSize - (juce::int64) c * chordSamples) / sampleRate;
+                }
+
+                const auto found = follower.getChord();
+                names << found.getName() << " ";
+                right += found.root == expected[c].first && found.quality == expected[c].second ? 1 : 0;
+                if (c > 0)
+                    worstDelay = std::max (worstDelay, changedAfter < 0.0 ? 9.0 : changedAfter);
+            }
+            check (right == (int) expected.size(), "live: the follower names each chord by its end: " + names);
+            check (worstDelay < 0.35, "live: it follows a chord change within " + juce::String (worstDelay * 1000.0, 0) + " ms");
+
+            std::bitset<128> held;
+            held.set (62).set (65).set (69);
+            follower.setHeldNotes (held);
+            const auto byKeys = follower.getChord().getName();
+            for (int i = 0; i < 40; ++i)
+            {
+                for (int s = 0; s < blockSize; ++s)
+                    mono[(size_t) s] = song.getSample (0, s);
+                follower.pushAudio (mono.data(), blockSize);
+            }
+            const auto stillKeys = follower.getChord().getName();
+            follower.setHeldNotes ({});
+            check (byKeys == "Dm" && stillKeys == "Dm", "held keys win over the audio while they're down (" + stillKeys + ")");
+        }
+
+        // The voices: which notes each mode and style sings.
+        const auto voicesFor = [] (fx::PitchEngine::Settings settings, float sungNote)
+        {
+            fx::PitchEngine engine;
+            engine.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+            auto input = makeVoice (noteToHz (sungNote), 0.4);
+            for (size_t start = 0; start + (size_t) blockSize <= input.size(); start += (size_t) blockSize)
+            {
+                float* channels[] = { input.data() + start };
+                juce::dsp::AudioBlock<float> block (channels, 1, (size_t) blockSize);
+                engine.process (juce::dsp::ProcessContextReplacing<float> (block), settings);
+            }
+            std::vector<int> notes;
+            for (const auto& note : engine.voiceNotes)
+                if (note.load() >= 0)
+                    notes.push_back (note.load());
+            return notes;
+        };
+
+        {
+            fx::PitchEngine::Settings settings;
+            settings.harmonyOn = true;
+            settings.harmonyMode = fx::PitchEngine::chordMode;
+            settings.chord = { 0, Chord::major, -1 };
+            settings.harmonyVoices = 2;
+
+            using V = std::vector<int>;
+            check (voicesFor (settings, 64) == V { 67, 72 }, "chords, above: E4 over C sings G4 and C5");
+            settings.harmonyStyle = fx::PitchEngine::below;
+            check (voicesFor (settings, 64) == V { 60, 55 }, "below: C4 and G3");
+            settings.harmonyStyle = fx::PitchEngine::around;
+            settings.harmonyVoices = 4;
+            check (voicesFor (settings, 64) == V { 67, 60, 72, 55 }, "around, four voices: G4, C4, C5, G3");
+            settings.harmonyStyle = fx::PitchEngine::rootBelow;
+            settings.chord = { 0, Chord::major, 4 }; // C/E: the bass note goes under
+            check (voicesFor (settings, 64) == V { 52, 67, 72, 76 }, "root below: the bass note E3 under the lead, the rest above");
+            settings.harmonyStyle = fx::PitchEngine::above;
+            settings.harmonyVoices = 2;
+            settings.chord = { 2, Chord::minor7, -1 };
+            check (voicesFor (settings, 65) == V { 69, 72 }, "follows the chord: F4 over Dm7 sings A4 and C5");
+            settings.chord = {};
+            settings.interval1 = 4.0f;
+            settings.interval2 = 7.0f;
+            check (voicesFor (settings, 64) == V { 68, 71 }, "no chord yet: the fixed intervals");
+
+            settings.harmonyMode = fx::PitchEngine::scaleMode;
+            settings.key = 0;
+            settings.scale = 1; // C major
+            check (voicesFor (settings, 64) == V { 67, 71 } && voicesFor (settings, 62) == V { 65, 69 },
+                   "scale: a third and a fifth in C major (E4 -> G4 B4, D4 -> F4 A4)");
+
+            settings.harmonyMode = fx::PitchEngine::intervalMode;
+            settings.harmonyVoices = 1;
+            check (voicesFor (settings, 64) == V { 68 }, "intervals: +4 semitones as before");
+        }
+
+        // What a voice really sings: the lead passes untouched, so output - input is the
+        // voice alone (humanize off: no delay or drift).
+        {
+            fx::PitchEngine::Settings settings;
+            settings.harmonyOn = true;
+            settings.harmonyMode = fx::PitchEngine::chordMode;
+            settings.chord = { 0, Chord::major, -1 };
+            settings.harmonyVoices = 1;
+            settings.humanize = 0.0f;
+            settings.harmonyMix = 1.0f;
+
+            const auto input = makeVoice (noteToHz (64.0f), 1.0);
+            auto voice = runPitchEngine (input, settings);
+            for (size_t i = 0; i < voice.size(); ++i)
+                voice[i] -= input[i];
+            const auto measured = measurePitch (voice);
+            check (std::abs (centsBetween (measured, noteToHz (67.0f))) < 15.0f,
+                   "the voice sings G4 (" + juce::String (measured, 1) + " Hz)");
+        }
+
+        // Humanize: each voice its own delay and pitch, spread across the stereo field.
+        // Two voices on the same note: placed apart, L - R carries a good part of them;
+        // with humanize and spread at 0 they're identical copies in the middle.
+        const auto sideOfVoices = [] (float humanize, float spread)
+        {
+            fx::PitchEngine::Settings settings;
+            settings.harmonyOn = true;
+            settings.harmonyVoices = 2;
+            settings.interval1 = settings.interval2 = 7.0f;
+            settings.humanize = humanize;
+            settings.spread = spread;
+
+            fx::PitchEngine engine;
+            engine.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            const auto input = makeVoice (220.0f, 1.0);
+            juce::AudioBuffer<float> stereo (2, (int) input.size());
+            for (int ch = 0; ch < 2; ++ch)
+                stereo.copyFrom (ch, 0, input.data(), (int) input.size());
+            for (int start = 0; start + blockSize <= stereo.getNumSamples(); start += blockSize)
+            {
+                auto block = juce::dsp::AudioBlock<float> (stereo).getSubBlock ((size_t) start, (size_t) blockSize);
+                engine.process (juce::dsp::ProcessContextReplacing<float> (block), settings);
+            }
+
+            double side = 0.0, voices = 0.0;
+            for (int i = stereo.getNumSamples() / 2; i < stereo.getNumSamples(); ++i)
+            {
+                const auto left = (double) stereo.getSample (0, i), right = (double) stereo.getSample (1, i);
+                side += juce::square (0.5 * (left - right));
+                voices += juce::square (0.5 * (left + right) - input[(size_t) i]);
+            }
+            return side / (voices + 1.0e-12);
+        };
+        const auto apart = sideOfVoices (1.0f, 1.0f), together = sideOfVoices (0.0f, 0.0f);
+        check (apart > 0.2 && together < 1.0e-6, "humanize and spread set the voices apart (side "
+                                                     + juce::String (10.0 * std::log10 (apart), 1) + " dB of the voices; "
+                                                     + juce::String (10.0 * std::log10 (together + 1.0e-12), 0) + " dB without)");
+
+        // CPU: four voices plus autotune, in real time with room to spare.
+        {
+            fx::PitchEngine::Settings settings;
+            settings.tuneOn = true;
+            settings.harmonyOn = true;
+            settings.harmonyMode = fx::PitchEngine::chordMode;
+            settings.chord = { 0, Chord::major, -1 };
+            settings.harmonyVoices = 4;
+            const auto input = makeVoice (220.0f, 5.0);
+            const auto start = juce::Time::getMillisecondCounterHiRes();
+            runPitchEngine (input, settings);
+            const auto seconds = (juce::Time::getMillisecondCounterHiRes() - start) / 1000.0;
+            // Generous: Debug builds are several times slower than Release.
+            check (seconds < 5.0, "4 voices + autotune: 5 s of voice in " + juce::String (seconds * 1000.0, 0) + " ms");
+        }
+
+        // Live: a backing track's chords drive the harmonizer as it plays.
+        {
+            const auto folder = juce::File::createTempFile ("micfx-harmonies");
+            folder.createDirectory();
+            const auto backing = folder.getChildFile ("song.wav");
+            writeWav (backing, song, sampleRate);
+
+            PluginProcessor processor;
+            processor.prepareToPlay (sampleRate, blockSize);
+            auto& state = processor.getState();
+            const auto set = [&state] (const char* id, float value)
+            {
+                auto* parameter = state.getParameter (id);
+                parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+            };
+            set ("harmonyOn", 1.0f);
+            set ("harmonyMode", 2.0f);
+
+            auto& multitrack = processor.getMultitrack();
+            check (multitrack.loadNow (backing, false, 0) > 0 && ! multitrack.getTracks().front()->chords.empty(),
+                   "a backing track gets its chords when it loads");
+
+            multitrack.seek (3 * chordSamples + chordSamples / 2); // in the G7
+            multitrack.play();
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            juce::MidiBuffer midi;
+            const auto voice = makeVoice (noteToHz (67.0f), 0.3);
+            for (int b = 0; b + 1 < (int) voice.size() / blockSize; ++b)
+            {
+                buffer.clear();
+                buffer.copyFrom (0, 0, voice.data() + b * blockSize, blockSize);
+                processor.processBlock (buffer, midi);
+            }
+            const auto name = processor.getHarmonyChord().getName();
+            const auto& engine = processor.getPitchEngine();
+            check (name == "G7" && engine.voiceNotes[0].load() == 71 && engine.voiceNotes[1].load() == 74,
+                   "Live: G4 sung over the song's G7 gets B4 and D5 (" + name + ")");
+
+            // Keys held on a MIDI keyboard win over the backing track while they're down;
+            // with "MIDI keys" chosen, their chord stays after release.
+            const auto playKeys = [&] (bool down)
+            {
+                juce::MidiBuffer keys;
+                for (auto note : { 62, 65, 69 })
+                    keys.addEvent (down ? juce::MidiMessage::noteOn (1, note, (juce::uint8) 100) : juce::MidiMessage::noteOff (1, note), 0);
+                buffer.clear();
+                processor.processBlock (buffer, keys);
+                return processor.getHarmonyChord().getName();
+            };
+            const auto held = playKeys (true);
+            const auto backAgain = playKeys (false);
+            set ("harmonySource", 2.0f);
+            playKeys (true);
+            playKeys (false);
+            for (int b = 0; b < 20; ++b)
+            {
+                buffer.clear();
+                processor.processBlock (buffer, midi);
+            }
+            const auto kept = processor.getHarmonyChord().getName();
+            check (held == "Dm" && backAgain == "G7" && kept == "Dm",
+                   "Live: MIDI keys win while held (" + held + ", then the song's " + backAgain + "); as the source their chord stays ("
+                       + kept + ")");
+
+            multitrack.pause();
+            folder.deleteRecursively();
+        }
+
+        // DAW: a harmonizer insert on the vocal follows the other tracks.
+        {
+            const auto folder = juce::File::createTempFile ("micfx-harmonies-daw");
+            folder.createDirectory();
+            const auto backing = folder.getChildFile ("keys.wav");
+            writeWav (backing, song, sampleRate);
+
+            daw::Edit edit;
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+            engine.getAudioPool().loadNow (backing);
+
+            const auto keys = (int) edit.addTrack ("Keys")[daw::ids::id];
+            const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+            edit.addClip (keys, backing, 0.0, 7.5);
+            const auto insert = (int) edit.addInsert (vocal, fx::ModuleType::pitch)[daw::ids::id];
+            edit.setInsertValue (insert, "harmonyOn", 1.0f);
+            edit.setInsertValue (insert, "harmonyMode", 2.0f);
+            engine.rebuildNow();
+
+            engine.seek (2 * chordSamples); // the F
+            engine.play();
+            render (engine, 0.6);
+            const auto heard = engine.getHarmonyChord().getName();
+            engine.stop();
+            check (heard == "F", "DAW: the vocal's harmonizer hears the keys track's chord (" + heard + ")");
+
+            // A MIDI keyboard decides while keys are held.
+            engine.addLiveMidi (juce::MidiMessage::noteOn (1, 57, (juce::uint8) 100));
+            engine.addLiveMidi (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100));
+            engine.addLiveMidi (juce::MidiMessage::noteOn (1, 64, (juce::uint8) 100));
+            render (engine, 0.05);
+            const auto played = engine.getHarmonyChord().getName();
+            check (played == "Am", "DAW: chords played on a MIDI keyboard (" + played + ")");
+
+            edit.setInsertValue (insert, "harmonyMode", 0.0f);
+            render (engine, 0.02);
+            check (! engine.getHarmonyChord().isValid(), "no chord is followed when no harmonizer asks for one");
+            folder.deleteRecursively();
+        }
+    }
+
     void testLatency()
     {
         std::cout << "\nLatency (autotune and pitch shift)\n";
@@ -8066,6 +8602,8 @@ int main()
     {
         testLooper();
         testMidiLearn();
+        testScenes();
+        testSetlist();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -8097,6 +8635,8 @@ int main()
     testMultitrack();
     testLooper();
     testMidiLearn();
+    testScenes();
+    testSetlist();
     testDawEngine();
     testReturns();
     testPreview();
@@ -8127,6 +8667,7 @@ int main()
     testAnalysis();
     testMixAssistant();
     testKeyDetection();
+    testHarmonies();
     testDawKey();
     testAutoMixEffects();
     testAutoMixRoles();

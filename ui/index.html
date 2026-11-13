@@ -61,6 +61,7 @@
       <button class="chip practice-toggle" type="button" aria-pressed="false" title="Practice: sing along to any song and see how close you get">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 12h3M6 8h4M11 4h3" /><path d="M2 14c3-1 5-5 7-7s3-3 5-3" stroke-dasharray="1.5 2" /></svg>Practice
       </button>
+      <button class="chip setlist-button" type="button" hidden aria-pressed="false" title="The setlist: the songs of the show, each with its sound, scenes, tempo, key, backing track and lyrics">Setlist</button>
       <button class="chip midi-button" type="button" aria-pressed="false" title="MIDI learn: map pedals, knobs and keys to controls">
         <span class="midi-dot"></span>MIDI
       </button>
@@ -84,6 +85,7 @@
     </nav>
 
     <main class="chain" aria-label="Active effects">
+      <div class="scene-bar" aria-label="Scenes"></div>
       <div class="chain-grid"></div>
       <div class="chain-empty" hidden>
         <p class="big">Your chain is empty</p>

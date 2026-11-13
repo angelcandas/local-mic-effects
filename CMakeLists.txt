@@ -50,6 +50,8 @@ juce_add_binary_data(MicFX_WebUI
         ui/takes.js
         ui/looper.js
         ui/midilearn.js
+        ui/scenes.js
+        ui/setlist.js
         ui/daw.css
         ui/aiviews.css
         ui/aiviews.js
@@ -82,6 +84,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/Analysis.h
     src/analysis/Key.cpp
     src/analysis/Key.h
+    src/analysis/Chords.cpp
+    src/analysis/Chords.h
     src/analysis/MixAssistant.cpp
     src/analysis/MixAssistant.h
     src/analysis/Beats.cpp
@@ -103,6 +107,10 @@ set(MICFX_DSP_SOURCES
     src/Looper.h
     src/MidiMap.cpp
     src/MidiMap.h
+    src/Scenes.cpp
+    src/Scenes.h
+    src/Setlist.cpp
+    src/Setlist.h
     src/Multitrack.cpp
     src/daw/AudioPool.cpp
     src/daw/DawEngine.cpp

@@ -7,6 +7,8 @@
 #include "Looper.h"
 #include "MidiMap.h"
 #include "PitchTap.h"
+#include "Scenes.h"
+#include "Setlist.h"
 #include "Multitrack.h"
 #include "Recorder.h"
 #include "daw/DawEngine.h"
@@ -62,6 +64,10 @@ public:
     juce::AudioProcessorValueTreeState& getState() noexcept { return state; }
     const fx::PitchEngine& getPitchEngine() const noexcept  { return pitchModule.getEngine(); }
 
+    // The chord the harmonizer follows now (Live: the backing track or the instrument
+    // input; DAW: the other tracks). Invalid when nothing is followed. Any thread.
+    analysis::Chord getHarmonyChord() const noexcept;
+
     // The Live chain, for the effect cards' live readings (module meters are atomics).
     fx::FxChain& getLiveChain() noexcept                    { return chain; }
 
@@ -72,6 +78,13 @@ public:
     // The Live mode looper: records the voice after the effects (before the safety
     // limiter) and plays its layers under it. Its playback is in recorded takes.
     Looper& getLooper() noexcept                            { return looper; }
+
+    // Scenes: snapshots of the Live sound, recalled with a glide. Message thread.
+    Scenes& getScenes() noexcept                            { return scenes; }
+
+    // The setlist (standalone app): songs with their sound, scenes, tempo, key, backing
+    // track and lyrics. Message thread.
+    Setlist& getSetlist() noexcept                          { return setlist; }
 
     // MIDI learn: pedals, knobs and keys on parameters and actions (Live mode).
     MidiMap& getMidiMap() noexcept                          { return midiMap; }
@@ -134,6 +147,8 @@ private:
     Multitrack multitrack;
     Looper looper;
     PitchTap pitchTap;
+    Scenes scenes { *this, state };
+    Setlist setlist { *this, scenes, looper, multitrack };
     MidiMap midiMap { state, looper, juce::JUCEApplicationBase::isStandaloneApp() || wrapperType != wrapperType_Undefined
                                          ? MidiMap::getDefaultFile() : juce::File() };
     juce::AudioBuffer<float> loopInput; // the voice before the limiter, for the looper
@@ -143,6 +158,13 @@ private:
     daw::DawEngine dawEngine { dawEdit };
     daw::Project dawProject { dawEdit };
     std::atomic<bool> dawMode { false };
+
+    // Live mode's chord for the harmonizer (Chords mode): from the backing track's
+    // chord list, or by listening to the instrument input (the interface's 2nd input).
+    // Keys held on a MIDI keyboard win while they're down.
+    void followChords (const juce::AudioBuffer<float>&, int numIn, int numSamples, const juce::MidiBuffer&) noexcept;
+    analysis::ChordFollower chordFollower;
+    std::bitset<128> heldKeys; // Live MIDI notes down now (audio thread)
 
     void applyPeakGuard (juce::AudioBuffer<float>&, int numChannels, int numSamples) noexcept;
     // Transparent peak guard for the voice + playback sum: only acts above -1 dB, so

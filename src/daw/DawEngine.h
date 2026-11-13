@@ -82,6 +82,10 @@ public:
     // Delay the inserts add (the slowest track's chain plus the master chain), in samples.
     int getLatencySamples() const noexcept   { return latency.load(); }
 
+    // The chord the harmonizer inserts follow (Chords mode), heard from the tracks
+    // without pitch inserts and the MIDI being played; invalid when none follows. Any thread.
+    analysis::Chord getHarmonyChord() const noexcept { return analysis::Chord::unpack (harmonyChord.load (std::memory_order_relaxed)); }
+
     //==============================================================================
     // Recording. Message thread.
     //
@@ -180,6 +184,7 @@ private:
         juce::String insertLayout; // insert ids in order: a different layout needs a new strip
         fx::FxChain chain;
         std::map<int, fx::Module*> modulesByInsertId;
+        std::vector<fx::modules::Pitch*> pitches; // its autotune / harmonizer inserts
         int latencyAtBuild = 0; // the chain's delay when the current graph was built (message thread)
 
         std::atomic<float> targetLeft { 1.0f }, targetRight { 1.0f };
@@ -298,7 +303,16 @@ private:
         int blockSize = 512; // the strips' buffer size: the most one chunk can render
         bool fresh = true;   // not played yet: notes from the previous graph get their note-offs
         TempoMap tempo;      // for the click
+
+        // Chord following for harmonizer inserts in Chords mode: the follower (shared
+        // with the next graph, so it keeps listening across edits), what it listens to,
+        // and the song key as a hint.
+        std::shared_ptr<analysis::ChordFollower> chords;
+        juce::AudioBuffer<float> listen;
+        int keyMask = 0;
     };
+
+    void followChords (Graph&, bool isPlaying, juce::int64 blockStart, int numSamples) noexcept;
 
     // ValueTree::Listener
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
@@ -352,6 +366,9 @@ private:
     static constexpr int retiredCapacity = 64;
     juce::AbstractFifo retiredFifo { retiredCapacity };
     std::array<Graph*, retiredCapacity> retired {};
+
+    std::shared_ptr<analysis::ChordFollower> chordFollower; // message thread: the current one, for new graphs
+    std::atomic<int> harmonyChord { -1 };
 
     // The library preview: handed over like the graphs, and freed on the message thread.
     std::atomic<juce::AudioBuffer<float>*> previewIncoming { nullptr };

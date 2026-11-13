@@ -377,6 +377,38 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            complete (describeMidi());
                        })
 
+                       // (action, args) -> the scenes ({ scenes: [{ name }], active, modified, glide, gliding, max }).
+                       // Actions: "list", "add" { name? }, "update" { index }, "rename" { index, name },
+                       // "remove" { index }, "recall" { index }, "step" { delta }, "glide" { seconds }.
+                       .withNativeFunction ("scenes", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           const auto options = args.size() > 1 ? args[1] : juce::var();
+                           auto& scenes = processorRef.getScenes();
+                           const auto index = (int) options.getProperty ("index", -1);
+
+                           if (action == "add")    scenes.add (options["name"].toString());
+                           if (action == "update") scenes.update (index);
+                           if (action == "rename") scenes.rename (index, options["name"].toString());
+                           if (action == "remove") scenes.remove (index);
+                           if (action == "recall") scenes.recall (index);
+                           if (action == "step")   scenes.step ((int) options.getProperty ("delta", 1));
+                           if (action == "glide")  scenes.setGlideSeconds ((double) options.getProperty ("seconds", 0.5));
+
+                           complete (scenes.describe());
+                       })
+
+                       // (action, args) -> the setlist (see Setlist::describe) plus { available, recent, warning,
+                       // error }. Actions: "list", "add" { name? }, "update" { index }, "remove" { index },
+                       // "move" { index, to }, "info" { index, name?, key?, minor?, tempo?, lyrics?, notes? },
+                       // "load" { index }, "step" { delta }, "new", "open", "openRecent" { file }, "save",
+                       // "saveAs", "chooseBacking" { index }, "chooseLyrics" { index }. Standalone app only.
+                       .withNativeFunction ("setlist", [this] (const auto& args, auto complete)
+                       {
+                           handleSetlist (args.size() > 0 ? args[0].toString() : juce::String(),
+                                          args.size() > 1 ? args[1] : juce::var(), std::move (complete));
+                       })
+
                        // (key) -> the stored string, or "" / (key, value) -> value. Small UI preferences
                        // (favourite presets) kept in the app's settings file.
                        .withNativeFunction ("uiPref", [this] (const auto& args, auto complete)
@@ -668,6 +700,13 @@ void PluginEditor::timerCallback()
     status->setProperty ("output", toDecibels (processorRef.outputPeak));
     status->setProperty ("note",   pitch.detectedNote.load());
     status->setProperty ("target", pitch.tunedNote.load());
+
+    // The harmonizer: the chord it follows ("" for none) and each voice's note (-1 = silent).
+    status->setProperty ("chord", processorRef.getHarmonyChord().getName());
+    juce::Array<juce::var> voices;
+    for (const auto& note : pitch.voiceNotes)
+        voices.add (note.load());
+    status->setProperty ("voices", voices);
     status->setProperty ("preset", processorRef.currentPreset.load());
 
     // Live readings for the effect cards that are on, by module key (Live mode only).
@@ -682,6 +721,10 @@ void PluginEditor::timerCallback()
 
         status->setProperty ("fx", juce::var (effects));
     }
+
+    // The scenes (which is active, and whether the sound has moved away from it), 5 times a second.
+    if (! processorRef.isDawMode() && looperTicks % 6 == 3)
+        status->setProperty ("scenes", processorRef.getScenes().describe());
 
     // The looper, with its layers' waveforms 5 times a second while it has a loop.
     if (! processorRef.isDawMode())
@@ -760,6 +803,150 @@ juce::var PluginEditor::describeLooper (bool withOverview)
     }
 
     return juce::var (result);
+}
+
+juce::var PluginEditor::describeSetlist (const juce::String& warning, const juce::String& error)
+{
+    auto result = processorRef.getSetlist().describe();
+    auto* object = result.getDynamicObject();
+    object->setProperty ("available", juce::JUCEApplicationBase::isStandaloneApp());
+    object->setProperty ("warning", warning);
+    object->setProperty ("error", error);
+
+    juce::Array<juce::var> recent;
+    for (const auto& path : juce::StringArray::fromLines (settings.getValue ("setlist.recent")))
+        if (juce::File::isAbsolutePath (path) && juce::File (path).existsAsFile())
+            recent.add (path);
+    object->setProperty ("recent", recent);
+    return result;
+}
+
+void PluginEditor::rememberSetlist (const juce::File& file)
+{
+    auto recent = juce::StringArray::fromLines (settings.getValue ("setlist.recent"));
+    recent.removeString (file.getFullPathName());
+    recent.insert (0, file.getFullPathName());
+    recent.removeEmptyStrings();
+    while (recent.size() > 8)
+        recent.remove (recent.size() - 1);
+    settings.setValue ("setlist.recent", recent.joinIntoString ("\n"));
+}
+
+void PluginEditor::handleSetlist (const juce::String& action, const juce::var& options, std::function<void (juce::var)> complete)
+{
+    auto& setlist = processorRef.getSetlist();
+    const auto index = (int) options.getProperty ("index", -1);
+    juce::String warning, error;
+
+    if (! juce::JUCEApplicationBase::isStandaloneApp())
+    {
+        complete (describeSetlist ({}, "Setlists are in the standalone app."));
+        return;
+    }
+
+    using Flags = juce::FileBrowserComponent::FileChooserFlags;
+    const auto choose = [this, complete] (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
+                                          std::function<juce::String (const juce::File&)> onPicked)
+    {
+        folderChooser = std::make_unique<juce::FileChooser> (title, start, patterns);
+        folderChooser->launchAsync (flags, [this, complete, onPicked] (const juce::FileChooser& chooser)
+        {
+            const auto picked = chooser.getResult();
+            const auto message = picked != juce::File() ? onPicked (picked) : juce::String();
+            complete (describeSetlist ({}, message));
+        });
+    };
+
+    const auto defaultFolder = setlist.getFile() != juce::File() ? setlist.getFile().getParentDirectory()
+                                                                 : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory);
+
+    if (action == "add")    setlist.addSong (options["name"].toString());
+    if (action == "update") setlist.updateSong (index);
+    if (action == "remove") setlist.removeSong (index);
+    if (action == "move")   setlist.moveSong (index, (int) options.getProperty ("to", index));
+    if (action == "info")   setlist.setSongInfo (index, options);
+    // A song change replaces the backing track, so it waits while a take is recording.
+    if ((action == "load" || action == "step") && processorRef.getRecorder().isRecording())
+    {
+        complete (describeSetlist ({}, "Stop recording before changing songs."));
+        return;
+    }
+
+    if (action == "load")   setlist.loadSong (index, warning);
+    if (action == "step")   setlist.step ((int) options.getProperty ("delta", 1), warning);
+    if (action == "new")    setlist.clear();
+
+    if (action == "openRecent")
+    {
+        const juce::File file (options["file"].toString());
+        error = setlist.open (file);
+        if (error.isEmpty())
+            rememberSetlist (file);
+    }
+
+    if (action == "save" && setlist.getFile() != juce::File())
+    {
+        error = setlist.save (setlist.getFile());
+    }
+    else if (action == "save" || action == "saveAs")
+    {
+        choose ("Save the setlist", defaultFolder.getChildFile (setlist.getName() + ".micfxset"), "*.micfxset",
+                Flags::saveMode | Flags::canSelectFiles | Flags::warnAboutOverwriting,
+                [this] (const juce::File& picked)
+                {
+                    const auto file = picked.withFileExtension ("micfxset");
+                    const auto message = processorRef.getSetlist().save (file);
+                    if (message.isEmpty())
+                        rememberSetlist (file);
+                    return message;
+                });
+        return;
+    }
+
+    if (action == "open")
+    {
+        choose ("Open a setlist", defaultFolder, "*.micfxset", Flags::openMode | Flags::canSelectFiles,
+                [this] (const juce::File& picked)
+                {
+                    const auto message = processorRef.getSetlist().open (picked);
+                    if (message.isEmpty())
+                        rememberSetlist (picked);
+                    return message;
+                });
+        return;
+    }
+
+    if (action == "chooseBacking")
+    {
+        choose ("The song's backing track", juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+                "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3;*.m4a", Flags::openMode | Flags::canSelectFiles,
+                [this, index] (const juce::File& picked)
+                {
+                    auto* fields = new juce::DynamicObject();
+                    fields->setProperty ("backing", picked.getFullPathName());
+                    processorRef.getSetlist().setSongInfo (index, juce::var (fields));
+                    return juce::String();
+                });
+        return;
+    }
+
+    if (action == "chooseLyrics")
+    {
+        choose ("The song's lyrics (plain text, or .lrc with times)", defaultFolder, "*.txt;*.lrc",
+                Flags::openMode | Flags::canSelectFiles,
+                [this, index] (const juce::File& picked)
+                {
+                    if (picked.getSize() > 200000)
+                        return juce::String ("That file is too big for lyrics.");
+                    auto* fields = new juce::DynamicObject();
+                    fields->setProperty ("lyrics", picked.loadFileAsString());
+                    processorRef.getSetlist().setSongInfo (index, juce::var (fields));
+                    return juce::String();
+                });
+        return;
+    }
+
+    complete (describeSetlist (warning, error));
 }
 
 juce::var PluginEditor::describeMidi()

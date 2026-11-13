@@ -112,8 +112,13 @@ void Multitrack::startLoad (const juce::File& file, bool isTake, juce::int64 sta
     loader.addJob ([this, file, isTake, startSample, id, rate, weak = std::weak_ptr<bool> (alive)]
     {
         auto decoded = std::make_shared<Decoded> (decode (file, rate));
+        auto chords = std::make_shared<std::vector<analysis::ChordSegment>>();
 
-        juce::MessageManager::callAsync ([this, file, isTake, startSample, id, rate, decoded, weak]
+        // The song's chords, for the harmonizer (takes are only the voice).
+        if (! isTake && decoded->error.isEmpty())
+            *chords = analysis::detectChords (decoded->audio, rate);
+
+        juce::MessageManager::callAsync ([this, file, isTake, startSample, id, rate, decoded, chords, weak]
         {
             if (auto flag = weak.lock(); flag == nullptr || ! *flag)
                 return;
@@ -134,7 +139,9 @@ void Multitrack::startLoad (const juce::File& file, bool isTake, juce::int64 sta
                 return;
             }
 
-            install (makeTrack (file, isTake, startSample, id, std::move (decoded->audio)));
+            auto track = makeTrack (file, isTake, startSample, id, std::move (decoded->audio));
+            track->chords = std::move (*chords);
+            install (std::move (track));
         });
     });
 }
@@ -157,7 +164,10 @@ int Multitrack::loadNow (const juce::File& file, bool isTake, juce::int64 startS
         return -1;
 
     const auto id = nextId++;
-    install (makeTrack (file, isTake, startSample, id, std::move (decoded.audio)));
+    auto chords = isTake ? std::vector<analysis::ChordSegment>() : analysis::detectChords (decoded.audio, sampleRate);
+    auto track = makeTrack (file, isTake, startSample, id, std::move (decoded.audio));
+    track->chords = std::move (chords);
+    install (std::move (track));
     return id;
 }
 
@@ -220,6 +230,21 @@ void Multitrack::publish()
 }
 
 //==============================================================================
+analysis::Chord Multitrack::getBackingChord (juce::int64 timelinePosition) noexcept
+{
+    const juce::SpinLock::ScopedTryLockType lock (liveLock);
+
+    if (! lock.isLocked())
+        return {};
+
+    // The first backing track that covers the position.
+    for (const auto* track : live)
+        if (! track->isTake && ! track->chords.empty() && timelinePosition >= track->start && timelinePosition < track->end())
+            return analysis::chordAt (track->chords, timelinePosition - track->start);
+
+    return {};
+}
+
 juce::int64 Multitrack::process (juce::AudioBuffer<float>& buffer, int numChannels, int numSamples) noexcept
 {
     const auto blockStart = position.load();

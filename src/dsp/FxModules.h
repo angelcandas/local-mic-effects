@@ -148,9 +148,39 @@ public:
     Value& harmonyVoice1 = addValue ("harmonyVoice1", 4.0f);
     Value& harmonyVoice2 = addValue ("harmonyVoice2", 7.0f);
     Value& harmonyMix    = addValue ("harmonyMix", 50.0f);
+    Value& harmonyMode     = addChoice ("harmonyMode", 0.0f);
+    Value& harmonyVoices   = addChoice ("harmonyVoices", 1.0f);   // index: 0 = one voice ... 3 = four
+    Value& harmonyStyle    = addChoice ("harmonyStyle", 0.0f);
+    Value& harmonySource   = addChoice ("harmonySource", 0.0f);   // Live: getHarmonySourceNames()
+    Value& harmonyVoice3   = addValue ("harmonyVoice3", -5.0f);
+    Value& harmonyVoice4   = addValue ("harmonyVoice4", 12.0f);
+    Value& harmonyHumanize = addValue ("harmonyHumanize", 35.0f);
+    Value& harmonySpread   = addValue ("harmonySpread", 50.0f);
+    Value& harmonyFormant  = addValue ("harmonyFormant", 0.0f);
+
+    // Where Live mode hears the chords (the DAW listens to the other tracks). Keys held
+    // on a MIDI keyboard win over the others while they're down.
+    enum HarmonySource { backingTrack, instrumentInput, midiKeys };
+    static const juce::StringArray& getHarmonySourceNames()
+    {
+        static const juce::StringArray names { "Backing track", "Instrument input", "MIDI keys" };
+        return names;
+    }
 
     // For the UI tuner.
     const PitchEngine& getEngine() const noexcept { return engine; }
+
+    // Whether the harmonizer wants a chord now (on, in Chords mode). Audio thread.
+    bool isFollowingChords() const noexcept
+    {
+        return flag (harmonyOn) && index (harmonyMode) == PitchEngine::chordMode;
+    }
+
+    int getHarmonySource() const noexcept { return index (harmonySource); }
+
+    // The chord the harmony voices follow in Chords mode, set by whoever listens to the
+    // music (audio thread, before each block).
+    void setChord (const analysis::Chord& chord) noexcept { settings.chord = chord; }
 
     // Autotune and pitch shift delay the voice (see PsolaShifter). The harmonizer alone
     // doesn't: the lead stays dry and only the harmony voices lag a little behind it.
@@ -181,6 +211,14 @@ private:
         settings.interval1        = get (harmonyVoice1);
         settings.interval2        = get (harmonyVoice2);
         settings.harmonyMix       = fraction (harmonyMix);
+        settings.harmonyMode      = index (harmonyMode);
+        settings.harmonyVoices    = index (harmonyVoices) + 1;
+        settings.harmonyStyle     = index (harmonyStyle);
+        settings.interval3        = get (harmonyVoice3);
+        settings.interval4        = get (harmonyVoice4);
+        settings.humanize         = fraction (harmonyHumanize);
+        settings.spread           = fraction (harmonySpread);
+        settings.voiceFormant     = get (harmonyFormant);
     }
 
     void render (const Context& c) noexcept override { engine.process (c, settings); }

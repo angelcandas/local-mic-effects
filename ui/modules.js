@@ -38,9 +38,20 @@ export const MODULES = [
     description: "Deeper or higher voice; formant sets the character",
     controls: [bipolar("pitchShift", "Pitch"), bipolar("pitchFormant", "Formant")] },
 
-  { id: "harmony", name: "Harmonizer", category: "pitch", power: "harmonyOn",
-    description: "Two extra voices singing along",
-    controls: [bipolar("harmonyVoice1", "Voice 1"), bipolar("harmonyVoice2", "Voice 2"), knob("harmonyMix", "Mix")] },
+  // Mode: fixed intervals, steps of the autotune key's scale, or notes of the song's
+  // chords. `when` shows a control only for some values of others (see isControlShown).
+  { id: "harmony", name: "Harmonizer", category: "pitch", power: "harmonyOn", wide: true,
+    description: "Up to four extra voices: at fixed intervals, in the key, or following the song's chords",
+    controls: [{ type: "chord" },
+               choice("harmonyMode", "Mode"), choice("harmonyVoices", "Voices"),
+               { ...choice("harmonyStyle", "Style"), when: { harmonyMode: [2] } },
+               { ...choice("harmonySource", "Chords from"), when: { harmonyMode: [2] }, liveOnly: true },
+               { ...bipolar("harmonyVoice1", "Voice 1"), when: { harmonyMode: [0, 1] } },
+               { ...bipolar("harmonyVoice2", "Voice 2"), when: { harmonyMode: [0, 1], harmonyVoices: [1, 2, 3] } },
+               { ...bipolar("harmonyVoice3", "Voice 3"), when: { harmonyMode: [0, 1], harmonyVoices: [2, 3] } },
+               { ...bipolar("harmonyVoice4", "Voice 4"), when: { harmonyMode: [0, 1], harmonyVoices: [3] } },
+               knob("harmonyMix", "Mix"), knob("harmonyHumanize", "Humanize"), knob("harmonySpread", "Spread"),
+               bipolar("harmonyFormant", "Formant")] },
 
   { id: "eq", name: "EQ", category: "cleanup", power: "eqOn", wide: true,
     description: "Warmth, presence and air",
@@ -178,6 +189,11 @@ export const MODULE_KEYS = {
   meq: "masterEq", mb: "multiband", imager: "imager", limiter: "limiter", loudness: "loudness",
   transient: "transient", deq: "dynamicEq",
 };
+
+// Whether a control with a `when` ({ param: [values] }) shows, given a way to read values.
+export function isControlShown(control, get) {
+  return Object.entries(control.when ?? {}).every(([param, values]) => values.includes(Math.round(get(param) ?? 0)));
+}
 
 export const NOTE_NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
 

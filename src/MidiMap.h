@@ -20,8 +20,9 @@
 //                            start of the block, so a footswitch is as tight as the
 //                            block; the others run on the message thread:
 //                            looper.main, looper.stop, looper.undo, looper.redo,
-//                            looper.clear, preset.next, preset.previous, mute, and the
-//                            page's own: record, scene.next, scene.previous.
+//                            looper.clear, preset.next, preset.previous, mute,
+//                            scene.next, scene.previous, scene.1 ... scene.8, and the
+//                            page's own: record.
 //
 // Threading: process() runs on the audio thread and only reads the mapping table through
 // a try-lock, so it never waits. Events reach the message thread through a lock-free
@@ -69,6 +70,7 @@ public:
     std::function<void (const juce::String& action)> onAction; // actions this class doesn't run itself
     std::function<void (int delta)> onPresetStep;
     std::function<void()> onMuteToggle;
+    std::function<void (const juce::String& action)> onScene; // "scene.next", "scene.previous", "scene.3"...
 
     // Audio thread: reads the block's MIDI (Live mode). Looper actions run here.
     void process (const juce::MidiBuffer&) noexcept;

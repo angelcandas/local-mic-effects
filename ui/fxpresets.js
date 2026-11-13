@@ -29,7 +29,15 @@ export const FX_PRESETS = {
   harmony: [p("Major third + fifth", { harmonyVoice1: 4, harmonyVoice2: 7, harmonyMix: 50 }),
             p("Minor third + fifth", { harmonyVoice1: 3, harmonyVoice2: 7, harmonyMix: 50 }),
             p("Octaves", { harmonyVoice1: -12, harmonyVoice2: 12, harmonyMix: 40 }),
-            p("Power fifths", { harmonyVoice1: -5, harmonyVoice2: 7, harmonyMix: 45 })],
+            p("Power fifths", { harmonyVoice1: -5, harmonyVoice2: 7, harmonyMix: 45 }),
+            // Following the song's chords (mode 2); voices 0-based (3 = four voices).
+            p("Chord choir above", { harmonyMode: 2, harmonyVoices: 1, harmonyStyle: 0, harmonyMix: 50, harmonyHumanize: 40, harmonySpread: 60 }),
+            p("Chord choir around", { harmonyMode: 2, harmonyVoices: 2, harmonyStyle: 2, harmonyMix: 50, harmonyHumanize: 45, harmonySpread: 70 }),
+            p("Gospel stack (4 voices)", { harmonyMode: 2, harmonyVoices: 3, harmonyStyle: 3, harmonyMix: 55, harmonyHumanize: 55, harmonySpread: 80 }),
+            p("Close harmony below", { harmonyMode: 2, harmonyVoices: 1, harmonyStyle: 1, harmonyMix: 45, harmonyHumanize: 30, harmonySpread: 40 }),
+            // In the autotune key (mode 1): a third and a fifth that fit the scale.
+            p("Thirds in the key", { harmonyMode: 1, harmonyVoices: 0, harmonyVoice1: 4, harmonyMix: 50, harmonyHumanize: 30 }),
+            p("Third + fifth in the key", { harmonyMode: 1, harmonyVoices: 1, harmonyVoice1: 4, harmonyVoice2: 7, harmonyMix: 50, harmonyHumanize: 35 })],
   eq: [p("Warm", { eqLow: 3, eqMidFreq: 2500, eqMidGain: -1, eqHigh: -1 }),
        p("Presence", { eqLow: -1, eqMidFreq: 3000, eqMidGain: 4, eqHigh: 2 }),
        p("Air", { eqLow: 0, eqMidFreq: 2500, eqMidGain: 0, eqHigh: 5 }),
