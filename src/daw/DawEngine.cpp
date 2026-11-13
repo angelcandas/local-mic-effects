@@ -148,6 +148,15 @@ void DawEngine::loadAllNow()
         }
 
     rebuildNow();
+
+    // Before the first block: start every fader, pan and mute where it's set, rather than
+    // gliding there from unity (a muted track leaked into the first few ms of a render).
+    for (auto& [id, strip] : strips)
+    {
+        strip->left.setCurrentAndTargetValue (strip->targetLeft.load());
+        strip->right.setCurrentAndTargetValue (strip->targetRight.load());
+        strip->direct.setCurrentAndTargetValue (strip->targetDirect.load());
+    }
 }
 
 InstrumentPtr DawEngine::getInstrument (int trackId) const

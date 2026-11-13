@@ -14788,6 +14788,79 @@ static void testSingAlongSession()
     folder.deleteRecursively();
 }
 
+static void testBounce()
+{
+    std::cout << "\nBounce to a new track\n";
+
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-bounce", {});
+    folder.createDirectory();
+    juce::AudioBuffer<float> tone (2, (int) (1.0 * sampleRate));
+    for (int i = 0; i < tone.getNumSamples(); ++i)
+        for (int ch = 0; ch < 2; ++ch)
+            tone.setSample (ch, i, 0.25f * (float) std::sin (juce::MathConstants<double>::twoPi * 330.0 * i / sampleRate));
+    const auto toneFile = folder.getChildFile ("tone.wav");
+    writeWav (toneFile, tone, sampleRate);
+
+    daw::Edit edit;
+    const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+    const auto other = (int) edit.addTrack ("Other")[daw::ids::id];
+    edit.addClip (vocal, toneFile, 0.5, 1.0);
+    edit.addClip (other, toneFile, 0.0, 1.0);
+    edit.setTrackVolume (vocal, -12.0f);
+
+    daw::Exporter::Settings settings;
+    settings.sampleRate = sampleRate;
+    settings.bitDepth = 32;
+    settings.tail = 0.0;
+    daw::Exporter exporter (edit, settings);
+    const auto file = folder.getChildFile ("bounced.wav");
+    const auto result = exporter.exportTrack (vocal, file);
+    check (result.error.isEmpty() && file.existsAsFile(), "renders the track to a file");
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    juce::AudioBuffer<float> audio (2, reader != nullptr ? (int) reader->lengthInSamples : 0);
+    if (reader != nullptr)
+        reader->read (&audio, 0, audio.getNumSamples(), 0, true, true);
+    const auto half = (int) (0.5 * sampleRate);
+    const auto before = audio.getNumSamples() > half ? audio.getMagnitude (0, half - 1000) : 1.0f;
+    const auto during = audio.getNumSamples() > half + 2000 ? audio.getMagnitude (half + 1000, juce::jmin (audio.getNumSamples() - half - 1000, (int) (0.5 * sampleRate))) : 0.0f;
+    check (before < 1.0e-4f, "without the other tracks (" + juce::String (before, 4) + ")");
+    check (std::abs (during - 0.25f) < 0.03f, "at 0 dB, not the track's fader (peak " + juce::String (during, 3) + ")");
+    check (! exporter.exportTrack (999, folder.getChildFile ("none.wav")).error.isEmpty(), "an unknown track is an error");
+
+    PluginProcessor processor;
+    processor.prepareToPlay (sampleRate, blockSize);
+    juce::PropertiesFile::Options options;
+    options.applicationName = "MicFXTests";
+    juce::PropertiesFile props (folder.getChildFile ("test.settings"), options);
+    DawBridge::availableForTesting = true;
+    {
+        DawBridge bridge (processor, props, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        auto& dawEdit = processor.getDawEdit();
+        const auto source = (int) dawEdit.addTrack ("Synth")[daw::ids::id];
+        dawEdit.addTrack ("Last");
+        const auto count = dawEdit.getTracks().size();
+        const auto added = bridge.addBouncedTrack (source, file, 2.0);
+        const auto tracks = dawEdit.getTracks();
+        int at = -1;
+        for (int i = 0; i < tracks.size(); ++i)
+            if ((int) tracks[i][daw::ids::id] == (int) added["track"])
+                at = i;
+        check ((bool) added["ok"] && tracks.size() == count + 1 && at >= 1 && (int) tracks[at - 1][daw::ids::id] == source
+                   && tracks[at][daw::ids::name].toString() == "Synth (bounced)",
+               "the bounce lands on a new track right under its source");
+        const auto clip = tracks[at].getChildWithName (daw::ids::CLIP);
+        check (clip.isValid() && std::abs ((double) clip[daw::ids::start] - 2.0) < 1e-9 && (bool) dawEdit.getTrack (source)[daw::ids::mute],
+               "from where the bounce started, with the source muted");
+        dawEdit.getUndoManager().undo();
+        check (dawEdit.getTracks().size() == count && ! (bool) dawEdit.getTrack (source)[daw::ids::mute], "one undo takes it back");
+    }
+    DawBridge::availableForTesting = false;
+    folder.deleteRecursively();
+}
+
 static void testTimeRange()
 {
     std::cout << "\nArrangement time range commands\n";
@@ -15723,6 +15796,7 @@ int main()
         testLiveHistory();
         testSingAlongSession();
         testTimeRange();
+        testBounce();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -15866,6 +15940,7 @@ int main()
     testLiveHistory();
     testSingAlongSession();
     testTimeRange();
+    testBounce();
     testSetlist();
     testDawEngine();
     testDeviceEdits();

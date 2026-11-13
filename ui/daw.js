@@ -907,6 +907,7 @@ class DawScreen {
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
     window.__JUCE__.backend.addEventListener("dawExport", (progress) => this.onExport(progress));
+    window.__JUCE__.backend.addEventListener("dawBounce", (event) => this.onBounce(event));
     window.__JUCE__.backend.addEventListener("dawStems", (event) => this.onStems(event));
     window.__JUCE__.backend.addEventListener("dawRebalance", (event) => this.onRebalance(event));
     window.__JUCE__.backend.addEventListener("dawToMidi", (event) => this.onToMidi(event));
@@ -1404,6 +1405,7 @@ class DawScreen {
       { level: 4, element: this.dockButton, label: "Bottom panel", run: () => this.run("toggleDock"), checked: () => !this.root.classList.contains("dock-hidden") },
       { level: 5, element: this.autoMixButton, label: "Auto Mix…", run: () => this.toggleAutoMix() },
       { level: 6, element: this.assistButton, label: "Assist…", run: () => this.openAssistMenu(this.moreButton) },
+      { level: 6, element: this.punchButton, label: "Punch", run: () => this.togglePunch(), checked: () => Boolean(this.session?.punch) },
       { level: 5, element: this.mixCheckButton, label: "Mix Check…", run: () => this.mixCheck.toggle() },
     ];
     this.foldLevel = 0;
@@ -4302,6 +4304,29 @@ class DawScreen {
     this.syncExportFormat();
   }
 
+  // Bounce to a new track: the track through its effects to audio on a new track under it
+  // (the source muted). Within a marked time range, just that range; else the whole song.
+  async bounceTrack(id = this.selectedTrackObject()?.id) {
+    if (id == null) return toast("Select a track to bounce first.");
+    const range = this.timeRange;
+    const result = await daw("bounce", range ? { id, start: range.start, end: range.end } : { id });
+    if (result && result.ok === false) toast(result.error || "Couldn't bounce the track.", "is-error");
+  }
+
+  onBounce(event) {
+    if (!event.done) {
+      this.setJob("bounce", { label: "Bounce", progress: event.progress ?? 0, cancel: () => daw("bounce", { cancel: true }) });
+      return;
+    }
+    this.endJob("bounce");
+    if (event.cancelled) toast("Bounce cancelled.");
+    else if (!event.ok) toast(event.error || "Couldn't bounce the track.", "is-error");
+    else {
+      this.select(event.track, null);
+      toast("Bounced to a new track. The original is muted, so you can go back to it.", "", "undo");
+    }
+  }
+
   onExport(progress) {
     if (progress.done) this.endJob("export");
     else this.setJob("export", { label: "Export", progress: progress.progress ?? 0, cancel: () => daw("cancelExport"), open: () => this.toggleExportPanel(true) });
@@ -5266,7 +5291,7 @@ class DawScreen {
                    ["K / Insert", "Add a marker at the playhead"], ["[ / ]", "Previous / next marker"], ["T", "Tap tempo"],
                    ["Click the clock", "Type a bar or time to go to"]]],
     ["Tracks", [["↑ / ↓", "Select the track above / below"], ["Ctrl+T", "New track"], ["Ctrl+Shift+T", "New MIDI track"], ["Ctrl+Shift+D", "Duplicate the selected track"],
-                ["Ctrl+G", "Group the selected tracks (Shift+click several)"], ["Ctrl+Shift+G", "Ungroup"], ["Ctrl+R", "Rename the selected track"], ["Ctrl+Delete", "Delete the selected track"],
+                ["Ctrl+G", "Group the selected tracks (Shift+click several)"], ["Ctrl+B", "Bounce the selected track to a new audio track"], ["Ctrl+Shift+G", "Ungroup"], ["Ctrl+R", "Rename the selected track"], ["Ctrl+Delete", "Delete the selected track"],
                 ["M / 0", "Mute the selected track"], ["S", "Solo the selected track"], ["Alt+click S", "Solo only that track"],
                 ["A", "Arm the selected track"], ["I", "Monitor the mic on the selected track (In / Off; the header button also has Auto)"],
                 ["Double-click a value / Enter", "Type a value (volume, pan, sends, knobs)"], ["Ctrl+click a slider", "Reset it"],
@@ -5606,6 +5631,8 @@ class DawScreen {
       item("Clear effect automation", () => daw("setTrack", { id: track.id, clearAutomation: true }), { disabled: !track.automation?.length });
       item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
       item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
+      item("Bounce to a new track", () => this.bounceTrack(track.id), { shortcut: "Ctrl+B",
+        hint: "Renders the track through its effects to audio on a new track and mutes this one (inside the marked range, if there is one). Frees the CPU its plug-ins use." });
       if (track.kind !== "midi")
         item("Split into stems…", () => this.toggleStems(true, firstClip), { disabled: !firstClip });
       if (track.kind !== "midi") {
@@ -5910,6 +5937,7 @@ class DawScreen {
       metronome: () => daw("metronome", { on: !this.session?.metronome }),
       addMarker: () => this.addMarker(),
       duplicateTrack: () => this.duplicateTrack(),
+      bounce: () => this.bounceTrack(),
       groupTracks: () => this.groupTracks(),
       ungroup: () => this.ungroup(),
       copyEffects: () => this.copyEffects(),
@@ -6027,6 +6055,7 @@ class DawScreen {
       else if (key === "f") command("searchLibrary");
       else if (key === "a") command("selectAll");
       else if (key === "k") { handled(); if (!event.repeat) this.togglePiano(); }
+      else if (key === "b") command("bounce");
       else if (code === "Digit1") { handled(); this.stepGrid("narrow"); }
       else if (code === "Digit2") { handled(); this.stepGrid("widen"); }
       else if (code === "Digit3") { handled(); this.stepGrid("triplet"); }
@@ -6068,8 +6097,8 @@ class DawScreen {
       if (key === "m") command("muteClip");
       else if (key === "z") command("zoomFit");
       else if (key === "b") command("toggleLibrary");
+      else if (key === "r") { handled(); this.togglePunch(); }
     }
-    else if (key === "r" && event.shiftKey) { handled(); this.togglePunch(); }
     else if (key === "r") command("record");
     else if (key === "k") command("addMarker");
     else if (key === "z") command("zoomSelection");

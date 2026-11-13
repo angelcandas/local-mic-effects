@@ -146,6 +146,11 @@ public:
     // the rest of the song (clips, markers, pattern blocks) left, "insertSilence" pushes
     // everything from the start right by the range's length. -> { ok, error, clips }
     juce::var editTimeRange (const juce::var& args);
+    // Bounce to a new track: the file (a render of `sourceTrackId` alone, see
+    // Exporter::exportTrack) on a new audio track right under it from `startSeconds`, and the
+    // source muted, in one undo step. Answers { ok, error, track }.
+    juce::var addBouncedTrack (int sourceTrackId, const juce::File&, double startSeconds);
+
 private:
     juce::var handleRebalance (const juce::var& args);
 
@@ -240,6 +245,11 @@ private:
     // A running export (at most one).
     struct ExportJob;
     std::shared_ptr<ExportJob> exportJob;
+
+    // A running "Bounce to a new track" (at most one): the source track, where it starts.
+    std::shared_ptr<ExportJob> bounceJob;
+    int bounceTrack = -1;
+    double bounceStart = 0.0;
 
     // A running stem split (at most one).
     struct StemJob;

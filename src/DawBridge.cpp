@@ -410,6 +410,8 @@ DawBridge::~DawBridge()
 
     if (exportJob != nullptr)
         exportJob->cancel = true;
+    if (bounceJob != nullptr)
+        bounceJob->cancel = true;
     if (autoMixJob != nullptr)
         autoMixJob->cancel = true;
     if (mixCheckJob != nullptr)
@@ -1335,6 +1337,24 @@ void DawBridge::tick()
             emit ("dawBackingVocals", object ({ { "state", "analysing" }, { "clip", backingJob->clipId }, { "progress", backingJob->progress.load() } }));
     }
 
+    if (bounceJob != nullptr)
+    {
+        if (bounceJob->finished)
+        {
+            const auto job = std::move (bounceJob);
+            auto answer = job->result.error.isNotEmpty() || job->result.cancelled || job->result.files.isEmpty()
+                            ? object ({ { "ok", false }, { "error", job->result.cancelled ? juce::String() : job->result.error } })
+                            : addBouncedTrack (bounceTrack, job->result.files.getFirst(), bounceStart);
+            answer.getDynamicObject()->setProperty ("done", true);
+            answer.getDynamicObject()->setProperty ("cancelled", job->result.cancelled);
+            emit ("dawBounce", answer);
+        }
+        else
+        {
+            emit ("dawBounce", object ({ { "progress", bounceJob->progress.load() } }));
+        }
+    }
+
     if (exportJob != nullptr)
     {
         if (exportJob->finished)
@@ -2117,6 +2137,40 @@ void DawBridge::loadPresetInto (int trackId, int presetIndex)
         for (int v = 0; v < module->getNumValues(); ++v)
             edit.setInsertValue ((int) insert[ids::id], module->getValueId (v), module->getValue (v).load());
     }
+}
+
+juce::var DawBridge::addBouncedTrack (int sourceTrackId, const juce::File& file, double startSeconds)
+{
+    const auto source = edit.getTrack (sourceTrackId);
+    if (! source.isValid())
+        return error ("The track to bounce has gone.");
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    if (reader == nullptr || reader->lengthInSamples <= 0)
+        return error ("The bounce didn't make any audio.");
+    const auto seconds = (double) reader->lengthInSamples / reader->sampleRate;
+    reader.reset();
+
+    edit.getUndoManager().beginNewTransaction ("Bounce to a new track");
+
+    const auto tracks = edit.getTracks();
+    auto index = tracks.size();
+    for (int i = 0; i < tracks.size(); ++i)
+        if ((int) tracks[i][ids::id] == sourceTrackId)
+            index = i + 1;
+
+    const auto track = edit.addTrack (source[ids::name].toString() + " (bounced)", index);
+    const auto id = (int) track[ids::id];
+    if (source.hasProperty (ids::colour))
+        edit.getTrack (id).setProperty (ids::colour, source[ids::colour], &edit.getUndoManager());
+    edit.addClip (id, file, startSeconds, seconds);
+    edit.setTrackMute (sourceTrackId, true);
+
+    edit.getUndoManager().beginNewTransaction();
+    sessionChanged = true;
+    return object ({ { "ok", true }, { "error", juce::String() }, { "track", id } });
 }
 
 void DawBridge::startExport (const juce::var& args, const juce::File& destination)
@@ -5405,6 +5459,46 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                                                      : error (folder.getFileName() + " isn't a folder.");
                      },
                      complete);
+        return;
+    }
+
+    // "bounce" { track, start?, end? }: renders the track alone (through its effects) to a
+    // new audio track under it and mutes it; progress and the end come as "dawBounce"
+    // events. "bounce" { cancel: true } stops it.
+    if (command == "bounce")
+    {
+        if (arg (args, "cancel", false))
+        {
+            if (bounceJob != nullptr)
+                bounceJob->cancel = true;
+            ok();
+            return;
+        }
+        if (bounceJob != nullptr)                 { complete (error ("A track is already bouncing.")); return; }
+        if (! edit.getTrack (id).isValid())       { complete (error ("Select a track to bounce.")); return; }
+
+        engine.captureInstrumentStates();
+        daw::Exporter::Settings settings;
+        settings.sampleRate = engine.getSampleRate();
+        settings.bitDepth = 32;
+        settings.start = juce::jmax (0.0, (double) arg (args, "start", 0.0));
+        settings.end = arg (args, "end", -1.0);
+        settings.tail = settings.end >= 0.0 ? 0.0 : 2.0;
+
+        const auto name = edit.getTrack (id)[ids::name].toString();
+        const auto file = getRecordingFolder().getNonexistentChildFile (juce::File::createLegalFileName (name + " (bounced)"), ".wav", false);
+        auto exporter = std::make_shared<daw::Exporter> (edit, settings); // snapshot on this thread
+        auto job = std::make_shared<ExportJob>();
+        bounceJob = job;
+        bounceTrack = id;
+        bounceStart = settings.start;
+
+        juce::Thread::launch ([exporter, job, file, trackId = id]
+        {
+            job->result = exporter->exportTrack (trackId, file, [job] (double p) { job->progress = p; return ! job->cancel.load(); });
+            job->finished = true;
+        });
+        ok();
         return;
     }
 

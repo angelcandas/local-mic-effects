@@ -61,6 +61,10 @@ public:
     // they line up. With normalise on, each file is normalised on its own.
     Result exportStems (const juce::File& folder, Progress = {});
 
+    // One track to one stereo WAV for "Bounce to a new track": through its inserts (and
+    // instrument), at 0 dB and centred, without its sends, the returns or the master bus.
+    Result exportTrack (int trackId, const juce::File& file, Progress = {});
+
 private:
     Result render (const juce::ValueTree& session, const juce::File&, const Progress&, double progressFrom, double progressTo);
 
