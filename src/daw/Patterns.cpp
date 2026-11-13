@@ -320,6 +320,12 @@ void Edit::setPatternClipMute (int clipId, bool mute)
         clip.setProperty (ids::mute, mute, undoTarget);
 }
 
+void Edit::setPatternClipPattern (int clipId, int patternId)
+{
+    if (auto clip = getPatternClip (clipId); clip.isValid() && getPattern (patternId).isValid())
+        clip.setProperty (ids::pattern, patternId, undoTarget);
+}
+
 void Edit::removePatternClip (int clipId)
 {
     if (auto clip = getPatternClip (clipId); clip.isValid())

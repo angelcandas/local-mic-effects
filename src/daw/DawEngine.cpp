@@ -2146,6 +2146,16 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 
     followChords (graph, isPlaying, blockStart, numSamples);
 
+    // The tempo where the timeline is, for effects that sync to it (the echo).
+    {
+        const auto bpm = graph.tempo.getBpmAt ((double) std::max ((juce::int64) 0, blockStart) / sampleRate);
+        for (auto& track : graph.tracks)
+            track.strip->chain.setTempo (bpm);
+        for (auto& bus : graph.returns)
+            bus.strip->chain.setTempo (bpm);
+        graph.master->chain.setTempo (bpm);
+    }
+
     auto& master = *graph.master;
     master.buffer.clear (0, numSamples);
 

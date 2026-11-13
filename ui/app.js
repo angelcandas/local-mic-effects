@@ -14,6 +14,7 @@ import { SCENE_KEYS, SceneBar } from "./scenes.js";
 import { SETLIST_KEYS, SetlistPanel } from "./setlist.js";
 import { CapturePanel } from "./capture.js";
 import { SoundCheckPanel } from "./soundcheck.js";
+import { initSetup } from "./setup.js";
 
 // Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
 // builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
@@ -826,7 +827,7 @@ class Rack {
         // Reset is in the ⋯ menu (and a double-click resets one control).
         if (module.id === "echo") {
           const tap = html("button", "mini card-tap", "Tap");
-          tap.title = "Tap the beat a few times to set the echo time";
+          tap.title = "Tap the beat a few times to set the echo time (with Sync on, the tempo the echo follows)";
           tap.addEventListener("click", () => rack.tapEcho(tap));
           head.querySelector(".insert-trim-switch").before(tap);
         }
@@ -947,11 +948,19 @@ class Rack {
     if (this.echoTaps.length < 2) return;
     const gaps = this.echoTaps.slice(1).map((t, i) => t - this.echoTaps[i]);
     const ms = clamp(gaps.reduce((a, b) => a + b, 0) / gaps.length, 20, 1500);
-    const state = Juce.getSliderState("delayTime");
-    state.sliderDragStarted();
-    state.setNormalisedValue(toNormalised(state, ms));
-    state.sliderDragEnded();
-    button.textContent = `${Math.round(ms)} ms`;
+    // The tapped beat is also the tempo a synced echo follows.
+    const bpm = Math.round((60000 / ms) * 10) / 10;
+    Juce.getNativeFunction("echoTapTempo")(bpm).catch(() => {});
+    const synced = Math.round(Juce.getComboBoxState("delaySync")?.getChoiceIndex?.() ?? 0) > 0;
+    if (synced) {
+      button.textContent = `${Math.round(bpm)} bpm`;
+    } else {
+      const state = Juce.getSliderState("delayTime");
+      state.sliderDragStarted();
+      state.setNormalisedValue(toNormalised(state, ms));
+      state.sliderDragEnded();
+      button.textContent = `${Math.round(ms)} ms`;
+    }
     clearTimeout(this.tapLabelTimer);
     this.tapLabelTimer = setTimeout(() => { button.textContent = "Tap"; }, 2500);
     this.onUserChange();
@@ -1521,7 +1530,7 @@ new SoundCheckPanel(document.querySelector(".sound-check"));
 const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["Ctrl+← / →", "Previous / next preset"],
                    ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"],
                    ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo any change to the sound (presets, knobs, scenes, resets)"], ["M", "Mute output (panic)"],
-                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["F1", "The user manual"], ["Esc", "Close"]];
+                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["F1", "The user manual"], ["Ctrl+,", "Settings"], ["Esc", "Close"]];
 function toggleLiveKeys(show) {
   let overlay = document.querySelector(".live-keys");
   if (!overlay) {
@@ -1573,3 +1582,4 @@ Juce.getNativeFunction("getParameterDefaults")().then((defaults) => {
 });
 
 initDaw();
+initSetup(); // after initDaw: the status strip goes into both hint lines

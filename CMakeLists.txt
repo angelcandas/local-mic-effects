@@ -52,6 +52,8 @@ juce_add_binary_data(MicFX_WebUI
         ui/tempo.js
         ui/patterns.js
         ui/patterns.css
+        ui/patternlane.js
+        ui/drawtool.js
         ui/browser.js
         ui/pianoroll.js
         ui/takes.js
@@ -68,6 +70,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/aiviews.css
         ui/aiviews.js
         ui/practice.js
+        ui/setup.js
         ui/practice.css
         libs/JUCE/modules/juce_gui_extra/native/typescript/webview-interop/dist/index.js)
 

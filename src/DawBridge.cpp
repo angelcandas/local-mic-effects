@@ -328,6 +328,7 @@ namespace
             { "removePatternClip", "Delete pattern block" }, { "makePatternUnique", "Make pattern unique" },
             { "patternToClips", "Turn into MIDI clips" }, { "clipToPattern", "Make a pattern" },
             { "setPartMutes", "Mute rows" }, { "splitPattern", "Split by track" },
+            { "addPatternClips", "Draw patterns" }, { "removePatternClips", "Erase pattern blocks" },
         };
         if (const auto it = names.find (command); it != names.end())
             return it->second;
@@ -1416,7 +1417,7 @@ namespace
     }
 }
 
-juce::var DawBridge::importAudio (const juce::File& file, int trackId, double start, bool match)
+juce::var DawBridge::importAudio (const juce::File& file, int trackId, double start, bool match, bool continueStep)
 {
     // Check the file before copying it anywhere. Only the header is read: the audio
     // itself loads in the background (AudioPool), so a long song doesn't freeze the app.
@@ -1429,7 +1430,8 @@ juce::var DawBridge::importAudio (const juce::File& file, int trackId, double st
         return error ("Couldn't copy " + file.getFileName() + " into the project's Audio folder.");
 
     auto& undo = edit.getUndoManager();
-    undo.beginNewTransaction ("Import " + file.getFileName());
+    if (! continueStep)
+        undo.beginNewTransaction ("Import " + file.getFileName());
 
     if (! edit.getTrack (trackId).isValid())
         trackId = (int) edit.addTrack (file.getFileNameWithoutExtension())[ids::id];
@@ -1451,11 +1453,13 @@ juce::var DawBridge::importAudio (const juce::File& file, int trackId, double st
     if (! clip.isValid())
         return error ("Couldn't add " + file.getFileName() + " to the track.");
 
+    if (loop)
+        edit.setClipMusical ((int) clip[ids::id], true, loop->bpm);
+
     auto reply = object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId }, { "clip", clip[ids::id] },
-                           { "start", start } });
+                           { "start", start }, { "file", source.getFullPathName() }, { "length", number (clip, ids::length) } });
     if (loop)
     {
-        edit.setClipMusical ((int) clip[ids::id], true, loop->bpm);
         reply.getDynamicObject()->setProperty ("loop", object ({ { "from", std::round (loop->bpm * 10.0) / 10.0 },
                                                                  { "to", std::round (tempo.getBpmAt (start) * 10.0) / 10.0 },
                                                                  { "bars", loop->bars }, { "found", loop->from } }));
@@ -5140,11 +5144,33 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    if (command == "audioInfo")
+    {
+        // A file's length, and as a loop (with the switch on) its length at the project's
+        // tempo: what the Draw tool paints with. -> { ok, seconds, length, loop? }
+        const juce::File file (args["file"].toString());
+        const auto seconds = readAudioLength (file);
+        if (const auto* message = std::get_if<juce::String> (&seconds)) { complete (error (*message)); return; }
+        auto reply = object ({ { "ok", true }, { "error", juce::String() }, { "seconds", std::get<double> (seconds) }, { "length", std::get<double> (seconds) } });
+        if (arg (args, "match", matchLoops))
+            if (const auto loop = daw::loops::findLoop (file, edit.getBeatsPerBar()))
+            {
+                const auto tempo = edit.getTempoMap();
+                const auto at = juce::jmax (0.0, arg (args, "start", 0.0));
+                const auto beats = tempo.toBeats (at);
+                reply.getDynamicObject()->setProperty ("length", tempo.toSeconds (beats + loop->bars * edit.getBeatsPerBar()) - at);
+                reply.getDynamicObject()->setProperty ("loop", object ({ { "bars", loop->bars }, { "from", std::round (loop->bpm * 10.0) / 10.0 } }));
+            }
+        complete (reply);
+        return;
+    }
+
     if (command == "importFile")
     {
         const juce::File file (args["file"].toString());
         complete (juce::File::isAbsolutePath (args["file"].toString()) && file.existsAsFile()
-                      ? importAudio (file, arg (args, "track", -1), arg (args, "start", -1.0), arg (args, "match", matchLoops))
+                      ? importAudio (file, arg (args, "track", -1), arg (args, "start", -1.0), arg (args, "match", matchLoops),
+                                    arg (args, "continue", false))
                       : error ("That file isn't there any more."));
         return;
     }
@@ -5843,6 +5869,38 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
                                  arg (args, "row", (int) number (clip, ids::row)));
         if (args.hasProperty ("mute"))
             edit.setPatternClipMute (id, args["mute"]);
+        if (args.hasProperty ("pattern"))
+        {
+            if (! edit.getPattern (patternId).isValid()) { complete (error ("There's no such pattern.")); return true; }
+            edit.setPatternClipPattern (id, patternId);
+        }
+        ok();
+        return true;
+    }
+
+    if (command == "addPatternClips")
+    {
+        // The Draw tool's stroke: blocks of one pattern at several starts (beats), one undo
+        // step. Each goes on the first free row. -> [ids]
+        if (! edit.getPattern (patternId).isValid()) { complete (error ("There's no such pattern.")); return true; }
+        const auto length = arg (args, "length", 0.0);
+        juce::Array<juce::var> added;
+        if (auto* starts = args["starts"].getArray())
+            for (const auto& start : *starts)
+            {
+                const auto at = juce::jmax (0.0, (double) start);
+                const auto size = length > 0.0 ? length : daw::Edit::getPatternLength (edit.getPattern (patternId));
+                added.add (edit.addPatternClip (patternId, at, size, edit.findFreePatternRow (at, size))[ids::id]);
+            }
+        complete (juce::var (added));
+        return true;
+    }
+
+    if (command == "removePatternClips")
+    {
+        if (auto* list = args["ids"].getArray())
+            for (const auto& clip : *list)
+                edit.removePatternClip ((int) clip);
         ok();
         return true;
     }

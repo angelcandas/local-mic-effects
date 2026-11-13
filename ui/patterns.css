@@ -155,3 +155,21 @@
 .pat-vel-cell b { position: absolute; left: 0; right: 0; top: 2px; color: var(--text); font: 600 8.5px var(--mono); text-align: center; pointer-events: none; }
 .pat-vel.is-pitch .pat-vel-cell.has-note i, .pat-vel.is-shift .pat-vel-cell.has-note i, .pat-vel.is-length .pat-vel-cell.has-note i { opacity: 0.75; }
 .pat-arrow { padding: 0 7px; font-size: 14px; }
+
+/* the Draw tool (drawtool.js), the lane fold, ghost notes, the library's Project list */
+.draw-brush {
+  max-width: 190px; height: 28px; overflow: hidden; padding: 0 10px; border: 1px dashed var(--line-strong); border-radius: 8px;
+  background: none; color: var(--muted); font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; cursor: pointer;
+}
+.draw-brush[hidden] { display: none; }
+.draw-brush.is-on { border-style: solid; border-color: var(--accent); color: var(--text); }
+.arrange[data-tool="draw"] .lane, .arrange[data-tool="draw"] .pattern-lane { cursor: crosshair; }
+.pl-block.is-ghost, .clip-ghost { position: absolute; pointer-events: none; opacity: 0.45; }
+.pl-block.is-ghost { border: 1px dashed var(--accent); background: color-mix(in srgb, var(--accent) 30%, transparent); }
+.clip-ghost { box-sizing: border-box; border: 1px dashed var(--accent-2, #3fd9c6); border-radius: 6px; background: color-mix(in srgb, var(--accent-2, #3fd9c6) 25%, transparent); }
+.pl-block.is-erasing, .clip.is-erasing { opacity: 0.15; }
+.pattern-fold { min-width: 0; padding: 0 5px; }
+.pattern-lane.is-folded .pl-block { opacity: 0.85; }
+.pl-ghost { position: absolute; top: 2px; pointer-events: none; opacity: 0.32; }
+.library-item.is-picked { box-shadow: inset 2px 0 0 var(--accent); }
+.library-item.is-pattern .library-item-icon::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: var(--cat, var(--accent)); }
