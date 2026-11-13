@@ -1174,6 +1174,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::loudness:   return std::make_unique<modules::Loudness>();
         case ModuleType::transient:  return std::make_unique<modules::Transient>();
         case ModuleType::dynamicEq:  return std::make_unique<modules::DynamicEq>();
+        case ModuleType::plugin:     return {}; // made by daw::PluginInsert, from its plugin
     }
 
     jassertfalse;

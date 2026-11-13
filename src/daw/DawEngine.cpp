@@ -153,6 +153,44 @@ void DawEngine::captureInstrumentStates()
         if (state != strip->instrumentTree[ids::state].toString())
             strip->instrumentTree.setProperty (ids::state, state, nullptr);
     }
+
+    // Effect plugins (one that didn't load keeps the state it was saved with).
+    for (auto& [id, strip] : strips)
+        for (auto& [insertId, slot] : strip->plugins)
+        {
+            if (slot.module == nullptr || ! slot.tree.isValid() || ! slot.tree.getParent().isValid())
+                continue;
+
+            const auto state = instruments::getState (*slot.module->getPlugin());
+            if (state != slot.tree[ids::state].toString())
+                slot.tree.setProperty (ids::state, state, nullptr);
+        }
+}
+
+InstrumentPtr DawEngine::getInsertPlugin (int insertId) const
+{
+    for (const auto& [id, strip] : strips)
+        if (const auto it = strip->plugins.find (insertId); it != strip->plugins.end())
+            return it->second.module != nullptr ? it->second.module->getPlugin() : nullptr;
+    return nullptr;
+}
+
+juce::String DawEngine::getInsertPluginError (int insertId) const
+{
+    for (const auto& [id, strip] : strips)
+        if (const auto it = strip->plugins.find (insertId); it != strip->plugins.end())
+            return it->second.error;
+    return {};
+}
+
+void DawEngine::checkPluginLatency()
+{
+    for (const auto& [id, strip] : strips)
+        if (! strip->plugins.empty() && strip->getLatency() != strip->latencyAtBuild)
+        {
+            triggerAsyncUpdate();
+            return;
+        }
 }
 
 void DawEngine::addLiveMidi (const juce::MidiMessage& message) noexcept
@@ -271,6 +309,16 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
 
     if (tree.hasType (ids::INSERT))
     {
+        // An effect plugin's saved settings and names are kept for saving, not played; a
+        // different plugin needs a new one (its layout changes).
+        if (property == ids::state || property == ids::name || property == ids::vendor || property == ids::description)
+            return;
+        if (property == ids::plugin)
+        {
+            triggerAsyncUpdate();
+            return;
+        }
+
         // A new type, or automation added, changed or removed (or a value under
         // automation, whose own setting the lanes go back to): a rebuild.
         if (property == ids::type || property == ids::automation || tree.hasProperty (ids::automation))
@@ -538,7 +586,11 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
 
     juce::String layout;
     for (const auto& insert : inserts)
+    {
         layout << insert[ids::type].toString() << ":" << (int) insert[ids::id] << " ";
+        if (Edit::isPluginInsert (insert))
+            layout << insert[ids::plugin].toString() << " ";
+    }
 
     const auto isMidi = trackOrMaster.hasType (ids::TRACK) && Edit::isMidiTrack (trackOrMaster);
     const auto instrumentTree = isMidi ? trackOrMaster.getChildWithName (ids::INSTRUMENT) : juce::ValueTree();
@@ -561,6 +613,40 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
 
     for (const auto& insert : inserts)
     {
+        const auto insertId = (int) insert[ids::id];
+
+        if (Edit::isPluginInsert (insert))
+        {
+            // An effect plugin: the one already running for this insert if there is one (so
+            // it keeps everything it has in memory), else loaded from its saved state. One
+            // that can't load is left out of the chain and the signal goes on past it.
+            auto& slot = strip->plugins[insertId];
+            slot.tree = insert;
+            std::unique_ptr<PluginInsert> module;
+
+            if (previous != strips.end())
+                if (const auto it = previous->second->plugins.find (insertId); it != previous->second->plugins.end() && it->second.module != nullptr)
+                    module = PluginInsert::share (*it->second.module);
+
+            if (module == nullptr)
+                module = PluginInsert::create (insert, sampleRate, blockSize, realtime, slot.error);
+
+            if (module == nullptr)
+            {
+                juce::Logger::writeToLog ("[MicFX DAW] effect plugin: " + slot.error);
+                continue;
+            }
+
+            auto& added = strip->chain.add (std::move (module));
+            for (int v = 0; v < added.getNumValues(); ++v)
+                if (const auto& value = insert[juce::Identifier (added.getValueId (v))]; ! value.isVoid())
+                    added.getValue (v).store ((float) value);
+
+            slot.module = static_cast<PluginInsert*> (&added);
+            strip->modulesByInsertId[insertId] = &added;
+            continue;
+        }
+
         const auto type = Edit::moduleTypeFromKey (insert[ids::type].toString());
         if (! type.has_value())
             continue; // a module from a newer version: skipped rather than refusing the project
