@@ -913,6 +913,14 @@ class InsertRack {
         heading(category.name);
         for (const module of modules) item(module.name, () => this.screen.addEffect(this.owner.id, module.id, index), { indent: true, hint: module.description ?? "" });
       }
+      // Effect plug-ins (VST3, AU on a Mac) found by a scan.
+      heading("Plug-ins");
+      const plugins = this.screen.library?.effectPlugins ?? [];
+      // (A long list stays short here; the library lists them all, with a search.)
+      for (const plugin of plugins.slice(0, 24))
+        item(plugin.name, () => this.screen.addPluginEffect(this.owner.id, plugin.id, index), { indent: true, hint: [plugin.vendor, plugin.format].filter(Boolean).join(" · ") });
+      if (plugins.length > 24) item(`${plugins.length - 24} more in the library…`, () => { this.screen.library?.setSection("effects"); this.screen.library?.setCollapsed(false); }, { indent: true, hint: "Effects, under Plug-ins" });
+      if (!plugins.length) item("Look for plug-ins…", () => { daw("scanPlugins"); toast("Looking for plug-ins…"); }, { indent: true, hint: "Scans the usual VST3 (and AU) folders" });
     }, anchor);
   }
 
@@ -994,6 +1002,7 @@ class InsertCard {
     this.insert = insert;
     this.controls = []; // [{ param, widget }]
     this.switches = []; // [{ param, element }]
+    if (insert.type === "plugin") { this.buildPlugin(insert); return; }
 
     const parts = insert.type === "pitch" ? PITCH_PARTS : MODULES.filter((m) => MODULE_KEYS[m.id] === insert.type).slice(0, 1);
     const main = parts[0];
@@ -1058,6 +1067,68 @@ class InsertCard {
     if (!this.element.classList.contains("is-wide")) this.element.style.setProperty("--card", `${clamp(widest * 62 + 28, 190, 290)}px`);
     this.element.append(html("span", "insert-folded-name", this.name));
     this.update(insert);
+  }
+
+  // An effect plug-in (VST3/AU): its name and maker, a button for its own window, its
+  // switch and trims. One that isn't installed here says so; its settings are kept.
+  buildPlugin(insert) {
+    this.element = html("section", "insert is-plugin");
+    this.name = insert.plugin?.name || "Plug-in";
+    const head = html("header", "insert-head");
+    this.activity = createActivity();
+    this.trimSwitch = button("insert-trim-switch", "trim", "Show this effect's input and output gain", () => this.setTrimsShown(!this.trimsShown));
+    head.append(this.addSwitch("pluginOn", `Switch ${this.name} on or off`), html("span", "insert-name", this.name), this.activity.element, this.trimSwitch,
+      button("mini is-danger insert-remove", "×", "Remove this effect (Delete)", () => daw("removeInsert", { id: insert.id })));
+    head.title = "Drag to move it in the chain · Double-click to fold · Right-click for more";
+    this.trimsShown = false;
+    this.parts = [];
+    this.conditional = [];
+    this.view = null;
+
+    this.body = html("div", "insert-body");
+    this.element.append(head, this.body);
+    const face = html("div", "plugin-face");
+    this.pluginBadge = html("span", "plugin-badge");
+    this.pluginMaker = html("div", "plugin-maker");
+    this.pluginStatus = html("div", "plugin-status");
+    this.pluginButton = button("text-button plugin-open", "Open plug-in", "", () => {
+      if (this.insert.plugin?.error) { daw("scanPlugins"); toast("Looking for plug-ins…"); }
+      else daw("showPluginInsert", { id: this.insert.id });
+    });
+    face.append(this.pluginBadge, this.pluginMaker, this.pluginStatus, this.pluginButton);
+    face.addEventListener("dblclick", (event) => { if (!event.target.closest("button") && !this.insert.plugin?.error) daw("showPluginInsert", { id: this.insert.id }); });
+    this.body.append(face);
+
+    const footer = html("div", "insert-footer");
+    const gains = html("div", "insert-gains");
+    const gainInfo = (suffix) => parameterInfo[`eq${suffix}`] ?? { min: -24, max: 24, skew: 1, step: 0, label: "dB", default: 0 };
+    for (const [suffix, label, title] of [["InGain", "In", "Input gain: the level going into this effect"],
+                                          ["OutGain", "Out", "Output gain: the level coming out of this effect"]]) {
+      const widget = this.createControl({ type: "knob", param: `plugin${suffix}`, label, bipolar: true, info: gainInfo(suffix) });
+      widget.title = `${title}. Drag or scroll · Double-click to reset`;
+      gains.append(widget);
+    }
+    this.gains = gains;
+    footer.append(gains);
+    this.body.append(footer);
+    this.element.style.setProperty("--card", "240px");
+    this.element.append(html("span", "insert-folded-name", this.name));
+    this.update(insert);
+  }
+
+  updatePlugin(insert) {
+    const plugin = insert.plugin ?? {};
+    const missing = Boolean(plugin.error);
+    this.element.classList.toggle("is-missing", missing);
+    this.pluginBadge.textContent = plugin.format || "Plug-in";
+    this.pluginMaker.textContent = plugin.vendor || "";
+    const reason = String(plugin.error ?? "").trim().replace(/([^.!?])$/, "$1.");
+    this.pluginStatus.textContent = missing ? `⚠ ${reason} Its settings are kept: it plays again once it's installed and scanned.`
+                                            : plugin.loaded ? "" : "Loading…";
+    this.pluginStatus.hidden = !this.pluginStatus.textContent;
+    this.pluginButton.textContent = missing ? "Rescan plug-ins" : plugin.windowOpen ? "Show its window" : "Open plug-in";
+    this.pluginButton.disabled = !missing && !plugin.loaded;
+    this.pluginButton.title = missing ? "Look for plug-ins again (after installing it)" : `Open ${plugin.name || "the plug-in"}'s own window`;
   }
 
   setTrimsShown(shown) {
@@ -1145,7 +1216,7 @@ class InsertCard {
     }
     if (control.type !== "knob" && control.type !== "choice" && control.type !== "toggle") return null;
 
-    const info = parameterInfo[control.param] ?? { min: 0, max: 1, skew: 1, step: 0, label: "" };
+    const info = control.info ?? parameterInfo[control.param] ?? { min: 0, max: 1, skew: 1, step: 0, label: "" };
     const value = this.insert.values[control.param] ?? info.default ?? info.min;
 
     if (control.type === "choice") {
@@ -1195,6 +1266,7 @@ class InsertCard {
       element.hidden = !isControlShown(control, (param) => insert.values[param] ?? parameterInfo[param]?.default ?? 0);
     this.element.classList.toggle("is-off", !this.switches.some(({ param }) => (insert.values[param] ?? 0) >= 0.5));
     this.renderTrims();
+    if (insert.type === "plugin") this.updatePlugin(insert);
   }
 
   get isOn() { return this.switches.some(({ param }) => (this.insert.values[param] ?? 0) >= 0.5); }
@@ -1995,7 +2067,7 @@ class DawScreen {
     this.patternRow.hidden = true;
 
     this.rows = html("div", "track-rows");
-    // The returns and the master, pinned to the bottom of the view (sticky).
+    // The returns and the master: rows after the last track that scroll with the list.
     this.pinned = html("div", "pinned-rows");
     this.returnRows = html("div", "return-rows");
     this.masterRow = html("div", "master-slot");
@@ -2789,7 +2861,7 @@ class DawScreen {
     return wrap;
   }
 
-  // The return and master rows, pinned under the tracks so they never scroll away: name,
+  // The return and master rows, after the last track and scrolling with it: name,
   // M and S (returns), effects, volume, pan and a stereo meter. "+ Return" after them;
   // double-clicking a name folds or unfolds them all. Updated in place like the tracks.
   renderPinnedRows(force) {
@@ -3506,7 +3578,8 @@ class DawScreen {
 
     const inserts = html("div", "strip-inserts");
     for (const insert of track.inserts) {
-      const part = insert.type === "pitch" ? { name: "Pitch" } : MODULES.find((m) => MODULE_KEYS[m.id] === insert.type);
+      const part = insert.type === "pitch" ? { name: "Pitch" } : insert.type === "plugin" ? { name: insert.plugin?.name || "Plug-in" }
+        : MODULES.find((m) => MODULE_KEYS[m.id] === insert.type);
       inserts.append(button("strip-insert", part?.name ?? insert.type, "Edit in the side panel", () => this.select(track.id, null)));
     }
     inserts.append(button("strip-insert is-add", "+ Effect", "Add an effect", () => this.select(track.id, null, true, true)));
@@ -5170,6 +5243,13 @@ class DawScreen {
       await daw("setInsert", { id, param: module.power, value: 1, continue: true });
     }
     return id;
+  }
+
+  // Adds an effect plug-in (an id from the "instruments" command's `effects`) to a track's
+  // (or the master's) chain. Returns the new insert's id, or -1.
+  async addPluginEffect(trackId, pluginId, index = -1) {
+    const result = await daw("addPluginInsert", { track: trackId, plugin: pluginId, index });
+    return result?.ok ? result.insert : -1;
   }
 
   // Loads one of an effect's factory presets (fxpresets.js) into a new insert; what the

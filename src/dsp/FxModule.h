@@ -15,9 +15,14 @@ namespace fx
 enum class ModuleType
 {
     highPass, denoise, gate, pitch, eq, paraEq, smooth, compressor, autoLevel, deEsser, exciter, saturation, radio, bitcrusher,
-    robot, filter, autoWah, cab, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, irReverb, width,
+    robot, filter, autoWah, amp, cab, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, irReverb, width,
     multiband, limiter, masterEq, imager, loudness, // mastering (see Mastering.h)
-    transient, dynamicEq
+    transient, dynamicEq,
+
+    // Not a built-in effect: a third-party VST3/AU effect hosted as a DAW insert (see
+    // daw/PluginInsert.h). It comes after numModuleTypes, so Live mode, the parameters
+    // and every list of effects leave it out.
+    plugin
 };
 
 inline constexpr int numModuleTypes = (int) ModuleType::dynamicEq + 1;
@@ -25,9 +30,12 @@ inline constexpr int numModuleTypes = (int) ModuleType::dynamicEq + 1;
 // A stable name for each type, for project files, parameter IDs and the UI.
 inline const char* getModuleKey (ModuleType type)
 {
+    if (type == ModuleType::plugin)
+        return "plugin";
+
     static constexpr const char* keys[] = {
         "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "smooth", "compressor", "autoLevel", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
-        "robot", "filter", "autoWah", "cab", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "irReverb", "width",
+        "robot", "filter", "autoWah", "amp", "cab", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "irReverb", "width",
         "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq"
     };
     static_assert (std::size (keys) == numModuleTypes);

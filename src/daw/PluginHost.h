@@ -4,7 +4,8 @@
 
 #include "Instruments.h"
 
-// Finds and loads instrument plugins (VST3 everywhere, AU on macOS) for MIDI tracks.
+// Finds and loads plugins (VST3 everywhere, AU on macOS): instruments for MIDI tracks and
+// effects for inserts (see PluginInsert.h).
 //
 // Scanning runs on a background thread and looks in each format's usual folders plus
 // any folders added by hand. What it finds is kept in Plugins.xml in the app's data
@@ -33,6 +34,11 @@ public:
     std::optional<Edit::InstrumentInfo> findInstrument (const juce::String& id) const;
     static Edit::InstrumentInfo describe (const juce::PluginDescription&);
 
+    // Every effect plugin (the scanned plugins that aren't instruments), by name, for
+    // inserts (Edit::addPluginInsert). Any thread.
+    juce::Array<Edit::InstrumentInfo> getEffects() const;
+    std::optional<Edit::InstrumentInfo> findEffect (const juce::String& id) const;
+
     //==============================================================================
     // Message thread. Scans in the background; onScanFinished runs on the message thread.
     // A full rescan forgets the list first (otherwise known, unchanged files are skipped).
@@ -54,8 +60,9 @@ public:
     juce::KnownPluginList& getKnownPlugins() noexcept     { return known; }
 
     //==============================================================================
-    // Message thread. Loads an INSTRUMENT's plugin: found by its id among the scanned
-    // plugins, or else from its saved description (a project from another computer).
+    // Message thread. Loads an INSTRUMENT's plugin, or a plugin INSERT's: found by its id
+    // among the scanned plugins, or else from its saved description (a project from
+    // another computer).
     std::unique_ptr<juce::AudioPluginInstance> load (const juce::ValueTree& instrument, double sampleRate, int blockSize,
                                                      juce::String& error);
 

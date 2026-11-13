@@ -1893,6 +1893,24 @@ juce::ValueTree Edit::addInsert (int trackId, fx::ModuleType type, int index)
     return insert;
 }
 
+juce::ValueTree Edit::addPluginInsert (int trackId, const InstrumentInfo& info, int index)
+{
+    auto inserts = getInserts (getTrackOrMaster (trackId));
+    if (! inserts.isValid() || info.id.isEmpty())
+        return {};
+
+    // Like an INSTRUMENT, plus the switch and gains every insert has.
+    juce::ValueTree tree (ids::INSERT);
+    tree.copyPropertiesFrom (makeInstrument (info, takeNextId()), nullptr);
+    tree.setProperty (ids::type, fx::getModuleKey (fx::ModuleType::plugin), nullptr);
+    tree.setProperty ("pluginOn", 1.0f, nullptr);
+    tree.setProperty ("pluginInGain", 0.0f, nullptr);
+    tree.setProperty ("pluginOutGain", 0.0f, nullptr);
+
+    inserts.addChild (tree, index, undoTarget);
+    return tree;
+}
+
 void Edit::removeInsert (int insertId)
 {
     if (auto insert = getInsert (insertId); insert.isValid())

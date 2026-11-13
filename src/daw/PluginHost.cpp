@@ -67,22 +67,53 @@ Edit::InstrumentInfo PluginHost::describe (const juce::PluginDescription& descri
     return info;
 }
 
+namespace
+{
+    juce::Array<juce::PluginDescription> sortedByName (juce::Array<juce::PluginDescription> types)
+    {
+        std::sort (types.begin(), types.end(), [] (const auto& a, const auto& b)
+        {
+            return a.name.compareNatural (b.name, false) != 0 ? a.name.compareNatural (b.name, false) < 0
+                                                              : a.pluginFormatName < b.pluginFormatName;
+        });
+        return types;
+    }
+
+    // An effect: anything that isn't an instrument. (A VST3 scan doesn't know the channel
+    // counts without loading the plugin, so a MIDI-only plugin is listed too; as an insert
+    // it would just pass its input on.)
+    bool isEffect (const juce::PluginDescription& type) { return ! type.isInstrument; }
+}
+
 juce::Array<Edit::InstrumentInfo> PluginHost::getInstruments() const
 {
     auto list = instruments::getBuiltins();
-    auto types = known.getTypes();
 
-    std::sort (types.begin(), types.end(), [] (const auto& a, const auto& b)
-    {
-        return a.name.compareNatural (b.name, false) != 0 ? a.name.compareNatural (b.name, false) < 0
-                                                          : a.pluginFormatName < b.pluginFormatName;
-    });
-
-    for (const auto& type : types)
+    for (const auto& type : sortedByName (known.getTypes()))
         if (type.isInstrument)
             list.add (describe (type));
 
     return list;
+}
+
+juce::Array<Edit::InstrumentInfo> PluginHost::getEffects() const
+{
+    juce::Array<Edit::InstrumentInfo> list;
+
+    for (const auto& type : sortedByName (known.getTypes()))
+        if (isEffect (type))
+            list.add (describe (type));
+
+    return list;
+}
+
+std::optional<Edit::InstrumentInfo> PluginHost::findEffect (const juce::String& id) const
+{
+    for (const auto& type : known.getTypes())
+        if (isEffect (type) && type.createIdentifierString() == id)
+            return describe (type);
+
+    return std::nullopt;
 }
 
 std::optional<Edit::InstrumentInfo> PluginHost::findInstrument (const juce::String& id) const
@@ -261,6 +292,23 @@ std::unique_ptr<juce::AudioPluginInstance> PluginHost::load (const juce::ValueTr
         stereo.outputBuses.getReference (0) = juce::AudioChannelSet::stereo();
         if (plugin->checkBusesLayoutSupported (stereo))
             plugin->setBusesLayout (stereo);
+    }
+
+    // An effect: stereo in as well where it can, else mono in and out (the insert sums
+    // the two sides into a mono plugin and plays its output on both).
+    layout = plugin->getBusesLayout();
+    if (! layout.inputBuses.isEmpty() && ! layout.outputBuses.isEmpty()
+        && (layout.getMainInputChannelSet() != juce::AudioChannelSet::stereo()
+            || layout.getMainOutputChannelSet() != juce::AudioChannelSet::stereo()))
+    {
+        for (const auto& set : { juce::AudioChannelSet::stereo(), juce::AudioChannelSet::mono() })
+        {
+            auto tried = layout;
+            tried.inputBuses.getReference (0) = set;
+            tried.outputBuses.getReference (0) = set;
+            if (plugin->checkBusesLayoutSupported (tried) && plugin->setBusesLayout (tried))
+                break;
+        }
     }
 
     return plugin;

@@ -8,6 +8,7 @@
 #include "Recorder.h"
 #include "Edit.h"
 #include "Instruments.h"
+#include "PluginInsert.h"
 #include "dsp/FxChain.h"
 
 #include <algorithm>
@@ -163,7 +164,18 @@ public:
     juce::String getInstrumentError (int trackId) const;
     // Writes every instrument's current settings into its INSTRUMENT `state`, so a save
     // or an export has them. Not an undoable edit.
+    // Effect plugin inserts too (their INSERT `state`).
     void captureInstrumentStates();
+    // An effect plugin insert's running plugin (for its window), or null; and why it
+    // didn't load (empty when it did, or when there's no such insert).
+    InstrumentPtr getInsertPlugin (int insertId) const;
+    juce::String getInsertPluginError (int insertId) const;
+    // Builds the graph again when a plugin now reports a different delay than it did (a
+    // look-ahead switched on in its window), so latency compensation follows. Message
+    // thread; the DAW screen calls it on its timer.
+    void checkPluginLatency();
+    // Tries again to load the effect plugins that didn't load (after a scan found them).
+    void retryMissingPlugins();
     // Live MIDI from code (the on-screen keyboard), as if from the MIDI input. Any thread.
     void addLiveMidi (const juce::MidiMessage&) noexcept;
     // Live MIDI for one track's instrument only, armed or not (auditioning a pattern row).
@@ -265,6 +277,16 @@ private:
         juce::String instrumentError;
         juce::ValueTree instrumentTree;
         bool isMidi = false;
+
+        // Effect plugin inserts, by insert id: the module (in `chain`) and its INSERT, or why
+        // it didn't load (then the insert is left out of the chain and keeps its state).
+        struct PluginSlot
+        {
+            PluginInsert* module = nullptr;
+            juce::ValueTree tree;
+            juce::String error;
+        };
+        std::map<int, PluginSlot> plugins;
 
         int getLatency() const { return chain.getLatencySamples() + (instrument != nullptr ? instrument->getLatencySamples() : 0); }
 

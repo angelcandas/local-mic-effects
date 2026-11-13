@@ -23,6 +23,8 @@
 //       INSERTS
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value,
 //                 file (the impulse response a cab or IR reverb plays through; missing = none)
+//         INSERT  type "plugin", id, pluginOn, pluginInGain, pluginOutGain, plugin, name, format,
+//                 vendor, description, state   (a VST3/AU effect, see PluginInsert.h)
 //     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor, transpose,
 //            kind ("midi" for MIDI tracks; audio when missing), mixRole (Auto Mix's tag:
 //            "voice", "drums"... see analysis::getRoleKey; missing when not tagged),
@@ -562,6 +564,10 @@ public:
     static constexpr int masterId = 0;
 
     juce::ValueTree addInsert (int trackId, fx::ModuleType, int index = -1);
+    // A third-party effect plugin as an insert (type "plugin", see PluginInsert.h), on, at
+    // unity gain, starting from the info's state (none: the plugin's own defaults).
+    juce::ValueTree addPluginInsert (int trackId, const InstrumentInfo& plugin, int index = -1);
+    static bool isPluginInsert (const juce::ValueTree& insert) { return insert[ids::type].toString() == "plugin"; }
     void removeInsert (int insertId);
     void moveInsert (int insertId, int newIndex);
     void setInsertValue (int insertId, const juce::String& valueId, float value);
