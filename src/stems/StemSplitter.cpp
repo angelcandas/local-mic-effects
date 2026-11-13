@@ -3,6 +3,8 @@
 #include <juce_cryptography/juce_cryptography.h>
 
 #include <atomic>
+#include <cmath>
+#include <limits>
 #include <mutex>
 #include <thread>
 
@@ -373,11 +375,87 @@ juce::String GpuModel::download (const juce::File& destination, const Progress& 
     return problem;
 }
 
+double matchOnTestSignal (const Separator& candidate, const Separator& reference)
+{
+    constexpr int length = 343980;
+    juce::AudioBuffer<float> signal (2, length);
+    juce::uint32 noise = 12345;
+
+    for (int ch = 0; ch < 2; ++ch)
+    {
+        auto* out = signal.getWritePointer (ch);
+        for (int i = 0; i < length; ++i)
+        {
+            const auto t = (double) i / modelSampleRate;
+            const auto tremolo = 0.6 + 0.4 * std::sin (2.0 * juce::MathConstants<double>::pi * 3.0 * t + ch);
+            auto v = 0.0;
+            for (const auto hz : { 110.0, 220.0, 440.0, 1320.0, 3000.0 })
+                v += 0.08 * std::sin (2.0 * juce::MathConstants<double>::pi * hz * t + hz * 0.01 * ch);
+            noise = noise * 1664525u + 1013904223u;
+            const auto burst = std::fmod (t, 0.5) < 0.04 ? 0.25 : 0.01; // drum-like hits over a quiet bed
+            v = v * tremolo + burst * ((double) (noise >> 8) / (double) (1u << 24) * 2.0 - 1.0);
+            out[i] = (float) v;
+        }
+    }
+
+    const auto wanted = candidate != nullptr && reference != nullptr;
+    if (! wanted)
+        return -std::numeric_limits<double>::infinity();
+
+    const auto got = candidate (signal, {});
+    const auto want = reference (signal, {});
+
+    if (got.size() != want.size() || want.empty())
+        return -std::numeric_limits<double>::infinity();
+
+    double signalEnergy = 0.0, errorEnergy = 0.0;
+
+    for (size_t s = 0; s < want.size(); ++s)
+    {
+        if (got[s].getNumChannels() != want[s].getNumChannels() || got[s].getNumSamples() != want[s].getNumSamples())
+            return -std::numeric_limits<double>::infinity();
+
+        for (int ch = 0; ch < want[s].getNumChannels(); ++ch)
+            for (int i = 0; i < want[s].getNumSamples(); ++i)
+            {
+                const auto w = (double) want[s].getSample (ch, i), g = (double) got[s].getSample (ch, i);
+                if (! std::isfinite (g))
+                    return -std::numeric_limits<double>::infinity();
+                signalEnergy += w * w;
+                errorEnergy += (g - w) * (g - w);
+            }
+    }
+
+    if (signalEnergy <= 0.0)
+        return -std::numeric_limits<double>::infinity();
+    return errorEnergy <= 0.0 ? 200.0 : 10.0 * std::log10 (signalEnergy / errorEnergy);
+}
+
 Loaded loadBest (const std::function<void (LoadPhase)>& onPhase, const Progress& progress)
 {
     Loaded result;
     const auto setPhase = [&] (LoadPhase phase) { if (onPhase != nullptr) onPhase (phase); };
     const auto cancelled = [&] { return progress != nullptr && ! progress (0.0); };
+
+    // The CPU model, downloading it the first time. False with result.error / result.cancelled set.
+    const auto loadCpu = [&] (Separator& separator, juce::String& error) -> bool
+    {
+        const auto model = Model::getDefaultFile();
+        if (! model.existsAsFile() || Model::verify (model).isNotEmpty())
+        {
+            setPhase (LoadPhase::downloading);
+            if (const auto problem = Model::download (model, progress); problem.isNotEmpty())
+            {
+                result.cancelled = cancelled();
+                error = result.cancelled ? juce::String() : problem;
+                return false;
+            }
+        }
+
+        setPhase (LoadPhase::loading);
+        separator = Model::load (model, error);
+        return separator != nullptr;
+    };
 
     // The GPU first, where Core ML is built in: its converted model downloads once, like the CPU one.
     if (const auto gpuModel = GpuModel::getDefaultFile(); GpuModel::isBuiltIn())
@@ -399,15 +477,54 @@ Loaded loadBest (const std::function<void (LoadPhase)>& onPhase, const Progress&
                 problem = "couldn't get it: " + problem;
         }
 
+        Separator gpuSeparator;
+
         if (problem.isEmpty())
         {
             setPhase (LoadPhase::loading);
-            result.separator = GpuModel::load (gpuModel, problem);
+            gpuSeparator = GpuModel::load (gpuModel, problem);
         }
 
-        if (result.separator != nullptr)
+        if (gpuSeparator != nullptr)
         {
-            result.gpu = true;
+            // A converted model that loads can still compute nonsense (the conversion is checked
+            // on a virtual machine that can't run it). Compare it with the CPU model once on this Mac.
+            const auto marker = gpuModel.getSiblingFile (juce::String (GpuModel::fileName) + ".verified");
+
+            if (marker.existsAsFile() && marker.loadFileAsString().trim() == juce::String (GpuModel::sha256))
+            {
+                result.separator = gpuSeparator;
+                result.gpu = true;
+                return result;
+            }
+
+            Separator cpuSeparator;
+            juce::String cpuError;
+
+            if (! loadCpu (cpuSeparator, cpuError))
+            {
+                if (result.cancelled)
+                    return result;
+
+                // Nothing to check against, and no CPU to fall back on: the GPU is all there is.
+                result.separator = gpuSeparator;
+                result.gpu = true;
+                return result;
+            }
+
+            const auto match = matchOnTestSignal (gpuSeparator, cpuSeparator);
+
+            if (match >= minGpuMatchDb)
+            {
+                marker.replaceWithText (GpuModel::sha256);
+                result.separator = gpuSeparator;
+                result.gpu = true;
+                return result;
+            }
+
+            result.separator = cpuSeparator;
+            result.note = "The GPU model's stems didn't match the CPU's on a test (" + (std::isfinite (match) ? juce::String (match, 1) + " dB" : juce::String ("it failed"))
+                          + "), so this split ran on the CPU.";
             return result;
         }
 
@@ -420,20 +537,9 @@ Loaded loadBest (const std::function<void (LoadPhase)>& onPhase, const Progress&
         return result;
     }
 
-    const auto model = Model::getDefaultFile();
-    if (! model.existsAsFile() || Model::verify (model).isNotEmpty())
-    {
-        setPhase (LoadPhase::downloading);
-        if (const auto problem = Model::download (model, progress); problem.isNotEmpty())
-        {
-            result.cancelled = cancelled();
-            result.error = result.cancelled ? juce::String() : problem;
-            return result;
-        }
-    }
-
-    setPhase (LoadPhase::loading);
-    result.separator = Model::load (model, result.error);
+    juce::String error;
+    loadCpu (result.separator, error);
+    result.error = error;
     return result;
 }
 

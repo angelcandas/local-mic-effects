@@ -11,6 +11,7 @@ import { MidiLearn, markLearnable } from "./midilearn.js";
 import { PracticeView } from "./practice.js";
 import { SCENE_KEYS, SceneBar } from "./scenes.js";
 import { SETLIST_KEYS, SetlistPanel } from "./setlist.js";
+import { SoundCheckPanel } from "./soundcheck.js";
 
 // Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
 // builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
@@ -1415,6 +1416,9 @@ micCheckButton.addEventListener("click", () => {
   };
   tick();
 });
+
+// Sound check: sing for 10-20 s and the chain is set for the voice, mic and room (ui/soundcheck.js).
+new SoundCheckPanel(document.querySelector(".sound-check"));
 
 // The "?" overlay with the Live keys.
 const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["← / →", "Previous / next preset"],

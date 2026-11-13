@@ -9,6 +9,7 @@
 #include "PitchTap.h"
 #include "Scenes.h"
 #include "Setlist.h"
+#include "SoundCheck.h"
 #include "Multitrack.h"
 #include "Recorder.h"
 #include "daw/DawEngine.h"
@@ -19,7 +20,7 @@
 // Signal chain, in order (every module except gain/reverb/limiter is skipped when off):
 //   input gain -> [effect chain] -> output gain -> safety limiter
 // where the effect chain (fx::FxChain, every module type) runs:
-//   high-pass -> gate -> autotune / pitch shift / harmonizer -> EQ -> compressor
+//   high-pass -> gate -> autotune / pitch shift / harmonizer -> EQ -> compressor -> auto level
 //   -> de-esser -> exciter -> saturation -> radio -> bitcrusher -> robot -> filter
 //   -> auto-wah -> tremolo -> vibrato -> chorus -> flanger -> phaser -> doubler
 //   -> echo -> reverb -> stereo width
@@ -92,6 +93,9 @@ public:
     // The singer's pitch before the effects, for the Practice view (off until it opens).
     PitchTap& getPitchTap() noexcept                        { return pitchTap; }
 
+    // Sound check: listens to the raw mic and sets the Live chain for it. Message thread.
+    SoundCheck& getSoundCheck() noexcept                    { return soundCheck; }
+
     // Backing track + recorded takes, mixed in after the voice chain (so the music
     // isn't processed or recorded with the voice). Message thread only.
     Multitrack& getMultitrack() noexcept                    { return multitrack; }
@@ -141,6 +145,7 @@ private:
     juce::dsp::Gain<float> inputGain, outputGain;
     fx::FxChain chain { fx::FxChain::getAllTypes() };
     fx::modules::Pitch& pitchModule;
+    fx::modules::AutoLevel& autoLevelModule;
     juce::dsp::Limiter<float> limiter;
 
     Recorder recorder;
@@ -148,10 +153,17 @@ private:
     Looper looper;
     PitchTap pitchTap;
     Scenes scenes { *this, state };
+    SoundCheck soundCheck { state, chain, scenes };
     Setlist setlist { *this, scenes, looper, multitrack };
     MidiMap midiMap { state, looper, juce::JUCEApplicationBase::isStandaloneApp() || wrapperType != wrapperType_Undefined
                                          ? MidiMap::getDefaultFile() : juce::File() };
     juce::AudioBuffer<float> loopInput; // the voice before the limiter, for the looper
+
+    // The backing (the Multitrack's playback) on its own before it joins the voice, and
+    // its momentary loudness, for auto level's "over the backing".
+    juce::AudioBuffer<float> backingBuffer;
+    fx::LoudnessMeter backingMeter;
+    bool backingWasPlaying = false;
 
     juce::SharedResourcePointer<daw::PluginHost> pluginHost; // before the engine, which loads instruments through it
     daw::Edit dawEdit;

@@ -194,6 +194,50 @@ private:
 };
 
 //==============================================================================
+// BS.1770 K-weighting (a high shelf, then a high-pass), designed for any sample rate.
+// Up to two channels. Audio thread.
+class KWeighting
+{
+public:
+    void setup (double sampleRate) noexcept
+    {
+        {
+            const auto f0 = 1681.974450955533, gain = 3.999843853973347, q = 0.7071752369554196;
+            const auto k = std::tan (juce::MathConstants<double>::pi * f0 / sampleRate);
+            const auto vh = std::pow (10.0, gain / 20.0);
+            const auto vb = std::pow (vh, 0.4996667741545416);
+            const auto a0 = 1.0 + k / q + k * k;
+            shelf = { (vh + vb * k / q + k * k) / a0, 2.0 * (k * k - vh) / a0, (vh - vb * k / q + k * k) / a0,
+                      2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0 };
+        }
+        {
+            const auto f0 = 38.13547087602444, q = 0.5003270373238773;
+            const auto k = std::tan (juce::MathConstants<double>::pi * f0 / sampleRate);
+            const auto a0 = 1.0 + k / q + k * k;
+            highPass = { 1.0, -2.0, 1.0, 2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0 };
+        }
+    }
+
+    void reset() noexcept { state = {}; }
+
+    double process (size_t channel, double x) noexcept
+    {
+        auto& s = state[channel];
+        const auto y1 = shelf[0] * x + s[0];
+        s[0] = shelf[1] * x - shelf[3] * y1 + s[1];
+        s[1] = shelf[2] * x - shelf[4] * y1;
+        const auto y2 = highPass[0] * y1 + s[2];
+        s[2] = highPass[1] * y1 - highPass[3] * y2 + s[3];
+        s[3] = highPass[2] * y1 - highPass[4] * y2;
+        return y2;
+    }
+
+private:
+    std::array<double, 5> shelf {}, highPass {};
+    std::array<std::array<double, 4>, 2> state {};
+};
+
+//==============================================================================
 // Loudness as in ITU-R BS.1770 / EBU R128: momentary (400 ms), short-term (3 s) and
 // integrated (gated, since the meter was switched on), in LUFS, plus the sample peak.
 class LoudnessMeter
@@ -204,13 +248,13 @@ public:
     void prepare (double sampleRate)
     {
         hopSize = juce::jmax (1, (int) std::lround (sampleRate * 0.1));
-        setupWeighting (sampleRate);
+        weighting.setup (sampleRate);
         reset();
     }
 
     void reset() noexcept
     {
-        state = {};
+        weighting.reset();
         hops.fill (0.0);
         hopIndex = hopsFilled = hopFill = 0;
         hopSum = 0.0;
@@ -231,7 +275,7 @@ public:
             for (size_t ch = 0; ch < channels; ++ch)
             {
                 const auto x = block.getSample ((int) ch, (int) i);
-                hopSum += juce::square (weight (ch, x));
+                hopSum += juce::square (weighting.process (ch, x));
                 samplePeak = juce::jmax (samplePeak, std::abs (x));
             }
 
@@ -311,40 +355,7 @@ private:
         }
     }
 
-    // BS.1770 K-weighting (a high shelf, then a high-pass), designed for any sample rate.
-    void setupWeighting (double sampleRate) noexcept
-    {
-        {
-            const auto f0 = 1681.974450955533, gain = 3.999843853973347, q = 0.7071752369554196;
-            const auto k = std::tan (juce::MathConstants<double>::pi * f0 / sampleRate);
-            const auto vh = std::pow (10.0, gain / 20.0);
-            const auto vb = std::pow (vh, 0.4996667741545416);
-            const auto a0 = 1.0 + k / q + k * k;
-            shelf = { (vh + vb * k / q + k * k) / a0, 2.0 * (k * k - vh) / a0, (vh - vb * k / q + k * k) / a0,
-                      2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0 };
-        }
-        {
-            const auto f0 = 38.13547087602444, q = 0.5003270373238773;
-            const auto k = std::tan (juce::MathConstants<double>::pi * f0 / sampleRate);
-            const auto a0 = 1.0 + k / q + k * k;
-            highPass = { 1.0, -2.0, 1.0, 2.0 * (k * k - 1.0) / a0, (1.0 - k / q + k * k) / a0 };
-        }
-    }
-
-    double weight (size_t channel, double x) noexcept
-    {
-        auto& s = state[channel];
-        const auto y1 = shelf[0] * x + s[0];
-        s[0] = shelf[1] * x - shelf[3] * y1 + s[1];
-        s[1] = shelf[2] * x - shelf[4] * y1;
-        const auto y2 = highPass[0] * y1 + s[2];
-        s[2] = highPass[1] * y1 - highPass[3] * y2 + s[3];
-        s[3] = highPass[2] * y1 - highPass[4] * y2;
-        return y2;
-    }
-
-    std::array<double, 5> shelf {}, highPass {};
-    std::array<std::array<double, 4>, 2> state {};
+    KWeighting weighting;
     int hopSize = 4800, hopFill = 0, hopIndex = 0, hopsFilled = 0;
     double hopSum = 0.0;
     std::array<double, 30> hops {}; // mean square of the last 30 hops of 100 ms

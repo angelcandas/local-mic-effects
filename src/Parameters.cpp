@@ -208,9 +208,10 @@ Parameters::Parameters (Layout& l)
         decibels (l, key + "OutGain", name + " Out Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
     };
 
-    // (The denoiser came later: its gains are at the end with its other parameters.)
+    // (The denoiser and auto level came later: their gains are at the end with their
+    // other parameters.)
     for (int i = 0; i < fx::numModuleTypes; ++i)
-        if ((fx::ModuleType) i != fx::ModuleType::denoise)
+        if ((fx::ModuleType) i != fx::ModuleType::denoise && (fx::ModuleType) i != fx::ModuleType::autoLevel)
             moduleGains ((fx::ModuleType) i);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
@@ -283,4 +284,13 @@ Parameters::Parameters (Layout& l)
     percent (l, "harmonyHumanize", "Harmony Humanize", 35.0f);
     percent (l, "harmonySpread", "Harmony Spread", 50.0f);
     semitones (l, "harmonyFormant", "Harmony Formant", 12.0f, 0.1f, 0.0f);
+
+    // Auto level (AutoLevel.h): rides the voice towards a loudness, after the compressor.
+    toggle (l, "alOn", "Auto Level On");
+    number (l, "alTarget", "Auto Level Target", -40.0f, -6.0f, 0.5f, -18.0f, "LUFS");
+    decibels (l, "alRange", "Auto Level Range", 0.0f, 12.0f, 6.0f);
+    number (l, "alSpeed", "Auto Level Speed", 100.0f, 2000.0f, 1.0f, 400.0f, "ms", 400.0f);
+    choice (l, "alMode", "Auto Level Aim", { "Fixed level", "Over the backing" }, 0);
+    number (l, "alOverBacking", "Auto Level Over Backing", -6.0f, 12.0f, 0.5f, 3.0f, "LU");
+    moduleGains (fx::ModuleType::autoLevel);
 }

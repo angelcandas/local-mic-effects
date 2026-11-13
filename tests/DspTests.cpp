@@ -31,6 +31,7 @@
 #include "analysis/Coach.h"
 #include "Practice.h"
 #include "PitchTap.h"
+#include "SoundCheck.h"
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
 #include "instruments/Kit.h"
@@ -8908,6 +8909,39 @@ static void testStems()
                "a GPU model zip with the wrong checksum is refused and leaves nothing");
     }
 
+    // The GPU model is compared with the CPU one on a test signal before it is trusted.
+    {
+        const auto quarters = [] (float gain, int count)
+        {
+            return stems::Separator ([gain, count] (const juce::AudioBuffer<float>& in, const stems::Progress&)
+            {
+                std::vector<juce::AudioBuffer<float>> out;
+                for (int s = 0; s < count; ++s)
+                {
+                    out.emplace_back (in);
+                    out.back().applyGain (gain);
+                }
+                return out;
+            });
+        };
+        const auto broken = stems::Separator ([] (const juce::AudioBuffer<float>& in, const stems::Progress&)
+        {
+            std::vector<juce::AudioBuffer<float>> out (4, juce::AudioBuffer<float> (2, in.getNumSamples()));
+            juce::Random random (1);
+            for (auto& stem : out)
+                for (int ch = 0; ch < 2; ++ch)
+                    for (int i = 0; i < in.getNumSamples(); ++i)
+                        stem.setSample (ch, i, random.nextFloat() - 0.5f);
+            return out;
+        });
+
+        check (stems::matchOnTestSignal (quarters (0.25f, 4), quarters (0.25f, 4)) > 100.0, "identical separators match perfectly on the test signal");
+        check (stems::matchOnTestSignal (quarters (0.2499f, 4), quarters (0.25f, 4)) > stems::minGpuMatchDb, "a tiny difference still passes");
+        check (stems::matchOnTestSignal (broken, quarters (0.25f, 4)) < stems::minGpuMatchDb, "a model that computes nonsense is caught");
+        check (std::isinf (stems::matchOnTestSignal (quarters (0.25f, 3), quarters (0.25f, 4))), "a model returning the wrong number of stems is caught");
+        check (std::isinf (stems::matchOnTestSignal (nullptr, quarters (0.25f, 4))), "no model, no match");
+    }
+
     // DawBridge: the stems land on four tracks under the song, lined up with its clip, and
     // the song's clip is muted. One undo takes it all back.
     {
@@ -10004,6 +10038,309 @@ static void testPatterns()
     folder.deleteRecursively();
 }
 
+//==============================================================================
+// Sound check: a sung voice with pauses, in a room with some hiss.
+static std::vector<float> makeSoundCheckVoice (double seconds, float voicePeak, float noiseRms, double singEvery = 3.0, double singFor = 2.0)
+{
+    std::vector<float> samples ((size_t) (seconds * sampleRate));
+    juce::Random random (11);
+    const auto twoPi = juce::MathConstants<double>::twoPi;
+    double phase = 0.0;
+    for (size_t i = 0; i < samples.size(); ++i)
+    {
+        const auto t = (double) i / sampleRate;
+        const auto inPhrase = std::fmod (t, singEvery);
+        double value = 0.0;
+        if (inPhrase < singFor)
+        {
+            // A slow melody between 180 and 300 Hz with a little vibrato, faded in and out.
+            const auto hz = 240.0 + 60.0 * std::sin (twoPi * 0.23 * t) + 3.0 * std::sin (twoPi * 5.5 * t);
+            phase += twoPi * hz / sampleRate;
+            for (int h = 1; h <= 12; ++h)
+                value += std::sin (phase * h) / h;
+            const auto fade = juce::jmin (1.0, inPhrase / 0.05, (singFor - inPhrase) / 0.05);
+            value *= fade * voicePeak / 2.0;
+        }
+        const auto noise = (random.nextFloat() * 2.0f - 1.0f) * noiseRms * 1.732f; // uniform: rms = range / sqrt 3
+        samples[i] = (float) value + noise;
+    }
+    return samples;
+}
+
+static float soundCheckValue (const SoundCheck::Plan& plan, const juce::String& id, float fallback = -999.0f)
+{
+    for (const auto& [key, value] : plan.values)
+        if (key == id)
+            return value;
+    return fallback;
+}
+
+static void testSoundCheck()
+{
+    std::cout << "\nSound check\n";
+
+    {
+        // Peaks near -10 dBFS, hiss at -52 dBFS RMS between phrases.
+        const auto mic = makeSoundCheckVoice (15.0, 0.3f, juce::Decibels::decibelsToGain (-52.0f));
+        const auto plan = SoundCheck::makePlan (mic.data(), (int) mic.size(), sampleRate, analysis::MixStyle::pop);
+        for (const auto& change : plan.changes)
+            std::cout << "        " << change.module << ": " << change.text << "\n";
+        for (const auto& note : plan.notes)
+            std::cout << "        note: " << note << "\n";
+        std::cout << "        input: " << plan.inputAdvice << "\n";
+
+        check (plan.error.isEmpty() && plan.voiceSeconds > 8.0, "a sung voice is planned (" + juce::String (plan.voiceSeconds, 1) + " s of voice)");
+        check (soundCheckValue (plan, "hpfOn") == 1.0f && soundCheckValue (plan, "hpfFreq") >= 50.0f && soundCheckValue (plan, "hpfFreq") <= 160.0f,
+               "the low cut goes to the high-pass (" + juce::String (soundCheckValue (plan, "hpfFreq")) + " Hz)");
+        check (soundCheckValue (plan, "peqLowCutOn", 0.0f) == 0.0f, "and not to the parametric EQ too");
+        const auto gate = soundCheckValue (plan, "gateThreshold");
+        check (soundCheckValue (plan, "gateOn") == 1.0f && gate > -52.0f && gate < -20.0f,
+               "a gate between the room and the voice (" + juce::String (gate) + " dB)");
+        check (soundCheckValue (plan, "denoiseOn") == 1.0f && soundCheckValue (plan, "denoiseLearn") == 0.0f && ! plan.noiseProfile.empty(),
+               "a noisy room gets the denoiser, with a learnt profile");
+        check (plan.noiseDb > -56.0f && plan.noiseDb < -48.0f, "the room measured near -52 dBFS (" + juce::String (plan.noiseDb, 1) + ")");
+        check (soundCheckValue (plan, "reverbOn") == 1.0f && juce::approximatelyEqual (soundCheckValue (plan, "reverbMix"), analysis::getTargets (analysis::MixStyle::pop).reverbMix),
+               "pop gets its reverb");
+        check (plan.inputAdvice.contains ("good"), "peaks near -10 dBFS are a good input level");
+
+        bool allExist = true;
+        PluginProcessor processor;
+        for (const auto& [id, value] : plan.values)
+            allExist = allExist && processor.getState().getParameter (id) != nullptr;
+        check (allExist, "every planned value is a Live parameter");
+
+        const auto coaching = SoundCheck::makePlan (mic.data(), (int) mic.size(), sampleRate, analysis::MixStyle::coaching);
+        check (soundCheckValue (coaching, "reverbOn") == 0.0f, "coaching keeps the voice dry");
+    }
+
+    {
+        const auto quietRoom = makeSoundCheckVoice (12.0, 0.3f, juce::Decibels::decibelsToGain (-80.0f));
+        const auto plan = SoundCheck::makePlan (quietRoom.data(), (int) quietRoom.size(), sampleRate, analysis::MixStyle::pop);
+        check (plan.error.isEmpty() && soundCheckValue (plan, "denoiseOn") == -999.0f, "a quiet room leaves the denoiser alone");
+    }
+
+    {
+        const auto shortVoice = makeSoundCheckVoice (10.0, 0.3f, 0.0005f, 10.0, 2.5);
+        const auto plan = SoundCheck::makePlan (shortVoice.data(), (int) shortVoice.size(), sampleRate, analysis::MixStyle::pop);
+        check (plan.error.isNotEmpty() && plan.values.empty(), "under 4 s of voice is refused (" + juce::String (plan.voiceSeconds, 1) + " s)");
+    }
+
+    {
+        const auto hot = makeSoundCheckVoice (12.0, 1.4f, 0.001f);
+        const auto plan = SoundCheck::makePlan (hot.data(), (int) hot.size(), sampleRate, analysis::MixStyle::pop);
+        check (plan.inputAdvice.contains ("down"), "hot peaks: turn the interface down");
+        const auto low = makeSoundCheckVoice (12.0, 0.03f, 0.0001f);
+        const auto lowPlan = SoundCheck::makePlan (low.data(), (int) low.size(), sampleRate, analysis::MixStyle::pop);
+        check (lowPlan.inputAdvice.contains ("up"), "low peaks: turn it up (" + juce::String (lowPlan.peakDb, 1) + " dBFS)");
+    }
+
+    // Through the processor: capture, apply, before / after, revert, save as a scene.
+    {
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& check_ = processor.getSoundCheck();
+        auto* threshold = processor.getState().getParameter ("gateThreshold");
+        auto* denoiseOn = processor.getState().getParameter ("denoiseOn");
+        const auto originalThreshold = threshold->convertFrom0to1 (threshold->getValue());
+
+        auto status = check_.handle ("start", juce::var (new juce::DynamicObject()));
+        check (status["phase"] == "listening", "start listens");
+
+        const auto mic = makeSoundCheckVoice (8.0, 0.3f, juce::Decibels::decibelsToGain (-50.0f));
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+        const auto feed = [&] (const std::vector<float>& audio, size_t from, size_t to)
+        {
+            for (size_t start = from; start + blockSize <= to; start += blockSize)
+            {
+                buffer.clear();
+                buffer.copyFrom (0, 0, audio.data() + start, blockSize);
+                processor.processBlock (buffer, midi);
+            }
+        };
+        feed (mic, 0, mic.size());
+        check_.tick();
+        check (check_.getPhase() == SoundCheck::Phase::listening, "still listening before the target length (6 s minimum, asked 15)");
+        check_.handle ("finish", {});
+        feed (mic, 0, blockSize * 2); // the audio thread sees the finish
+        check_.waitForAnalysis();
+        status = check_.describe();
+        check (check_.getPhase() == SoundCheck::Phase::done && status["changes"].size() > 0, "finish sets the chain (" + juce::String (status["changes"].size()) + " changes)");
+
+        const auto after = threshold->convertFrom0to1 (threshold->getValue());
+        check (! juce::approximatelyEqual (after, originalThreshold) && denoiseOn->getValue() > 0.5f, "the gate and denoiser are set on the parameters");
+
+        // The room's profile reaches the running denoiser.
+        feed (mic, 0, blockSize * 4);
+        auto* denoise = processor.getLiveChain().find<fx::modules::Denoise>();
+        check (denoise != nullptr && denoise->getDenoiser().hasProfile() && ! denoise->getDenoiser().hasPendingOffer(), "the denoiser took the learnt profile");
+
+        check_.handle ("compare", juce::var (new juce::DynamicObject()));
+        auto* before = new juce::DynamicObject();
+        before->setProperty ("after", false);
+        check_.handle ("compare", juce::var (before));
+        check (juce::approximatelyEqual (threshold->convertFrom0to1 (threshold->getValue()), originalThreshold), "Before brings the old gate back");
+        auto* afterArgs = new juce::DynamicObject();
+        afterArgs->setProperty ("after", true);
+        check_.handle ("compare", juce::var (afterArgs));
+        check (juce::approximatelyEqual (threshold->convertFrom0to1 (threshold->getValue()), after), "and After the new one");
+
+        check_.handle ("revert", {});
+        check (juce::approximatelyEqual (threshold->convertFrom0to1 (threshold->getValue()), originalThreshold) && denoiseOn->getValue() < 0.5f
+               && check_.getPhase() == SoundCheck::Phase::idle, "Revert restores the sound from before");
+
+        // Again, and keep it as a scene.
+        check_.handle ("start", juce::var (new juce::DynamicObject()));
+        feed (mic, 0, mic.size());
+        check_.handle ("finish", {});
+        feed (mic, 0, blockSize * 2);
+        check_.waitForAnalysis();
+        auto* name = new juce::DynamicObject();
+        name->setProperty ("name", "My voice");
+        status = check_.handle ("saveScene", juce::var (name));
+        check (processor.getScenes().size() == 1 && processor.getScenes().getName (0) == "My voice" && status["phase"] == "idle",
+               "Save as scene keeps the sound in a new scene");
+
+        // Too little voice: refused, nothing changes.
+        const auto thresholdNow = threshold->getValue();
+        check_.handle ("start", juce::var (new juce::DynamicObject()));
+        const auto silence = makeSoundCheckVoice (7.0, 0.3f, 0.0005f, 100.0, 1.5);
+        feed (silence, 0, silence.size());
+        check_.handle ("finish", {});
+        feed (silence, 0, blockSize * 2);
+        check_.waitForAnalysis();
+        status = check_.describe();
+        check (status["phase"] == "idle" && status["error"].toString().contains ("at least") && juce::approximatelyEqual (threshold->getValue(), thresholdNow),
+               "1.5 s of voice is refused and changes nothing");
+    }
+}
+
+//==============================================================================
+// Auto level: the voice's loudness (K-weighted) of a stretch of a processed signal.
+static float autoLevelLoudness (const std::vector<float>& signal, double fromSeconds, double toSeconds)
+{
+    const auto from = (size_t) (fromSeconds * sampleRate), to = juce::jmin (signal.size(), (size_t) (toSeconds * sampleRate));
+    fx::LoudnessMeter meter;
+    meter.prepare (sampleRate);
+    std::vector<float> part (signal.begin() + (long) from, signal.begin() + (long) to);
+    float* channels[] = { part.data() };
+    meter.process (juce::dsp::AudioBlock<float> (channels, 1, part.size()));
+    return meter.getIntegrated();
+}
+
+static std::vector<float> runAutoLevel (fx::modules::AutoLevel& module, const std::vector<float>& input, std::vector<float>* rides = nullptr)
+{
+    module.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+    auto output = input;
+    for (size_t start = 0; start + blockSize <= output.size(); start += blockSize)
+    {
+        float* channels[] = { output.data() + start };
+        juce::dsp::AudioBlock<float> block (channels, 1, (size_t) blockSize);
+        module.process (juce::dsp::ProcessContextReplacing<float> (block));
+        if (rides != nullptr)
+            rides->push_back (module.getRideDb());
+    }
+    return output;
+}
+
+static void testAutoLevel()
+{
+    std::cout << "\nAuto level\n";
+
+    // A voice that steps from quiet to loud: 5 s at one level, 5 s at another 16 dB up.
+    std::vector<float> voice;
+    for (const auto peak : { 0.08f, 0.5f })
+    {
+        const auto part = makeSoundCheckVoice (5.0, peak, 0.0f, 100.0, 100.0);
+        voice.insert (voice.end(), part.begin(), part.end());
+    }
+    const auto quietIn = autoLevelLoudness (voice, 3.0, 5.0), loudIn = autoLevelLoudness (voice, 8.0, 10.0);
+
+    fx::modules::AutoLevel module;
+    module.on.store (1.0f);
+    module.target.store (-20.0f);
+    module.range.store (12.0f);
+    module.speed.store (400.0f);
+    const auto out = runAutoLevel (module, voice);
+    const auto quietOut = autoLevelLoudness (out, 3.0, 5.0), loudOut = autoLevelLoudness (out, 8.0, 10.0);
+    check (std::abs (quietOut + 20.0f) <= 1.5f && std::abs (loudOut + 20.0f) <= 1.5f,
+           "a stepped voice (" + juce::String (quietIn, 1) + " then " + juce::String (loudIn, 1) + " LUFS) comes out at -20 LUFS ("
+           + juce::String (quietOut, 1) + ", " + juce::String (loudOut, 1) + ")");
+
+    // Within the range only.
+    module.range.store (3.0f);
+    const auto limited = runAutoLevel (module, voice);
+    check (std::abs (autoLevelLoudness (limited, 3.0, 5.0) - (quietIn + 3.0f)) <= 1.0f, "never more than its range");
+
+    // Silence between phrases doesn't come up: the gain holds.
+    {
+        module.range.store (12.0f);
+        auto phrase = makeSoundCheckVoice (3.0, 0.25f, 0.0f, 100.0, 100.0);
+        const auto noise = makeSoundCheckVoice (4.0, 0.0f, juce::Decibels::decibelsToGain (-65.0f));
+        phrase.insert (phrase.end(), noise.begin(), noise.end());
+        std::vector<float> rides;
+        runAutoLevel (module, phrase, &rides);
+        const auto blocksPerSecond = sampleRate / blockSize;
+        const auto atEnd = rides[(size_t) (2.9 * blocksPerSecond)], later = rides.back();
+        check (later <= atEnd + 0.5f, "the gain holds through 4 s of room noise (" + juce::String (atEnd, 1) + " -> " + juce::String (later, 1) + " dB)");
+    }
+
+    // Over the backing: aims 3 LU over its loudness.
+    {
+        module.mode.store (1.0f);
+        module.overBacking.store (3.0f);
+        module.setReference (-26.0f);
+        const auto over = runAutoLevel (module, voice);
+        check (std::abs (autoLevelLoudness (over, 8.0, 10.0) + 23.0f) <= 1.5f, "over a -26 LUFS backing it sits at -23 LUFS ("
+               + juce::String (autoLevelLoudness (over, 8.0, 10.0), 1) + ")");
+        module.setReference (fx::modules::AutoLevel::silence);
+        const auto none = runAutoLevel (module, voice);
+        check (std::abs (autoLevelLoudness (none, 8.0, 10.0) + 20.0f) <= 1.5f, "with no backing the fixed target holds");
+    }
+
+    // In the Live chain, measuring the backing on the audio thread.
+    {
+        PluginProcessor processor;
+        auto* chainModule = processor.getLiveChain().find<fx::modules::AutoLevel>();
+        check (chainModule != nullptr && processor.getState().getParameter ("alOn") != nullptr
+               && processor.getState().getParameter ("autoLevelInGain") != nullptr, "auto level is in the Live chain with its parameters");
+        int position = -1, compressor = -1;
+        for (int i = 0; i < processor.getLiveChain().size(); ++i)
+        {
+            if (processor.getLiveChain()[i].getType() == fx::ModuleType::autoLevel) position = i;
+            if (processor.getLiveChain()[i].getType() == fx::ModuleType::compressor) compressor = i;
+        }
+        check (position == compressor + 1, "right after the compressor");
+
+        processor.prepareToPlay (sampleRate, blockSize);
+        const auto backingNoise = makeSoundCheckVoice (6.0, 0.0f, juce::Decibels::decibelsToGain (-30.0f));
+        const auto backingLufs = autoLevelLoudness (backingNoise, 1.0, 6.0) + 3.01f; // played on both sides
+        juce::AudioBuffer<float> backing (1, (int) backingNoise.size());
+        backing.copyFrom (0, 0, backingNoise.data(), (int) backingNoise.size());
+        processor.getMultitrack().addAudio ("Backing", std::move (backing), 0);
+        processor.getMultitrack().play();
+        for (const auto& [id, value] : { std::pair<const char*, float> { "alOn", 1.0f }, { "alMode", 1.0f }, { "alOverBacking", 4.0f } })
+            if (auto* parameter = processor.getState().getParameter (id))
+                parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+        const auto mic = makeSoundCheckVoice (3.0, 0.2f, 0.0f, 100.0, 100.0);
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+        for (size_t start = 0; start + blockSize <= mic.size(); start += blockSize)
+        {
+            buffer.clear();
+            buffer.copyFrom (0, 0, mic.data() + start, blockSize);
+            processor.processBlock (buffer, midi);
+        }
+        const auto aimed = chainModule->getEffectiveTarget();
+        check (std::abs (aimed - (backingLufs + 4.0f)) <= 1.0f, "the Live backing is measured: aims " + juce::String (aimed, 1)
+               + " LUFS over a " + juce::String (backingLufs, 1) + " LUFS backing (+4)");
+        processor.getMultitrack().pause();
+        buffer.clear();
+        processor.processBlock (buffer, midi);
+        check (juce::approximatelyEqual (chainModule->getEffectiveTarget(), -18.0f), "stopped: back to the fixed target");
+    }
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juce;
@@ -10024,6 +10361,16 @@ int main()
         testMidiLearn();
         testScenes();
         testSetlist();
+        testSoundCheck();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=soundcheck: just the Live sound check and auto level.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "soundcheck")
+    {
+        testSoundCheck();
+        testAutoLevel();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -10085,6 +10432,8 @@ int main()
     testLooper();
     testMidiLearn();
     testScenes();
+    testSoundCheck();
+    testAutoLevel();
     testSetlist();
     testDawEngine();
     testReturns();

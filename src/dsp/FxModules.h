@@ -4,6 +4,7 @@
 #include "ParametricEq.h"
 #include "FxModule.h"
 #include "Dynamics.h"
+#include "AutoLevel.h"
 #include "Mastering.h"
 #include "PitchEngine.h"
 #include "SpectralDenoiser.h"
@@ -55,6 +56,9 @@ public:
     int getLatencySamples() const noexcept override { return flag (on) ? latency.load (std::memory_order_relaxed) : 0; }
 
     const SpectralDenoiser& getDenoiser() const noexcept { return denoiser; }
+
+    // A noise profile learnt elsewhere (Sound check), taken while running. Message thread.
+    bool offerProfile (const std::vector<float>& powerPerBin) { return denoiser.offerProfile (powerPerBin); }
 
     // noise: the profile per band (dB, 60 Hz..16 kHz log-spaced), reduction: what each
     // band is turned down by right now (dB), learning: seconds learnt while Learn is on.
@@ -739,6 +743,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::eq:         return std::make_unique<modules::Eq>();
         case ModuleType::paraEq:     return std::make_unique<modules::ParaEq>();
         case ModuleType::compressor: return std::make_unique<modules::Compressor>();
+        case ModuleType::autoLevel:  return std::make_unique<modules::AutoLevel>();
         case ModuleType::deEsser:    return std::make_unique<modules::DeEsser>();
         case ModuleType::exciter:    return std::make_unique<modules::Exciter>();
         case ModuleType::saturation: return std::make_unique<modules::Saturation>();
