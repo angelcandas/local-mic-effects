@@ -142,6 +142,20 @@ struct DawBridge::TakeCompJob
     bool keyMinor = false;
 };
 
+// One "toMidi" conversion. Times in `notes` are the analysed audio's own seconds, plus `origin`
+// (where the analysed stretch starts in the file); finishToMidi moves them onto the timeline.
+struct DawBridge::ToMidiJob
+{
+    std::atomic<bool> cancel { false }, finished { false };
+    juce::String kind, error;
+    int clipId = 0, trackId = 0, transpose = 0;
+    double clipStart = 0.0, clipOffset = 0.0, clipLength = 0.0;
+    double origin = 0.0;
+    daw::warp::Map map;
+    juce::String name;
+    std::vector<analysis::tomidi::Note> notes;
+};
+
 struct DawBridge::KeyJob
 {
     std::atomic<double> progress { 0.0 };
@@ -330,6 +344,8 @@ DawBridge::~DawBridge()
         stemJob->cancel = true;
     if (keyJob != nullptr)
         keyJob->cancel = true;
+    if (toMidiJob != nullptr)
+        toMidiJob->cancel = true;
     if (takeCompJob != nullptr)
         takeCompJob->cancel = true;
 }
@@ -1014,6 +1030,14 @@ void DawBridge::tick()
             finishKeyDetection();
         else
             emit ("dawKey", object ({ { "state", "analysing" }, { "progress", keyJob->progress.load() } }));
+    }
+
+    if (toMidiJob != nullptr)
+    {
+        if (toMidiJob->finished)
+            finishToMidi();
+        else
+            emit ("dawToMidi", object ({ { "state", "analysing" }, { "clip", toMidiJob->clipId } }));
     }
 
     if (exportJob != nullptr)
@@ -1794,6 +1818,187 @@ juce::var DawBridge::describeAutoMix() const
                      { "style", styleKey (autoMixStyle) }, { "mode", analysis::getModeKey (autoMixOptions.mode) },
                      { "focus", autoMixOptions.focusTrackId }, { "masterLufs", autoMixOptions.masterLufs }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
                      { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs } });
+}
+
+//==============================================================================
+// The "toMidi" command; args.action is one of:
+//   start   { id (an audio clip), what: "melody" | "bass" | "drums", snapKey (bool, the project key),
+//             quantise (0..1), grid (beats, default 0.25), sensitivity (0..1) }
+//           listens in the background; "dawToMidi" brings { state: "analysing" | "done" | "cancelled" |
+//           "error", ... }. Done: a new MIDI track under the clip's track, one undo step.
+//   cancel
+juce::var DawBridge::handleToMidi (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+
+    if (action == "cancel")
+    {
+        if (toMidiJob != nullptr)
+            toMidiJob->cancel = true;
+        return object ({ { "ok", true }, { "error", juce::String() } });
+    }
+
+    if (action != "start")
+        return error ("Unknown Convert to MIDI action.");
+    if (toMidiJob != nullptr)
+        return error ("Already converting a clip to MIDI.");
+
+    const auto clip = edit.getClip (arg (args, "id", -1));
+    if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+        return error ("Pick an audio clip to convert to MIDI.");
+
+    const auto what = args["what"].toString();
+    if (what != "melody" && what != "bass" && what != "drums")
+        return error ("Pick melody, bass or drums.");
+
+    auto source = engine.getAudioPool().loadNow (juce::File (clip[ids::file].toString()));
+    if (source == nullptr)
+        return error ("The clip's audio couldn't be read.");
+
+    const auto settings = daw::Edit::getWarpSettings (clip);
+    const auto rate = engine.getAudioPool().getSampleRate();
+    const auto tempo = edit.getTempoMap();
+
+    auto job = std::make_shared<ToMidiJob>();
+    job->kind = what;
+    job->clipId = (int) clip[ids::id];
+    job->trackId = (int) clip.getParent()[ids::id];
+    job->clipStart = (double) clip[ids::start];
+    job->clipOffset = (double) clip[ids::offset];
+    job->clipLength = (double) clip[ids::length];
+    job->map = settings.map;
+    job->name = clip[ids::name].toString();
+    job->transpose = what == "drums" ? 0 : (int) std::round (settings.semitones);
+
+    // File time of the analysed stretch, and the grid moved into it.
+    const auto fileFrom = juce::jmax (0.0, settings.map.toSource (job->clipOffset));
+    const auto fileTo = settings.map.toSource (job->clipOffset + job->clipLength);
+    const auto quantise = juce::jlimit (0.0f, 1.0f, (float) (double) args.getProperty ("quantise", 0.0));
+    const auto steps = juce::jlimit (0.0625, 4.0, args.hasProperty ("grid") ? (double) args["grid"] : 0.25);
+    const auto sensitivity = juce::jlimit (0.0f, 1.0f, (float) (double) args.getProperty ("sensitivity", 0.5));
+    const auto key = (bool) args.getProperty ("snapKey", false) ? edit.getKey() : -1;
+    const auto minor = edit.isKeyMinor();
+
+    // The tempo map's lines are timeline seconds: into the clip's content, then the file.
+    std::vector<double> grid;
+    if (quantise > 0.0f)
+        for (const auto line : tempo.makeGrid (steps, job->clipStart, job->clipStart + job->clipLength))
+        {
+            const auto t = settings.map.toSource (line - job->clipStart + job->clipOffset);
+            if (t >= fileFrom - 0.2 && t <= fileTo + 0.2)
+                grid.push_back (t);
+        }
+    std::sort (grid.begin(), grid.end());
+
+    job->origin = what == "drums" ? fileFrom : 0.0;
+    toMidiJob = job;
+
+    juce::Thread::launch ([job, source, rate, what, fileFrom, fileTo, quantise, sensitivity, key, minor, grid]
+    {
+        namespace tomidi = analysis::tomidi;
+        const auto keepGoing = [job] { return ! job->cancel.load(); };
+
+        if (what == "drums")
+        {
+            const auto first = juce::jlimit (0, source->getNumSamples(), (int) std::floor (fileFrom * rate));
+            const auto last = juce::jlimit (first, source->getNumSamples(), (int) std::ceil (fileTo * rate));
+            juce::AudioBuffer<float> part (source->getNumChannels(), last - first);
+            for (int ch = 0; ch < part.getNumChannels(); ++ch)
+                part.copyFrom (ch, 0, *source, ch, first, last - first);
+
+            tomidi::DrumOptions options;
+            options.sensitivity = sensitivity;
+            options.quantise = quantise;
+            for (const auto t : grid)
+                options.grid.push_back (t - fileFrom);
+            job->notes = tomidi::drumsToMidi (part, rate, options, keepGoing);
+        }
+        else
+        {
+            auto options = what == "bass" ? tomidi::MelodyOptions::bass() : tomidi::MelodyOptions();
+            options.key = key;
+            options.minor = minor;
+            options.sensitivity = sensitivity;
+            options.quantise = quantise;
+            options.grid = grid;
+            const auto track = analysis::pitch::analyseCached (*source, rate);
+            if (keepGoing())
+                job->notes = tomidi::melodyToMidi (*track, options, fileFrom, fileTo);
+        }
+        job->finished = true;
+    });
+
+    emit ("dawToMidi", object ({ { "state", "analysing" }, { "clip", job->clipId } }));
+    return object ({ { "ok", true }, { "error", juce::String() } });
+}
+
+void DawBridge::finishToMidi()
+{
+    auto job = std::move (toMidiJob);
+    if (job->cancel)
+    {
+        emit ("dawToMidi", object ({ { "state", "cancelled" } }));
+        return;
+    }
+
+    const auto source = edit.getTrack (job->trackId);
+    const auto clip = edit.getClip (job->clipId);
+    if (! source.isValid() || ! clip.isValid())
+    {
+        emit ("dawToMidi", object ({ { "state", "error" }, { "error", "The clip was removed while it was listened to." } }));
+        return;
+    }
+
+    // Onto the timeline, and out of the clip's range.
+    struct Placed { double time, length; int pitch, velocity; };
+    std::vector<Placed> placed;
+    const auto end = job->clipStart + job->clipLength;
+    for (const auto& n : job->notes)
+    {
+        const auto fileStart = n.time + job->origin;
+        const auto start = job->clipStart + job->map.toTarget (fileStart) - job->clipOffset;
+        const auto stop = job->clipStart + job->map.toTarget (fileStart + n.length) - job->clipOffset;
+        if (start < job->clipStart - 1.0e-6 || start >= end)
+            continue;
+        const auto pitch = juce::jlimit (0, 127, n.pitch + job->transpose);
+        placed.push_back ({ start, juce::jmax (0.02, juce::jmin (stop, end) - start), pitch, n.velocity });
+    }
+
+    if (placed.empty())
+    {
+        emit ("dawToMidi", object ({ { "state", "done" }, { "count", 0 },
+                                     { "note", job->kind == "drums" ? "No drum hits were found. On a full song, split it into stems first and convert the drums."
+                                                                    : "No notes were found. Try a higher sensitivity, or a clip with a clear single line." } }));
+        return;
+    }
+
+    const auto instrumentId = job->kind == "drums" ? "builtin:beat" : job->kind == "bass" ? "builtin:bass" : "builtin:grand";
+    const auto info = processor.getPluginHost().findInstrument (instrumentId);
+    if (! info.has_value())
+    {
+        emit ("dawToMidi", object ({ { "state", "error" }, { "error", "The instrument for this part isn't available." } }));
+        return;
+    }
+
+    const auto label = juce::String (job->kind == "drums" ? "Drums" : job->kind == "bass" ? "Bass" : "Melody");
+    edit.getUndoManager().beginNewTransaction ("Convert to MIDI");
+    auto track = edit.addMidiTrack ((job->name + " " + label + " MIDI").substring (0, 60), *info,
+                                    edit.getTracks().indexOf (source) + 1);
+    const auto trackId = (int) track[ids::id];
+    const auto midiClip = edit.addMidiClip (trackId, job->clipStart, job->clipLength, job->name + " " + label.toLowerCase());
+    if (! midiClip.isValid())
+    {
+        emit ("dawToMidi", object ({ { "state", "error" }, { "error", "Couldn't add the MIDI clip." } }));
+        return;
+    }
+
+    const auto midiClipId = (int) midiClip[ids::id];
+    for (const auto& n : placed)
+        edit.addNote (midiClipId, n.pitch, n.time - job->clipStart, n.length, n.velocity);
+
+    sessionChanged = true;
+    emit ("dawToMidi", object ({ { "state", "done" }, { "count", (int) placed.size() }, { "track", trackId },
+                                 { "clip", midiClipId }, { "kind", job->kind } }));
 }
 
 //==============================================================================
@@ -3216,6 +3421,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "takes")
     {
         complete (handleTakes (args));
+        return;
+    }
+
+    if (command == "toMidi")
+    {
+        complete (handleToMidi (args));
         return;
     }
 

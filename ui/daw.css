@@ -764,6 +764,7 @@ body.is-daw .chip--live { display: none; }
 /* ---------- Export ---------- */
 
 .export-panel,
+.tomidi-panel,
 .stems-panel,
 .automix-panel,
 .key-panel {
@@ -779,7 +780,7 @@ body.is-daw .chip--live { display: none; }
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
 }
 
-.export-panel[hidden], .automix-panel[hidden], .key-panel[hidden], .stems-panel[hidden] { display: none; }
+.export-panel[hidden], .tomidi-panel[hidden], .automix-panel[hidden], .key-panel[hidden], .stems-panel[hidden] { display: none; }
 .export-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .export-options { display: grid; gap: 8px; }
 .export-options label { display: grid; grid-template-columns: 70px 1fr; align-items: center; color: var(--muted); }
@@ -790,6 +791,7 @@ body.is-daw .chip--live { display: none; }
 .export-bar { height: 4px; margin: 14px 0 10px; overflow: hidden; border-radius: 2px; background: #080a0e; visibility: hidden; }
 .export-bar div { height: 100%; width: calc(var(--progress, 0) * 100%); background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
 .export-panel.is-running .export-bar,
+.tomidi-panel.is-running .export-bar,
 .stems-panel.is-running .export-bar,
 .automix-panel.is-running .export-bar,
 .key-panel.is-running .export-bar { visibility: visible; }
@@ -2367,3 +2369,13 @@ body.is-daw .library-hint { display: none; }
 
 .strip.is-group .strip-name { color: var(--text); font-weight: 600; }
 .strip.is-group { background: color-mix(in srgb, var(--track-color) 6%, var(--panel)); }
+
+/* ---------- Convert to MIDI ---------- */
+.tomidi-panel .tomidi-note { margin: 10px 0 0; }
+.tomidi-panel .tomidi-note:empty { display: none; }
+.tomidi-panel .tomidi-key-name { color: var(--muted); font-style: normal; }
+.tomidi-cancel { display: none; }
+.tomidi-panel.is-running .tomidi-cancel { display: inline-block; }
+.tomidi-panel.is-running .tomidi-go { display: none; }
+.tomidi-panel.is-running .export-options { opacity: 0.55; pointer-events: none; }
+.tomidi-panel[data-what="drums"] .tomidi-key { display: none; }

@@ -570,6 +570,7 @@ namespace
     //==========================================================================
     // Stereo sines: each part is { seconds, frequency, amplitude per channel }.
     void writeWav (const juce::File&, const juce::AudioBuffer<float>&, double rate);
+    juce::AudioBuffer<float> makeMelody();
 
     struct TonePart { double seconds, frequency; float left, right; };
 
@@ -5272,6 +5273,73 @@ namespace
             check (roleOf (tags, plain).isEmpty() && ! edit.getTrack (plain).hasProperty (daw::ids::mixRole), "auto forgets the tag");
             edit.removeTrack (kick);
             edit.removeTrack (plain);
+        }
+
+        // Convert to MIDI: a sung line on a clip becomes notes on a new piano track under it,
+        // in one undo step; a clip that starts later puts the notes later.
+        {
+            const auto melodyFile = folder.getChildFile ("Melody.wav");
+            writeWav (melodyFile, makeMelody(), sampleRate);
+            const auto before = edit.getTracks().size();
+            const auto source = (int) edit.addTrack ("Sung")[daw::ids::id];
+            const auto placed = bridge.importAudio (melodyFile, source, 4.0);
+            const auto clipId = (int) placed["clip"];
+
+            const auto convert = [&] (const juce::String& what, juce::var more = juce::var())
+            {
+                auto* object = new juce::DynamicObject();
+                object->setProperty ("action", "start");
+                object->setProperty ("id", clipId);
+                object->setProperty ("what", what);
+                if (const auto* extra = more.getDynamicObject())
+                    for (const auto& property : extra->getProperties())
+                        object->setProperty (property.name, property.value);
+                const auto started = run ("toMidi", juce::var (object));
+                juce::var done;
+                for (int i = 0; i < 1000 && done.isVoid(); ++i)
+                {
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+                    events.clear();
+                    bridge.tick();
+                    for (const auto& [name, payload] : events)
+                        if (name == "dawToMidi" && payload["state"].toString() != "analysing")
+                            done = payload;
+                }
+                return std::make_pair (started, done);
+            };
+
+            check (! ok (run ("toMidi", args ({ { "action", "start" }, { "id", 987654 }, { "what", "melody" } }))),
+                   "toMidi needs a real audio clip");
+
+            const auto [started, done] = convert ("melody");
+            const auto track = edit.getTrack ((int) done["track"]);
+            const auto midiClip = edit.getClip ((int) done["clip"]);
+            check (ok (started) && done["state"].toString() == "done" && (int) done["count"] == 3 && track.isValid()
+                       && daw::Edit::isMidiTrack (track) && edit.getTracks().indexOf (track) == edit.getTracks().indexOf (edit.getTrack (source)) + 1
+                       && track.getChildWithName (daw::ids::INSTRUMENT)[daw::ids::plugin].toString() == "builtin:grand",
+                   "melody becomes a piano track under the clip's track (" + done["state"].toString() + ", " + done["count"].toString() + ")");
+
+            if (midiClip.isValid())
+            {
+                std::vector<std::pair<int, double>> notes;
+                for (const auto& n : midiClip)
+                    if (n.hasType (daw::ids::NOTE))
+                        notes.push_back ({ (int) n[daw::ids::pitch], (double) n[daw::ids::time] });
+                check (notes.size() == 3 && notes[0].first == 57 && notes[1].first == 59 && notes[2].first == 60
+                           && std::abs ((double) midiClip[daw::ids::start] - 4.0) < 1.0e-6 && notes[0].second > 0.05 && notes[0].second < 0.2,
+                       "the notes are the sung ones, placed from the clip's start");
+            }
+
+            edit.getUndoManager().undo();
+            check (edit.getTracks().size() == before + 1 && ! edit.getTrack ((int) done["track"]).isValid(),
+                   "Convert to MIDI undoes in one step");
+
+            const auto [bassStarted, bassDone] = convert ("bass");
+            check (bassDone["state"].toString() == "done" && edit.getTrack ((int) bassDone["track"]).getChildWithName (daw::ids::INSTRUMENT)[daw::ids::plugin].toString() == "builtin:bass",
+                   "bass uses the synth bass");
+            edit.getUndoManager().undo();
+
+            run ("removeTrack", args ({ { "id", source } }));
         }
 
         project.close();
