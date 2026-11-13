@@ -6054,6 +6054,40 @@ namespace
             check (! edit.getClip (clipId).hasProperty (daw::ids::warp), "and each undoes");
         }
 
+        // Several clips warped in one step (the clip editor's All clips mode).
+        {
+            const auto first = (int) imported["clip"];
+            const auto otherTrack = (int) run ("addTrack");
+            const auto second = (int) edit.addClip (otherTrack, song, 0.0, 2.0)[daw::ids::id];
+            const auto pair = [] (double a, double b) { return juce::var (juce::Array<juce::var> { a, b }); };
+            const auto entry = [&] (int clip, double target)
+            {
+                auto* o = new juce::DynamicObject();
+                o->setProperty ("id", clip);
+                o->setProperty ("markers", juce::Array<juce::var> { pair (0.0, 0.0), pair (0.5, target), pair (1.5, 1.5) });
+                return juce::var (o);
+            };
+            check (ok (run ("setWarp", args ({ { "clips", juce::Array<juce::var> { entry (first, 0.6), entry (second, 0.7) } } }))),
+                   "setWarp takes several clips");
+            const auto warpOf = [&] (int clip) { return daw::Edit::getEffectiveWarp (edit.getClip (clip)).toTarget (0.5); };
+            check (std::abs (warpOf (first) - 0.6) < 1e-9 && std::abs (warpOf (second) - 0.7) < 1e-9, "each clip gets its own tabs");
+            run ("undo");
+            check (! edit.getClip (first).hasProperty (daw::ids::warp) && ! edit.getClip (second).hasProperty (daw::ids::warp),
+                   "one undo puts every clip back");
+
+            // Linked: the partner follows the first clip, its own entry is skipped.
+            edit.linkTracks ({ vocal, otherTrack });
+            edit.getClip (second).setProperty (daw::ids::start, (double) edit.getClip (first)[daw::ids::start], nullptr);
+            edit.getClip (second).setProperty (daw::ids::offset, (double) edit.getClip (first)[daw::ids::offset], nullptr);
+            run ("setWarp", args ({ { "clips", juce::Array<juce::var> { entry (first, 0.6), entry (second, 0.9) } } }));
+            check (std::abs (warpOf (second) - 0.6) < 1e-9, "a linked partner in the list isn't warped twice: it follows its partner");
+            run ("undo");
+            edit.unlinkTrack (vocal);
+            edit.unlinkTrack (otherTrack);
+            edit.removeClip (second);
+            edit.removeTrack (otherTrack);
+        }
+
         // The tempo map through the page's commands.
         {
             const auto points = juce::Array<juce::var> { juce::var (juce::Array<juce::var> { 0.0, 100.0, false }),

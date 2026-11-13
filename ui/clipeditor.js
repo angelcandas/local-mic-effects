@@ -4,7 +4,8 @@
 //  - an overview of the whole rendered copy with the clip's window lit and the view box;
 //  - a ruler in the project's bars and beats (click: locate, drag: loop range), the grid,
 //    the playhead;
-//  - the waveform, as a list of lanes (one clip each; one lane for now);
+//  - the waveform, as a list of lanes: the selected clip, and every other audio clip
+//    selected with it, stacked on one timeline (Edit: Active clip | All clips);
 //  - on the left, one section per job: Pitch, Warp, Hitpoints, Quantize. The open section
 //    is the active tool. With no tool open (or Pitch) the pointer only locates, scrolls and
 //    zooms, so nothing in the audio changes by accident.
@@ -49,13 +50,21 @@ function createLane(clip, track) {
   };
 }
 
-// `ui` carries what the DAW screen shares: daw, peaks (no error toasts), ValueKnob, button, toast.
-export function createClipEditor(screen, track, clip, ui) {
+// `ui` carries what the DAW screen shares: daw, peaks (no error toasts), ValueKnob, button,
+// toast. `others`: the other audio clips selected with it ([{ track, clip }]), as more lanes.
+// The sections and the toolbar are the selected (active) clip's; click a lane's name to
+// make that clip the active one.
+export function createClipEditor(screen, track, clip, ui, others = []) {
   const { daw, peaks, ValueKnob, button, toast } = ui;
   const id = clip.id;
   let current = clip, owner = track;
-  const lanes = [createLane(clip, track)];
-  const active = () => lanes[0];
+  const trackIndex = (t) => screen.session?.tracks?.findIndex((x) => x.id === t.id) ?? 0;
+  const lanes = [{ clip, track }, ...others]
+    .sort((x, y) => trackIndex(x.track) - trackIndex(y.track) || x.clip.start - y.clip.start)
+    .map(({ clip: c, track: t }) => createLane(c, t));
+  const primary = lanes.find((lane) => lane.clip.id === id);
+  const active = () => primary;
+  let editAll = prefs.get("editAll", false);
   let disposed = false;
 
   const element = html("section", "panel clip-editor");
@@ -104,6 +113,7 @@ export function createClipEditor(screen, track, clip, ui) {
     span: () => span(), width: () => width(), xOf: (time) => xOf(time), timeAt: (clientX) => timeAt(clientX),
     perPx: () => { const [a, b] = span(); return (b - a) / width(); },
     laneAt: (clientY) => laneAt(clientY), layer: toolLayer, wave: null,
+    editAll: () => editAll && lanes.length > 1,
     paintSoon: () => paintSoon(), redraw: () => drawOverlay(), setStatus: (text) => setStatus(text),
   };
   const tools = { warp: createWarpTool(ctx) };
@@ -200,7 +210,22 @@ export function createClipEditor(screen, track, clip, ui) {
   };
   const waveTab = viewButton("wave", "Wave", "The clip's waveform: its timing, on the project's bars and beats");
   const notesTab = viewButton("notes", "Notes", "The clip's sung notes: move, straighten and shape each one (a single voice or instrument line)");
-  bar.append(views, musical, clipTempoLabel, algorithmRow, compare, solo, loop, status, fit);
+  // With several clips: does the Warp tool change the active clip, or all of them at once?
+  const editSwitch = html("div", "segmented clip-editor-edit");
+  const editLabel = html("span", "clip-editor-compare-label", "Edit");
+  const editActive = button("segment", "Active clip", "The Warp tool changes only the active clip (the one whose name is lit)", () => setEditAll(false));
+  const editEvery = button("segment", "All clips", "The Warp tool changes every clip at once: a tab goes in each clip at the same moment, and a drag moves them all together", () => setEditAll(true));
+  editSwitch.append(editLabel, editActive, editEvery);
+  editSwitch.hidden = lanes.length < 2;
+  const setEditAll = (on) => {
+    editAll = on;
+    prefs.set("editAll", on);
+    editActive.classList.toggle("is-selected", !on);
+    editEvery.classList.toggle("is-selected", on);
+    tools.warp.update();
+    drawOverlay();
+  };
+  bar.append(views, editSwitch, musical, clipTempoLabel, algorithmRow, compare, solo, loop, status, fit);
 
   const overview = html("canvas", "clip-editor-overview");
   overview.title = "The whole recording: the clip's part is lit, the box is what's shown. Drag the box to scroll, its edges to zoom";
@@ -210,7 +235,8 @@ export function createClipEditor(screen, track, clip, ui) {
   const overlay = html("div", "clip-editor-overlay");
   const playhead = html("div", "clip-editor-playhead");
   const loopBand = html("div", "clip-editor-loop");
-  overlay.append(loopBand, toolLayer, playhead);
+  const laneLabels = html("div", "clip-editor-lane-labels");
+  overlay.append(loopBand, toolLayer, laneLabels, playhead);
   wave.append(canvas, overlay);
   const hint = html("p", "panel-caption clip-editor-hint");
   main.append(bar, overview, wave, hint);
@@ -230,6 +256,7 @@ export function createClipEditor(screen, track, clip, ui) {
       main.append(notesView.element);
     }
     for (const item of [musical, clipTempoLabel, compareTime, overview, wave, hint]) item.hidden = notes;
+    editSwitch.hidden = notes || lanes.length < 2;
     if (notesView) notesView.element.hidden = !notes;
     element.classList.toggle("is-notes", notes);
     if (notes) notesView.shown(); else requestAnimationFrame(draw);
@@ -402,6 +429,7 @@ export function createClipEditor(screen, track, clip, ui) {
 
     const fill = colour();
     for (const lane of lanes) {
+      g.globalAlpha = lanes.length > 1 && lane !== active() ? 0.55 : 1;
       const c = lane.clip;
       const top = ruler + lane.top * ratio, laneH = lane.height * ratio;
       // Outside the clip's window: dim.
@@ -413,10 +441,11 @@ export function createClipEditor(screen, track, clip, ui) {
 
       const result = lane.peaks;
       if (!result) continue;
+      g.fillStyle = lane.track.colour || fill;
       const back = lane.remap ? (lane.drag ? (t) => lane.remap(lane.drag(t)) : lane.remap) : lane.drag ?? ((t) => t);
       const gain = Math.pow(10, (c.gain || 0) / 20);
       const middle = top + laneH / 2, reach = laneH / 2 - ratio;
-      g.fillStyle = fill;
+      if (!lane.track.colour) g.fillStyle = fill;
       for (let x = Math.floor(x0); x < Math.ceil(x1); ++x) {
         // Where this column came from in the picture we have (the same place unless an edit moved it).
         const from = back(lane.toRendered(a + x * perPixel)), until = back(lane.toRendered(a + (x + 1) * perPixel));
@@ -441,6 +470,7 @@ export function createClipEditor(screen, track, clip, ui) {
         }
       }
     }
+    g.globalAlpha = 1;
     paintOverview();
   };
   const paintSoon = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; paint(); }); };
@@ -482,9 +512,25 @@ export function createClipEditor(screen, track, clip, ui) {
       }
     }
     tools.warp.draw(open === "warp" && !active().clip.timeBypass);
+    drawLaneLabels();
     drawLoop();
     movePlayhead();
   };
+  // With several lanes: each one's track name; click it to make that clip the active one.
+  const drawLaneLabels = () => {
+    laneLabels.replaceChildren();
+    if (lanes.length < 2) return;
+    for (const lane of lanes) {
+      const label = html("button", `clip-editor-lane-label${lane === active() ? " is-active" : ""}`, `${lane.track.name} · ${lane.clip.name || "clip"}`);
+      label.type = "button";
+      label.title = lane === active() ? "The active clip: the sections on the left are its" : "Make this the active clip";
+      label.style.top = `${RULER + lane.top + 2}px`;
+      label.addEventListener("pointerdown", (event) => event.stopPropagation());
+      label.addEventListener("click", () => { if (lane !== active()) screen.select(lane.track.id, lane.clip.id); });
+      laneLabels.append(label);
+    }
+  };
+
   const drawLoop = () => {
     const loopRange = screen.session?.loop;
     const shown = loopRange && loopRange.end > loopRange.start;
@@ -622,11 +668,15 @@ export function createClipEditor(screen, track, clip, ui) {
 
   //================================================================ the session changed
   let lastShape = "";
-  const update = (t, c) => {
+  const update = (t, c, more = []) => {
     owner = t;
     current = c;
-    lanes[0].clip = c;
-    lanes[0].track = t;
+    primary.clip = c;
+    primary.track = t;
+    for (const other of more) {
+      const lane = lanes.find((l) => l.clip.id === other.clip.id);
+      if (lane) { lane.clip = other.clip; lane.track = other.track; }
+    }
     pitch.update(c.transpose);
     keyInfo.textContent = keyCaption(screen.session, (t.transpose || 0) + (c.transpose || 0));
     if (Math.abs(t.transpose || 0) > 1e-4) keyInfo.textContent += ` Includes the track's ${semitoneText(t.transpose)}.`;
@@ -652,7 +702,7 @@ export function createClipEditor(screen, track, clip, ui) {
     tools.warp.update();
     hint.textContent = tool()?.hint?.() ?? HINTS[open ?? "none"];
     if (mode === "notes") notesView.update();
-    const shape = `${c.audioKey}|${c.start}|${c.offset}|${c.length}|${c.gain}|${JSON.stringify(c.warp ?? [])}|${c.timeBypass}`;
+    const shape = lanes.map((l) => { const x = l.clip; return `${x.audioKey}|${x.start}|${x.offset}|${x.length}|${x.gain}|${JSON.stringify(x.warp ?? [])}|${x.timeBypass}`; }).join("/");
     if (shape !== lastShape) {
       lastShape = shape;
       draw();
@@ -675,7 +725,8 @@ export function createClipEditor(screen, track, clip, ui) {
 
   setMode(mode);
   setOpen(open);
-  update(track, clip);
+  setEditAll(editAll);
+  update(track, clip, others);
   requestAnimationFrame(draw); // sizes are known once it's on screen
 
   return {
