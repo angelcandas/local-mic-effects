@@ -5,6 +5,7 @@
 #include "analysis/Pitch.h"
 
 #include <functional>
+#include <memory>
 #include <vector>
 
 // Time warp and transpose for audio clips, rendered offline.
@@ -113,12 +114,91 @@ struct Settings
     static constexpr double maxSemitones = 24.0;
 };
 
+// Rendering in pieces.
+//
+// A render is cut at fixed seams of the source (quiet spots about every 1.5 s, chosen from
+// the audio alone, so they stay put whatever the settings) into pieces, each identified
+// by a key made only of what shapes that stretch of the output: the algorithm, the
+// transpose, the map around it (relative to where the piece lands, so audio that only
+// slides keeps its key) and the note edits over it. A cache of pieces (the AudioPool's)
+// then re-renders only what an edit changed: moving one note renders the one to three
+// pieces under it, and the rest of the take comes from the cache. Each piece starts a
+// little early (so the vocoder has settled by the seam) and runs a little past its end,
+// and neighbours crossfade over 8 ms at the seam.
+
+// The seams of a recording: sample positions, the first 0 and the last its length,
+// rising. Remembered for the last few recordings (by a sparse sample of the audio, like
+// analysis::pitch::analyseCached). Thread-safe.
+std::vector<int> findSeams (const juce::AudioBuffer<float>&, double sampleRate);
+std::shared_ptr<const std::vector<int>> findSeamsCached (const juce::AudioBuffer<float>&, double sampleRate);
+
+// One render of a recording with some settings, worked out ready to render piece by
+// piece. Making it can take a moment on a long take with note edits (the take's pitch is
+// analysed, once), so do it off the message thread. The source stays shared with it.
+// Rendering pieces is thread-safe: several threads can render different pieces at once.
+class Render
+{
+public:
+    Render (std::shared_ptr<const juce::AudioBuffer<float>> source, double sampleRate, const Settings&);
+    ~Render();
+
+    int getLength() const noexcept { return length; } // samples of the finished copy
+    int getNumChannels() const noexcept;
+
+    // False when the render is cheap and done whole (neutral settings, levels only, slice
+    // or varispeed without a pitch move): then renderWhole() makes it.
+    bool isSegmented() const noexcept { return ! pieces.empty(); }
+
+    struct Piece
+    {
+        double from = 0.0, to = 0.0; // where it lands in the copy, seconds (within the copy)
+        juce::String key;            // what shapes it (unique for the source)
+    };
+    const std::vector<Piece>& getPieces() const noexcept { return pieces; }
+
+    // One piece's audio, a little longer than its stretch (the crossfade into the next).
+    // Empty when `shouldContinue` stopped it.
+    juce::AudioBuffer<float> renderPiece (size_t index, const std::function<bool()>& shouldContinue = {}) const;
+
+    // A piece's stretch (with its crossfade tail) cut out of a finished copy made with the
+    // same map, so it can stand in for a piece not rendered yet (an interim copy). Silence
+    // past the copy's end.
+    juce::AudioBuffer<float> cutPiece (size_t index, const juce::AudioBuffer<float>& copy) const;
+
+    // The finished copy from every piece (in order), joined with crossfades at the seams.
+    juce::AudioBuffer<float> assemble (const std::vector<std::shared_ptr<const juce::AudioBuffer<float>>>&) const;
+
+    // The finished copy in one go, for a render that isn't segmented (or as a reference).
+    juce::AudioBuffer<float> renderWhole (const std::function<bool()>& shouldContinue = {}) const;
+
+    static constexpr double seamSpacing = 1.5, seamSearch = 0.4, crossfadeSeconds = 0.008;
+
+    struct Context;
+
+private:
+    std::shared_ptr<const Context> context;
+    std::vector<Piece> pieces;
+    std::vector<double> starts, ends; // each piece's exact landing times, seconds (may be outside the copy)
+    int length = 0;
+};
+
+// The settings' render in one go, without pieces: what the pieces are checked against.
+juce::AudioBuffer<float> renderUnsegmented (const juce::AudioBuffer<float>& source, double sampleRate, const Settings&,
+                                            const std::function<bool()>& shouldContinue = {});
+
+// Linked files as one buffer (their channels one after the other, as long as the longest),
+// and a render of it split back into each file's copy.
+juce::AudioBuffer<float> combineLinked (const std::vector<const juce::AudioBuffer<float>*>& sources);
+std::vector<juce::AudioBuffer<float>> splitLinked (const juce::AudioBuffer<float>& rendered, const std::vector<const juce::AudioBuffer<float>*>& sources,
+                                                   double sampleRate, const Settings&);
+
 // Several files warped as one (see Settings::linked): the channels of all of them go
 // through render() together, and each comes back at its own length.
 std::vector<juce::AudioBuffer<float>> renderLinked (const std::vector<const juce::AudioBuffer<float>*>& sources, double sampleRate,
                                                     const Settings&, const std::function<bool()>& shouldContinue = {});
 
-// The file's audio warped and transposed with the settings' algorithm. Its length is the map's target for the file's
+// The file's audio warped and transposed with the settings' algorithm, rendered in pieces
+// (see Render) one after the other. Its length is the map's target for the file's
 // end (silence where the map starts the audio later than 0). `shouldContinue` is polled
 // now and then; false stops early and returns an empty buffer.
 juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& source, double sampleRate, const Settings&,

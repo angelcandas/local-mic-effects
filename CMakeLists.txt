@@ -45,6 +45,8 @@ juce_add_binary_data(MicFX_WebUI
         ui/daw.js
         ui/rhythm.js
         ui/tempo.js
+        ui/patterns.js
+        ui/patterns.css
         ui/browser.js
         ui/pianoroll.js
         ui/takes.js
@@ -76,7 +78,8 @@ set(MICFX_INSTRUMENT_SOURCES
     src/instruments/Drawbar.cpp
     src/instruments/Pluck.cpp
     src/instruments/Mallets.cpp
-    src/instruments/Beat.cpp)
+    src/instruments/Beat.cpp
+    src/instruments/Kit.cpp)
 
 set(MICFX_DSP_SOURCES
     ${MICFX_INSTRUMENT_SOURCES}
@@ -283,6 +286,7 @@ if(MICFX_BUILD_INSTRUMENT_PLUGINS)
     micfx_add_instrument_plugin(pluck Pluck Mplk Synth)
     micfx_add_instrument_plugin(mallets Mallets Mmlt Synth)
     micfx_add_instrument_plugin(beat Beat Mbea Drum)
+    micfx_add_instrument_plugin(kit Kit Mkit Drum)
 endif()
 
 # Headless test runner for the DSP: pitch accuracy, autotune, every preset, CPU load.

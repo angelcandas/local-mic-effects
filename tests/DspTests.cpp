@@ -33,6 +33,7 @@
 #include "PitchTap.h"
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
+#include "instruments/Kit.h"
 #include "daw/Quantize.h"
 #include "daw/Patterns.h"
 #include "analysis/Beats.h"
@@ -4932,6 +4933,28 @@ namespace
                    "the session shows them, and the clip plays another rendered copy");
             run ("undo");
             check (lastSession()["tracks"][0]["clips"][0]["stretch"].toString() == "mix", "and they undo");
+
+            // Previews while dragging: played, not stored, not an undo step.
+            {
+                const auto undoName = edit.getUndoManager().getUndoDescription();
+                const auto stored = edit.getClip (clipId)[daw::ids::warp].toString();
+                auto moved = juce::Array<juce::var> { juce::var (juce::Array<juce::var> { 0.0, 0.0 }), juce::var (juce::Array<juce::var> { 0.5, 1.2 }) };
+                auto& engine = processor.getDawEngine();
+                check (ok (run ("previewWarp", args ({ { "id", clipId }, { "markers", moved } }))) && engine.hasPreview (clipId)
+                           && std::abs (engine.getPlaybackSettings (edit.getClip (clipId)).map.toTarget (0.5) - 1.2) < 1.0e-9,
+                       "previewWarp plays markers that aren't stored");
+                check (edit.getClip (clipId)[daw::ids::warp].toString() == stored
+                           && edit.getUndoManager().getUndoDescription() == undoName,
+                       "the session and undo don't see a preview");
+                check (ok (run ("renderState", args ({ { "id", clipId } })))
+                           && ok (run ("cancelPreview", args ({ { "id", clipId } }))) && ! engine.hasPreview (clipId),
+                       "renderState follows the preview, cancelPreview ends it");
+                check (ok (run ("previewPitchNotes", args ({ { "id", clipId }, { "notes", juce::Array<juce::var>() } }))) && engine.hasPreview (clipId)
+                           && ok (run ("setWarp", args ({ { "id", clipId }, { "markers", moved } }))) && ! engine.hasPreview (clipId),
+                       "previewPitchNotes completes, and the real edit ends the preview");
+                check (! ok (run ("previewWarp", args ({ { "id", 99999 } }))), "previewWarp refuses a clip that isn't there");
+                run ("undo");
+            }
             check (ok (run ("setClip", args ({ { "id", clipId }, { "musical", true }, { "clipTempo", 100.0 } }))),
                    "setClip switches musical mode on with the clip's tempo");
             const auto musical = lastSession()["tracks"][0]["clips"][0];
@@ -6697,6 +6720,558 @@ namespace
                "a split keeps the warp on both halves");
         edit.setClipWarp (clip, Map());
         check (! edit.getClip (clip).hasProperty (daw::ids::warp), "clearing the warp removes it from the project");
+
+        folder.deleteRecursively();
+    }
+
+    // Renders in pieces: an edit renders only the pieces it changed.
+    // Dragging while the song plays (fluid editing PR 3): previews that the engine plays but
+    // never stores, renders that start at the playhead, interim copies for big changes.
+    void testLivePreview()
+    {
+        std::cout << "\nLive preview while dragging\n";
+        namespace pitch = analysis::pitch;
+        using daw::warp::Map;
+
+        const auto phrase = makeMelody();
+        const auto repeats = 10; // 21 s
+        juce::AudioBuffer<float> take (2, phrase.getNumSamples() * repeats);
+        for (int r = 0; r < repeats; ++r)
+            for (int ch = 0; ch < 2; ++ch)
+                take.copyFrom (ch, r * phrase.getNumSamples(), phrase, 0, 0, phrase.getNumSamples());
+        const auto seconds = take.getNumSamples() / sampleRate;
+
+        const auto folder = juce::File::createTempFile ("micfx-live-preview");
+        folder.createDirectory();
+        const auto file = folder.getChildFile ("take.wav");
+        writeWav (file, take, sampleRate);
+
+        daw::Edit edit;
+        const auto trackId = (int) edit.addTrack ("Voice")[daw::ids::id];
+        const auto clipId = (int) edit.addClip (trackId, file, 0.0, seconds)[daw::ids::id];
+        edit.getUndoManager().clearUndoHistory();
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        engine.loadAllNow();
+        auto& pool = engine.getAudioPool();
+        const auto clip = [&] { return edit.getClip (clipId); };
+        const auto settle = [&] (int limit = 60000)
+        {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (20); // the rebuild that asks for it
+            for (int i = 0; i < limit && pool.isLoading(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (20); // the last rebuild
+        };
+        const auto stateBefore = edit.getState().toXmlString();
+
+        // A marker preview plays, but nothing is stored and nothing can be undone.
+        const Map dragged ({ { 0.0, 0.0 }, { 5.0, 5.4 }, { seconds, seconds } });
+        engine.setPreviewWarp (clipId, dragged);
+        check (engine.hasPreview (clipId) && engine.getPlaybackSettings (clip()).map == dragged, "a warp preview is what the clip plays");
+        settle();
+        check (pool.isReady (file, engine.getPlaybackSettings (clip())), "its copy renders");
+        check (edit.getState().toXmlString() == stateBefore && ! edit.getUndoManager().canUndo(), "a preview never touches the project or undo");
+
+        // Rapid previews (a drag every 120 ms): each one's render goes stale and is cancelled,
+        // and nothing is left pending once the hand stops.
+        for (int k = 1; k <= 12; ++k)
+        {
+            engine.setPreviewWarp (clipId, Map ({ { 0.0, 0.0 }, { 5.0, 5.0 + 0.03 * k }, { seconds, seconds } }));
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (15);
+        }
+        const Map last ({ { 0.0, 0.0 }, { 5.0, 5.0 + 0.03 * 12 }, { seconds, seconds } });
+        settle();
+        check (pool.getPendingWarps() == 0 && ! pool.isLoading(), "after rapid previews nothing is left pending");
+        check (pool.isReady (file, engine.getPlaybackSettings (clip())), "the last preview's copy is ready");
+
+        // The real edit replaces the preview, and finds its copy already made.
+        edit.setEffectiveWarp (clipId, last);
+        check (! engine.hasPreview (clipId), "storing the edit ends the preview");
+        check (pool.isReady (file, daw::Edit::getWarpSettings (clip())), "the stored edit plays at once (the preview rendered it)");
+        engine.setPreviewWarp (clipId, dragged);
+        engine.cancelPreview (clipId);
+        check (! engine.hasPreview (clipId) && engine.getPlaybackSettings (clip()).map == last, "cancelPreview goes back to what's stored");
+        edit.getUndoManager().undo();
+        check (daw::Edit::getEffectiveWarp (clip()).isIdentity(), "undo takes the stored edit back as usual");
+        settle();
+
+        // Every note up two semitones, with the playhead at 12 s: the pieces from the playhead
+        // on render first; an interim copy (new audio near the playhead, the old elsewhere)
+        // is heard before the whole copy is done, at the same length.
+        auto notes = pitch::findNotes (*pitch::analyseCached (take, sampleRate));
+        check (notes.size() > 20, "the take has notes");
+        for (auto& n : notes)
+            n.shift = 2.0f;
+        const auto focus = 12.2;
+        engine.seek ((juce::int64) (focus * sampleRate));
+        const auto interimsBefore = pool.getInterimsPublished();
+        engine.setPreviewNotes (clipId, notes);
+        const auto settings = engine.getPlaybackSettings (clip());
+        check (settings.hasNoteEdits(), "a notes preview is what the clip plays");
+
+        auto aheadFirst = false, sawWindowDone = false;
+        daw::AudioPool::Audio interim;
+        for (int i = 0; i < 60000 && ! pool.isReady (file, settings); ++i)
+        {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+            const auto ranges = pool.getRenderingRanges (file, settings);
+            if (! sawWindowDone && ! ranges.empty())
+            {
+                const auto covers = [&] (double a, double b) { return std::any_of (ranges.begin(), ranges.end(), [&] (const auto& r) { return r.second > a && r.first < b; }); };
+                if (! covers (focus, focus + 3.0))
+                {
+                    sawWindowDone = true;
+                    aheadFirst = covers (0.0, 1.0);
+                }
+            }
+            if (interim == nullptr && ! pool.isReady (file, settings))
+                interim = pool.getForPlayback (file, settings, {});
+        }
+        const auto whole = pool.get (file, settings);
+        check (sawWindowDone && aheadFirst, "the pieces after the playhead render before the ones behind it");
+        check (interim != nullptr && pool.getInterimsPublished() == interimsBefore + 1, "an interim copy is handed out while the rest renders");
+        const auto plain = pool.get (file);
+        if (interim != nullptr && whole != nullptr && plain != nullptr)
+        {
+            check (interim->getNumSamples() == whole->getNumSamples(), "the interim copy is as long as the finished one");
+            const auto from = (int) (focus * sampleRate), n = (int) (2.5 * sampleRate);
+            auto near = 0.0f, far = 0.0f;
+            for (int i = 0; i < n; ++i)
+            {
+                near = juce::jmax (near, std::abs (interim->getSample (0, from + i) - whole->getSample (0, from + i)));
+                far = juce::jmax (far, std::abs (interim->getSample (0, i + (int) (0.5 * sampleRate)) - plain->getSample (0, i + (int) (0.5 * sampleRate))));
+            }
+            check (near < 1.0e-5f, "near the playhead the interim copy is the new audio (" + juce::String (near, 6) + ")");
+            check (far < 1.0e-5f, "far behind it, the old audio stands in (" + juce::String (far, 6) + ")");
+        }
+        check (pool.getPendingWarps() == 0, "nothing pending once the copy is done");
+        check (edit.getState().toXmlString().contains ("pitchNotes") == false, "the notes preview isn't stored");
+
+        // A change of map gets no interim copy (the old audio's timing would be wrong).
+        const auto interimsMid = pool.getInterimsPublished();
+        engine.setPreviewWarp (clipId, Map ({ { 0.0, 0.0 }, { 9.0, 9.6 }, { seconds, seconds } }));
+        settle();
+        check (pool.getInterimsPublished() == interimsMid, "a new map waits for the finished copy");
+        engine.cancelPreview (-1);
+        check (! engine.hasPreview (clipId), "cancelPreview with no clip ends them all");
+
+        // A rebuild (each publish while dragging makes one) stays cheap with many tracks.
+        for (int t = 0; t < 12; ++t)
+            edit.addClip ((int) edit.addTrack ("Track " + juce::String (t))[daw::ids::id], file, 0.0, seconds);
+        engine.loadAllNow();
+        const auto started = juce::Time::getMillisecondCounterHiRes();
+        for (int k = 0; k < 20; ++k)
+            engine.rebuildNow();
+        const auto each = (juce::Time::getMillisecondCounterHiRes() - started) / 20.0;
+        std::cout << "  (a graph rebuild with 13 audio tracks: " << juce::String (each, 2) << " ms)\n";
+        check (each < 100.0, "a graph rebuild stays cheap (" + juce::String (each, 2) + " ms)");
+
+        folder.deleteRecursively();
+    }
+
+    void testSegments()
+    {
+        std::cout << "\nWarp renders in pieces (edits render only what they change)\n";
+        namespace pitch = analysis::pitch;
+        using daw::warp::Map;
+        using daw::warp::Render;
+
+        // A long take: the melody ten times over (21 s), in stereo.
+        const auto phrase = makeMelody();
+        const auto repeats = 10;
+        auto take = std::make_shared<juce::AudioBuffer<float>> (2, phrase.getNumSamples() * repeats);
+        take->clear();
+        for (int r = 0; r < repeats; ++r)
+            for (int ch = 0; ch < 2; ++ch)
+                take->addFrom (ch, r * phrase.getNumSamples(), phrase, 0, 0, phrase.getNumSamples(), ch == 0 ? 1.0f : 0.8f);
+        const auto length = take->getNumSamples();
+
+        // Seams: fixed, rising, about 1.5 s apart, at quiet spots.
+        const auto seams = daw::warp::findSeams (*take, sampleRate);
+        auto spaced = seams.front() == 0 && seams.back() == length && seams.size() > 10;
+        auto quiet = true;
+        for (size_t k = 1; k + 1 < seams.size(); ++k)
+        {
+            const auto gap = (seams[k] - seams[k - 1]) / sampleRate;
+            spaced = spaced && gap > 0.6 && gap < 2.4;
+
+            // The quietest 10 ms within reach of where it would be (k * 1.5 s).
+            const auto spot = (int) std::round (std::round (seams[k] / sampleRate / Render::seamSpacing) * Render::seamSpacing * sampleRate);
+            const auto energyAt = [&] (int at) { return take->getRMSLevel (0, juce::jlimit (0, length - 480, at - 240), 480); };
+            auto quietest = energyAt (spot);
+            for (int at = spot - (int) (0.4 * sampleRate); at <= spot + (int) (0.4 * sampleRate); at += 48)
+                quietest = juce::jmin (quietest, energyAt (at));
+            quiet = quiet && energyAt (seams[k]) <= quietest + 1.0e-4f;
+        }
+        check (spaced, juce::String ((int) seams.size() - 1) + " pieces about 1.5 s long, from the start to the end");
+        check (quiet, "each seam sits at the quietest spot near it");
+        check (*daw::warp::findSeamsCached (*take, sampleRate) == seams && daw::warp::findSeamsCached (*take, sampleRate) == daw::warp::findSeamsCached (*take, sampleRate),
+               "seams are remembered per recording");
+
+        // Pieces against one whole render: same length, same sound.
+        const auto envelopeDifference = [] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+        {
+            // 100 ms levels where both clearly sound (an attack can land a few ms apart:
+            // the two put their frames in different places), and the level overall.
+            const auto window = (int) (0.1 * sampleRate);
+            const auto n = juce::jmin (a.getNumSamples(), b.getNumSamples());
+            auto worst = std::abs (juce::Decibels::gainToDecibels (a.getRMSLevel (0, 0, n) / juce::jmax (1.0e-6f, b.getRMSLevel (0, 0, n))));
+            for (int i = 0; i + window <= n; i += window / 2)
+            {
+                const auto x = a.getRMSLevel (0, i, window), y = b.getRMSLevel (0, i, window);
+                if (juce::jmin (x, y) > 0.04f)
+                    worst = juce::jmax (worst, std::abs (juce::Decibels::gainToDecibels (x / y)));
+            }
+            return worst;
+        };
+        const auto spectrumDifference = [] (const juce::AudioBuffer<float>& a, const juce::AudioBuffer<float>& b)
+        {
+            // Long-term spectrum in 1/3-octave bands, 100 Hz..8 kHz: worst band difference.
+            constexpr int order = 12, size = 1 << order;
+            juce::dsp::FFT fft (order);
+            const auto bands = [&] (const juce::AudioBuffer<float>& audio)
+            {
+                std::vector<double> energy (20, 0.0);
+                std::vector<float> data ((size_t) size * 2);
+                for (int start = 0; start + size <= audio.getNumSamples(); start += size)
+                {
+                    std::fill (data.begin(), data.end(), 0.0f);
+                    for (int i = 0; i < size; ++i)
+                        data[(size_t) i] = audio.getSample (0, start + i) * (0.5f - 0.5f * (float) std::cos (juce::MathConstants<double>::twoPi * i / size));
+                    fft.performFrequencyOnlyForwardTransform (data.data());
+                    for (int k = 1; k < size / 2; ++k)
+                        if (const auto f = k * sampleRate / size; f >= 100.0 && f < 8000.0)
+                            energy[(size_t) juce::jlimit (0, 19, (int) (3.0 * std::log2 (f / 100.0)))] += (double) data[(size_t) k] * data[(size_t) k];
+                }
+                return energy;
+            };
+            const auto x = bands (a), y = bands (b);
+            auto total = 0.0;
+            for (auto e : x)
+                total += e;
+            auto worst = 0.0;
+            for (size_t i = 0; i < x.size(); ++i)
+                if (x[i] > total * 1.0e-3 || y[i] > total * 1.0e-3)
+                    worst = juce::jmax (worst, std::abs (10.0 * std::log10 ((x[i] + 1.0e-9) / (y[i] + 1.0e-9))));
+            return worst;
+        };
+
+        daw::warp::Settings warped;
+        warped.map = Map ({ { 2.0, 2.0 }, { 6.0, 7.1 }, { 12.0, 12.4 }, { 15.0, 16.9 } });
+        warped.semitones = 3.0;
+
+        auto edited = pitch::findNotes (pitch::analyse (*take, sampleRate));
+        check (edited.size() >= 25, juce::String ((int) edited.size()) + " sung notes in the long take");
+        if (edited.size() < 25)
+            return;
+        edited[0].shift = 1.0f;
+        daw::warp::Settings notes;
+        notes.notes = edited;
+        notes.algorithm = daw::warp::Algorithm::solo;
+
+        for (const auto& [name, base] : { std::pair<juce::String, daw::warp::Settings> { "mix, warped and +3 st", warped },
+                                          std::pair<juce::String, daw::warp::Settings> { "solo, note edits", notes } })
+        {
+            for (const auto algorithm : { base.algorithm, daw::warp::Algorithm::efficient, daw::warp::Algorithm::varispeed })
+            {
+                if (algorithm != base.algorithm && base.hasNoteEdits())
+                    continue;
+                auto settings = base;
+                settings.algorithm = algorithm;
+                const auto label = name + (algorithm != base.algorithm ? " (" + daw::warp::getAlgorithmKey (algorithm) + ")" : juce::String());
+
+                const Render render (take, sampleRate, settings);
+                const auto pieces = daw::warp::render (*take, sampleRate, settings);
+                const auto whole = daw::warp::renderUnsegmented (*take, sampleRate, settings);
+                const auto expected = (int) std::round (settings.map.toTarget (length / sampleRate) * sampleRate);
+                check (render.isSegmented() && pieces.getNumSamples() == expected && whole.getNumSamples() == expected,
+                       label + ": " + juce::String ((int) render.getPieces().size()) + " pieces, exactly as long as the whole render");
+                const auto envelope = envelopeDifference (pieces, whole);
+                const auto spectrum = spectrumDifference (pieces, whole);
+                // Efficient's grains fall in other places in a piece than in one whole run,
+                // which moves the level of a note's edges a little more.
+                check (envelope < (algorithm == daw::warp::Algorithm::efficient ? 3.5f : 1.5f) && spectrum < 1.0,
+                       label + ": sounds like the whole render (level within " + juce::String (envelope, 2) + " dB, spectrum within "
+                           + juce::String (spectrum, 2) + " dB)");
+            }
+        }
+
+        // No click at a seam, even where the audio doesn't go quiet: a steady tone, stretched
+        // and transposed, through the crossfades.
+        {
+            auto tone = std::make_shared<juce::AudioBuffer<float>> (1, (int) (8.0 * sampleRate));
+            for (int i = 0; i < tone->getNumSamples(); ++i)
+            {
+                auto value = 0.0;
+                for (int h = 1; h <= 6; ++h)
+                    value += std::sin (juce::MathConstants<double>::twoPi * 196.0 * h * i / sampleRate) / h;
+                tone->setSample (0, i, (float) (0.3 * value));
+            }
+            daw::warp::Settings settings;
+            settings.map = Map ({ { 0.0, 0.0 }, { 8.0, 10.0 } });
+            settings.semitones = -2.0;
+            const Render render (tone, sampleRate, settings);
+            const auto out = daw::warp::render (*tone, sampleRate, settings);
+            const auto jumpNear = [&] (int centre, int from, int to)
+            {
+                auto worst = 0.0f;
+                for (int i = juce::jmax (1, centre + from); i < juce::jmin (out.getNumSamples(), centre + to); ++i)
+                    worst = juce::jmax (worst, std::abs (out.getSample (0, i) - out.getSample (0, i - 1)));
+                return worst;
+            };
+            auto worstRatio = 0.0f;
+            for (size_t k = 1; k < render.getPieces().size(); ++k)
+            {
+                const auto seam = (int) std::round (render.getPieces()[k].from * sampleRate);
+                const auto atSeam = jumpNear (seam, -(int) (0.002 * sampleRate), (int) (0.012 * sampleRate));
+                const auto around = juce::jmax (jumpNear (seam, -(int) (0.1 * sampleRate), -(int) (0.02 * sampleRate)),
+                                                jumpNear (seam, (int) (0.03 * sampleRate), (int) (0.1 * sampleRate)));
+                worstRatio = juce::jmax (worstRatio, atSeam / juce::jmax (1.0e-6f, around));
+            }
+            check (render.getPieces().size() > 3 && worstRatio < 1.3f,
+                   "no click at the seams of a steady tone (largest step " + juce::String (worstRatio, 2) + "x the one around it)");
+        }
+
+        // Keys: what an edit changes.
+        const auto keys = [&] (const daw::warp::Settings& settings, const std::shared_ptr<const juce::AudioBuffer<float>>& audio)
+        {
+            std::vector<juce::String> list;
+            const Render render (audio, sampleRate, settings);
+            for (const auto& piece : render.getPieces())
+                list.push_back (piece.key);
+            return list;
+        };
+        const auto changed = [] (const std::vector<juce::String>& a, const std::vector<juce::String>& b)
+        {
+            int count = 0;
+            for (size_t i = 0; i < juce::jmax (a.size(), b.size()); ++i)
+                count += i >= a.size() || i >= b.size() || a[i] != b[i] ? 1 : 0;
+            return count;
+        };
+
+        {
+            auto moved = notes;
+            moved.notes[16].shift = -2.0f;
+            const auto before = keys (notes, take), after = keys (moved, take);
+            const auto count = changed (before, after);
+            check (count >= 1 && count <= 3, "moving one note changes " + juce::String (count) + " of " + juce::String ((int) before.size()) + " pieces");
+        }
+        {
+            daw::warp::Settings a, b;
+            a.map = Map ({ { 0.0, 0.5 } });
+            b.map = Map ({ { 0.0, 0.5 + 731.37 / sampleRate } }); // not a whole number of samples
+            a.semitones = b.semitones = 2.0;
+            check (changed (keys (a, take), keys (b, take)) == 0, "audio that only slides keeps every piece");
+        }
+        {
+            std::vector<daw::warp::Marker> markers;
+            for (int m = 0; m <= 7; ++m)
+                markers.push_back ({ m * 3.0, m * 3.0 * 1.05 });
+            daw::warp::Settings a, b;
+            a.map = Map (markers);
+            markers[4].target += 0.12;
+            b.map = Map (markers);
+            const auto before = keys (a, take), after = keys (b, take);
+            const Render render (take, sampleRate, a);
+            auto outside = true;
+            for (size_t i = 0; i < before.size() && i < after.size(); ++i)
+                if (before[i] != after[i])
+                    outside = outside && render.getPieces()[i].to > markers[3].target - 0.6 && render.getPieces()[i].from < markers[5].target + 0.6;
+            const auto count = changed (before, after);
+            check (count >= 1 && count <= 6 && outside,
+                   "moving one marker changes only the pieces between its neighbours (" + juce::String (count) + " of " + juce::String ((int) before.size()) + ")");
+        }
+
+        // In the pool: pieces are cached and copies are put together from them.
+        const auto folder = juce::File::createTempFile ("micfx-segments");
+        folder.createDirectory();
+        const auto file = folder.getChildFile ("take.wav");
+        writeWav (file, *take, sampleRate);
+        {
+            daw::AudioPool pool;
+            pool.setSampleRate (sampleRate);
+            const auto pieceCount = (int) Render (take, sampleRate, notes).getPieces().size();
+
+            auto rendered = pool.getPiecesRendered();
+            const auto first = pool.loadNow (file, notes);
+            check (first != nullptr && pool.getPiecesRendered() - rendered == pieceCount, "the first copy renders every piece");
+
+            auto moved = notes;
+            moved.notes[16].shift = -2.0f;
+            rendered = pool.getPiecesRendered();
+            const auto second = pool.loadNow (file, moved);
+            const auto newPieces = pool.getPiecesRendered() - rendered;
+            check (second != nullptr && second->getNumSamples() == first->getNumSamples() && newPieces >= 1 && newPieces <= 3,
+                   "after moving one note only " + juce::String (newPieces) + " piece(s) render");
+
+            // Undo: the old copy comes back from its pieces without rendering any.
+            pool.releaseUnusedWarps ({ daw::AudioPool::getWarpKey (file, moved) });
+            for (int i = 0; i < 4; ++i) // push the old whole copy out of the spares
+            {
+                auto other = notes;
+                other.notes[16 + i].shift = 0.5f;
+                pool.loadNow (file, other);
+                pool.releaseUnusedWarps ({ daw::AudioPool::getWarpKey (file, moved) });
+            }
+            rendered = pool.getPiecesRendered();
+            const auto again = pool.loadNow (file, notes);
+            auto same = again != nullptr && again->getNumSamples() == first->getNumSamples();
+            for (int i = 0; same && i < again->getNumSamples(); i += 97)
+                same = juce::exactlyEqual (again->getSample (0, i), first->getSample (0, i));
+            check (same && pool.getPiecesRendered() == rendered, "undo puts the old copy together from cached pieces (none rendered)");
+
+            // Hearing one edited note: only the pieces it touches render, the stretch matches
+            // the finished copy, and a newer ask drops the older.
+            {
+                auto heard = notes;
+                heard.notes[19].shift = 3.0f;
+                const auto from = heard.notes[19].start, to = heard.notes[19].end;
+                const auto stretch = [&] (const daw::warp::Settings& s, double a, double b, int wait)
+                {
+                    std::shared_ptr<juce::AudioBuffer<float>> got;
+                    pool.renderRange (file, s, a, b, [&got] (juce::AudioBuffer<float>&& audio) { got = std::make_shared<juce::AudioBuffer<float>> (std::move (audio)); });
+                    for (int i = 0; i < wait && got == nullptr; ++i)
+                        juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+                    return got;
+                };
+
+                rendered = pool.getPiecesRendered();
+                const auto got = stretch (heard, from, to, 4000);
+                const auto cost = pool.getPiecesRendered() - rendered;
+                check (got != nullptr && cost >= 1 && cost <= 3 && got->getNumSamples() == (int) std::llround (juce::jmin (to, from + 1.5) * sampleRate) - (int) std::llround (from * sampleRate),
+                       "hearing a note renders only " + juce::String (cost) + " piece(s), at the stretch's length");
+
+                const auto whole = pool.loadNow (file, heard);
+                auto worst = 0.0f;
+                if (got != nullptr && whole != nullptr)
+                {
+                    const auto first = (int) std::llround (from * sampleRate), n = got->getNumSamples();
+                    const auto a = got->getRMSLevel (0, 0, n), b = whole->getRMSLevel (0, first, n);
+                    worst = std::abs (juce::Decibels::gainToDecibels (a / juce::jmax (1.0e-6f, b)));
+                    check (a > 0.01f && worst < 1.5f, "the heard stretch sounds like the finished copy (" + juce::String (worst, 2) + " dB apart)");
+                }
+
+                rendered = pool.getPiecesRendered();
+                const auto repeat = stretch (heard, from, to, 4000);
+                check (repeat != nullptr && pool.getPiecesRendered() == rendered, "hearing it again finds the pieces cached");
+
+                bool first = false, second = false;
+                auto other = notes;
+                other.notes[3].shift = -1.0f;
+                pool.renderRange (file, other, 0.0, 1.0, [&first] (juce::AudioBuffer<float>&&) { first = true; });
+                pool.renderRange (file, heard, from, to, [&second] (juce::AudioBuffer<float>&&) { second = true; });
+                for (int i = 0; i < 4000 && ! second; ++i)
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+                check (second && ! first, "a newer ask drops the older one");
+            }
+
+            daw::warp::Settings a, b;
+            a.map = Map ({ { 0.0, 0.5 } });
+            b.map = Map ({ { 0.0, 0.75 } });
+            a.semitones = b.semitones = -1.0;
+            pool.loadNow (file, a);
+            rendered = pool.getPiecesRendered();
+            const auto slid = pool.loadNow (file, b);
+            check (slid != nullptr && pool.getPiecesRendered() == rendered
+                       && slid->getNumSamples() == (int) std::round ((length / sampleRate + 0.75) * sampleRate),
+                   "a lone marker sliding the take renders nothing");
+
+            // The cache's limit: the least recently used pieces go.
+            pool.setPieceCacheBytes ((size_t) 8 << 20);
+            check (pool.getPieceBytes() <= ((size_t) 8 << 20), "the piece cache stays within its limit");
+            pool.setPieceCacheBytes ((size_t) 512 << 20);
+
+            // Cancelled: the pieces already done stay.
+            auto third = notes;
+            third.semitones = 1.0;
+            rendered = pool.getPiecesRendered();
+            check (pool.get (file, third) == nullptr, "a new copy renders in the background");
+            const auto ranges = pool.getRenderingRanges (file, third);
+            check (! ranges.empty() && ranges.front().first < 1.0e-6, "the stretches still to render are known");
+            for (int i = 0; i < 30000 && pool.getPiecesRendered() - rendered < 2; ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
+            const auto partial = pool.getRenderingRanges (file, third);
+            pool.releaseUnusedWarps ({ daw::AudioPool::getWarpKey (file, notes) }); // moved on: cancel it
+            for (int i = 0; i < 1000 && pool.isLoading(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            const auto done = pool.getPiecesRendered() - rendered;
+            auto rangeTotal = 0.0;
+            for (const auto& r : partial)
+                rangeTotal += r.second - r.first;
+            check (done >= 2 && done < pieceCount && rangeTotal < length / sampleRate, "while it renders, finished stretches drop off the list ("
+                       + juce::String (rangeTotal, 1) + " s of " + juce::String (length / sampleRate, 1) + " s left)");
+            rendered = pool.getPiecesRendered();
+            check (pool.loadNow (file, third) != nullptr && pool.getPiecesRendered() - rendered == pieceCount - done,
+                   "cancelled, its finished pieces stay: asked again, it renders only the " + juce::String (pieceCount - done) + " left");
+            check (pool.getRenderingRanges (file, third).empty(), "nothing left to render once it's ready");
+        }
+
+        // Linked files: rendered as one, in pieces, they stay sample-aligned.
+        {
+            const auto other = folder.getChildFile ("other.wav");
+            juce::AudioBuffer<float> quieter (*take);
+            quieter.applyGain (0.5f);
+            writeWav (other, quieter, sampleRate);
+
+            daw::warp::Settings settings = warped;
+            settings.linked = { file.getFullPathName(), other.getFullPathName() };
+            settings.linked.sort (false);
+            daw::AudioPool pool;
+            pool.setSampleRate (sampleRate);
+            const auto a = pool.loadNow (file, settings), b = pool.loadNow (juce::File (other), settings);
+            auto aligned = a != nullptr && b != nullptr && a->getNumSamples() == b->getNumSamples() && pool.getPiecesRendered() > 3;
+            auto worst = 0.0f;
+            for (int i = 0; aligned && i < a->getNumSamples(); ++i)
+                worst = juce::jmax (worst, std::abs (b->getSample (0, i) - 0.5f * a->getSample (0, i)));
+            check (aligned && worst < 1.0e-3f, "linked files render in pieces and stay sample-aligned (worst " + juce::String (worst, 5) + ")");
+        }
+
+        // Timings (use the release build for real numbers): a long take, rendered whole on
+        // one thread, then in pieces on the warp threads, then after one note edit.
+        {
+#if JUCE_DEBUG
+            const auto minutes = 0.5;
+#else
+            const auto minutes = 3.0;
+#endif
+            const auto count = (int) std::ceil (minutes * 60.0 / (phrase.getNumSamples() / sampleRate));
+            juce::AudioBuffer<float> longTake (2, phrase.getNumSamples() * count);
+            for (int r = 0; r < count; ++r)
+                for (int ch = 0; ch < 2; ++ch)
+                    longTake.copyFrom (ch, r * phrase.getNumSamples(), phrase, 0, 0, phrase.getNumSamples());
+            const auto longFile = folder.getChildFile ("long.wav");
+            writeWav (longFile, longTake, sampleRate);
+
+            auto longNotes = pitch::findNotes (*pitch::analyseCached (longTake, sampleRate));
+            longNotes[0].shift = 1.0f;
+            daw::warp::Settings settings;
+            settings.notes = longNotes;
+            settings.algorithm = daw::warp::Algorithm::solo;
+
+            auto started = juce::Time::getMillisecondCounterHiRes();
+            daw::warp::renderUnsegmented (longTake, sampleRate, settings);
+            const auto single = (juce::Time::getMillisecondCounterHiRes() - started) / 1000.0;
+
+            daw::AudioPool pool;
+            pool.setSampleRate (sampleRate);
+            pool.loadNow (longFile);
+            const auto wait = [&] (const daw::warp::Settings& s)
+            {
+                const auto from = juce::Time::getMillisecondCounterHiRes();
+                pool.get (longFile, s);
+                for (int i = 0; i < 100000 && pool.get (longFile, s) == nullptr; ++i)
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (1);
+                return (juce::Time::getMillisecondCounterHiRes() - from) / 1000.0;
+            };
+            const auto full = wait (settings);
+            auto edit = settings;
+            edit.notes[(size_t) (longNotes.size() / 2)].shift = -2.0f;
+            const auto oneNote = wait (edit);
+            std::cout << "  INFO  " << juce::String (minutes, 1) << " min stereo take with note edits: whole on one thread "
+                      << juce::String (single, 2) << " s, in pieces on " << daw::AudioPool::getWarpThreads() << " thread(s) "
+                      << juce::String (full, 2) << " s, after moving one note " << juce::String (oneNote * 1000.0, 0) << " ms\n";
+            check (oneNote < full, "a one-note edit is quicker than the whole take");
+        }
 
         folder.deleteRecursively();
     }
@@ -8546,6 +9121,8 @@ namespace
 
         for (const auto* spec : specs)
         {
+            if (spec->key == "kit") // a sampler with no samples of its own: testKit
+                continue;
             auto created = micfx::inst::createInstrument (spec->key);
             auto& instrument = dynamic_cast<micfx::inst::InstrumentProcessor&> (*created);
             instrument.setRateAndBufferSizeDetails (sampleRate, blockSize);
@@ -8696,6 +9273,325 @@ namespace
                    "a project's \"builtin:pad\" opens on Nova's Warm Pad, with a window");
         }
     }
+    //==============================================================================
+    // Kit: the sampler drum kit. Samples are made here (no sample ships with it).
+    juce::File writeTestSample (const juce::File& folder, const juce::String& name, double rate, double seconds, float frequency,
+                                bool stereo, float decaySeconds)
+    {
+        const auto file = folder.getChildFile (name);
+        file.deleteFile();
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
+        auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions().withSampleRate (rate)
+                                                                                  .withNumChannels (stereo ? 2 : 1).withBitsPerSample (16));
+        const auto n = (int) (seconds * rate);
+        juce::AudioBuffer<float> buffer (stereo ? 2 : 1, n);
+        for (int i = 0; i < n; ++i)
+        {
+            const auto t = (double) i / rate;
+            const auto v = (float) (0.8 * std::sin (juce::MathConstants<double>::twoPi * frequency * t) * std::exp (-t / decaySeconds));
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                buffer.setSample (ch, i, v);
+        }
+        writer->writeFromAudioSampleBuffer (buffer, 0, n);
+        return file;
+    }
+
+    // When the sound is over: the last time (seconds) the signal is above the threshold.
+    double lastAbove (const std::vector<float>& x, float threshold)
+    {
+        for (size_t i = x.size(); i-- > 0;)
+            if (std::abs (x[i]) > threshold)
+                return (double) i / sampleRate;
+        return 0.0;
+    }
+
+    float peakOf (const std::vector<float>& x)
+    {
+        auto p = 0.0f;
+        for (auto v : x)
+            p = std::max (p, std::abs (v));
+        return p;
+    }
+
+    void testKit()
+    {
+        std::cout << "\nKit (sampler drum kit)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-kit");
+        folder.createDirectory();
+        const auto demoFolder = juce::SystemStats::getEnvironmentVariable ("MICFX_INSTRUMENT_DEMO", {});
+
+        const auto kickFile = writeTestSample (folder, "Kick 808.wav", 44100.0, 1.0, 60.0f, false, 0.25f);
+        const auto snareFile = writeTestSample (folder, "Snare.wav", 22050.0, 1.0, 400.0f, true, 0.3f);
+        const auto hatFile = writeTestSample (folder, "Hat.wav", 48000.0, 1.5, 6000.0f, true, 0.6f);
+        const auto openFile = writeTestSample (folder, "Open Hat.wav", 48000.0, 1.5, 7000.0f, true, 0.6f);
+        const auto notAudio = folder.getChildFile ("notes.txt");
+        notAudio.replaceWithText ("not audio");
+
+        auto make = [] (std::unique_ptr<juce::AudioProcessor>& owner) -> micfx::inst::InstrumentProcessor&
+        {
+            owner = micfx::inst::createInstrument ("kit");
+            auto& p = dynamic_cast<micfx::inst::InstrumentProcessor&> (*owner);
+            p.setRateAndBufferSizeDetails (sampleRate, blockSize);
+            p.prepareToPlay (sampleRate, blockSize);
+            return p;
+        };
+
+        std::unique_ptr<juce::AudioProcessor> owner;
+        auto& kit = make (owner);
+        auto* sampler = micfx::inst::asKit (kit.getEngine());
+        check (sampler != nullptr && micfx::inst::findSpec ("kit") != nullptr, "the Kit is listed and its engine is a sampler");
+
+        // Empty: silent, and the keys are named after the General MIDI drums.
+        {
+            const auto out = playInstrument (kit, chord ({ 36, 38, 42, 46 }, 0.0, 0.2), 0.5);
+            check (peakOf (out[0]) == 0.0f && kit.getKeyName (36) == "Kick" && kit.getKeyName (38) == "Snare" && kit.getKeyName (46) == "Open hat"
+                       && kit.getKeyName (70).isEmpty(),
+                   "an empty kit is silent and its keys have the drum names");
+        }
+
+        juce::String error;
+        check (sampler->loadSample (0, kickFile, error) && sampler->loadSample (2, snareFile, error)
+                   && sampler->loadSample (6, hatFile, error) && sampler->loadSample (10, openFile, error),
+               "four samples load (mono, stereo, 22 kHz, 48 kHz): " + error);
+        error = {};
+        check (! sampler->loadSample (1, folder.getChildFile ("nothing.wav"), error) && error.isNotEmpty()
+                   && ! sampler->loadSample (1, notAudio, error) && ! sampler->loadSample (99, kickFile, error)
+                   && sampler->getSample (1) == nullptr,
+               "a missing file, a file that isn't audio and a pad that doesn't exist are refused");
+        check (kit.getKeyName (36) == "Kick 808" && kit.getKeyName (38) == "Snare" && kit.getKeyName (37) == "Rim",
+               "a loaded pad is named after its sample, an empty one after the drum");
+
+        // Plays on its own note, once, at the right length (the 22 kHz sample is resampled).
+        kit.reset();
+        const auto kick = playInstrument (kit, chord ({ 36 }, 0.1, 0.15), 2.0);
+        kit.reset();
+        const auto snare = playInstrument (kit, chord ({ 38 }, 0.1, 0.15), 2.0);
+        const auto kickEnd = lastAbove (kick[0], 1.0e-3f), snareEnd = lastAbove (snare[0], 1.0e-3f);
+        check (peakOf (kick[0]) > 0.05f && kickEnd > 0.95f && kickEnd < 1.15 && snareEnd > 0.95 && snareEnd < 1.15,
+               "a pad plays its whole sample whatever the file's sample rate (" + juce::String (kickEnd, 2) + " s, " + juce::String (snareEnd, 2) + " s)");
+        check (std::abs (kick[0][(size_t) (0.5 * sampleRate)]) > 0.0f && peakOf (kick[1]) > 0.0f, "a mono sample plays on both sides");
+        kit.reset();
+        const auto other = playInstrument (kit, chord ({ 37, 52, 60 }, 0.0, 0.2), 0.5);
+        check (peakOf (other[0]) == 0.0f, "an empty pad and notes outside the kit are silent");
+        kit.reset();
+        const auto early = playInstrument (kit, chord ({ 36 }, 0.0, 0.01), 0.3);
+        check (std::abs (early[0][0]) < 0.02f, "a hit starts without a click");
+
+        // Pad settings.
+        const auto setParam = [&] (const char* id, float value)
+        {
+            auto* p = kit.getState().getParameter (id);
+            p->setValueNotifyingHost (p->convertTo0to1 (value));
+        };
+        const auto playKick = [&] (float velocity = 0.8f, double seconds = 2.0)
+        {
+            kit.reset();
+            return playInstrument (kit, chord ({ 36 }, 0.0, 0.05, velocity), seconds);
+        };
+
+        const auto base = peakOf (playKick (0.9f)[0]);
+        setParam ("p1Level", -12.0f);
+        const auto quiet = peakOf (playKick (0.9f)[0]);
+        setParam ("p1Level", 0.0f);
+        check (std::abs (quiet / base - 0.251f) < 0.03f, "level moves the pad in dB (" + juce::String (quiet / base, 3) + " of " + juce::String (base, 3) + ")");
+
+        const auto soft = peakOf (playKick (0.3f)[0]), hard = peakOf (playKick (1.0f)[0]);
+        check (soft < hard * 0.6f && soft > 0.0f, "a harder hit is louder (" + juce::String (soft, 3) + " < " + juce::String (hard, 3) + ")");
+        setParam ("velocity", 0.0f);
+        check (std::abs (peakOf (playKick (0.3f)[0]) / peakOf (playKick (1.0f)[0]) - 1.0f) < 0.05f, "with velocity at 0 every hit is as loud");
+        setParam ("velocity", 0.7f);
+
+        setParam ("p1Tune", 12.0f);
+        const auto up = lastAbove (playKick()[0], 1.0e-3f);
+        setParam ("p1Tune", -12.0f);
+        const auto down = lastAbove (playKick (0.8f, 3.0)[0], 1.0e-3f);
+        setParam ("p1Tune", 0.0f);
+        check (std::abs (up - (kickEnd - 0.1) / 2.0) < 0.06 && std::abs (down - (kickEnd - 0.1) * 2.0) < 0.12,
+               "tune shifts the pitch and the length (" + juce::String (up, 2) + " s up, " + juce::String (down, 2) + " s down)");
+
+        setParam ("p1Decay", 0.1f);
+        const auto cut = lastAbove (playKick()[0], 1.0e-2f);
+        setParam ("p1Decay", 8.0f);
+        check (cut < 0.2 && cut > 0.03, "decay fades the sample out early (" + juce::String (cut, 3) + " s)");
+
+        setParam ("p1Pan", -1.0f);
+        const auto hardLeft = playKick();
+        setParam ("p1Pan", 1.0f);
+        const auto hardRight = playKick();
+        setParam ("p1Pan", 0.0f);
+        check (peakOf (hardLeft[0]) > 0.1f && peakOf (hardLeft[1]) < 1.0e-3f && peakOf (hardRight[1]) > 0.1f && peakOf (hardRight[0]) < 1.0e-3f,
+               "pan puts a pad on one side");
+
+        // Choke: the closed hat (note 42) stops the open one (46); pad 1 has no group, so a re-hit just restarts it.
+        {
+            kit.reset();
+            const auto open = playInstrument (kit, chord ({ 46 }, 0.0, 0.05), 1.0);
+            kit.reset();
+            auto events = chord ({ 46 }, 0.0, 0.05);
+            const auto hit = chord ({ 42 }, 0.3, 0.35);
+            events.insert (events.end(), hit.begin(), hit.end());
+            const auto choked = playInstrument (kit, events, 1.0);
+            kit.reset();
+            const auto closedAlone = playInstrument (kit, hit, 1.0);
+            const auto window = [&] (const std::array<std::vector<float>, 2>& x) { return rms (x[0], (size_t) (0.5 * sampleRate), (size_t) (0.7 * sampleRate)); };
+            check (window (open) > 0.005f && window (choked) < window (closedAlone) * 1.1f,
+                   "a closed hat chokes the open one (" + juce::String (window (choked), 4) + " vs " + juce::String (window (closedAlone), 4) + " alone)");
+
+            setParam ("p11Choke", 0.0f);
+            kit.reset();
+            const auto free = playInstrument (kit, events, 1.0);
+            setParam ("p11Choke", 1.0f);
+            check (window (free) > window (closedAlone) * 1.1f, "with its choke group off the open hat rings on (" + juce::String (window (free), 4) + ")");
+        }
+
+        // Many hits at once don't overload it, and nothing is left sounding.
+        {
+            kit.reset();
+            std::vector<juce::MidiMessage> events;
+            for (int i = 0; i < 80; ++i)
+                for (auto n : { 36, 38, 42, 46 })
+                    events.push_back (at (juce::MidiMessage::noteOn (1, n, 0.7f), 0.01 * i));
+            const auto out = playInstrument (kit, events, 4.0);
+            auto finite = true;
+            for (const auto v : out[0])
+                finite = finite && std::isfinite (v);
+            check (finite && lastAbove (out[0], 1.0e-3f) < 3.5, "a flood of hits stays finite and dies away");
+        }
+
+        // Swapping a sample while it plays is safe (the old one is kept until nothing uses it).
+        {
+            kit.reset();
+            auto events = chord ({ 36 }, 0.0, 0.05);
+            const auto total = (int) (1.0 * sampleRate);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            auto ok = true;
+            for (int start = 0; start < total; start += blockSize)
+            {
+                juce::MidiBuffer midi;
+                if (start == 0)
+                    midi.addEvent (events[0], 0);
+                if ((start / blockSize) % 3 == 0)
+                    ok = sampler->loadSample (0, (start / blockSize) % 2 == 0 ? kickFile : snareFile, error) && ok;
+                buffer.clear();
+                kit.processBlock (buffer, midi);
+                for (int i = 0; i < blockSize; ++i)
+                    ok = ok && std::isfinite (buffer.getSample (0, i));
+            }
+            check (ok, "a sample can be replaced while the pad is playing");
+            sampler->loadSample (0, kickFile, error);
+        }
+
+        // The state keeps the sample paths and the pad settings.
+        setParam ("p3Level", -6.0f);
+        setParam ("p3Tune", 5.0f);
+        juce::MemoryBlock saved;
+        kit.getStateInformation (saved);
+        {
+            std::unique_ptr<juce::AudioProcessor> otherOwner;
+            auto& again = make (otherOwner);
+            again.setStateInformation (saved.getData(), (int) saved.getSize());
+            auto* again2 = micfx::inst::asKit (again.getEngine());
+            const auto a = playInstrument (kit, chord ({ 38, 36 }, 0.0, 0.1), 1.0);
+            const auto b = playInstrument (again, chord ({ 38, 36 }, 0.0, 0.1), 1.0);
+            auto same = a[0].size() == b[0].size();
+            for (size_t i = 0; same && i < a[0].size(); ++i)
+                same = std::abs (a[0][i] - b[0][i]) < 1.0e-4f;
+            check (again2->getSample (0) != nullptr && again2->getSample (2) != nullptr && again2->getSample (1) == nullptr
+                       && again.getKeyName (36) == "Kick 808" && same,
+                   "the samples and the pad settings come back from the saved state");
+        }
+
+        // A moved sample is found again by name in the search folders; a lost one keeps its path.
+        {
+            const auto moved = juce::File::createTempFile ("micfx-kit-moved");
+            moved.createDirectory();
+            const auto elsewhere = moved.getChildFile ("sub");
+            elsewhere.createDirectory();
+            kickFile.copyFileTo (elsewhere.getChildFile (kickFile.getFileName()));
+            const auto gone = folder.getChildFile ("gone");
+            gone.createDirectory();
+            const auto temporary = writeTestSample (gone, "Temp.wav", 44100.0, 0.3, 300.0f, false, 0.1f);
+            sampler->loadSample (3, temporary, error);
+            const auto kickBackup = kickFile.getFullPathName();
+            sampler->loadSample (0, kickFile, error);
+
+            juce::MemoryBlock withMoved;
+            kit.getStateInformation (withMoved);
+            // Pretend the project went to another computer: paths that don't exist there.
+            auto xml = juce::AudioProcessor::getXmlFromBinary (withMoved.getData(), (int) withMoved.getSize());
+            auto* extra = xml->getChildByName ("Extra");
+            for (auto* pad : extra->getChildWithTagNameIterator ("Pad"))
+                pad->setAttribute ("path", "/no/such/place/" + pad->getStringAttribute ("name"));
+            juce::MemoryBlock relocated;
+            juce::AudioProcessor::copyXmlToBinary (*xml, relocated);
+
+            micfx::inst::setKitSearchFolders ({ moved });
+            std::unique_ptr<juce::AudioProcessor> otherOwner;
+            auto& again = make (otherOwner);
+            again.setStateInformation (relocated.getData(), (int) relocated.getSize());
+            auto* again2 = micfx::inst::asKit (again.getEngine());
+            check (again2->getSample (0) != nullptr && again2->getSample (0)->file.getParentDirectory() == elsewhere
+                       && again2->getSample (2) == nullptr && again2->getPadFile (2).getFileName() == "Snare.wav",
+                   "a sample that moved is found by its name in the search folders; one that's gone shows as missing");
+
+            juce::MemoryBlock resaved;
+            again.getStateInformation (resaved);
+            std::unique_ptr<juce::AudioProcessor> thirdOwner;
+            auto& third = make (thirdOwner);
+            micfx::inst::setKitSearchFolders ({ folder });
+            third.setStateInformation (resaved.getData(), (int) resaved.getSize());
+            check (micfx::inst::asKit (third.getEngine())->getSample (2) != nullptr,
+                   "a missing sample keeps its place: it loads once its file is back in reach");
+            micfx::inst::setKitSearchFolders ({});
+            moved.deleteRecursively();
+            juce::ignoreUnused (kickBackup);
+        }
+
+        // Clearing a pad.
+        sampler->clearPad (0);
+        check (peakOf (playKick (0.8f, 0.5)[0]) == 0.0f && sampler->getSample (0) == nullptr && kit.getKeyName (36) == "Kick",
+               "clearing a pad silences it");
+        sampler->loadSample (0, kickFile, error);
+
+        // Its window.
+        {
+            sampler->loadSample (1, openFile, error);
+            sampler->loadSample (4, hatFile, error);
+            std::unique_ptr<juce::AudioProcessorEditor> editor (kit.createEditor());
+            check (editor != nullptr && editor->getWidth() >= 700 && editor->getHeight() >= 500,
+                   "the Kit has its own window (" + juce::String (editor->getWidth()) + "x" + juce::String (editor->getHeight()) + ")");
+            if (demoFolder.isNotEmpty())
+            {
+                playInstrument (kit, chord ({ 36, 42 }, 0.0, 0.1), 0.1);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+                const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 2.0f);
+                const auto file = juce::File (demoFolder).getChildFile ("Kit.png");
+                file.deleteFile();
+                juce::FileOutputStream stream (file);
+                juce::PNGImageFormat().writeImageToStream (image, stream);
+            }
+            kit.editorBeingDeleted (editor.get());
+        }
+
+        // Built into the DAW: the library lists it and a MIDI track plays it.
+        {
+            auto listed = false;
+            for (const auto& info : daw::instruments::getBuiltins())
+                listed = listed || info.id == "builtin:kit";
+            juce::ValueTree tree (daw::ids::INSTRUMENT);
+            tree.setProperty (daw::ids::plugin, "builtin:kit", nullptr);
+            juce::String problem;
+            const auto instrument = daw::instruments::create (tree, sampleRate, blockSize, false, problem);
+            check (listed && instrument != nullptr && daw::instruments::hasWindow ("builtin:kit"),
+                   "the DAW lists the Kit as an instrument for MIDI tracks " + problem);
+        }
+
+        micfx::inst::setKitSearchFolders ({});
+        folder.deleteRecursively();
+    }
+
 }
 
 //==============================================================================
@@ -9116,6 +10012,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "instruments")
     {
         testInstruments();
+        testKit();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -9127,6 +10024,26 @@ int main()
         testMidiLearn();
         testScenes();
         testSetlist();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=bridge: just the DAW screen's commands.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "bridge")
+    {
+        testDawBridge();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=segments: warp renders in pieces (and the warp tests around them).
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "segments")
+    {
+        testSegments();
+        testLivePreview();
+        testWarp();
+        testLinkedTracks();
+        testPitchNotes();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -9179,6 +10096,7 @@ int main()
     testStereoInputs();
     testMidiTracks();
     testInstruments();
+    testKit();
     testPluginHosting();
     testProjects();
     testExport();
@@ -9189,6 +10107,8 @@ int main()
     testMusicalMode();
     testLinkedTracks();
     testWarp();
+    testSegments();
+    testLivePreview();
     testPitchNotes();
     testCoach();
     testPractice();

@@ -9,7 +9,7 @@
 // C++ side renders the take again in the background (see src/analysis/Pitch.h and Warp.h).
 import { NOTE_NAMES, SCALES } from "./modules.js";
 import { clamp, html } from "./widgets.js";
-import { toSource } from "./rhythm.js";
+import { livePreview, toSource } from "./rhythm.js";
 
 const KEYS = 40;     // the keyboard's width
 const RULER = 16;    // bar and beat numbers on top
@@ -17,7 +17,7 @@ const LANE = 54;     // the loudness lane's height
 
 // Tools: [key, name, shortcut, what it does, icon path (24x24, stroked)].
 const TOOLS = [
-  ["select", "Select", "V", "Click a note to pick it (Shift adds), drag it up or down to move it (snaps to semitones; hold Alt for cents). Drag empty space to pick several. Double-click a note to put it right on its semitone",
+  ["select", "Select", "V", "Click a note to pick it (Shift adds), drag it up or down to move it (snaps to semitones; hold Shift or Alt for cents, Ctrl/Cmd for whole semitones from where it is). Up/Down arrows move picked notes a semitone, Shift+arrow 10 cents. Drag empty space to pick several. Double-click a note to put it right on its semitone",
     '<path d="M6 3l12 9-5.5 1.2L16 20l-2.6 1.2-2.7-6.4L6 19z"/>'],
   ["split", "Split", "C", "Click inside a note to cut it in two there; Alt-click a note to join it to the next one",
     '<circle cx="6" cy="7" r="2.6"/><circle cx="6" cy="17" r="2.6"/><path d="M8.2 8.4L20 17M8.2 15.6L20 7"/>'],
@@ -115,8 +115,15 @@ export function createNoteEditor(host) {
   const toKey = action("Snap", "Put the picked notes (or all of them) right on their semitone, or on the nearest note of the song's key when it's set (S)", () => snapNotes());
   const straighten = action("Straighten", "Take the drift out of the picked notes (or all of them), keeping their vibrato", () => editPicked((n) => ({ ...n, straighten: 1 })));
   const reset = action("Reset", "Put the picked notes (or all of them) back as sung", () => resetNotes());
+  const listenBox = html("input");
+  listenBox.type = "checkbox";
+  listenBox.checked = prefs.get("listen", true);
+  listenBox.addEventListener("change", () => prefs.set("listen", listenBox.checked));
+  const listen = html("label", "rhythm-check note-listen");
+  listen.title = "Hear a note as you move it: it plays when it lands on a new semitone, and after each arrow key (not while the song plays)";
+  listen.append(listenBox, document.createTextNode(" Listen"));
   const readout = html("span", "note-readout");
-  bar.append(tools, toKey, straighten, reset, readout);
+  bar.append(tools, toKey, straighten, reset, listen, readout);
 
   const area = html("div", "note-area");
   const canvas = html("canvas", "note-canvas");
@@ -461,11 +468,40 @@ export function createNoteEditor(host) {
 
   //--------------------------------------------------------------------------
   // Editing.
+  const payload = (list) => list.map(({ start, end, pitch, shift, straighten, vibrato, formant, gain, transition }) =>
+    ({ start, end, pitch, shift, straighten, vibrato, formant, gain, transition }));
+  let nudgeTimer = 0;
+  const flushNudges = () => {
+    if (!nudgeTimer) return;
+    clearTimeout(nudgeTimer);
+    nudgeTimer = 0;
+    daw("setPitchNotes", { id: clip().id, notes: payload(notes) });
+  };
   const store = (next) => {
+    clearTimeout(nudgeTimer);
+    nudgeTimer = 0;
     notes = next;
     paint();
-    daw("setPitchNotes", { id: clip().id, notes: notes.map(({ start, end, pitch, shift, straighten, vibrato, formant, gain, transition }) =>
-      ({ start, end, pitch, shift, straighten, vibrato, formant, gain, transition })) });
+    daw("setPitchNotes", { id: clip().id, notes: payload(notes) });
+  };
+  // Arrow keys and the like: painted at once, but a run of them within 250 ms is sent as
+  // one edit, so it's one undo step and one render.
+  const storeSoon = (next) => {
+    notes = next;
+    paint();
+    clearTimeout(nudgeTimer);
+    nudgeTimer = setTimeout(flushNudges, 250);
+  };
+
+  // Hear one note as it would sound with these edits (only that stretch renders).
+  let lastAudition = 0;
+  const audition = (list, index) => {
+    const n = list[index];
+    if (!listenBox.checked || !n || !data || data.linked || screen.status?.playing) return;
+    const now = performance.now();
+    if (now - lastAudition < 80) return;
+    lastAudition = now;
+    daw("auditionNote", { id: clip().id, from: Math.max(0, n.at - 0.03), to: n.until + 0.05, notes: payload(list) });
   };
   const targets = () => (picked.size ? [...picked] : notes.map((_, i) => i));
   const editPicked = (change) => {
@@ -600,23 +636,35 @@ export function createNoteEditor(host) {
     const before = notes.map((n) => ({ ...n }));
     const startX = event.clientX, startY = event.clientY;
     const rh = rowHeight();
-    let changed = false;
+    let changed = false, heard = null;
+    const live = livePreview(daw, screen, "previewPitchNotes", clip().id);
 
     drag(event, (e) => {
       const dy = (startY - e.clientY), dx = e.clientX - startX;
       if (Math.abs(dx) + Math.abs(dy) > 2) changed = true;
       if (tool === "select") {
-        // Moving pitch: the grabbed note lands on a semitone (Alt: free), the rest move with it.
+        // Moving pitch: the grabbed note lands on a semitone, the rest move with it.
+        // Shift or Alt: free (cents). Ctrl/Cmd: whole semitones, keeping its offset from one.
         const grabbed = before[index];
         let delta = dy / rh;
-        if (!e.altKey) delta = Math.round(shown(grabbed) + delta) - shown(grabbed);
+        if (e.ctrlKey || e.metaKey) delta = Math.round(delta);
+        else if (!e.altKey && !e.shiftKey) delta = Math.round(shown(grabbed) + delta) - shown(grabbed);
         preview = { offsets: new Map(chosen.map((i) => [i, delta])) };
         paint();
+        const landed = Math.round((shown(grabbed) + delta) * 100);
+        const moved = before.map((n, i) => (preview.offsets.has(i) ? { ...n, shift: clamp(n.shift + preview.offsets.get(i), -24, 24) } : n));
+        if (landed !== heard && Math.abs(delta) > 1e-3) {
+          heard = landed;
+          audition(moved, index);
+        }
+        live.send({ notes: payload(moved) });
         return;
       }
       notes = before.map((n, i) => (picked.has(i) ? adjust(n, dx, dy, e) : n));
+      live.send({ notes: payload(notes) });
       paint();
     }, (e) => {
+      live.end(changed);
       if (!changed) { preview = null; paint(); return; }
       if (tool === "select") {
         const offsets = preview?.offsets ?? new Map();
@@ -689,16 +737,19 @@ export function createNoteEditor(host) {
     const high = at < markers.length - 1 ? markers[at + 1][1] - 0.01 : Infinity;
     const startX = event.clientX;
     let target = grabbed;
+    const live = livePreview(daw, screen, "previewWarp", c.id);
     drag(event, (e) => {
       const free = grabbed + (e.clientX - startX) * perPx;
       const snapped = screen.snapTime ? screen.snapTime(c.start + (free - c.offset), e) - c.start + c.offset : free;
       target = clamp(snapped, low, high);
       preview = { shiftTime: [index, target - grabbed] };
+      live.send({ markers: markers.map((m, i) => (i === at ? [m[0], target] : m)) });
       host.setStatus?.(`Moving ${noteName(shown(notes[index]))} ${signed((target - grabbed) * 1000)} ms`);
       paint();
     }, () => {
       preview = null;
       host.setStatus?.("");
+      live.end(Math.abs(target - grabbed) > 1e-4);
       if (Math.abs(target - grabbed) > 1e-4) {
         markers[at][1] = target;
         daw("setWarp", { id: c.id, markers });
@@ -747,10 +798,12 @@ export function createNoteEditor(host) {
     if (!picked.has(index)) picked = new Set([index]);
     const box = lane.getBoundingClientRect();
     const before = notes.map((n) => ({ ...n }));
+    const live = livePreview(daw, screen, "previewPitchNotes", clip().id);
     const set = (e) => {
       const gain = Math.round(gainAtY(e.clientY - box.top, box.height) * 10) / 10;
       const delta = gain - before[index].gain;
       notes = before.map((n, i) => (picked.has(i) ? { ...n, gain: clamp(Math.round((n.gain + delta) * 10) / 10, -24, 12) } : n));
+      live.send({ notes: payload(notes) });
       paint();
     };
     set(event);
@@ -761,6 +814,7 @@ export function createNoteEditor(host) {
       lane.removeEventListener("pointerup", up);
       lane.removeEventListener("pointercancel", up);
       dragging = false;
+      live.end(true);
       store(notes);
     };
     lane.addEventListener("pointermove", set);
@@ -781,8 +835,11 @@ export function createNoteEditor(host) {
     else if (!mod && key === "s") { handled(); snapNotes(); }
     else if ((key === "arrowup" || key === "arrowdown") && picked.size) {
       handled();
-      const step = (key === "arrowup" ? 1 : -1) * (event.altKey ? 0.1 : 1);
-      editPicked((n) => ({ ...n, shift: clamp(Math.round((n.shift + step) * 100) / 100, -24, 24) }));
+      // A semitone, or 10 cents with Shift (or Alt).
+      const step = (key === "arrowup" ? 1 : -1) * (event.altKey || event.shiftKey ? 0.1 : 1);
+      const chosen = new Set(picked);
+      storeSoon(notes.map((n, i) => (chosen.has(i) ? { ...n, shift: clamp(Math.round((n.shift + step) * 100) / 100, -24, 24) } : n)));
+      audition(notes, [...chosen][0]);
     }
   });
 
@@ -805,7 +862,7 @@ export function createNoteEditor(host) {
     // Called when the view is shown again.
     shown: () => { fetchData(); requestAnimationFrame(paint); },
     fit: () => { view = null; fitRows(); paint(); },
-    dispose: () => { disposed = true; cancelAnimationFrame(frame); resize.disconnect(); },
+    dispose: () => { flushNudges(); disposed = true; cancelAnimationFrame(frame); resize.disconnect(); },
   };
 }
 

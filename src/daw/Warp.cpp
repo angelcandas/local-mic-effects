@@ -7,7 +7,9 @@
 #include <algorithm>
 #include <cmath>
 #include <complex>
+#include <cstring>
 #include <limits>
+#include <mutex>
 
 namespace daw::warp
 {
@@ -728,122 +730,490 @@ namespace
     }
 }
 
-juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& source, double sampleRate, const Settings& settings,
-                                 const std::function<bool()>& shouldContinue)
+//==============================================================================
+namespace
 {
-    const auto numSource = source.getNumSamples();
+    // The map with every marker's target moved by `by` seconds (so the copy's time t is
+    // the new map's t - by). No markers: the identity, moved.
+    Map shifted (const Map& map, double by)
+    {
+        if (map.getMarkers().empty())
+            return Map ({ { 0.0, by } });
 
-    if (settings.isNeutral() || numSource == 0 || source.getNumChannels() == 0)
-        return juce::AudioBuffer<float> (source);
+        auto markers = map.getMarkers();
+        for (auto& m : markers)
+            m.target += by;
+        return Map (std::move (markers));
+    }
 
-    const auto& map = settings.map;
-    const auto ratio = std::pow (2.0, juce::jlimit (-Settings::maxSemitones, Settings::maxSemitones, settings.semitones) / 12.0);
-    const auto outLength = (int) juce::jmax (0.0, std::round (map.toTarget (numSource / sampleRate) * sampleRate));
+    juce::int64 hashSamples (const juce::AudioBuffer<float>& audio, int from, int to)
+    {
+        auto hash = (juce::int64) 1469598103934665603LL;
+        for (int ch = 0; ch < audio.getNumChannels(); ++ch)
+        {
+            const auto* data = audio.getReadPointer (ch);
+            for (int i = juce::jmax (0, from); i < juce::jmin (to, audio.getNumSamples()); ++i)
+            {
+                juce::uint32 bits;
+                std::memcpy (&bits, data + i, sizeof (bits));
+                hash = (hash ^ (juce::int64) bits) * 1099511628211LL;
+            }
+            hash = (hash ^ (juce::int64) (from + 7 * ch)) * 1099511628211LL;
+        }
+        return hash;
+    }
 
+    juce::int64 sparseHash (const juce::AudioBuffer<float>& source, double sampleRate)
+    {
+        auto hash = (juce::int64) source.getNumSamples() * 31 + source.getNumChannels() * 7 + (juce::int64) sampleRate;
+        const auto stride = juce::jmax (1, source.getNumSamples() / 4096);
+        for (int ch = 0; ch < source.getNumChannels(); ++ch)
+            for (int i = 0; i < source.getNumSamples(); i += stride)
+                hash = hash * 1099511628211LL + (juce::int64) std::lround (source.getSample (ch, i) * 1.0e6f);
+        return hash;
+    }
+}
+
+std::vector<int> findSeams (const juce::AudioBuffer<float>& source, double sampleRate)
+{
+    const auto numSamples = source.getNumSamples();
+    std::vector<int> seams { 0 };
+
+    const auto spacing = Render::seamSpacing * sampleRate, search = Render::seamSearch * sampleRate;
+    if (numSamples > 0 && numSamples >= spacing * 1.5)
+    {
+        // Energy of the channels' sum, summed up so any 10 ms is quick to read.
+        std::vector<double> energy ((size_t) numSamples + 1, 0.0);
+        for (int i = 0; i < numSamples; ++i)
+        {
+            auto x = 0.0f;
+            for (int ch = 0; ch < source.getNumChannels(); ++ch)
+                x += source.getSample (ch, i);
+            energy[(size_t) i + 1] = energy[(size_t) i] + (double) x * x;
+        }
+
+        const auto half = juce::jmax (1, (int) std::round (sampleRate * 0.005));
+        const auto step = juce::jmax (1, (int) std::round (sampleRate * 0.001));
+
+        for (int k = 1; k * spacing + spacing * 0.5 <= numSamples; ++k)
+        {
+            const auto centre = (int) std::round (k * spacing);
+            auto best = centre;
+            auto quietest = std::numeric_limits<double>::max();
+            for (int at = centre - (int) search; at <= centre + (int) search; at += step)
+            {
+                const auto a = juce::jlimit (0, numSamples, at - half), b = juce::jlimit (0, numSamples, at + half);
+                // Ties (digital silence) go to the spot nearest the even spacing.
+                const auto e = energy[(size_t) b] - energy[(size_t) a] + 1.0e-12 * std::abs (at - centre);
+                if (e < quietest)
+                    quietest = e, best = at;
+            }
+
+            if (best > seams.back() && best < numSamples)
+                seams.push_back (best);
+        }
+    }
+
+    seams.push_back (numSamples);
+    return seams;
+}
+
+std::shared_ptr<const std::vector<int>> findSeamsCached (const juce::AudioBuffer<float>& source, double sampleRate)
+{
+    const auto hash = sparseHash (source, sampleRate);
+
+    static std::mutex lock;
+    static std::vector<std::pair<juce::int64, std::shared_ptr<const std::vector<int>>>> cache;
+    {
+        const std::lock_guard<std::mutex> guard (lock);
+        for (const auto& [key, seams] : cache)
+            if (key == hash)
+                return seams;
+    }
+
+    auto seams = std::make_shared<const std::vector<int>> (findSeams (source, sampleRate));
+    const std::lock_guard<std::mutex> guard (lock);
+    cache.emplace_back (hash, seams);
+    if (cache.size() > 12)
+        cache.erase (cache.begin());
+    return seams;
+}
+
+//==============================================================================
+// Everything one render shares between its pieces.
+struct Render::Context
+{
+    enum class Kind { copy, vocoder, wsola };
+
+    std::shared_ptr<const juce::AudioBuffer<float>> source; // the file
+    juce::AudioBuffer<float> placed;                         // slice/varispeed: the file already placed (then the stretcher's input)
+    bool usePlaced = false;
+    double sampleRate = 48000.0;
+    Settings settings;
+    Kind kind = Kind::copy;
     VocoderOptions options;
-    options.formant = settings.formant;
-
-    // Note edits: the pitch moves along the notes' shapes (looked up in file time), and the
-    // voice's formants are kept, as each note says.
-    const auto edits = settings.hasNoteEdits();
+    double ratio = 1.0;
+    bool edits = false, gains = false;
     std::shared_ptr<const analysis::pitch::Track> track;
     std::vector<analysis::pitch::Shape> shapes;
-    if (edits)
-    {
-        track = analysis::pitch::analyseCached (source, sampleRate);
-        shapes = analysis::pitch::getShapes (*track, settings.notes);
-        options.formant = true;
-    }
-    const auto shapeAtOutput = [&] (double outSample) { return analysis::pitch::shapeAt (*track, shapes, map.toSource (outSample / sampleRate)); };
+    int outLength = 0;
+    int preRoll = 0;   // output samples rendered before a piece starts
+    double reach = 0.0; // seconds of the map past a piece's ends that its frames look at
 
-    Path path;
-    path.ratio = ratio;
-    auto steady = true; // no pitch or formant moves anywhere
-    if (edits)
+    const juce::AudioBuffer<float>& input() const noexcept { return usePlaced ? placed : *source; }
+    Map stretchMap() const { return usePlaced ? Map() : settings.map; }
+
+    analysis::pitch::Shape shapeAt (double copySeconds) const
     {
-        const auto count = (size_t) (outLength / path.step + 2);
+        return edits ? analysis::pitch::shapeAt (*track, shapes, settings.map.toSource (copySeconds)) : analysis::pitch::Shape {};
+    }
+
+    // The pitch path for `length` output samples from `start` seconds of the copy.
+    Path makePath (double start, int length) const
+    {
+        Path path;
+        path.ratio = ratio;
+        if (! edits)
+            return path;
+
+        const auto count = (size_t) (length / path.step + 2);
         path.position.assign (count, 0.0);
         path.ratios.assign (count, 1.0f);
         path.formants.assign (count, 1.0f);
         path.highest = 0.0;
         for (size_t j = 0; j < count; ++j)
         {
-            const auto shape = shapeAtOutput ((double) j * path.step);
+            const auto shape = shapeAt (start + (double) j * path.step / sampleRate);
             const auto semitones = juce::jlimit (-Settings::maxSemitones, Settings::maxSemitones, settings.semitones + (double) shape.semitones);
             path.ratios[j] = (float) std::pow (2.0, semitones / 12.0);
             path.formants[j] = (float) std::pow (2.0, shape.formant / 12.0);
             path.highest = juce::jmax (path.highest, (double) path.ratios[j]);
-            steady = steady && std::abs (path.ratios[j] - 1.0f) < 1.0e-6f && std::abs (path.formants[j] - 1.0f) < 1.0e-6f;
             if (j > 0)
                 path.position[j] = path.position[j - 1] + path.step * 0.5 * ((double) path.ratios[j - 1] + path.ratios[j]);
         }
-    }
-    else
-    {
-        steady = std::abs (ratio - 1.0) < 1.0e-9;
+        return path;
     }
 
-    // The notes' levels, on the finished audio.
-    const auto withGains = [&] (juce::AudioBuffer<float> out)
+    // The notes' levels, on finished audio that starts `start` seconds into the copy.
+    void applyGains (juce::AudioBuffer<float>& out, double start) const
     {
-        if (! edits || std::none_of (settings.notes.begin(), settings.notes.end(), [] (const auto& n) { return std::abs (n.gain) > 1.0e-3f; }))
-            return out;
+        if (! gains)
+            return;
         constexpr int step = 64;
         for (int j0 = 0; j0 < out.getNumSamples(); j0 += step)
         {
-            const auto a = juce::Decibels::decibelsToGain (shapeAtOutput (j0).gainDb);
-            const auto b = juce::Decibels::decibelsToGain (shapeAtOutput (j0 + step).gainDb);
+            const auto a = juce::Decibels::decibelsToGain (shapeAt (start + j0 / sampleRate).gainDb);
+            const auto b = juce::Decibels::decibelsToGain (shapeAt (start + (j0 + step) / sampleRate).gainDb);
             const auto n = juce::jmin (step, out.getNumSamples() - j0);
             for (int ch = 0; ch < out.getNumChannels(); ++ch)
                 out.applyGainRamp (ch, j0, n, a, a + (b - a) * (float) n / (float) step);
         }
-        return out;
-    };
+    }
 
-    // Slice and varispeed place the audio themselves; a transpose or note edits then go
-    // through the vocoder on the result.
-    const auto thenTranspose = [&] (juce::AudioBuffer<float> placed)
+    // `length` samples of the copy from `start` seconds (which may be before 0).
+    juce::AudioBuffer<float> renderRange (double start, int length, const std::function<bool()>& shouldContinue) const
     {
-        if (steady || placed.getNumSamples() == 0)
-            return withGains (std::move (placed));
-        return withGains (vocode (placed, sampleRate, {}, path, placed.getNumSamples(), options, shouldContinue));
-    };
+        juce::AudioBuffer<float> out;
+        switch (kind)
+        {
+            case Kind::copy:
+            {
+                out.setSize (input().getNumChannels(), length);
+                out.clear();
+                const auto from = (int) std::llround (start * sampleRate);
+                for (int ch = 0; ch < out.getNumChannels(); ++ch)
+                    for (int i = juce::jmax (0, -from); i < length && from + i < input().getNumSamples(); ++i)
+                        out.setSample (ch, i, input().getSample (ch, from + i));
+                break;
+            }
+            case Kind::vocoder:
+                out = vocode (input(), sampleRate, shifted (stretchMap(), -start), makePath (start, length), length, options, shouldContinue);
+                break;
+            case Kind::wsola:
+                out = overlapAdd (input(), sampleRate, shifted (stretchMap(), -start), ratio, length, shouldContinue);
+                break;
+        }
+
+        if (out.getNumSamples() > 0)
+            applyGains (out, start);
+        return out;
+    }
+};
+
+Render::Render (std::shared_ptr<const juce::AudioBuffer<float>> sourceIn, double sampleRate, const Settings& settings)
+{
+    auto context = std::make_shared<Context>();
+    auto& c = *context;
+    c.source = std::move (sourceIn);
+    c.sampleRate = sampleRate;
+    c.settings = settings;
+    this->context = context;
+
+    const auto numSource = c.source != nullptr ? c.source->getNumSamples() : 0;
+    length = numSource;
+
+    if (c.source == nullptr || settings.isNeutral() || numSource == 0 || c.source->getNumChannels() == 0)
+        return; // a plain copy
+
+    const auto& map = settings.map;
+    c.ratio = std::pow (2.0, juce::jlimit (-Settings::maxSemitones, Settings::maxSemitones, settings.semitones) / 12.0);
+    c.outLength = length = (int) juce::jmax (0.0, std::round (map.toTarget (numSource / sampleRate) * sampleRate));
+    c.options.formant = settings.formant;
+
+    // Note edits: the pitch moves along the notes' shapes (looked up in file time), and the
+    // voice's formants are kept, as each note says.
+    c.edits = settings.hasNoteEdits();
+    auto steady = std::abs (c.ratio - 1.0) < 1.0e-9; // no pitch or formant moves anywhere
+    if (c.edits)
+    {
+        c.track = analysis::pitch::analyseCached (*c.source, sampleRate);
+        c.shapes = analysis::pitch::getShapes (*c.track, settings.notes);
+        c.options.formant = true;
+        c.gains = std::any_of (settings.notes.begin(), settings.notes.end(), [] (const auto& n) { return std::abs (n.gain) > 1.0e-3f; });
+
+        const auto path = c.makePath (0.0, length);
+        steady = std::all_of (path.ratios.begin(), path.ratios.end(), [] (float r) { return std::abs (r - 1.0f) < 1.0e-6f; })
+              && std::all_of (path.formants.begin(), path.formants.end(), [] (float f) { return std::abs (f - 1.0f) < 1.0e-6f; });
+    }
 
     // Only levels changed: the audio as it is.
-    if (edits && steady && map.isIdentity())
-        return withGains (juce::AudioBuffer<float> (source));
+    if (c.edits && steady && map.isIdentity())
+    {
+        c.kind = Context::Kind::copy;
+        return;
+    }
 
+    c.kind = Context::Kind::vocoder;
     switch (settings.algorithm)
     {
         case Algorithm::solo:
-            options.overlap = 8;
-            options.attackRatio = 3.0;
+            c.options.overlap = 8;
+            c.options.attackRatio = 3.0;
             break;
         case Algorithm::drums:
-            options.windowSeconds = 0.0115;
-            options.attackRatio = 2.0;
+            c.options.windowSeconds = 0.0115;
+            c.options.attackRatio = 2.0;
             break;
         case Algorithm::efficient:
-            if (edits) // the time-domain path can't follow the notes: the voice setting does
+            if (c.edits) // the time-domain path can't follow the notes: the voice setting does
             {
-                options.overlap = 8;
-                options.attackRatio = 3.0;
+                c.options.overlap = 8;
+                c.options.attackRatio = 3.0;
                 break;
             }
-            return overlapAdd (source, sampleRate, map, ratio, outLength, shouldContinue);
+            c.kind = Context::Kind::wsola;
+            break;
         case Algorithm::slice:
-            return thenTranspose (slice (source, sampleRate, map, outLength));
         case Algorithm::varispeed:
-            return thenTranspose (varispeed (source, sampleRate, map, outLength));
+            // These place the audio themselves (quickly, in one go); a transpose or note
+            // edits then go through the vocoder on the result.
+            c.placed = settings.algorithm == Algorithm::slice ? slice (*c.source, sampleRate, map, length)
+                                                              : varispeed (*c.source, sampleRate, map, length);
+            c.usePlaced = true;
+            c.kind = steady ? Context::Kind::copy : Context::Kind::vocoder;
+            break;
         case Algorithm::mix:
             break;
     }
 
-    return withGains (vocode (source, sampleRate, map, path, outLength, options, shouldContinue));
+    if (c.kind == Context::Kind::copy || length == 0)
+        return;
+
+    // Pieces. The pre-roll lets the overlap-add and the read-back's filter settle before
+    // the seam; the reach covers the frames just outside a piece (a few hops, at the
+    // slowest read-back).
+    const auto order = juce::jlimit (9, 13, (int) std::round (std::log2 (sampleRate * c.options.windowSeconds)));
+    const auto window = c.kind == Context::Kind::wsola ? 2 * juce::jmax (64, (int) std::round (sampleRate * 0.02)) : 1 << order;
+    const auto hop = c.kind == Context::Kind::wsola ? window / 2 : window / juce::jlimit (4, 16, c.options.overlap);
+    c.preRoll = juce::jmax ((int) std::round (sampleRate * 0.05), 4 * window);
+    c.reach = (4.0 * hop + 8.0) / std::pow (2.0, -Settings::maxSemitones / 12.0) / sampleRate;
+
+    const auto seams = c.usePlaced ? std::make_shared<const std::vector<int>> (findSeams (c.placed, sampleRate))
+                                   : findSeamsCached (*c.source, sampleRate);
+    const auto fade = (int) std::round (crossfadeSeconds * sampleRate);
+    const auto toCopy = [&] (int seam) { return c.usePlaced ? seam / sampleRate : map.toTarget (seam / sampleRate); };
+    const auto copySeconds = length / sampleRate;
+
+    for (size_t k = 0; k + 1 < seams->size(); ++k)
+    {
+        const auto from = toCopy ((*seams)[k]), to = toCopy ((*seams)[k + 1]);
+        const auto first = (int) std::llround (from * sampleRate), last = (int) std::llround (to * sampleRate);
+        if (last + fade <= 0 || first >= length || last <= first)
+            continue; // lands outside the copy
+
+        // The key: only what shapes this stretch of output, relative to where it lands.
+        const auto span = to - from;
+        const auto renderStart = from - c.preRoll / sampleRate;
+        const auto renderLength = c.preRoll + (int) std::ceil (span * sampleRate) + fade + 2;
+
+        juce::String key;
+        key << "p" << (int) k << "|" << getAlgorithmKey (settings.algorithm) << (c.options.formant ? "|f" : "")
+            << (c.kind == Context::Kind::wsola ? "|w" : "") << "|" << juce::String (juce::jlimit (-Settings::maxSemitones, Settings::maxSemitones, settings.semitones), 4)
+            << "|" << juce::String (span, 7);
+
+        const auto lo = -c.preRoll / sampleRate - c.reach, hi = span + (fade + 2) / sampleRate + c.reach;
+        if (c.usePlaced)
+        {
+            key << "|c" << juce::String::toHexString (hashSamples (c.placed, (int) std::floor ((from + lo) * sampleRate) - window,
+                                                                    (int) std::ceil ((from + hi) * sampleRate) + window));
+        }
+        else
+        {
+            key << "|m" << juce::String (lo, 7) << ":" << juce::String (map.toSource (from + lo), 7);
+            for (const auto& m : map.getMarkers())
+                if (m.target > from + lo && m.target < from + hi)
+                    key << ";" << juce::String (m.target - from, 7) << ":" << juce::String (m.source, 7);
+            key << ";" << juce::String (hi, 7) << ":" << juce::String (map.toSource (from + hi), 7);
+        }
+
+        if (c.edits)
+        {
+            // The very shape values this piece's path and levels read.
+            auto hash = (juce::int64) 1469598103934665603LL;
+            constexpr int step = 64;
+            for (int j = 0; j <= renderLength + 2 * step; j += step)
+            {
+                const auto shape = c.shapeAt (renderStart + j / sampleRate);
+                for (const auto v : { shape.semitones, shape.formant, shape.gainDb })
+                    hash = (hash ^ (juce::int64) std::lround (v * 1.0e5f)) * 1099511628211LL;
+            }
+            key << "|n" << juce::String::toHexString (hash);
+        }
+
+        pieces.push_back ({ juce::jmax (0.0, from), juce::jmin (copySeconds, to), key });
+        starts.push_back (from);
+        ends.push_back (to);
+    }
 }
 
-std::vector<juce::AudioBuffer<float>> renderLinked (const std::vector<const juce::AudioBuffer<float>*>& sources, double sampleRate,
-                                                    const Settings& settings, const std::function<bool()>& shouldContinue)
+Render::~Render() = default;
+
+int Render::getNumChannels() const noexcept
+{
+    return context->source != nullptr ? juce::jmax (1, context->source->getNumChannels()) : 0;
+}
+
+juce::AudioBuffer<float> Render::renderPiece (size_t index, const std::function<bool()>& shouldContinue) const
+{
+    jassert (index < pieces.size());
+    const auto& c = *context;
+    const auto fade = (int) std::round (crossfadeSeconds * c.sampleRate);
+    const auto lengthNeeded = (int) std::ceil ((ends[index] - starts[index]) * c.sampleRate) + fade + 2;
+    const auto start = starts[index] - c.preRoll / c.sampleRate;
+
+    auto out = c.renderRange (start, c.preRoll + lengthNeeded, shouldContinue);
+    if (out.getNumSamples() == 0)
+        return {};
+
+    juce::AudioBuffer<float> piece (out.getNumChannels(), lengthNeeded);
+    for (int ch = 0; ch < out.getNumChannels(); ++ch)
+        piece.copyFrom (ch, 0, out, ch, c.preRoll, lengthNeeded);
+    return piece;
+}
+
+juce::AudioBuffer<float> Render::cutPiece (size_t index, const juce::AudioBuffer<float>& copy) const
+{
+    const auto& c = *context;
+    if (index >= pieces.size())
+        return {};
+    const auto fade = (int) std::round (crossfadeSeconds * c.sampleRate);
+    const auto first = (int) std::llround (starts[index] * c.sampleRate);
+    const auto next = index + 1 < pieces.size() ? (int) std::llround (starts[index + 1] * c.sampleRate) : length;
+    const auto count = juce::jmax (0, next - first + (index + 1 < pieces.size() ? fade : 0));
+
+    juce::AudioBuffer<float> part (getNumChannels(), count);
+    part.clear();
+    const auto from = juce::jmax (0, first), to = juce::jmin (copy.getNumSamples(), first + count);
+    for (int ch = 0; ch < part.getNumChannels() && copy.getNumChannels() > 0 && to > from; ++ch)
+        part.copyFrom (ch, from - first, copy, juce::jmin (ch, copy.getNumChannels() - 1), from, to - from);
+    return part;
+}
+
+juce::AudioBuffer<float> Render::assemble (const std::vector<std::shared_ptr<const juce::AudioBuffer<float>>>& parts) const
+{
+    const auto& c = *context;
+    juce::AudioBuffer<float> out (getNumChannels(), length);
+    out.clear();
+
+    const auto fade = (int) std::round (crossfadeSeconds * c.sampleRate);
+    for (size_t k = 0; k < pieces.size() && k < parts.size(); ++k)
+    {
+        if (parts[k] == nullptr)
+            continue;
+
+        const auto& part = *parts[k];
+        const auto first = (int) std::llround (starts[k] * c.sampleRate);
+        const auto next = k + 1 < pieces.size() ? (int) std::llround (starts[k + 1] * c.sampleRate) : length;
+        const auto fadeIn = k > 0, fadeOut = k + 1 < pieces.size();
+        const auto count = juce::jmin (part.getNumSamples(), next - first + (fadeOut ? fade : 0));
+
+        // Complementary fades (they sum to one): the pieces mostly agree at the seam, so
+        // this keeps the level steady where an equal-power fade would bump it.
+        const auto gainAt = [&] (int i)
+        {
+            auto gain = 1.0f;
+            if (fadeIn && i < fade)
+                gain *= (float) std::pow (std::sin (juce::MathConstants<double>::halfPi * (i + 0.5) / fade), 2.0);
+            if (fadeOut && i >= next - first)
+                gain *= (float) std::pow (std::cos (juce::MathConstants<double>::halfPi * (i - (next - first) + 0.5) / fade), 2.0);
+            return gain;
+        };
+
+        for (int ch = 0; ch < out.getNumChannels(); ++ch)
+        {
+            const auto* in = part.getReadPointer (juce::jmin (ch, part.getNumChannels() - 1));
+            auto* dest = out.getWritePointer (ch);
+            for (int i = juce::jmax (0, -first); i < count && first + i < length; ++i)
+                dest[first + i] += in[i] * gainAt (i);
+        }
+    }
+
+    return out;
+}
+
+juce::AudioBuffer<float> Render::renderWhole (const std::function<bool()>& shouldContinue) const
+{
+    const auto& c = *context;
+    if (c.source == nullptr)
+        return {};
+    if (c.settings.isNeutral() || c.source->getNumSamples() == 0 || c.source->getNumChannels() == 0)
+        return juce::AudioBuffer<float> (*c.source);
+    return c.renderRange (0.0, length, shouldContinue);
+}
+
+namespace
+{
+    std::shared_ptr<const juce::AudioBuffer<float>> borrow (const juce::AudioBuffer<float>& source)
+    {
+        return { &source, [] (const juce::AudioBuffer<float>*) {} };
+    }
+}
+
+juce::AudioBuffer<float> renderUnsegmented (const juce::AudioBuffer<float>& source, double sampleRate, const Settings& settings,
+                                            const std::function<bool()>& shouldContinue)
+{
+    return Render (borrow (source), sampleRate, settings).renderWhole (shouldContinue);
+}
+
+juce::AudioBuffer<float> render (const juce::AudioBuffer<float>& source, double sampleRate, const Settings& settings,
+                                 const std::function<bool()>& shouldContinue)
+{
+    const Render render (borrow (source), sampleRate, settings);
+    if (! render.isSegmented())
+        return render.renderWhole (shouldContinue);
+
+    std::vector<std::shared_ptr<const juce::AudioBuffer<float>>> parts;
+    for (size_t i = 0; i < render.getPieces().size(); ++i)
+    {
+        auto part = render.renderPiece (i, shouldContinue);
+        if (part.getNumSamples() == 0)
+            return {};
+        parts.push_back (std::make_shared<const juce::AudioBuffer<float>> (std::move (part)));
+    }
+    return render.assemble (parts);
+}
+
+juce::AudioBuffer<float> combineLinked (const std::vector<const juce::AudioBuffer<float>*>& sources)
 {
     int channels = 0, longest = 0;
     for (const auto* source : sources)
@@ -859,11 +1229,14 @@ std::vector<juce::AudioBuffer<float>> renderLinked (const std::vector<const juce
         if (source != nullptr)
             for (int ch = 0; ch < source->getNumChannels(); ++ch)
                 together.copyFrom (channel++, 0, *source, ch, 0, source->getNumSamples());
+    return together;
+}
 
-    auto rendered = render (together, sampleRate, settings, shouldContinue);
-
+std::vector<juce::AudioBuffer<float>> splitLinked (const juce::AudioBuffer<float>& rendered, const std::vector<const juce::AudioBuffer<float>*>& sources,
+                                                   double sampleRate, const Settings& settings)
+{
     std::vector<juce::AudioBuffer<float>> parts;
-    channel = 0;
+    int channel = 0;
     for (const auto* source : sources)
     {
         if (source == nullptr || rendered.getNumSamples() == 0)
@@ -883,5 +1256,12 @@ std::vector<juce::AudioBuffer<float>> renderLinked (const std::vector<const juce
     }
 
     return parts;
+}
+
+std::vector<juce::AudioBuffer<float>> renderLinked (const std::vector<const juce::AudioBuffer<float>*>& sources, double sampleRate,
+                                                    const Settings& settings, const std::function<bool()>& shouldContinue)
+{
+    const auto together = combineLinked (sources);
+    return splitLinked (render (together, sampleRate, settings, shouldContinue), sources, sampleRate, settings);
 }
 }

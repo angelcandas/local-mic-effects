@@ -120,11 +120,11 @@ void DawEngine::loadAllNow()
         for (const auto& child : track)
         {
             if (child.hasType (ids::CLIP))
-                pool.loadNow (juce::File (child[ids::file].toString()), Edit::getWarpSettings (child));
+                pool.loadNow (juce::File (child[ids::file].toString()), getPlaybackSettings (child));
             else if (child.hasType (ids::TAKE) && (int) child[ids::id] == Edit::getListenTake (track))
                 for (const auto& clip : child)
                     if (clip.hasType (ids::CLIP))
-                        pool.loadNow (juce::File (clip[ids::file].toString()), Edit::getWarpSettings (clip));
+                        pool.loadNow (juce::File (clip[ids::file].toString()), getPlaybackSettings (clip));
         }
 
     rebuildNow();
@@ -339,7 +339,90 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     }
 
     if (tree.hasType (ids::CLIP))
+    {
+        // The real edit (or an undo) replaces what was being previewed.
+        if (property == ids::warp || property == ids::pitchNotes || property == ids::musical || property == ids::clipTempo)
+            previews.erase ((int) tree[ids::id]);
         triggerAsyncUpdate();
+    }
+}
+
+//==============================================================================
+void DawEngine::setPreviewWarp (int clipId, const warp::Map& map)
+{
+    const auto clip = edit.getClip (clipId);
+    if (! clip.isValid() || Edit::isMidiClip (clip))
+        return;
+
+    // Linked partners render together, so they all preview the same timing.
+    auto clipIds = juce::Array<int> { clipId };
+    for (const auto& partner : Edit::getLinkedClips (clip))
+        clipIds.add ((int) partner[ids::id]);
+    for (const auto id : clipIds)
+    {
+        auto& preview = previews[id];
+        if (preview.map.has_value() && *preview.map == map)
+            continue;
+        preview.map = map;
+        triggerAsyncUpdate();
+    }
+}
+
+void DawEngine::setPreviewNotes (int clipId, const std::vector<analysis::pitch::Note>& notes)
+{
+    const auto clip = edit.getClip (clipId);
+    if (! clip.isValid() || Edit::isMidiClip (clip) || ! Edit::getLinkedClips (clip).isEmpty())
+        return;
+    previews[clipId].notes = notes;
+    triggerAsyncUpdate();
+}
+
+void DawEngine::cancelPreview (int clipId)
+{
+    if (clipId < 0)
+    {
+        if (previews.empty())
+            return;
+        previews.clear();
+        triggerAsyncUpdate();
+        return;
+    }
+
+    const auto clip = edit.getClip (clipId);
+    auto clipIds = juce::Array<int> { clipId };
+    if (clip.isValid())
+        for (const auto& partner : Edit::getLinkedClips (clip))
+            clipIds.add ((int) partner[ids::id]);
+    for (const auto id : clipIds)
+        if (previews.erase (id) > 0)
+            triggerAsyncUpdate();
+}
+
+warp::Settings DawEngine::getPlaybackSettings (const juce::ValueTree& clip) const
+{
+    auto settings = Edit::getWarpSettings (clip);
+    const auto it = previews.find ((int) clip[ids::id]);
+    if (it == previews.end())
+        return settings;
+
+    const auto bypass = (bool) clip.getProperty (ids::warpBypass, false);
+    if (it->second.map.has_value())
+        settings.map = *it->second.map;
+    if (it->second.notes.has_value() && ! bypass && settings.linked.isEmpty())
+        settings.notes = *it->second.notes;
+
+    // Neutral now (or no longer): linked partners render together only when warped.
+    if (settings.isNeutral())
+        settings.linked.clear();
+    else if (settings.linked.isEmpty())
+        if (const auto partners = Edit::getLinkedClips (clip); ! partners.isEmpty())
+        {
+            settings.linked.add (clip[ids::file].toString());
+            for (const auto& partner : partners)
+                settings.linked.addIfNotAlreadyThere (partner[ids::file].toString());
+            settings.linked.sort (false);
+        }
+    return settings;
 }
 
 void DawEngine::setStripTargets (Strip& strip, const juce::ValueTree& tree, bool audible, bool jump)
@@ -593,6 +676,7 @@ void DawEngine::rebuild()
     int maxLatency = 0;
     std::set<juce::String> warpsInUse;
     std::map<int, AudioPool::Audio> clipAudio;
+    std::map<int, warp::Map> clipMaps;
 
     for (const auto& trackTree : edit.getTracks())
     {
@@ -665,9 +749,25 @@ void DawEngine::rebuild()
 
             Clip clip;
             const juce::File file (clipTree[ids::file].toString());
-            const auto warpSettings = Edit::getWarpSettings (clipTree);
+            const auto warpSettings = getPlaybackSettings (clipTree);
             const auto clipId = (int) clipTree[ids::id];
-            clip.audio = pool.get (file, warpSettings);
+            const auto toSeconds = [] (const juce::var& v) { return (double) v; };
+
+            // Where the playhead is in this clip's copy, so what's heard next renders first;
+            // and what it plays now, to stand in while a pitch change renders.
+            AudioPool::Hint hint;
+            if (realtime)
+            {
+                const auto now = (double) position.load() / sampleRate;
+                const auto clipStart = toSeconds (clipTree[ids::start]), clipOffset = toSeconds (clipTree[ids::offset]);
+                if (now < clipStart + toSeconds (clipTree[ids::length]))
+                    hint.focus = juce::jmax (0.0, clipOffset + juce::jmax (0.0, now - clipStart));
+                if (const auto it = lastClipMap.find (clipId); it != lastClipMap.end() && it->second == warpSettings.map)
+                    if (const auto audio = lastClipAudio.find (clipId); audio != lastClipAudio.end())
+                        hint.previous = audio->second;
+            }
+            clip.audio = realtime ? pool.getForPlayback (file, warpSettings, hint) : pool.get (file, warpSettings);
+            auto playedMap = warpSettings.map;
 
             if (! warpSettings.isNeutral())
                 warpsInUse.insert (AudioPool::getWarpKey (file, warpSettings));
@@ -677,12 +777,17 @@ void DawEngine::rebuild()
                 // A new warp or transpose is rendering: keep playing what the clip played
                 // until now, rather than dropping out.
                 if (const auto it = lastClipAudio.find (clipId); it != lastClipAudio.end())
+                {
                     clip.audio = it->second;
+                    if (const auto map = lastClipMap.find (clipId); map != lastClipMap.end())
+                        playedMap = map->second;
+                }
                 else
                     continue; // still loading (rebuilds when it's ready) or unreadable
             }
 
             clipAudio[clipId] = clip.audio;
+            clipMaps[clipId] = playedMap;
 
             const auto toSamples = [this] (const juce::var& seconds) { return (juce::int64) std::llround ((double) seconds * sampleRate); };
             clip.start   = toSamples (clipTree[ids::start]);
@@ -754,6 +859,7 @@ void DawEngine::rebuild()
         graph->direct.setSize (2, blockSize);
 
     lastClipAudio = std::move (clipAudio);
+    lastClipMap = std::move (clipMaps);
     pool.releaseUnusedWarps (warpsInUse);
 
     if (loopPattern.isValid())
