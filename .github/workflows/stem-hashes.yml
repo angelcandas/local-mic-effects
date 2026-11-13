@@ -1,0 +1,23 @@
+# Lists the Demucs weight files the app can use and prints their size and SHA-256, so the
+# app can pin them (the cloud container can't reach huggingface). Run by hand or on push to this file.
+name: Stem model hashes
+on:
+  workflow_dispatch:
+  push:
+    paths: [".github/workflows/stem-hashes.yml"]
+jobs:
+  hashes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: List the dataset
+        run: |
+          curl -sSf https://huggingface.co/api/datasets/Retrobear/demucs.cpp/tree/main | python3 -c "import json,sys; [print(f['path'], f.get('size')) for f in json.load(sys.stdin)]"
+      - name: Download and hash
+        run: |
+          base=https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main
+          for f in ggml-model-htdemucs-4s-f16.bin ggml-model-htdemucs-6s-f16.bin ggml-model-htdemucs_ft_drums-4s-f16.bin ggml-model-htdemucs_ft_bass-4s-f16.bin ggml-model-htdemucs_ft_other-4s-f16.bin ggml-model-htdemucs_ft_vocals-4s-f16.bin; do
+            curl -sSfL --retry 3 -o "$f" "$base/$f" || { echo "MISSING $f"; continue; }
+            echo "HASH $(sha256sum "$f" | cut -d' ' -f1) $(stat -c %s "$f") $f"
+          done | tee hashes.txt
+          { echo '```'; grep -h "HASH\|MISSING" hashes.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
