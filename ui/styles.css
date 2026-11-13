@@ -364,11 +364,34 @@ button { font: inherit; color: inherit; }
 
 .step:hover, .step:focus-visible { background: color-mix(in srgb, var(--cat) 18%, transparent); outline: none; }
 
+/* The Live chain's cards are the DAW's device cards (ui/devices.js), laid out in a grid. */
+.chain-grid > .live-card {
+  width: auto;
+  overflow: hidden;
+  padding: 10px 12px 12px;
+  border-radius: var(--radius);
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.04) inset, 0 10px 30px rgba(0, 0, 0, 0.25);
+  animation: card-in 0.22s ease-out;
+}
+.chain-grid > .live-card.is-wide { grid-column: span 2; width: auto; }
+.chain-grid > .live-card[hidden] { display: none; }
+.live-card.is-flashing { animation: card-flash 0.9s ease-out; }
+.live-card .insert-head { min-height: 26px; }
+.live-card .insert-name { font-size: 13px; }
+.live-card .live-desc { margin: 2px 0 6px; }
+.live-card .card-reset, .live-card .card-tap { margin-left: 0; }
+/* The name gets the room: trims, ⋯ and × come in on hover (or keyboard focus). */
+.live-card .insert-trim-switch:not(.is-set), .live-card .insert-more, .live-card .insert-remove { display: none; }
+.live-card:hover .insert-trim-switch, .live-card:focus-within .insert-trim-switch,
+.live-card:hover .insert-more, .live-card:focus-within .insert-more,
+.live-card:hover .insert-remove, .live-card:focus-within .insert-remove { display: inline-flex; align-items: center; justify-content: center; }
+.live-card .insert-controls { flex-wrap: wrap; }
+
 /* Cards already on screen don't replay their entrance when the chain is reordered. */
-.card.is-settled:not(.is-flashing) { animation: none; }
-.card.is-dragging { opacity: 0.45; }
-.card.drop-before { border-left-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
-.card.drop-after { border-right-color: var(--accent); box-shadow: inset -3px 0 0 var(--accent); }
+.live-card.is-settled:not(.is-flashing) { animation: none; }
+.live-card.is-dragging { opacity: 0.45; }
+.live-card.drop-before { border-left-color: var(--accent); box-shadow: inset 3px 0 0 var(--accent); }
+.live-card.drop-after { border-right-color: var(--accent); box-shadow: inset -3px 0 0 var(--accent); }
 
 .desc {
   margin: 2px 0 6px;

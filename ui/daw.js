@@ -5772,6 +5772,11 @@ class DawScreen {
 //==============================================================================
 // Wires the Live/DAW switch in the header. Returns nothing; DAW mode is a
 // standalone-app feature, so in a plugin host the switch stays hidden.
+// The pieces a device card needs (ui/devices.js), for the Live screen's cards.
+export function deviceKit() {
+  return { button, popMenu, ValueKnob, dbText, toast: (...args) => toast(...args), reducedMotion: REDUCED_MOTION };
+}
+
 export function initDaw() {
   const root = document.querySelector(".daw");
   const modeSwitch = document.querySelector(".mode-switch");
