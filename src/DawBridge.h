@@ -5,6 +5,7 @@
 #include "PluginProcessor.h"
 #include "daw/Exporter.h"
 #include "analysis/MixAssistant.h"
+#include "analysis/ToMidi.h"
 #include "stems/StemSplitter.h"
 
 // Connects the web UI's DAW screen (ui/daw.js) to the processor's DAW session.
@@ -131,6 +132,13 @@ private:
     // (src/analysis/TakeComp.h), which listens on a background thread.
     juce::var handleTakes (const juce::var& args);
     void finishTakeComp();
+
+    // Convert to MIDI (src/analysis/ToMidi.h): the analysis runs on a background thread, the
+    // notes go in on the message thread as one undo step.
+    juce::var handleToMidi (const juce::var& args);
+    void finishToMidi();
+    struct ToMidiJob;
+    std::shared_ptr<ToMidiJob> toMidiJob;
 
     // Song key (src/analysis/Key.h): detection runs on a background thread.
     juce::var handleKey (const juce::var& args);

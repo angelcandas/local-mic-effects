@@ -101,6 +101,12 @@ const AUDIO_PROCESSES = [
   ["Strip silence: noisy (−35 dB)", "stripSilenceNoisy", "Split the clip into phrases and remove the silent gaps between them"],
   ["Split into stems…", "splitStems", "Separate the song into vocals, drums, bass and other, each on its own track"],
 ];
+// The clip menu's "Convert to MIDI": [label, part, hint].
+const TO_MIDI_PARTS = [
+  ["Melody…", "melody", "A sung or played line becomes notes on a new piano track"],
+  ["Bass line…", "bass", "A bass line becomes notes on a new synth bass track"],
+  ["Drums…", "drums", "A drum loop becomes General MIDI drum notes on a new Beat track"],
+];
 const RETURN_EFFECTS = [["reverb", "Reverb"], ["chorus", "Chorus"], ["echo", "Echo"], ["doubler", "Doubler"],
                         ["flanger", "Flanger"], ["phaser", "Phaser"], ["none", "Empty return"]];
 const dbText = (value) => {
@@ -1261,6 +1267,7 @@ class DawScreen {
     this.buildBanners();
     this.buildAutoMix();
     this.buildStems();
+    this.buildToMidi();
     this.buildLibrary();
     this.buildKeyPanel();
     decorateAiPanels(this.root);
@@ -1271,6 +1278,7 @@ class DawScreen {
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
     window.__JUCE__.backend.addEventListener("dawExport", (progress) => this.onExport(progress));
     window.__JUCE__.backend.addEventListener("dawStems", (event) => this.onStems(event));
+    window.__JUCE__.backend.addEventListener("dawToMidi", (event) => this.onToMidi(event));
     document.addEventListener("keydown", (event) => this.onKey(event));
     document.addEventListener("keydown", (event) => this.onPianoKey(event, true), true); // before the shortcuts
     document.addEventListener("keyup", (event) => this.onPianoKey(event, false), true);
@@ -4282,6 +4290,97 @@ class DawScreen {
     }
   }
 
+  //============================================================================ Convert to MIDI
+  buildToMidi() {
+    const panel = (this.toMidiPanel = this.root.querySelector(".tomidi-panel"));
+    this.toMidi = { clip: null, running: false };
+    const field = (name) => panel.querySelector(`[name=${name}]`);
+    panel.querySelector(".tomidi-close").addEventListener("click", () => this.toggleToMidi(false));
+    panel.querySelector(".tomidi-cancel").addEventListener("click", () => daw("toMidi", { action: "cancel" }));
+    panel.querySelector(".tomidi-stems").addEventListener("click", () => {
+      const clip = this.toMidi.clip;
+      this.toggleToMidi(false);
+      if (clip) this.toggleStems(true, clip);
+    });
+    field("what").addEventListener("change", () => this.updateToMidiPanel());
+    panel.querySelector(".tomidi-go").addEventListener("click", async () => {
+      const clip = this.toMidi.clip;
+      if (!clip) return;
+      this.setToMidiStatus("Starting…");
+      const what = field("what").value;
+      const result = await daw("toMidi", {
+        action: "start", id: clip.id, what,
+        snapKey: what !== "drums" && field("snapKey").checked,
+        quantise: Number(field("quantise").value) / 100,
+        grid: Number(field("grid").value),
+        sensitivity: Number(field("sensitivity").value) / 100,
+      });
+      if (result?.ok === false) this.setToMidiStatus(result.error, true);
+    });
+  }
+
+  // `what`: "melody" | "bass" | "drums", the part the menu item picked.
+  toggleToMidi(show, clip = null, what = "melody") {
+    const panel = this.toMidiPanel;
+    panel.hidden = !show;
+    if (!show) return;
+    for (const other of [this.exportPanel, this.stemsPanel, this.autoMixPanel]) if (other) other.hidden = true;
+    if (!this.toMidi.running) {
+      this.toMidi.clip = clip;
+      panel.querySelector("[name=what]").value = what;
+      panel.querySelector(".tomidi-title").textContent = clip ? `Convert “${clip.name}” to MIDI` : "Convert to MIDI";
+      this.setToMidiStatus("");
+      this.updateToMidiPanel();
+    }
+  }
+
+  updateToMidiPanel() {
+    const panel = this.toMidiPanel;
+    const what = panel.querySelector("[name=what]").value;
+    const key = this.session?.key;
+    const keyed = (key?.key ?? -1) >= 0;
+    panel.dataset.what = what;
+    const snap = panel.querySelector("[name=snapKey]");
+    snap.disabled = !keyed;
+    if (!keyed) snap.checked = false;
+    panel.querySelector(".tomidi-key-name").textContent = keyed ? `(${NOTE_NAMES[key.key]}${key.minor ? " minor" : " major"})` : "(set the key first)";
+    const clip = this.toMidi.clip;
+    // A full song has more than a drum loop: the stems give the drums on their own.
+    const song = what === "drums" && clip && clip.length > 40;
+    panel.querySelector(".tomidi-stems").hidden = !song;
+    panel.querySelector(".tomidi-note").textContent = what === "drums"
+      ? (song ? "This clip is long. On a full song the drums are easiest to hear on their own: split it into stems, then convert the Drums track."
+              : "Kick, snare, hats, toms and crash become General MIDI drum notes on a new Beat track.")
+      : what === "bass" ? "A bass line sung or played one note at a time becomes notes on a synth bass, moved to the bass range."
+      : "A single line (a voice, a hum, a whistle, a lead) becomes notes on a new piano track. Chords aren't understood yet.";
+  }
+
+  setToMidiStatus(text, isError = false) {
+    this.toMidiPanel.querySelector(".tomidi-status").replaceChildren(html("span", isError ? "is-error" : "", text));
+  }
+
+  onToMidi(event) {
+    const panel = this.toMidiPanel;
+    const running = event.state === "analysing";
+    this.toMidi.running = running;
+    panel.classList.toggle("is-running", running);
+    if (running) {
+      this.setJob("tomidi", { label: "Convert to MIDI", progress: null, cancel: () => daw("toMidi", { action: "cancel" }),
+                              open: () => { panel.hidden = false; } });
+      this.setToMidiStatus("Listening…");
+      return;
+    }
+    this.endJob("tomidi");
+    if (event.state === "error") return this.setToMidiStatus(event.error, true);
+    if (event.state === "cancelled") return this.setToMidiStatus("Cancelled.");
+    if (event.state === "done") {
+      if (!event.count) return this.setToMidiStatus(event.note || "Nothing was found.", true);
+      panel.hidden = true;
+      toast(`Added ${event.count} note${event.count === 1 ? "" : "s"} on a new ${{ drums: "drum", bass: "bass", melody: "piano" }[event.kind] ?? "MIDI"} track.`, "", "undo");
+      if (event.track) this.select(event.track, event.clip ?? null);
+    }
+  }
+
   //============================================================================ Split into stems
   buildStems() {
     const panel = (this.stemsPanel = this.root.querySelector(".stems-panel"));
@@ -5378,6 +5477,9 @@ class DawScreen {
         heading("Audio");
         for (const [label, command, hint] of AUDIO_PROCESSES)
           item(label, () => this.run(command), { hint, indent: true });
+        heading("Convert to MIDI");
+        for (const [label, what, hint] of TO_MIDI_PARTS)
+          item(label, () => this.toggleToMidi(true, clip, what), { hint, indent: true });
       }
       if (clip.midi) item("Edit notes", () => { this.setDockTab("track"); this.setDock(true); });
     });
