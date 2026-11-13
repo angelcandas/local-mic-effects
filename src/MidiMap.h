@@ -71,9 +71,17 @@ public:
     std::function<void (int delta)> onPresetStep;
     std::function<void()> onMuteToggle;
     std::function<void (const juce::String& action)> onScene; // "scene.next", "scene.previous", "scene.3"...
+    // DAW mode's targets ("daw:<name>"): buttons (play, stop, record, loop, metronome, punch,
+    // undo, redo, marker, marker.next, marker.previous) on a press with value 1; volume and
+    // pan (the selected track) from a CC with value 0..1.
+    std::function<void (const juce::String& name, float value)> onDaw;
 
-    // Audio thread: reads the block's MIDI (Live mode). Looper actions run here.
-    void process (const juce::MidiBuffer&) noexcept;
+    // Audio thread: reads the block's MIDI. Looper actions run here in Live mode. In DAW
+    // mode (live false) only the "daw:" mappings act, and the Live ones are left alone.
+    void process (const juce::MidiBuffer&, bool live = true) noexcept;
+    // Audio thread, DAW mode: takes the messages mapped to "daw:" targets out of the buffer,
+    // so a pad that starts playback doesn't also play a note on the instrument.
+    void removeMapped (juce::MidiBuffer&) noexcept;
 
     // The last MIDI message seen, for the page's activity light ("CC 64 · ch 1"), and a
     // counter that goes up with every message. Message thread.
@@ -91,6 +99,7 @@ private:
     {
         Source source;
         int channel, number, value; // value: CC 0..127, velocity (0 = off), program 0
+        bool live = true;           // false: arrived in DAW mode
     };
 
     void timerCallback() override { drain(); }
@@ -114,6 +123,9 @@ private:
     juce::SpinLock tableLock;
     std::array<AudioEntry, 64> table {};
     int tableSize = 0;
+    std::array<int, 64> dawKeys {}; // sources mapped to "daw:" targets
+    int dawKeyCount = 0;
+    juce::MidiBuffer kept;          // removeMapped's scratch, audio thread
     std::array<juce::uint8, 16 * 128> lastCc {}; // for the "crossing 64" edge, audio thread
 
     // Message thread state for the CC pick-up and edges.

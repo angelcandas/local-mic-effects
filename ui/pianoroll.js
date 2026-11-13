@@ -8,6 +8,8 @@
 //   keys on the left         play the note (on the armed/monitored MIDI tracks)
 //   wheel / Shift+wheel      scroll pitch / time;  Ctrl+wheel zooms time
 //   Delete, ↑↓ (Shift: octave), ←→ (one grid step), Ctrl+A, Ctrl+D, Q (quantize)
+//   Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste notes (pasted at the playhead)
+//   the song key's rows are tinted, its root a little more (Song key panel)
 //
 // Notes live in C++ (the clip's NOTE children); every gesture is one "editNotes" command
 // (one undo step), and the roll redraws from the session that comes back. Note times are
@@ -24,6 +26,8 @@ const EDGE = 6;          // px: grabbing a note this close to its end resizes it
 export const noteName = (pitch) => `${NAMES[pitch % 12]}${Math.floor(pitch / 12) - 1}`;
 
 let savedGrid = 0.25;
+let noteClipboard = null; // copied notes, times from the first one: [{ pitch, time, length, velocity }]
+const SCALES = { major: new Set([0, 2, 4, 5, 7, 9, 11]), minor: new Set([0, 2, 3, 5, 7, 8, 10]) };
 
 export class PianoRoll {
   // options: { clip, track, colour, session, daw (command, args) -> result, toast (text) }
@@ -251,11 +255,18 @@ export class PianoRoll {
     const clip = this.clip;
     const top = this.pitchOf(0), bottom = this.pitchOf(height);
 
-    // Rows: black-key rows darker, C rows with a line.
+    // Rows: black-key rows darker, C rows with a line, the song key's notes tinted.
+    const songKey = this.session.key?.key ?? -1;
+    const scale = this.session.key?.minor ? SCALES.minor : SCALES.major;
     for (let p = bottom; p <= top; ++p) {
       const y = this.yOf(p);
       c.fillStyle = BLACK.has(p % 12) ? "#14151c" : "#1a1c25";
       c.fillRect(KEYS, y, width - KEYS, ROW);
+      const degree = songKey >= 0 ? (p - songKey + 120) % 12 : -1;
+      if (degree >= 0 && scale.has(degree)) {
+        c.fillStyle = degree === 0 ? "rgba(140,123,255,0.16)" : "rgba(140,123,255,0.07)";
+        c.fillRect(KEYS, y, width - KEYS, ROW);
+      }
       if (p % 12 === 0) { c.fillStyle = "rgba(255,255,255,0.10)"; c.fillRect(KEYS, y + ROW - 1, width - KEYS, 1); }
     }
 
@@ -536,6 +547,29 @@ export class PianoRoll {
     this.send({ add: notes.map((n) => ({ pitch: n.pitch, time: n.time + shift, length: n.length, velocity: n.velocity })) });
   }
 
+  copySelected(cut = false) {
+    const notes = this.selectedNotes();
+    if (!notes.length) return;
+    const first = Math.min(...notes.map((n) => n.time));
+    noteClipboard = notes.map((n) => ({ pitch: n.pitch, time: n.time - first, length: n.length, velocity: n.velocity }));
+    if (cut) this.removeSelected();
+    this.toast(`${cut ? "Cut" : "Copied"} ${notes.length} note${notes.length === 1 ? "" : "s"}.`);
+  }
+
+  // At the playhead when it's inside the clip, else right after the selection (or the start).
+  paste() {
+    if (!noteClipboard?.length) return this.toast("Copy some notes first (Ctrl+C).");
+    const clip = this.clip;
+    const playhead = this.position - clip.start + clip.offset;
+    let at;
+    if (this.position >= clip.start && playhead < clip.offset + clip.length) at = this.snap(playhead);
+    else {
+      const selected = this.selectedNotes();
+      at = selected.length ? this.snap(Math.max(...selected.map((n) => n.time + n.length)), "ceil") : clip.offset;
+    }
+    this.send({ add: noteClipboard.map((n) => ({ ...n, time: at + n.time })) });
+  }
+
   onKey(event) {
     if (event.target !== this.element) return;
     const mod = event.ctrlKey || event.metaKey;
@@ -550,6 +584,9 @@ export class PianoRoll {
     else if (some && key === "ArrowRight") this.nudge(1);
     else if (mod && key.toLowerCase() === "a") { this.selected = new Set(this.notes.map((n) => n.id)); this.draw(); }
     else if (mod && key.toLowerCase() === "d") this.duplicateSelected();
+    else if (mod && some && key.toLowerCase() === "c") this.copySelected();
+    else if (mod && some && key.toLowerCase() === "x") this.copySelected(true);
+    else if (mod && noteClipboard && key.toLowerCase() === "v") this.paste();
     else if (!mod && key.toLowerCase() === "q") this.quantize();
     else if (key === "Escape") { this.selected.clear(); this.draw(); }
     else handled = false;

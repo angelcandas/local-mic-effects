@@ -812,6 +812,14 @@ juce::var DawBridge::describeSession()
         { "canRedo", undo.canRedo() },
         { "undoName", undo.getUndoDescription() },
         { "redoName", undo.getRedoDescription() },
+        { "undoList", [&undo]
+          {
+              juce::Array<juce::var> names;
+              for (const auto& name : undo.getUndoDescriptions())
+                  if (names.size() < 30)
+                      names.add (name);
+              return juce::var (names);
+          }() },
         { "view", state[ids::viewState].toString() },
         { "returns", returns },
         { "master", object ({ { "volume", number (master, ids::volume) }, { "pan", number (master, ids::pan) }, { "inGain", number (master, ids::inGain) },
@@ -1389,6 +1397,65 @@ void DawBridge::withChooser (const juce::String& title, const juce::File& start,
         else
             complete (action (file));
     });
+}
+
+//==============================================================================
+juce::var DawBridge::relinkMissing (const juce::File& picked, const juce::String& path)
+{
+    std::vector<juce::ValueTree> clips;
+    std::function<void (juce::ValueTree)> collect = [&] (juce::ValueTree tree)
+    {
+        for (auto child : tree)
+        {
+            if (child.hasType (daw::ids::CLIP) && ! daw::Edit::isMidiClip (child))
+                clips.push_back (child);
+            else
+                collect (child);
+        }
+    };
+    collect (edit.getState());
+
+    juce::StringArray missing;
+    for (const auto& clip : clips)
+        if (const juce::File file (clip[daw::ids::file].toString()); ! file.existsAsFile())
+            missing.addIfNotAlreadyThere (file.getFullPathName());
+
+    if (missing.isEmpty())
+        return object ({ { "ok", true }, { "error", juce::String() }, { "relinked", 0 }, { "missing", 0 } });
+
+    // Where each missing file is now.
+    std::map<juce::String, juce::File> found;
+    if (picked.existsAsFile() && path.isNotEmpty() && missing.contains (path))
+        found[path] = picked;
+
+    const auto folder = picked.isDirectory() ? picked : picked.getParentDirectory();
+    for (const auto& lost : missing)
+    {
+        if (found.count (lost) != 0)
+            continue;
+        const auto name = juce::File (lost).getFileName();
+        if (const auto direct = folder.getChildFile (name); direct.existsAsFile())
+            found[lost] = direct;
+        else if (picked.isDirectory())
+            if (const auto matches = folder.findChildFiles (juce::File::findFiles, true, name); ! matches.isEmpty())
+                found[lost] = matches.getFirst();
+    }
+
+    if (found.empty())
+        return object ({ { "ok", false }, { "error", "None of the missing files are in " + folder.getFileName() + "." },
+                         { "relinked", 0 }, { "missing", missing.size() } });
+
+    auto& undo = edit.getUndoManager();
+    undo.beginNewTransaction ("Locate missing files");
+    for (auto& clip : clips)
+        if (const auto it = found.find (juce::File (clip[daw::ids::file].toString()).getFullPathName()); it != found.end())
+            clip.setProperty (daw::ids::file, it->second.getFullPathName(), &undo);
+    undo.beginNewTransaction();
+
+    engine.rebuildNow();
+    sessionChanged = true;
+    return object ({ { "ok", true }, { "error", juce::String() }, { "relinked", (int) found.size() },
+                     { "missing", missing.size() - (int) found.size() } });
 }
 
 //==============================================================================
@@ -3943,7 +4010,14 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
     if (command == "session")               { complete (describeSession()); return; }
     if (command == "mode")                  { setMode (arg (args, "daw", false)); ok(); return; }
-    if (command == "undo")                  { undo.undo(); ok(); return; }
+    if (command == "undo")
+    {
+        // { steps }: back several steps at once (the undo history menu).
+        for (int i = juce::jlimit (1, 100, (int) arg (args, "steps", 1)); --i >= 0 && undo.canUndo();)
+            undo.undo();
+        ok();
+        return;
+    }
     if (command == "redo")                  { undo.redo(); ok(); return; }
     if (command == "peaks")
     {
@@ -5243,6 +5317,19 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         project.save(); // the saved version wins; the backup stays in Backups/
         sessionChanged = true;
         ok();
+        return;
+    }
+
+    // "locate" { path? }: pick where missing audio went (see relinkMissing).
+    if (command == "locate")
+    {
+        const auto path = args["path"].toString();
+        const auto start = path.isNotEmpty() ? juce::File (path).getParentDirectory() : juce::File::getSpecialLocation (juce::File::userMusicDirectory);
+        withChooser (path.isNotEmpty() ? "Where is " + juce::File (path).getFileName() + "?" : "Pick a folder with the missing files",
+                     start.isDirectory() ? start : juce::File::getSpecialLocation (juce::File::userHomeDirectory),
+                     path.isNotEmpty() ? "*" + juce::File (path).getFileExtension() : juce::String(),
+                     Flags::openMode | (path.isNotEmpty() ? Flags::canSelectFiles : Flags::canSelectDirectories),
+                     [this, path] (const juce::File& picked) { return relinkMissing (picked, path); }, complete);
         return;
     }
 

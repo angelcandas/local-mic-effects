@@ -134,6 +134,13 @@ PluginEditor::PluginEditor (PluginProcessor& p)
             webView->emitEventIfBrowserIsVisible ("midiLearned", juce::var (learned));
         };
         map.onAction = [this] (const juce::String& action) { webView->emitEventIfBrowserIsVisible ("midiAction", action); };
+        map.onDaw = [this] (const juce::String& name, float value)
+        {
+            auto* event = new juce::DynamicObject();
+            event->setProperty ("action", name);
+            event->setProperty ("value", value);
+            webView->emitEventIfBrowserIsVisible ("dawMidi", juce::var (event));
+        };
     }
 
     // The looper's tempo, lock and volume are app preferences, like the recording folder.
@@ -168,6 +175,7 @@ PluginEditor::~PluginEditor()
     auto& map = processorRef.getMidiMap();
     map.onLearned = nullptr;
     map.onAction = nullptr;
+    map.onDaw = nullptr;
 
     // The processor (and its tracks) outlive the editor.
     auto& multitrack = processorRef.getMultitrack();
