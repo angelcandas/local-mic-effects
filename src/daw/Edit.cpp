@@ -1303,6 +1303,32 @@ void Edit::setClipGain (int clipId, float decibels)
     getClip (clipId).setProperty (ids::gain, juce::jlimit (-60.0f, 24.0f, decibels), undoTarget);
 }
 
+void Edit::setClipRebalance (int clipId, const juce::File& mixed, const juce::File& original, const juce::String& settings)
+{
+    if (auto clip = getClip (clipId); clip.isValid())
+    {
+        clip.setProperty (ids::rebalanceFrom, original.getFullPathName(), undoTarget);
+        clip.setProperty (ids::rebalance, settings, undoTarget);
+        clip.setProperty (ids::file, mixed.getFullPathName(), undoTarget);
+    }
+}
+
+void Edit::resetClipRebalance (int clipId)
+{
+    if (auto clip = getClip (clipId); clip.isValid() && clip.hasProperty (ids::rebalanceFrom))
+    {
+        const auto original = clip[ids::rebalanceFrom].toString();
+        clip.setProperty (ids::file, original, undoTarget);
+        clip.removeProperty (ids::rebalanceFrom, undoTarget);
+        clip.removeProperty (ids::rebalance, undoTarget);
+    }
+}
+
+juce::File Edit::getRebalanceOriginal (const juce::ValueTree& clip)
+{
+    return juce::File (clip.hasProperty (ids::rebalanceFrom) ? clip[ids::rebalanceFrom].toString() : clip[ids::file].toString());
+}
+
 void Edit::setClipName (int clipId, const juce::String& name)
 {
     if (auto clip = getClip (clipId); clip.isValid() && name.trim().isNotEmpty())

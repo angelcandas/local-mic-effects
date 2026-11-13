@@ -77,7 +77,8 @@ public:
         bool split = true;
         juce::File cacheRoot = getCacheRoot();
         // Where the stem separator comes from (tests pass their own).
-        std::function<stems::Loaded (const std::function<void (stems::LoadPhase)>&, const stems::Progress&)> loadSeparator = stems::loadBest;
+        std::function<stems::Loaded (const std::function<void (stems::LoadPhase)>&, const stems::Progress&)> loadSeparator =
+        [] (const std::function<void (stems::LoadPhase)>& onPhase, const stems::Progress& progress) { return stems::loadBest (onPhase, progress); };
     };
 
     using Progress = std::function<bool (Phase, double)>; // false cancels

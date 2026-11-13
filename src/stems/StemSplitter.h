@@ -18,10 +18,27 @@
 // callbacks return false to stop.
 namespace stems
 {
-// Demucs' output order.
-enum class Stem { drums, bass, other, vocals };
-inline constexpr int numStems = 4;
-inline constexpr std::array<const char*, numStems> stemNames { "Drums", "Bass", "Other", "Vocals" };
+// Demucs' output order. The four-stem model gives the first four; the six-stem one adds guitar and piano.
+enum class Stem { drums, bass, other, vocals, guitar, piano };
+inline constexpr int numStems = 4; // what the four-stem network (and so the Core ML one) produces
+inline constexpr int maxStems = 6;
+inline constexpr std::array<const char*, maxStems> stemNames { "Drums", "Bass", "Other", "Vocals", "Guitar", "Piano" };
+
+// How a song is separated: the standard four-stem model, the six-stem one (guitar and piano come
+// out of "Other"; CPU only, a little less clean on the other four), or the four fine-tuned models
+// (one per stem, about four times slower, cleanest; CPU only).
+enum class Quality { fourStems, sixStems, best };
+inline constexpr int numQualities = 3;
+inline constexpr std::array<const char*, numQualities> qualityKeys { "4", "6", "best" };
+inline constexpr std::array<const char*, numQualities> qualityLabels { "4 stems", "6 stems", "Best quality" };
+inline int getStemCount (Quality q) { return q == Quality::sixStems ? 6 : 4; }
+inline Quality getQualityFromKey (const juce::String& key)
+{
+    for (int i = 0; i < numQualities; ++i)
+        if (key == qualityKeys[(size_t) i])
+            return (Quality) i;
+    return Quality::fourStems;
+}
 
 inline constexpr double modelSampleRate = 44100.0; // what the model was trained on
 
@@ -41,6 +58,24 @@ struct Model
     static constexpr const char* downloadUrl = "https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/ggml-model-htdemucs-4s-f16.bin";
     static constexpr const char* sha256 = "72b17c42d308982ddb5069bc3bf48b81a5aac4cb6516e4366c0fa7cef6df0064";
     static constexpr int approxMegabytes = 84;
+
+    // One weights file of a quality level; all come from the same dataset as the four-stem one.
+    struct WeightFile { const char* fileName; const char* sha256; int megabytes; };
+    static constexpr const char* baseUrl = "https://huggingface.co/datasets/Retrobear/demucs.cpp/resolve/main/";
+
+    // The files `quality` needs: one, or four for Best quality (drums, bass, other, vocals, in that order).
+    static std::vector<WeightFile> getWeightFiles (Quality);
+    static juce::File getFile (const WeightFile&);
+    static juce::String verifyFile (const juce::File&, const WeightFile&);
+    // Downloads one file (via .part), verified. Empty on success.
+    static juce::String downloadFile (const WeightFile&, const Progress&);
+    // Every file of `quality` is downloaded and verified.
+    static bool isDownloaded (Quality);
+    static int getMegabytes (Quality);
+
+    // A separator for `quality` (its files must be downloaded); null with `error` set if it can't load.
+    // Best quality holds four models (about 1.2 GB).
+    static Separator loadQuality (Quality, juce::String& error);
 
     // True when this build includes demucs.cpp (see CMakeLists.txt).
     static bool isBuiltIn();
@@ -95,8 +130,9 @@ struct GpuModel
 };
 
 //==============================================================================
-// The best separator this machine has, downloading its model the first time: the GPU
-// model where Core ML is built in, else (or when that fails) the CPU one.
+// The best separator this machine has, downloading its model the first time: for four stems the
+// GPU model where Core ML is built in, else (or when that fails) the CPU one. The six-stem and
+// Best quality models run on the CPU only.
 struct Loaded
 {
     Separator separator;  // null when it couldn't (see error) or was cancelled
@@ -117,7 +153,7 @@ constexpr double minGpuMatchDb = 15.0; // a broken model sits around 0 dB; fp16 
 
 // Background thread. `onPhase` says what it's doing (progress restarts at each phase);
 // progress returning false cancels.
-Loaded loadBest (const std::function<void (LoadPhase)>& onPhase, const Progress&);
+Loaded loadBest (const std::function<void (LoadPhase)>& onPhase, const Progress&, Quality = Quality::fourStems);
 
 //==============================================================================
 struct Settings
@@ -130,7 +166,7 @@ struct Settings
 
 struct Result
 {
-    std::array<juce::File, numStems> files; // in Stem order, when it worked
+    std::vector<juce::File> files; // in Stem order (as many as the model has), when it worked
     juce::String error;
     bool cancelled = false;
 };
@@ -145,4 +181,25 @@ Result split (const juce::File& source, const juce::File& folder, const juce::St
 // Returns the numStems stems, or an empty vector when cancelled.
 std::vector<juce::AudioBuffer<float>> separate (const juce::AudioBuffer<float>& stereo, const Separator&,
                                                 const Progress&, const Settings& = {});
+
+//==============================================================================
+// Rebalance: the stems of a file are kept (24-bit WAVs) per file content and quality, so
+// changing their levels again later needs no new separation. The folder is
+// <root>/<hash of the file>-<quality key>/ ("Stem - Drums.wav" ...), root defaulting to
+// ~/Library/Application Support/MicFX/StemCache.
+juce::File getDefaultCacheRoot();
+juce::File getCacheFolder (const juce::File& source, Quality, const juce::File& root = {});
+
+// The stem files in Stem order, or an empty vector unless all of them are there.
+std::vector<juce::File> getCachedStems (const juce::File& folder, Quality);
+
+// Separates `source` into its cache folder (or finds it there already, without separating) and
+// returns the files. Oldest cache folders are deleted past about 4 GB.
+Result splitToCache (const juce::File& source, Quality, const Separator&, const Progress&,
+                     const Settings& = {}, const juce::File& root = {});
+
+// Sums `files` (stems, equal length) scaled by `gainsDb` (one per file, -100 or less mutes) into a
+// 32-bit float stereo WAV at the stems' own sample rate, a block at a time. Empty on success.
+juce::String mixStems (const std::vector<juce::File>& files, const std::vector<float>& gainsDb,
+                       const juce::File& destination, const Progress&);
 }

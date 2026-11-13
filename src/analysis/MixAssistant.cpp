@@ -3037,11 +3037,11 @@ MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float 
 }
 
 //==============================================================================
-void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
+void applyMix (daw::Edit& edit, const MixPlan& plan, float amount, const char* undoName)
 {
     // Volume rides are written whole (a new ride replaces one the track had).
     amount = juce::jlimit (0.0f, 1.0f, amount);
-    edit.getUndoManager().beginNewTransaction ("Auto Mix"); // DawBridge looks for this name
+    edit.getUndoManager().beginNewTransaction (undoName); // DawBridge looks for "Auto Mix"
 
     std::map<int, int> added; // inserts added per track, so they keep the plan's order
 
