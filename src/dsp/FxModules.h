@@ -10,6 +10,7 @@
 #include "SpectralDenoiser.h"
 #include "Smooth.h"
 #include "VocalDynamics.h"
+#include "Colour.h"
 #include "Cabinet.h"
 #include "GuitarAmp.h"
 #include "Convolver.h"
@@ -580,14 +581,65 @@ public:
     Value& on    = addSwitch ("satOn");
     Value& drive = addValue ("satDrive", 12.0f);
     Value& mix   = addValue ("satMix", 100.0f);
+    Value& type  = addChoice ("satType", 0.0f);  // 0 Warm (the original), ColourSaturation::Type
+    Value& tone  = addValue ("satTone", 0.0f);   // -100..100 tilt
+
+    // Tape, Tube and Clip run oversampled: a few samples of delay while on.
+    int getLatencySamples() const noexcept override
+    {
+        return flag (on) && index (type) > 0 ? colour.getLatencySamples() : 0;
+    }
 
 private:
-    void prepareModule (const juce::dsp::ProcessSpec& spec) override { saturation.prepare (spec); }
-    void resetModule() override                                      { saturation.reset(); }
-    void update() noexcept override                  { saturation.setParameters (get (drive), fraction (mix)); }
-    void render (const Context& c) noexcept override { saturation.process (c); }
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override
+    {
+        saturation.prepare (spec);
+        colour.prepare (spec);
+        warmTilt.prepare (spec.sampleRate);
+    }
+
+    void resetModule() override { saturation.reset(); colour.reset(); warmTilt.reset(); }
+
+    void update() noexcept override
+    {
+        saturation.setParameters (get (drive), fraction (mix));
+        const auto t = juce::jlimit (0, 3, index (type));
+        if (t > 0)
+            colour.setSettings ({ (ColourSaturation::Type) t, get (drive), fraction (mix), fraction (tone) });
+        warmTilt.setTilt (fraction (tone));
+
+        if (t != lastType)
+        {
+            // Switching type: the one taking over starts clean.
+            if (t == 0) saturation.reset(); else colour.reset();
+            lastType = t;
+        }
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        if (lastType == 0)
+        {
+            saturation.process (c);
+
+            // Warm with Tone off its centre: the tilt after it (at 0 nothing changes).
+            auto& block = c.getOutputBlock();
+            if (std::abs (get (tone)) > 0.5f)
+                for (size_t ch = 0; ch < std::min<size_t> (2, block.getNumChannels()); ++ch)
+                    for (size_t i = 0; i < block.getNumSamples(); ++i)
+                        block.setSample ((int) ch, (int) i, warmTilt.process (ch, block.getSample ((int) ch, (int) i)));
+        }
+        else
+        {
+            auto block = c.getOutputBlock();
+            colour.process (block);
+        }
+    }
 
     fx::Saturation saturation;
+    ColourSaturation colour;
+    Tilt warmTilt;
+    int lastType = 0;
 };
 
 class Radio final : public Module
@@ -827,14 +879,43 @@ public:
     Value& on     = addSwitch ("doublerOn");
     Value& mix    = addValue ("doublerMix", 50.0f);
     Value& spread = addValue ("doublerSpread", 80.0f);
+    Value& mode   = addChoice ("doublerMode", 0.0f);     // 0 Classic (the original), VoiceDoubler::Mode
+    Value& detune = addValue ("doublerDetune", 8.0f);    // cents
+    Value& delay  = addValue ("doublerDelay", 12.0f);    // ms
 
 private:
-    void prepareModule (const juce::dsp::ProcessSpec& spec) override { doubler.prepare (spec); }
-    void resetModule() override                                      { doubler.reset(); }
-    void update() noexcept override                  { doubler.setParameters (fraction (mix), fraction (spread)); }
-    void render (const Context& c) noexcept override { doubler.process (c); }
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override { doubler.prepare (spec); voice.prepare (spec.sampleRate); }
+    void resetModule() override                                      { doubler.reset(); voice.reset(); }
+
+    void update() noexcept override
+    {
+        doubler.setParameters (fraction (mix), fraction (spread));
+        const auto m = juce::jlimit (0, 2, index (mode));
+        if (m > 0)
+            voice.setSettings ({ (VoiceDoubler::Mode) m, fraction (mix), fraction (spread), get (detune), get (delay) });
+        if (m != lastMode)
+        {
+            if (m == 0) doubler.reset(); else voice.reset();
+            lastMode = m;
+        }
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        if (lastMode == 0)
+        {
+            doubler.process (c);
+        }
+        else
+        {
+            auto block = c.getOutputBlock();
+            voice.process (block);
+        }
+    }
 
     fx::Doubler doubler;
+    VoiceDoubler voice;
+    int lastMode = 0;
 };
 
 class Echo final : public Module

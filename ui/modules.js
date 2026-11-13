@@ -102,8 +102,8 @@ export const MODULES = [
     controls: [knob("exciterFreq", "Freq"), knob("exciterAmount", "Amount")] },
 
   { id: "sat", name: "Saturation", category: "character", power: "satOn",
-    description: "Warm analog-style drive",
-    controls: [knob("satDrive", "Drive"), knob("satMix", "Mix")] },
+    description: "Analog-style drive: Warm, Tape (soft, bright), Tube (rich, even) or Clip (firm edge). The level stays put as you drive it (except Warm)",
+    controls: [choice("satType", "Type"), knob("satDrive", "Drive"), knob("satMix", "Mix"), bipolar("satTone", "Tone")] },
 
   { id: "radio", name: "Radio", category: "character", power: "radioOn",
     description: "Telephone and walkie-talkie band",
@@ -156,8 +156,10 @@ export const MODULES = [
     controls: [knob("phaserRate", "Rate"), knob("phaserDepth", "Depth"), knob("phaserFeedback", "Feedback"), knob("phaserMix", "Mix")] },
 
   { id: "doubler", name: "Doubler", category: "space", power: "doublerOn",
-    description: "Double-tracked vocal, spread wide",
-    controls: [knob("doublerMix", "Mix"), knob("doublerSpread", "Spread")] },
+    description: "Double-tracked vocal, spread wide. Micro shift detunes two copies a few cents (stays clean in mono); Double track sounds like a second take",
+    controls: [choice("doublerMode", "Mode"), knob("doublerMix", "Mix"), knob("doublerSpread", "Spread"),
+               { ...knob("doublerDetune", "Detune"), when: { doublerMode: [1, 2] } },
+               { ...knob("doublerDelay", "Delay"), when: { doublerMode: [1, 2] } }] },
 
   { id: "echo", name: "Echo", category: "space", power: "delayOn", wide: true,
     description: "Repeats that darken as they fade. Sync follows the song's tempo; Duck keeps the repeats out of the way while you sing",

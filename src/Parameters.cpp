@@ -385,4 +385,11 @@ Parameters::Parameters (Layout& l)
     percent (l, "plateWidth", "Plate Width", 100.0f);
     percent (l, "plateDuck", "Plate Duck", 0.0f);
     moduleGains (fx::ModuleType::plate);
+
+    // Colour (Colour.h), after those: saturation types and tone, doubler modes.
+    choice (l, "satType", "Saturation Type", { "Warm", "Tape", "Tube", "Clip" }, 0);
+    number (l, "satTone", "Saturation Tone", -100.0f, 100.0f, 1.0f, 0.0f, "%");
+    choice (l, "doublerMode", "Doubler Mode", { "Classic", "Micro shift", "Double track" }, 0);
+    number (l, "doublerDetune", "Doubler Detune", 0.0f, 20.0f, 0.1f, 8.0f, "ct");
+    number (l, "doublerDelay", "Doubler Delay", 1.0f, 40.0f, 0.1f, 12.0f, "ms");
 }

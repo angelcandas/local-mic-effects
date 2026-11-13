@@ -1393,6 +1393,207 @@ namespace
         }
     }
 
+    //==========================================================================
+    // Colour: saturation types and tone, doubler modes.
+    void testColour()
+    {
+        std::cout << "\nColour (saturation types, doubler modes)\n";
+
+        const auto runReference = [] (auto& processor, std::vector<float> signal, int channels)
+        {
+            juce::AudioBuffer<float> buffer (channels, blockSize);
+            std::vector<float> out;
+            for (size_t start = 0; start + blockSize <= signal.size(); start += blockSize)
+            {
+                for (int ch = 0; ch < channels; ++ch)
+                    buffer.copyFrom (ch, 0, signal.data() + start, blockSize);
+                juce::dsp::AudioBlock<float> block (buffer);
+                processor.process (juce::dsp::ProcessContextReplacing<float> (block));
+                out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+            }
+            return out;
+        };
+        const auto single = [] (fx::ModuleType type)
+        {
+            auto chain = std::make_unique<fx::FxChain> (std::vector<fx::ModuleType> { type });
+            switchAll (*chain, true);
+            return chain;
+        };
+        const auto voice = makeVoice (180.0f, 1.5, 0.4f);
+
+        // Warm and Classic at their defaults are the original effects, bit for bit.
+        {
+            auto chain = single (fx::ModuleType::saturation);
+            const auto ours = runLeft (*chain, voice);
+            fx::Saturation reference;
+            reference.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            reference.setParameters (12.0f, 1.0f);
+            const auto expected = runReference (reference, voice, 2);
+            float worst = 0.0f;
+            for (size_t i = 0; i < ours.size(); ++i) worst = std::max (worst, std::abs (ours[i] - expected[i]));
+            check (worst == 0.0f, "Saturation Warm at its defaults is the original, bit for bit");
+        }
+        {
+            auto chain = single (fx::ModuleType::doubler);
+            const auto ours = runLeft (*chain, voice);
+            fx::Doubler reference;
+            reference.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            reference.setParameters (0.5f, 0.8f);
+            const auto expected = runReference (reference, voice, 2);
+            float worst = 0.0f;
+            for (size_t i = 0; i < ours.size(); ++i) worst = std::max (worst, std::abs (ours[i] - expected[i]));
+            check (worst == 0.0f, "Doubler Classic at its defaults is the original, bit for bit");
+        }
+
+        // Tape, Tube and Clip keep a voice's loudness within 1 dB from no drive to 30 dB.
+        const char* typeNames[] = { "Warm", "Tape", "Tube", "Clip" };
+        for (int type = 1; type <= 3; ++type)
+        {
+            float worst = 0.0f;
+            for (const auto drive : { 0.0f, 6.0f, 12.0f, 20.0f, 30.0f })
+            {
+                auto chain = single (fx::ModuleType::saturation);
+                chain->setValue ("satType", (float) type);
+                chain->setValue ("satDrive", drive);
+                const auto out = runLeft (*chain, voice);
+                const auto from = (size_t) (0.6 * sampleRate);
+                worst = std::max (worst, std::abs (rmsDb (out, from, out.size()) - rmsDb (voice, from, out.size())));
+            }
+            check (worst < 1.0f, juce::String (typeNames[type]) + " keeps the voice's level within 1 dB at any drive (worst "
+                                     + juce::String (worst, 2) + " dB)");
+        }
+
+        // Harmonics of a 200 Hz tone: Tube is mostly even, Clip mostly odd. And nothing
+        // folds back below the tone (aliasing) from a 5 kHz tone pushed hard.
+        {
+            const auto harmonicDb = [] (const std::vector<float>& x, float frequency)
+            {
+                double re = 0.0, im = 0.0;
+                const auto from = x.size() / 2;
+                for (auto i = from; i < x.size(); ++i)
+                {
+                    const auto phase = juce::MathConstants<double>::twoPi * frequency * (double) i / sampleRate;
+                    re += x[i] * std::cos (phase);
+                    im += x[i] * std::sin (phase);
+                }
+                return (float) (20.0 * std::log10 (2.0 * std::sqrt (re * re + im * im) / (double) (x.size() - from) + 1e-12));
+            };
+            std::array<float, 4> second {}, third {};
+            for (int type = 1; type <= 3; ++type)
+            {
+                auto chain = single (fx::ModuleType::saturation);
+                chain->setValue ("satType", (float) type);
+                chain->setValue ("satDrive", 18.0f);
+                const auto out = runLeft (*chain, sine (200.0f, 1.0, 0.4f));
+                const auto fundamental = harmonicDb (out, 200.0f);
+                second[(size_t) type] = harmonicDb (out, 400.0f) - fundamental;
+                third[(size_t) type] = harmonicDb (out, 600.0f) - fundamental;
+            }
+            std::cout << "        2nd / 3rd harmonic: Tape " << second[1] << " / " << third[1] << " dB, Tube " << second[2] << " / "
+                      << third[2] << " dB, Clip " << second[3] << " / " << third[3] << " dB\n";
+            check (second[2] > -30.0f && second[2] > second[3] + 20.0f, "Tube adds even harmonics, Clip doesn't");
+            check (third[3] > -30.0f, "Clip adds odd harmonics");
+
+            auto chain = single (fx::ModuleType::saturation);
+            chain->setValue ("satType", 3.0f);
+            chain->setValue ("satDrive", 24.0f);
+            const auto out = runLeft (*chain, sine (5000.0f, 1.0, 0.5f));
+            // 4x oversampled: 15 kHz is the first odd harmonic; its alias in a 1x clipper
+            // would land at 48 - 25 = 23 kHz -> 23 kHz, and the 7th (35 kHz) at 13 kHz.
+            const auto alias = harmonicDb (out, 13000.0f) - harmonicDb (out, 5000.0f);
+            check (alias < -50.0f, "Clip at 24 dB drive doesn't alias (13 kHz fold-back " + juce::String (alias, 1) + " dB)");
+        }
+
+        // Reported latency is real: at Mix 0 the output is the dry, that many samples late.
+        {
+            auto chain = single (fx::ModuleType::saturation);
+            chain->setValue ("satType", 1.0f);
+            chain->setValue ("satMix", 0.0f);
+            chain->prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            const auto latency = chain->getLatencySamples();
+            const auto out = runLeft (*chain, voice);
+            float worst = 0.0f;
+            for (size_t i = (size_t) latency; i < out.size(); ++i)
+                worst = std::max (worst, std::abs (out[i] - voice[i - (size_t) latency]));
+            check (latency > 0 && latency < 16 && worst < 1.0e-6f,
+                   "Tape reports its oversampling delay (" + juce::String (latency) + " samples) and the dry lines up");
+        }
+
+        // Tone tilts: brighter at +100, darker at -100.
+        {
+            const auto highs = [&] (float tone)
+            {
+                auto chain = single (fx::ModuleType::saturation);
+                chain->setValue ("satType", 2.0f);
+                chain->setValue ("satDrive", 6.0f);
+                chain->setValue ("satTone", tone);
+                return highBandDb (runLeft (*chain, voice));
+            };
+            check (highs (100.0f) > highs (0.0f) + 2.0f && highs (-100.0f) < highs (0.0f) - 2.0f, "Tone brightens and darkens");
+        }
+
+        // Micro shift doesn't comb in mono the way the Classic doubler does.
+        {
+            const auto worstDip = [&] (int mode)
+            {
+                float worst = 0.0f;
+                for (float frequency = 150.0f; frequency < 3000.0f; frequency *= 1.13f)
+                {
+                    auto chain = single (fx::ModuleType::doubler);
+                    chain->setValue ("doublerMode", (float) mode);
+                    chain->setValue ("doublerMix", 100.0f);
+                    const auto tone = sine (frequency, 1.5, 0.2f);
+                    std::vector<float> l, r;
+                    chain->prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+                    const auto both = runChain (*chain, tone);
+                    std::vector<float> monoSum;
+                    for (size_t start = 0; start + 2 * blockSize <= both.size(); start += 2 * blockSize)
+                        for (size_t i = 0; i < (size_t) blockSize; ++i)
+                            monoSum.push_back (0.5f * (both[start + i] + both[start + blockSize + i]));
+                    const auto from = (size_t) (0.5 * sampleRate);
+                    // Against the level dry + copies would have if they added in power.
+                    const auto expected = rmsDb (tone, from, monoSum.size()) + 10.0f * std::log10 (1.0f + 0.5f);
+                    worst = std::min (worst, rmsDb (monoSum, from, monoSum.size()) - expected);
+                }
+                return worst;
+            };
+            const auto classic = worstDip (0), micro = worstDip (1);
+            std::cout << "        worst mono dip over 150 Hz-3 kHz: Classic " << classic << " dB, Micro shift " << micro << " dB\n";
+            check (micro > -3.0f, "Micro shift stays within 3 dB in mono");
+            check (micro > classic + 1.0f, "and combs less than Classic");
+        }
+
+        // Micro shift's copies are really detuned: the wet's pitch is a few cents off.
+        {
+            fx::VoiceDoubler doubler;
+            doubler.prepare (sampleRate);
+            doubler.setSettings ({ fx::VoiceDoubler::Mode::microShift, 1.0f, 1.0f, 15.0f, 12.0f });
+            auto tone = sine (440.0f, 2.0, 0.3f);
+            std::vector<float> left = tone, right = tone;
+            for (size_t start = 0; start + blockSize <= tone.size(); start += blockSize)
+            {
+                float* channels[] = { left.data() + start, right.data() + start };
+                juce::dsp::AudioBlock<float> block (channels, 2, (size_t) blockSize);
+                doubler.process (block);
+            }
+            // Spread 100 %: left = dry + up copy. Wet only:
+            for (size_t i = 0; i < left.size(); ++i) left[i] -= tone[i];
+            const auto cents = centsBetween (measurePitch (left), 440.0f);
+            check (std::abs (cents - 15.0f) < 5.0f, "Micro shift's up copy is about +15 cents (" + juce::String (cents, 1) + ")");
+        }
+
+        // Double track: a copy that moves (not a fixed delay), finite.
+        {
+            auto chain = single (fx::ModuleType::doubler);
+            chain->setValue ("doublerMode", 2.0f);
+            const auto out = runLeft (*chain, voice);
+            bool finite = true;
+            for (auto x : out) finite = finite && std::isfinite (x);
+            const auto from = (size_t) (0.5 * sampleRate);
+            check (finite && rmsDb (out, from, out.size()) > rmsDb (voice, from, out.size()) - 3.0f, "Double track adds a copy");
+        }
+    }
+
     void testAutoMixEffects()
     {
         std::cout << "\nAuto Mix adds effects\n";
@@ -15789,6 +15990,7 @@ int main()
         testFxChain();
         testVocalDynamics();
     testSpace();
+    testColour();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -16007,6 +16209,7 @@ int main()
     testDynamics();
     testVocalDynamics();
     testSpace();
+    testColour();
     testEffectAutomation();
     testAnalysisSpeed();
     testLatency();
