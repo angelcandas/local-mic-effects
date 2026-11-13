@@ -23,7 +23,8 @@
 //            "voice", "drums"... see analysis::getRoleKey; missing when not tagged),
 //            ride (volume automation, see RidePoint; missing when none),
 //            output (the RETURN id the track plays into instead of the master; missing = master),
-//            takesShown (its take lanes are unfolded), listenTake (a TAKE id heard instead of the comp)
+//            takesShown (its take lanes are unfolded), listenTake (a TAKE id heard instead of the comp),
+//            polarity (true: its audio clips play upside down), nudge (ms its audio clips play later; < 0 earlier)
 //       INSERTS ...
 //       SEND  id, target (a RETURN's id), level (dB), pre (true = before the fader)
 //       INSTRUMENT  id, plugin, name, format, vendor, description, state   (MIDI tracks)
@@ -107,7 +108,7 @@ namespace ids
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns) MICFX_DAW_ID (group) MICFX_DAW_ID (folded)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
     MICFX_DAW_ID (pitchNotes) MICFX_DAW_ID (rebalance) MICFX_DAW_ID (rebalanceFrom)
-    MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight)
+    MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight) MICFX_DAW_ID (polarity) MICFX_DAW_ID (nudge)
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
     MICFX_DAW_ID (PATTERN) MICFX_DAW_ID (PART) MICFX_DAW_ID (PATTERNCLIP) MICFX_DAW_ID (track) MICFX_DAW_ID (drum)
     MICFX_DAW_ID (rows) MICFX_DAW_ID (stepNote) MICFX_DAW_ID (step) MICFX_DAW_ID (swing) MICFX_DAW_ID (pattern) MICFX_DAW_ID (row)
@@ -156,6 +157,16 @@ public:
     void setTrackSolo (int trackId, bool);
     void setMasterVolume (float decibels);
     void setMasterPan (float pan);
+
+    // Phase between tracks that recorded the same sound (two mics on one source): the
+    // track's audio clips play upside down (polarity) and/or shifted by `nudge` ms
+    // (+ later, - earlier), before its effects. Auto Mix and "Align to..." set them
+    // (analysis::measureAlignment). MIDI tracks and the live input aren't affected.
+    static constexpr float maxNudgeMs = 50.0f;
+    void setTrackPolarity (int trackId, bool inverted);
+    void setTrackNudge (int trackId, float milliseconds);
+    static bool getPolarity (const juce::ValueTree& track) { return (bool) track.getProperty (ids::polarity, false); }
+    static float getNudge (const juce::ValueTree& track)   { return (float) track.getProperty (ids::nudge, 0.0f); }
 
     //==============================================================================
     // Return tracks. Their ids share the track id space; the mixer setters above

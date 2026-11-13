@@ -320,7 +320,8 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         return;
     }
 
-    if (tree.hasType (ids::TRACK) && (property == ids::transpose || property == ids::ride || property == ids::output || property == ids::listenTake))
+    if (tree.hasType (ids::TRACK) && (property == ids::transpose || property == ids::ride || property == ids::output || property == ids::listenTake
+                                     || property == ids::polarity || property == ids::nudge))
     {
         triggerAsyncUpdate(); // its clips play other rendered copies
         return;
@@ -796,6 +797,24 @@ void DawEngine::rebuild()
             clip.fadeIn  = juce::jmax ((juce::int64) 0, toSamples (clipTree[ids::fadeIn]));
             clip.fadeOut = juce::jmax ((juce::int64) 0, toSamples (clipTree[ids::fadeOut]));
             clip.gain    = volumeToGain (clipTree.getProperty (ids::gain, 0.0f));
+
+            // The track's phase: upside down, and/or a little later or earlier (an earlier
+            // clip at the session's start loses the bit that would play before it).
+            if (Edit::getPolarity (trackTree))
+                clip.gain = -clip.gain;
+            if (const auto nudge = (juce::int64) std::llround (Edit::getNudge (trackTree) / 1000.0 * sampleRate); nudge != 0)
+            {
+                clip.start += nudge;
+                if (clip.start < 0)
+                {
+                    const auto cut = -clip.start;
+                    clip.offset += cut;
+                    clip.length -= cut;
+                    clip.fadeIn = juce::jmax ((juce::int64) 0, clip.fadeIn - cut);
+                    clip.start = 0;
+                }
+                clip.length = juce::jmin (clip.length, (juce::int64) clip.audio->getNumSamples() - clip.offset);
+            }
 
             if (clip.length <= 0 || loopPattern.isValid())
                 continue; // pattern mode: no clips (their audio stays loaded for the song)

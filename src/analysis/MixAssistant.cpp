@@ -1,6 +1,8 @@
 #include "MixAssistant.h"
 
 #include "daw/Edit.h"
+
+#include <juce_audio_formats/juce_audio_formats.h>
 #include "dsp/FxModules.h"
 
 #include <algorithm>
@@ -1174,6 +1176,76 @@ namespace
         plan.notes.add ("Clean & polish: only " + name + " was changed (no level, space or other tracks).");
     }
     //==============================================================================
+    // Phase: each track that recorded the same sound as one before it is lined up with
+    // the one it shares the most with (polarity, nudge), as those will play.
+    void planPhase (MixPlan& plan, const SessionAnalyser::Result& analysis, const MixOptions& options, const std::function<Role (int)>& roleOf)
+    {
+        constexpr float minGainDb = 0.5f; // what lining up must add to the two summed
+
+        const auto alignableRole = [] (Role role)
+        {
+            return ! (role == Role::voice || role == Role::backingVocal || role == Role::backing || role == Role::other);
+        };
+        const auto currentOf = [&] (int id)
+        {
+            const auto it = options.currentPhase.find (id);
+            return it != options.currentPhase.end() ? it->second : std::pair<bool, float> { false, 0.0f };
+        };
+
+        std::map<int, std::pair<bool, float>> planned; // polarity, nudge (ms) of the tracks lined up so far
+        std::vector<MixMove> moves;
+        for (const auto& [id, profile] : analysis.tracks)
+        {
+            juce::ignoreUnused (profile);
+            const auto name = nameOf (options, id, getRoleName (roleOf (id)));
+            if (getNamedSide (name) != 0)
+                continue; // half of a stereo pair: its timing is its image
+
+            const TrackPairAlignment* best = nullptr;
+            for (const auto& pair : options.alignments)
+            {
+                if (pair.b != id || ! pair.alignment.related || pair.alignment.sumGainDb < minGainDb)
+                    continue;
+                if (! pair.linked && ! (roleOf (pair.a) == roleOf (id) && alignableRole (roleOf (id))))
+                    continue;
+                if (best == nullptr || pair.alignment.confidence > best->alignment.confidence)
+                    best = &pair;
+            }
+            if (best == nullptr)
+                continue;
+
+            // Relative to the other track as it will play (lined up itself, or as it is).
+            const auto reference = planned.count (best->a) > 0 ? planned[best->a] : currentOf (best->a);
+            const auto polarity = reference.first != best->alignment.inverted;
+            const auto nudge = (float) juce::jlimit ((double) -daw::Edit::maxNudgeMs, (double) daw::Edit::maxNudgeMs,
+                                                     std::round ((reference.second - best->alignment.delaySeconds * 1000.0) * 100.0) / 100.0);
+            planned[id] = { polarity, nudge };
+
+            const auto current = currentOf (id);
+            if (current.first == polarity && std::abs (current.second - nudge) < 0.05f)
+                continue;
+
+            const auto other = nameOf (options, best->a, getRoleName (roleOf (best->a)));
+            MixMove move;
+            move.trackId = id;
+            move.values = { { "polarity", polarity ? 1.0f : 0.0f }, { "nudge", nudge } };
+            juce::StringArray what;
+            if (polarity != current.first)
+                what.add (polarity ? "polarity flipped" : "polarity back to normal");
+            if (std::abs (current.second - nudge) >= 0.05f)
+                what.add (std::abs (nudge) < 0.05f ? "timing back as recorded"
+                                                   : "nudged " + juce::String (std::abs (nudge), 2) + " ms " + (nudge < 0 ? "earlier" : "later"));
+            auto reason = what.joinIntoString (", ");
+            reason = reason.substring (0, 1).toUpperCase() + reason.substring (1);
+            move.reasons.add (reason + " to line up with " + other + ", which recorded the same sound: together "
+                              + juce::String (best->alignment.sumGainDb, 1) + " dB fuller, no thinning where they overlap");
+            moves.push_back (move);
+        }
+
+        plan.moves.insert (plan.moves.begin(), moves.begin(), moves.end());
+    }
+
+    //==============================================================================
     // Placement (pan).
 
     // The mixer's balance law (DawEngine): the centre is unity on both sides, panning
@@ -1190,23 +1262,6 @@ namespace
     {
         const auto [left, right] = getBalanceGains (pan);
         return powerToDb (0.5 * (left * left + right * right));
-    }
-
-    // The side a track's name says it is ("OH L", "Piano Right", "Guitarra Izq"): -1 left,
-    // 1 right, 0 none.
-    int getNamedSide (const juce::String& trackName)
-    {
-        juce::StringArray words;
-        words.addTokens (trackName.toLowerCase().replaceCharacters ("_-.()[]/", "        "), " ", "");
-        words.removeEmptyStrings();
-        for (const auto& word : words)
-        {
-            if (word == "l" || word == "left" || word == "lft" || word == "izq" || word == "izquierda" || word == "izquierdo")
-                return -1;
-            if (word == "r" || word == "right" || word == "rt" || word == "der" || word == "derecha" || word == "derecho")
-                return 1;
-        }
-        return 0;
     }
 
     // Where a drum mic sits on a kit seen from the drummer's seat (the hi-hat on the left,
@@ -1533,6 +1588,160 @@ namespace
             }
         return moves;
     }
+}
+
+//==============================================================================
+int getNamedSide (const juce::String& trackName)
+{
+    juce::StringArray words;
+    words.addTokens (trackName.toLowerCase().replaceCharacters ("_-.()[]/", "        "), " ", "");
+    words.removeEmptyStrings();
+    for (const auto& word : words)
+    {
+        if (word == "l" || word == "left" || word == "lft" || word == "izq" || word == "izquierda" || word == "izquierdo")
+            return -1;
+        if (word == "r" || word == "right" || word == "rt" || word == "der" || word == "derecha" || word == "derecho")
+            return 1;
+    }
+    return 0;
+}
+
+double getFirstAudioStart (const juce::ValueTree& track)
+{
+    double first = -1.0;
+    for (const auto& clip : track)
+        if (clip.hasType (daw::ids::CLIP) && ! daw::Edit::isMidiClip (clip) && ! (bool) clip.getProperty (daw::ids::mute, false))
+        {
+            const auto start = (double) clip[daw::ids::start];
+            if (first < 0.0 || start < first)
+                first = start;
+        }
+    return first;
+}
+
+juce::AudioBuffer<float> readTrackAudio (const juce::ValueTree& track, double from, double seconds, double& sampleRate)
+{
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    sampleRate = 0.0;
+    juce::AudioBuffer<float> out;
+
+    for (const auto& clip : track)
+    {
+        if (! clip.hasType (daw::ids::CLIP) || daw::Edit::isMidiClip (clip) || (bool) clip.getProperty (daw::ids::mute, false))
+            continue;
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (juce::File (clip[daw::ids::file].toString())));
+        if (reader == nullptr || reader->sampleRate <= 0.0)
+            continue;
+        if (sampleRate <= 0.0)
+        {
+            sampleRate = reader->sampleRate;
+            out.setSize (1, juce::jmax (1, (int) std::ceil (seconds * sampleRate)));
+            out.clear();
+        }
+        if (! juce::approximatelyEqual (reader->sampleRate, sampleRate))
+            continue;
+
+        // The part of the clip inside the window, as timeline samples from `from`.
+        const auto start = (double) clip[daw::ids::start], offset = (double) clip[daw::ids::offset];
+        const auto length = (double) clip[daw::ids::length];
+        const auto begin = juce::jmax (start, from), end = juce::jmin (start + length, from + seconds);
+        if (end <= begin)
+            continue;
+
+        const auto into = (juce::int64) std::llround ((begin - from) * sampleRate);
+        const auto fileStart = (juce::int64) std::llround ((offset + begin - start) * sampleRate);
+        const auto count = (int) juce::jmin ((juce::int64) out.getNumSamples() - into, (juce::int64) std::llround ((end - begin) * sampleRate),
+                                             reader->lengthInSamples - fileStart);
+        if (count <= 0 || fileStart < 0)
+            continue;
+
+        juce::AudioBuffer<float> part ((int) reader->numChannels, count);
+        reader->read (&part, 0, count, fileStart, true, true);
+        const auto gain = juce::Decibels::decibelsToGain ((float) clip.getProperty (daw::ids::gain, 0.0f)) / (float) part.getNumChannels();
+        for (int ch = 0; ch < part.getNumChannels(); ++ch)
+            out.addFrom (0, (int) into, part, ch, 0, count, gain);
+    }
+    return out;
+}
+
+std::vector<TrackPairAlignment> measureAlignments (const juce::ValueTree& session, const std::map<int, Role>& knownRoles,
+                                                   const std::function<bool()>& shouldContinue)
+{
+    constexpr double analysedSeconds = 30.0;
+
+    struct Candidate
+    {
+        juce::ValueTree track;
+        int id = 0, link = 0;
+        double start = 0.0, fileSeconds = 0.0;
+        std::optional<Role> role;
+    };
+    std::vector<Candidate> candidates;
+    for (const auto& track : session)
+    {
+        if (! track.hasType (daw::ids::TRACK) || daw::Edit::isMidiTrack (track))
+            continue;
+        Candidate c;
+        c.track = track;
+        c.id = (int) track[daw::ids::id];
+        c.link = daw::Edit::getLink (track);
+        c.start = getFirstAudioStart (track);
+        if (c.start < 0.0)
+            continue;
+        if (const auto it = knownRoles.find (c.id); it != knownRoles.end())
+            c.role = it->second;
+
+        // The length of the file the first clip plays (takes recorded together are as long as each other).
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        for (const auto& clip : track)
+            if (clip.hasType (daw::ids::CLIP) && ! daw::Edit::isMidiClip (clip) && juce::approximatelyEqual ((double) clip[daw::ids::start], c.start))
+            {
+                if (std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (juce::File (clip[daw::ids::file].toString()))); reader != nullptr)
+                    c.fileSeconds = (double) reader->lengthInSamples / reader->sampleRate;
+                break;
+            }
+        candidates.push_back (c);
+    }
+
+    const auto alignable = [] (const std::optional<Role>& role)
+    {
+        return ! role.has_value() || ! (*role == Role::voice || *role == Role::backingVocal || *role == Role::backing || *role == Role::other);
+    };
+
+    std::map<std::pair<int, double>, juce::AudioBuffer<float>> audio; // by track and where it's read from
+    std::map<std::pair<int, double>, double> rates;
+    std::vector<TrackPairAlignment> pairs;
+    for (size_t j = 0; j < candidates.size(); ++j)
+        for (size_t i = 0; i < j; ++i)
+        {
+            if (shouldContinue && ! shouldContinue())
+                return pairs;
+
+            const auto& a = candidates[i];
+            const auto& b = candidates[j];
+            const auto linked = a.link != 0 && a.link == b.link;
+            const auto together = std::abs (a.start - b.start) < 0.005 && a.fileSeconds > 0.0 && std::abs (a.fileSeconds - b.fileSeconds) < 0.05;
+            if (! linked && ! (together && alignable (a.role) && alignable (b.role) && (! a.role || ! b.role || *a.role == *b.role)))
+                continue;
+
+            const auto from = juce::jmax (a.start, b.start);
+            const std::pair<int, double> keyA { a.id, from }, keyB { b.id, from };
+            for (const auto& [key, c] : { std::pair { keyA, &a }, std::pair { keyB, &b } })
+                if (audio.count (key) == 0)
+                    audio[key] = readTrackAudio (c->track, from, analysedSeconds, rates[key]);
+            if (rates[keyA] <= 0.0 || ! juce::approximatelyEqual (rates[keyA], rates[keyB]))
+                continue;
+
+            TrackPairAlignment pair;
+            pair.a = a.id;
+            pair.b = b.id;
+            pair.linked = linked;
+            pair.alignment = measureAlignment (audio[keyA], audio[keyB], rates[keyA]);
+            pairs.push_back (pair);
+        }
+    return pairs;
 }
 
 //==============================================================================
@@ -1899,6 +2108,10 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             return plan;
         }
     }
+
+    // Phase first: what's planned next hears the tracks summed.
+    if (options.phase && options.mode != MixMode::clean && ! options.alignments.empty())
+        planPhase (plan, measured, options, roleOf);
 
     // Normalize: each track to its role's level, with its chain's input gain. The rest
     // is planned on the measurements as they will be after it.
@@ -2861,6 +3074,19 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, float amount, const char* u
             // A change from the input gain it was measured with.
             const auto current = (float) owner.getProperty (daw::ids::inGain, 0.0f);
             edit.setChainGain (move.trackId, false, current + move.values.at ("inGain") * amount);
+            continue;
+        }
+
+        if (! move.insert.has_value() && (move.values.count ("polarity") > 0 || move.values.count ("nudge") > 0))
+        {
+            // Lined up or not: no halfway (any amount but none lines it up).
+            if (amount > 0.0f)
+            {
+                if (move.values.count ("polarity") > 0)
+                    edit.setTrackPolarity (move.trackId, move.values.at ("polarity") > 0.5f);
+                if (move.values.count ("nudge") > 0)
+                    edit.setTrackNudge (move.trackId, move.values.at ("nudge"));
+            }
             continue;
         }
 

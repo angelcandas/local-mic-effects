@@ -88,6 +88,8 @@ set(MICFX_DSP_SOURCES
     ${MICFX_INSTRUMENT_SOURCES}
     src/analysis/Analysis.cpp
     src/analysis/Analysis.h
+    src/analysis/Alignment.cpp
+    src/analysis/Alignment.h
     src/analysis/Key.cpp
     src/analysis/Key.h
     src/analysis/Chords.cpp
