@@ -723,10 +723,11 @@ class Rack {
 
   // Puts the cards in the chain's order (moving only the ones out of place, so the rest
   // don't replay their entrance).
+  // Autotune, pitch shift and harmonizer are one effect in the chain ("pitch"), so they
+  // move together.
   applyOrder(keys) {
     if (!Array.isArray(keys)) return;
-    const byKey = new Map(this.entries.map((entry) => [MODULE_KEYS[entry.module.id], entry]));
-    const ordered = keys.map((key) => byKey.get(key)).filter(Boolean);
+    const ordered = keys.flatMap((key) => this.entries.filter((entry) => MODULE_KEYS[entry.module.id] === key));
     for (const entry of this.entries) if (!ordered.includes(entry)) ordered.push(entry);
     this.entries = ordered;
 
@@ -747,16 +748,20 @@ class Rack {
 
   // Moves an effect before (or after) another card.
   moveNextTo(module, target, after) {
-    const keys = this.entries.map((entry) => MODULE_KEYS[entry.module.id]).filter((key) => key !== MODULE_KEYS[module.id]);
+    const moving = MODULE_KEYS[module.id];
+    const keys = [...new Set(this.entries.map((entry) => MODULE_KEYS[entry.module.id]))].filter((key) => key !== moving);
     const index = keys.indexOf(MODULE_KEYS[target.id]);
     if (index >= 0) this.moveTo(module, index + (after ? 1 : 0));
   }
 
-  // ←/→ on a card's number: past the next card that's on.
+  // ←/→ on a card's number: past the next card that's on (and not part of the same effect).
   nudge(module, direction) {
+    const key = MODULE_KEYS[module.id];
     const visible = this.entries.filter((entry) => !entry.card.hidden);
     const at = visible.findIndex((entry) => entry.module === module);
-    const target = visible[at + direction];
+    let next = at + direction;
+    while (visible[next] && MODULE_KEYS[visible[next].module.id] === key) next += direction;
+    const target = visible[next];
     if (target) this.moveNextTo(module, target.module, direction > 0);
   }
 
@@ -775,7 +780,7 @@ class Rack {
         dragging = true;
         card.classList.add("is-dragging");
         const over = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest(".card");
-        const entry = this.entries.find((e) => e.card === over && !e.card.hidden && e.module !== module);
+        const entry = this.entries.find((e) => e.card === over && !e.card.hidden && MODULE_KEYS[e.module.id] !== MODULE_KEYS[module.id]);
         clear();
         target = entry?.module ?? null;
         if (!entry) return;
@@ -1050,8 +1055,11 @@ class Rack {
       this.refresh();
 
       if (on) {
-        // Switched on from the list: it goes to the end of the chain.
-        this.chainOrder("last", MODULE_KEYS[module.id]).then((keys) => this.applyOrder(keys)).catch(() => {});
+        // Switched on from the list: it goes to the end of the chain (unless another part
+        // of the same effect, like the harmonizer for autotune, is already playing).
+        const key = MODULE_KEYS[module.id];
+        const playing = this.entries.some((entry) => entry.module !== module && MODULE_KEYS[entry.module.id] === key && !entry.card.hidden);
+        if (!playing) this.chainOrder("last", key).then((keys) => this.applyOrder(keys)).catch(() => {});
         card.scrollIntoView({ behavior: "smooth", block: "nearest" });
         card.classList.remove("is-flashing");
         void card.offsetWidth; // restart the animation
