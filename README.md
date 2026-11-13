@@ -377,6 +377,21 @@ To convert by hand instead, use Python 3.12 (PyTorch 2.7.0 has no build for newe
 `pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops "numpy<2.3" demucs==4.0.1` and
 `python scripts/export_htdemucs_coreml.py`.
 
+**More stems and Rebalance.** The split panel has a **Quality** choice. *4 stems* is the standard
+model. *6 stems* (`htdemucs_6s`, 55 MB) also pulls **Guitar** and **Piano** out of Other; it is a
+little less clean on the other four. *Best quality* runs the four fine-tuned models (`htdemucs_ft`,
+336 MB in all, one per stem) and keeps each model's own stem: about four times slower and the
+cleanest. Both run on the CPU only (the Core ML export covers the 4-stem network). The weights come
+from the same dataset as the 4-stem one and are checked against SHA-256 hashes pinned in
+`Model::getWeightFiles` (made by a GitHub runner, as the cloud container can't reach Hugging Face).
+
+**Rebalance stems** (clip menu, Audio) turns the vocals, drums, bass and the rest of one clip up or
+down without making tracks: a slider per stem (-30 dB is off, +12 dB boost, double-click for 0).
+MicFX separates the clip's file once (kept in `Application Support/MicFX/StemCache`, per file content
+and quality, up to about 4 GB), mixes the stems at the chosen levels into a 32-bit float WAV and the
+clip plays that. Its window, warp, fades and gain stay as they are. Opening Rebalance again shows the
+levels last applied; **Reset** or undo brings the original back.
+
 ### Song key
 
 **Key** next to the time signature (or **Edit → Song key…**) finds the key the song is in, locally:
@@ -543,7 +558,7 @@ src/analysis/           Auto Mix measurements: loudness (BS.1770 / EBU R128), 1/
                         singing against them
 src/PluginEditor.*      WebView host: parameter relays, presets, meters, embedded files
 src/stems/              Split into stems: chunked, multi-threaded separation, model download and
-                        check (StemSplitter), and the Demucs adapter (DemucsSeparator)
+                        check, 4/6-stem/Best quality models, stem cache and Rebalance mix (StemSplitter), and the Demucs adapter (DemucsSeparator)
 src/instruments/        the MicFX instruments (Grand, Nova, Tines, Drawbar, Pluck, Mallets, Beat, Kit): a Spec per instrument (parameters,
                         window layout, presets, sound engine), InstrumentProcessor (the built-in
                         instrument and the VST3/AU plugin), InstrumentEditor (its window)

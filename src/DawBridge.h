@@ -70,7 +70,7 @@ public:
 
     // Puts finished stems (in stems::Stem order) on new tracks under the clip's track,
     // lined up with the clip, and mutes the clip. One undo step. -> { ok, error, tracks }
-    juce::var addStemTracks (const juce::ValueTree& clip, int trackId, const std::array<juce::File, stems::numStems>&);
+    juce::var addStemTracks (const juce::ValueTree& clip, int trackId, const std::vector<juce::File>&);
 
     // Puts loop layers (files in layer order, with their level in dB and mute) on new tracks
     // "Loop 1"..., each repeated `repeats` times from the start of the song. With bpm > 0,
@@ -115,6 +115,7 @@ private:
     // Split into stems (src/stems/StemSplitter.h): downloads the model the first time,
     // then separates on background threads.
     juce::var handleStems (const juce::var& args);
+    juce::var handleRebalance (const juce::var& args);
 
     // Auto Mix (src/analysis/MixAssistant.h): analysis runs on a background thread;
     // planning and applying on the message thread.
@@ -184,6 +185,7 @@ private:
     // A running stem split (at most one).
     struct StemJob;
     void finishAutoMixSplit (StemJob&);
+    void finishRebalance (StemJob&);
     std::shared_ptr<StemJob> stemJob;
 
     // Auto Mix: the running analysis (at most one), the last analysis and its plan.

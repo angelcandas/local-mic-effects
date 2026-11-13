@@ -121,6 +121,15 @@ struct DawBridge::StemJob
     std::atomic<bool> gpu { false };               // separating on the GPU (Core ML), not the CPU
     juce::String note;                             // why the GPU wasn't used, when it was meant to be; set before finished
     bool autoMix = false; // started by Auto Mix, which listens once it's done
+    stems::Quality quality = stems::Quality::fourStems;
+
+    // Rebalance: re-mixes the clip's stems (separated first unless cached) into `mixed`.
+    bool rebalance = false;
+    std::vector<float> gains;  // dB per stem
+    juce::File original, mixed;
+    juce::String settings;     // JSON stored on the clip
+    int clipId = -1;
+    std::atomic<bool> mixing { false };
 };
 
 struct DawBridge::AutoMixJob
@@ -523,6 +532,7 @@ juce::var DawBridge::describeSession()
                            // While its copy renders: the stretches of it ([from, to] seconds into the copy) still to come.
                            { "renderingRanges", describeRanges (engine.getAudioPool().getRenderingRanges (file, warpSettings)) },
                            { "missing", ! file.existsAsFile() },
+                           { "rebalanced", clip.hasProperty (ids::rebalanceFrom) },
                            { "take", (int) clip.getProperty (ids::take, -1) } });
     };
 
@@ -988,7 +998,9 @@ void DawBridge::tick()
         {
             auto job = std::move (stemJob);
 
-            if (job->autoMix)
+            if (job->rebalance)
+                finishRebalance (*job);
+            else if (job->autoMix)
                 finishAutoMixSplit (*job);
             else if (job->result.cancelled)
                 emit ("dawStems", object ({ { "state", "cancelled" } }));
@@ -1008,6 +1020,13 @@ void DawBridge::tick()
             // Auto Mix splitting a song first: its own panel shows the progress.
             emit ("dawAutoMix", object ({ { "state", "splitting" }, { "phase", stemJob->phase.load() },
                                           { "progress", stemJob->progress.load() } }));
+        }
+        else if (stemJob->rebalance)
+        {
+            static constexpr const char* phases[] { "downloading", "loading", "splitting" };
+            emit ("dawRebalance", object ({ { "state", stemJob->mixing ? "mixing" : phases[juce::jlimit (0, 2, stemJob->phase.load())] },
+                                            { "progress", stemJob->progress.load() }, { "gpu", stemJob->gpu.load() },
+                                            { "clip", stemJob->clipId } }));
         }
         else
         {
@@ -1177,8 +1196,11 @@ juce::var DawBridge::importAudio (const juce::File& file, int trackId, double st
 }
 
 juce::var DawBridge::addStemTracks (const juce::ValueTree& clip, int trackId,
-                                    const std::array<juce::File, stems::numStems>& files)
+                                    const std::vector<juce::File>& files)
 {
+    if (files.size() < (size_t) stems::numStems)
+        return error ("The split didn't make any stems.");
+
     for (const auto& file : files)
         if (! file.existsAsFile())
             return error ("A stem file is missing: " + file.getFullPathName());
@@ -1194,8 +1216,11 @@ juce::var DawBridge::addStemTracks (const juce::ValueTree& clip, int trackId,
             index = i + 1;
 
     juce::Array<juce::var> added;
-    for (const auto stem : { stems::Stem::vocals, stems::Stem::drums, stems::Stem::bass, stems::Stem::other })
+    for (const auto stem : { stems::Stem::vocals, stems::Stem::drums, stems::Stem::bass, stems::Stem::guitar, stems::Stem::piano, stems::Stem::other })
     {
+        if ((size_t) stem >= files.size())
+            continue; // a four-stem split has no guitar or piano
+
         const auto track = edit.addTrack (stems::stemNames[(size_t) stem], index++);
         const auto id = (int) track[ids::id];
         auto copy = edit.addClip (id, files[(size_t) stem], number (clip, ids::start), number (clip, ids::length),
@@ -1290,6 +1315,7 @@ juce::var DawBridge::handleStems (const juce::var& args)
     auto job = std::make_shared<StemJob>();
     job->clip = clip.createCopy();
     job->trackId = (int) clip.getParent()[ids::id];
+    job->quality = stems::getQualityFromKey (args["quality"].toString());
     stemJob = job;
 
     const auto folder = getRecordingFolder();
@@ -1304,7 +1330,7 @@ juce::var DawBridge::handleStems (const juce::var& args)
                                            job->phase = phase == stems::LoadPhase::downloading ? StemJob::downloading : StemJob::loading;
                                            job->progress = 0.0;
                                        },
-                                       progress);
+                                       progress, job->quality);
         const auto separator = loaded.separator;
         job->gpu = loaded.gpu;
         job->note = loaded.note;
@@ -1316,7 +1342,7 @@ juce::var DawBridge::handleStems (const juce::var& args)
             // The GPU takes one segment at a time; two workers keep it fed while the other
             // prepares or finishes a segment. On the CPU every core works on its own chunk.
             stems::Settings settings;
-            settings.threads = job->gpu ? 2 : 0;
+            settings.threads = job->gpu || job->quality == stems::Quality::best ? 2 : 0; // Best holds four models per thread
 
             job->phase = StemJob::splitting;
             job->progress = 0.0;
@@ -1329,6 +1355,178 @@ juce::var DawBridge::handleStems (const juce::var& args)
     });
 
     return error ({});
+}
+
+// The "rebalance" command; args.action is one of:
+//   info    { id } -> { ok, stems: [names], quality, gains: [dB] (as last applied, else zeros),
+//                       rebalanced, cached: { "4": bool, "6": bool, "best": bool } }
+//   start   { id, quality: "4" | "6" | "best", gains: [dB per stem] } -> separates the clip's file
+//           unless its stems are cached, mixes them at those levels and swaps the clip's file for the
+//           mix (one undo step). Events "dawRebalance": { state: downloading | loading | splitting |
+//           mixing | done | error | cancelled, progress, gpu, clip }.
+//   reset   { id } -> back to the original file
+//   cancel
+juce::var DawBridge::handleRebalance (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+
+    if (action == "cancel")
+    {
+        if (stemJob != nullptr)
+            stemJob->cancel = true;
+        return error ({});
+    }
+
+    const auto clip = edit.getClip (arg (args, "id", -1));
+    if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+        return error ("Select an audio clip first.");
+
+    const auto original = daw::Edit::getRebalanceOriginal (clip);
+
+    if (action == "reset")
+    {
+        if (! clip.hasProperty (ids::rebalanceFrom))
+            return error ("This clip isn't rebalanced.");
+        if (! original.existsAsFile())
+            return error ("The original file is missing: " + original.getFullPathName());
+
+        edit.getUndoManager().beginNewTransaction ("Reset rebalance");
+        edit.resetClipRebalance ((int) clip[ids::id]);
+        sessionChanged = true;
+        return error ({});
+    }
+
+    if (action == "info")
+    {
+        const auto saved = juce::JSON::parse (clip[ids::rebalance].toString());
+        auto quality = stems::getQualityFromKey (saved["quality"].toString());
+        juce::Array<juce::var> names, gains;
+        for (int s = 0; s < stems::maxStems; ++s)
+            names.add (stems::stemNames[(size_t) s]);
+        for (int s = 0; s < stems::maxStems; ++s)
+            gains.add (saved["gains"].isArray() && s < saved["gains"].size() ? (double) saved["gains"][s] : 0.0);
+
+        auto* cached = new juce::DynamicObject();
+        if (original.existsAsFile())
+            for (int q = 0; q < stems::numQualities; ++q)
+                cached->setProperty (stems::qualityKeys[(size_t) q],
+                                     ! stems::getCachedStems (stems::getCacheFolder (original, (stems::Quality) q), (stems::Quality) q).empty());
+
+        return object ({ { "ok", true }, { "error", juce::String() }, { "stems", names }, { "gains", gains },
+                         { "quality", stems::qualityKeys[(size_t) quality] }, { "rebalanced", clip.hasProperty (ids::rebalanceFrom) },
+                         { "cached", juce::var (cached) }, { "builtIn", stems::Model::isBuiltIn() } });
+    }
+
+    if (action != "start")
+        return error ("Unknown rebalance action.");
+
+    if (stemJob != nullptr)
+        return error ("A song is already splitting into stems.");
+    if (! stems::Model::isBuiltIn())
+        return error ("This build of MicFX doesn't include the stem splitter.");
+    if (! original.existsAsFile())
+        return error ("Couldn't find " + original.getFullPathName() + ".");
+
+    auto job = std::make_shared<StemJob>();
+    job->rebalance = true;
+    job->clip = clip.createCopy();
+    job->clipId = (int) clip[ids::id];
+    job->trackId = (int) clip.getParent()[ids::id];
+    job->quality = stems::getQualityFromKey (args["quality"].toString());
+    job->original = original;
+
+    const auto count = stems::getStemCount (job->quality);
+    juce::Array<juce::var> gainList;
+    for (int s = 0; s < count; ++s)
+    {
+        const auto gain = args["gains"].isArray() && s < args["gains"].size() ? (float) (double) args["gains"][s] : 0.0f;
+        job->gains.push_back (juce::jlimit (-100.0f, 12.0f, gain));
+        gainList.add (job->gains.back());
+    }
+    job->settings = juce::JSON::toString (object ({ { "quality", stems::qualityKeys[(size_t) job->quality] }, { "gains", gainList } }), true);
+
+    job->mixed = getRecordingFolder().getNonexistentChildFile (juce::File::createLegalFileName (original.getFileNameWithoutExtension() + " (rebalanced)"), ".wav", false);
+    stemJob = job;
+
+    juce::Thread::launch ([job]
+    {
+        const auto progress = [job] (double p) { job->progress = p; return ! job->cancel.load(); };
+        auto& result = job->result;
+        const auto folder = stems::getCacheFolder (job->original, job->quality);
+        auto files = stems::getCachedStems (folder, job->quality);
+
+        if (files.empty())
+        {
+            auto loaded = stems::loadBest ([job] (stems::LoadPhase phase)
+                                           {
+                                               job->phase = phase == stems::LoadPhase::downloading ? StemJob::downloading : StemJob::loading;
+                                               job->progress = 0.0;
+                                           },
+                                           progress, job->quality);
+            job->gpu = loaded.gpu;
+            job->note = loaded.note;
+            result.error = loaded.error;
+            result.cancelled = loaded.cancelled;
+
+            if (loaded.separator != nullptr && ! job->cancel.load())
+            {
+                stems::Settings settings;
+                settings.threads = job->gpu || job->quality == stems::Quality::best ? 2 : 0;
+                job->phase = StemJob::splitting;
+                job->progress = 0.0;
+                job->splitStartedMs = (juce::int64) juce::Time::getMillisecondCounter();
+                result = stems::splitToCache (job->original, job->quality, loaded.separator, progress, settings);
+                files = result.files;
+            }
+        }
+
+        if (result.error.isEmpty() && ! result.cancelled && ! job->cancel.load() && ! files.empty())
+        {
+            job->mixing = true;
+            job->progress = 0.0;
+            const auto problem = stems::mixStems (files, job->gains, job->mixed, progress);
+            if (problem == "cancelled")
+                result.cancelled = true;
+            else
+                result.error = problem;
+        }
+
+        result.cancelled = result.cancelled || job->cancel.load();
+        job->finished = true;
+    });
+
+    return error ({});
+}
+
+void DawBridge::finishRebalance (StemJob& job)
+{
+    if (job.result.cancelled)
+    {
+        job.mixed.deleteFile();
+        emit ("dawRebalance", object ({ { "state", "cancelled" }, { "clip", job.clipId } }));
+        return;
+    }
+    if (job.result.error.isNotEmpty())
+    {
+        job.mixed.deleteFile();
+        emit ("dawRebalance", object ({ { "state", "error" }, { "error", job.result.error }, { "clip", job.clipId } }));
+        return;
+    }
+
+    if (! edit.getClip (job.clipId).isValid() || ! job.mixed.existsAsFile())
+    {
+        job.mixed.deleteFile();
+        emit ("dawRebalance", object ({ { "state", "error" }, { "error", "The clip was removed while its stems were mixing." }, { "clip", job.clipId } }));
+        return;
+    }
+
+    edit.getUndoManager().beginNewTransaction ("Rebalance");
+    edit.setClipRebalance (job.clipId, job.mixed, job.original, job.settings);
+    sessionChanged = true;
+
+    const auto seconds = (juce::Time::getMillisecondCounter() - job.splitStartedMs.load()) / 1000.0;
+    emit ("dawRebalance", object ({ { "state", "done" }, { "clip", job.clipId }, { "gpu", job.gpu.load() }, { "note", job.note },
+                                    { "seconds", job.splitStartedMs.load() != 0 ? seconds : 0.0 } }));
 }
 
 //==============================================================================
@@ -3461,6 +3659,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "stems")
     {
         complete (handleStems (args));
+        return;
+    }
+
+    if (command == "rebalance")
+    {
+        complete (handleRebalance (args));
         return;
     }
 
