@@ -61,6 +61,10 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
         if (count > 0)
             setCurrentProgram (((currentPreset.load() + delta) % count + count) % count);
     };
+    // Each setlist song keeps the order of its effects with its sound.
+    setlist.getChainOrder = [this] { return getChainOrder().joinIntoString (","); };
+    setlist.setChainOrder = [this] (const juce::String& keys) { setChainOrder (juce::StringArray::fromTokens (keys, ",", "")); };
+
     midiMap.onMuteToggle = [this] { outputMuted = ! outputMuted.load(); };
     midiMap.onScene = [this] (const juce::String& action)
     {
@@ -410,6 +414,40 @@ void PluginProcessor::setCurrentProgram (int index)
         liveHistory.label (juce::String ("Load preset ") + presets[(size_t) index].name);
     currentPreset = index;
     applyPreset (*this, presets[(size_t) index]);
+
+    juce::StringArray order;
+    for (const auto* key : presets[(size_t) index].order)
+        order.add (key);
+    setChainOrder (order);
+}
+
+juce::StringArray PluginProcessor::getChainOrder() const
+{
+    auto& live = const_cast<fx::FxChain&> (chain);
+    juce::StringArray keys;
+    for (const auto index : live.getOrder())
+        keys.add (juce::String (fx::getModuleKey (live[index].getType())));
+    return keys;
+}
+
+void PluginProcessor::setChainOrder (const juce::StringArray& keys)
+{
+    std::vector<int> order;
+    std::vector<bool> placed ((size_t) chain.size(), false);
+
+    for (const auto& key : keys)
+        for (int i = 0; i < chain.size(); ++i)
+            if (! placed[(size_t) i] && key.trim() == fx::getModuleKey (chain[i].getType()))
+            {
+                order.push_back (i);
+                placed[(size_t) i] = true;
+            }
+
+    for (int i = 0; i < chain.size(); ++i)
+        if (! placed[(size_t) i])
+            order.push_back (i);
+
+    chain.setOrder (order);
 }
 
 const juce::String PluginProcessor::getProgramName (int index)
@@ -453,6 +491,7 @@ void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto tree = state.copyState();
     tree.setProperty ("preset", currentPreset.load(), nullptr);
+    tree.setProperty ("chainOrder", getChainOrder().joinIntoString (","), nullptr);
 
     // The effects' files, by module key.
     juce::ValueTree files ("MODULE_FILES");
@@ -479,6 +518,9 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
         {
             auto tree = juce::ValueTree::fromXml (*xml);
             currentPreset = (int) tree.getProperty ("preset", 0);
+            // The effects' order (a state from before orders existed: the standard one).
+            setChainOrder (juce::StringArray::fromTokens (tree.getProperty ("chainOrder").toString(), ",", ""));
+            tree.removeProperty ("chainOrder", nullptr);
             if (const auto saved = tree.getChildWithName ("SETLIST"); saved.isValid())
             {
                 if (juce::JUCEApplicationBase::isStandaloneApp())

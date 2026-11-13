@@ -3559,6 +3559,131 @@ namespace
 
     // Ableton-style chain edits: adding, removing or moving an effect doesn't restart the
     // others (a reverb tail rings on), and the single-effect commands.
+    void testChainOrder()
+    {
+        std::cout << "\nLive chain order (reorder, save, setlist)\n";
+
+        const auto voice = makeVoice (180.0f, 1.0);
+        const auto reversed = [] (const fx::FxChain& chain)
+        {
+            std::vector<int> order;
+            for (int i = chain.size() - 1; i >= 0; --i)
+                order.push_back (i);
+            return order;
+        };
+
+        // The order changes the sound: drive into an echo isn't an echo into drive.
+        {
+            fx::FxChain natural (fx::FxChain::getAllTypes()), flipped (fx::FxChain::getAllTypes());
+            for (auto* chain : { &natural, &flipped })
+            {
+                switchAll (*chain, false);
+                chain->setValue ("satOn", 1.0f);
+                chain->setValue ("satDrive", 9.0f);
+                chain->setValue ("delayOn", 1.0f);
+            }
+            flipped.setOrder (reversed (flipped));
+            check (flipped.getOrder() == reversed (flipped), "the chain reports the order it was given");
+            check (runChain (natural, voice) != runChain (flipped, voice), "a different order sounds different");
+
+            flipped.setOrder ({ 0, 0 });
+            check (flipped.getOrder() == natural.getOrder(), "an order that isn't a permutation falls back to the standard one");
+            check (runChain (natural, voice) == runChain (flipped, voice), "back in the standard order it sounds the same again");
+        }
+
+        // With everything off, any order is still a clean pass-through.
+        {
+            fx::FxChain natural (fx::FxChain::getAllTypes()), flipped (fx::FxChain::getAllTypes());
+            switchAll (natural, false);
+            switchAll (flipped, false);
+            flipped.setOrder (reversed (flipped));
+            check (runChain (natural, voice) == runChain (flipped, voice), "the null test holds in any order");
+        }
+
+        // Reordering while it plays dips briefly instead of clicking.
+        {
+            fx::FxChain chain (fx::FxChain::getAllTypes());
+            switchAll (chain, false);
+            chain.setValue ("satOn", 1.0f);
+            chain.setValue ("satDrive", 6.0f);
+            chain.setValue ("delayOn", 1.0f);
+            chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            float biggestJump = 0.0f, biggestJumpBefore = 0.0f, quietest = 1.0f, previous = 0.0f;
+            const auto swapBlock = (int) (0.5 * sampleRate) / blockSize;
+            int block = 0;
+
+            for (size_t start = 0; start + blockSize <= voice.size(); start += blockSize, ++block)
+            {
+                if (block == swapBlock)
+                    chain.setOrder (reversed (chain));
+
+                for (int ch = 0; ch < 2; ++ch)
+                    buffer.copyFrom (ch, 0, voice.data() + start, blockSize);
+                juce::dsp::AudioBlock<float> audio (buffer);
+                chain.process (fx::Module::Context (audio));
+
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    const auto sample = buffer.getSample (0, i);
+                    const auto jump = std::abs (sample - previous);
+                    previous = sample;
+                    if (block > 4 && block < swapBlock)
+                        biggestJumpBefore = juce::jmax (biggestJumpBefore, jump);
+                    if (block >= swapBlock && block < swapBlock + 4)
+                    {
+                        biggestJump = juce::jmax (biggestJump, jump);
+                        quietest = juce::jmin (quietest, std::abs (sample));
+                    }
+                }
+            }
+
+            check (chain.getOrder() == reversed (chain), "the new order takes over while playing");
+            check (quietest < 1.0e-3f, "the swap happens in a short dip");
+            check (biggestJump <= biggestJumpBefore * 1.5f + 1.0e-4f, "and doesn't click (" + juce::String (biggestJump) + " vs " + juce::String (biggestJumpBefore) + ")");
+        }
+
+        // The processor: keys in, keys out, saved with the state.
+        {
+            PluginProcessor processor;
+            processor.prepareToPlay (sampleRate, blockSize);
+            const auto standard = processor.getChainOrder();
+            check (standard.size() == fx::numModuleTypes && standard[0] == "highPass", "a new session plays the standard order");
+
+            processor.setChainOrder ({ "reverb", "nothing", "saturation" });
+            const auto order = processor.getChainOrder();
+            check (order[0] == "reverb" && order[1] == "saturation" && order.size() == standard.size(),
+                   "the keys named go first, unknown ones are skipped, the rest follow");
+
+            juce::MemoryBlock saved;
+            processor.getStateInformation (saved);
+            PluginProcessor restored;
+            restored.setStateInformation (saved.getData(), (int) saved.getSize());
+            check (restored.getChainOrder() == order, "the order is saved with the plug-in state");
+
+            // A state saved before the order existed loads in the standard order.
+            processor.setChainOrder (standard);
+            juce::MemoryBlock old;
+            processor.getStateInformation (old);
+            restored.setChainOrder ({ "reverb" });
+            restored.setStateInformation (old.getData(), (int) old.getSize());
+            check (restored.getChainOrder() == standard, "an older state plays the standard order");
+
+            // A setlist song keeps its order.
+            auto& setlist = processor.getSetlist();
+            processor.setChainOrder ({ "echo", "pitch" });
+            setlist.addSong ("Ordered");
+            processor.setChainOrder (standard);
+            setlist.addSong ("Standard");
+            juce::String warning;
+            setlist.loadSong (0, warning);
+            check (processor.getChainOrder()[0] == "echo" && processor.getChainOrder()[1] == "pitch", "a setlist song brings back its order");
+            setlist.loadSong (1, warning);
+            check (processor.getChainOrder() == standard, "and the next song its own");
+        }
+    }
+
     void testDeviceEdits()
     {
         std::cout << "\nEffect chain edits (seamless, duplicate, move, replace, rename, A/B)\n";
@@ -15176,6 +15301,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "devices")
     {
         testDeviceEdits();
+        testChainOrder();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -15215,6 +15341,7 @@ int main()
     testSetlist();
     testDawEngine();
     testDeviceEdits();
+    testChainOrder();
     testReturns();
     testPreview();
     testGroups();

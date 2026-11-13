@@ -1926,12 +1926,20 @@ void DawBridge::loadPresetInto (int trackId, int presetIndex)
     if (! inserts.isValid())
         return;
 
-    // Replace the chain with the preset's switched-on modules, in Live mode order.
+    // Replace the chain with the preset's switched-on modules, in its order (or Live
+    // mode's standard order).
     inserts.removeAllChildren (&edit.getUndoManager());
 
+    std::vector<fx::ModuleType> types;
+    for (const auto* key : preset.order)
+        if (const auto type = daw::Edit::moduleTypeFromKey (key); type.has_value() && std::find (types.begin(), types.end(), *type) == types.end())
+            types.push_back (*type);
     for (int t = 0; t < fx::numModuleTypes; ++t)
+        if (std::find (types.begin(), types.end(), (fx::ModuleType) t) == types.end())
+            types.push_back ((fx::ModuleType) t);
+
+    for (const auto type : types)
     {
-        const auto type = (fx::ModuleType) t;
         auto module = fx::createModule (type);
 
         // Live mode defaults, then the preset's values.

@@ -293,6 +293,41 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                                           args.size() > 1 ? args[1] : juce::var()));
                        })
 
+                       // (action, ...) -> the Live chain's order, module keys first to last. "get";
+                       // "set" (keys); "move" (key, index: its place among the keys); "last" (key):
+                       // to the end, as the sidebar does when it switches an effect on.
+                       .withNativeFunction ("chainOrder", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String ("get");
+                           auto keys = processorRef.getChainOrder();
+
+                           if (action == "set" && args.size() > 1)
+                           {
+                               keys.clear();
+                               if (const auto* list = args[1].getArray())
+                                   for (const auto& key : *list)
+                                       keys.add (key.toString());
+                           }
+                           else if ((action == "move" || action == "last") && args.size() > 1)
+                           {
+                               const auto key = args[1].toString();
+                               if (const auto from = keys.indexOf (key); from >= 0)
+                               {
+                                   keys.remove (from);
+                                   const auto to = action == "last" || args.size() < 3 ? keys.size()
+                                                                                     : juce::jlimit (0, keys.size(), (int) args[2]);
+                                   keys.insert (to, key);
+                               }
+                           }
+
+                           if (action != "get")
+                               processorRef.setChainOrder (keys);
+
+                           juce::Array<juce::var> result;
+                           for (const auto& key : processorRef.getChainOrder())
+                               result.add (key);
+                           complete (juce::var (result));
+                       })
                        // (moduleKey, action) -> { file, name, error?, cancelled? }. The file a Live effect plays
                        // through (cabinet, IR reverb): "get", "choose" (a file chooser) or "clear".
                        .withNativeFunction ("moduleFile", [this] (const auto& args, auto complete)
@@ -920,6 +955,14 @@ void PluginEditor::timerCallback()
         lastFullScreen = window->isFullScreen();
         webView->emitEventIfBrowserIsVisible ("window", describeWindow());
     }
+
+    // A preset, a setlist song or the host can reorder the Live chain; the page follows.
+    if (! processorRef.isDawMode())
+        if (const auto order = processorRef.getChainOrder().joinIntoString (","); order != lastChainOrder)
+        {
+            lastChainOrder = order;
+            webView->emitEventIfBrowserIsVisible ("chainOrder", order);
+        }
 
     const auto& pitch = processorRef.getPitchEngine();
 
