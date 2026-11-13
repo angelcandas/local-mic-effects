@@ -110,3 +110,48 @@
 .pat-roll-title { font-size: 12px; font-weight: 600; }
 .pat-roll .piano-panel { flex: 1; min-height: 0; }
 .patterns-panel.is-drop-target, .pat-label.is-drop-target { box-shadow: inset 0 0 0 2px var(--accent-2, #3fd9c6); }
+
+/* rack tools: the row strip (mute light, pan, level), step values, beat ruler, length grip */
+.pat-strip { display: inline-flex; flex: none; align-items: center; gap: 4px; width: 52px; }
+.pat-light {
+  flex: none; width: 10px; height: 10px; padding: 0; border: 1px solid var(--line-strong); border-radius: 50%;
+  background: #0f1219; cursor: pointer;
+}
+.pat-light.is-on { border-color: color-mix(in srgb, #6fdc8c 70%, #000); background: #6fdc8c; box-shadow: 0 0 4px rgba(111, 220, 140, 0.6); }
+.pat-knob {
+  position: relative; flex: none; width: 17px; height: 17px; box-sizing: border-box; border: 1px solid var(--line); border-radius: 50%;
+  background: #0f1219; cursor: ns-resize; touch-action: none;
+}
+.pat-knob::after {
+  content: ""; position: absolute; left: 50%; top: 1px; width: 2px; height: 6px; margin-left: -1px; border-radius: 1px;
+  background: var(--track, #8c7bff); transform-origin: 50% 6.5px; transform: rotate(var(--a, 0deg));
+}
+.pat-knob:hover { border-color: var(--line-strong); }
+.pat-knob.is-blank { visibility: hidden; }
+.pat-strip.is-blank, .pat-label.is-blank { visibility: hidden; }
+.pat-row.is-row-muted .pat-steps { opacity: 0.4; }
+.pat-step { color: #fff; font: 600 8.5px var(--mono); line-height: 1; overflow: hidden; }
+.pat-step.has-shape::after {
+  content: ""; position: absolute; bottom: 2px; left: calc(2px + var(--shift, 0) * 20px); width: calc(var(--len, 1) * 20px); height: 2px;
+  border-radius: 1px; background: rgba(255, 255, 255, 0.85);
+}
+.pat-ruler { height: 14px; margin: 0 0 2px; }
+.pat-beats { display: grid; grid-template-columns: repeat(var(--steps), 24px); gap: 2px; }
+.pat-beat { color: var(--faint); font: 10px var(--mono); line-height: 14px; border-left: 1px solid var(--line); padding-left: 3px; }
+.pat-beat.is-bar { color: var(--muted); font-weight: 600; border-left-color: var(--line-strong); }
+.pat-grip {
+  position: relative; margin-left: 2px; padding: 0 4px; border: 1px solid var(--line); border-radius: 4px; color: var(--muted);
+  font-size: 10px; line-height: 12px; cursor: ew-resize; touch-action: none; user-select: none;
+}
+.pat-grip:hover { color: var(--text); border-color: var(--line-strong); }
+.pat-grip[data-length]::after {
+  content: attr(data-length); position: absolute; left: 100%; top: -2px; margin-left: 6px; padding: 1px 6px; border-radius: 4px;
+  background: var(--panel-raised); color: var(--text); white-space: nowrap;
+}
+.pat-vel-head { display: inline-flex; flex: none; flex-direction: column; justify-content: center; gap: 3px; width: 144px; }
+.pat-vel-name { overflow: hidden; color: var(--muted); font-size: 10px; text-overflow: ellipsis; white-space: nowrap; }
+.pat-target { width: 96px; height: 22px; padding-top: 0; padding-bottom: 0; font-size: 11px; }
+.pat-vel-cell { position: relative; }
+.pat-vel-cell b { position: absolute; left: 0; right: 0; top: 2px; color: var(--text); font: 600 8.5px var(--mono); text-align: center; pointer-events: none; }
+.pat-vel.is-pitch .pat-vel-cell.has-note i, .pat-vel.is-shift .pat-vel-cell.has-note i, .pat-vel.is-length .pat-vel-cell.has-note i { opacity: 0.75; }
+.pat-arrow { padding: 0 7px; font-size: 14px; }

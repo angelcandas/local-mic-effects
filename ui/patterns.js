@@ -45,15 +45,25 @@ export function trackRows(track, part) {
   return { drum: false, named, rows: [{ pitch: part?.stepNote ?? DEFAULT_NOTE, name: track.name }] };
 }
 
-// Does the part hold notes that the one row of steps can't show (other pitches or off the grid)?
-function isMelody(part, pattern, rows) {
-  if (!part?.notes?.length) return false;
-  const step = pattern.step;
-  return part.notes.some((n) => n.pitch !== rows[0].pitch || Math.abs(n.time / step - Math.round(n.time / step)) > 0.1);
-}
-
 const stepCount = (pattern) => Math.max(1, Math.round(pattern.length / pattern.step - 1e-6));
-const noteIndex = (note, pattern) => Math.round(note.time / pattern.step);
+// The step a note sits on: up to a twentieth of a step early counts as on it, later is a shifted
+// step (as Edit::getStepIndex).
+const noteIndex = (note, pattern) => Math.floor(note.time / pattern.step + 0.05);
+const MAX_SHIFT = 0.9, MIN_LEN = 0.1, MAX_LEN = 4; // step values, in steps
+let stepClipboard = null; // "Copy steps": [{ index, velocity, length, shift (steps), offset (semitones) }]
+
+// Can a track row's steps show the part? Each step holds one note of any pitch; chords, two notes
+// on a step or notes past the end need the piano roll (the rack shows a preview).
+function isMelody(part, pattern) {
+  if (!part?.notes?.length) return false;
+  const seen = new Set(), count = stepCount(pattern);
+  for (const n of part.notes) {
+    const i = noteIndex(n, pattern);
+    if (i < 0 || i >= count || seen.has(i)) return true;
+    seen.add(i);
+  }
+  return false;
+}
 
 //==================================================================================== the tab
 // screen: the DAW screen (session, status, selectedPattern, tempoMap, beatsPerBar, setDockTab,
@@ -86,7 +96,11 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
 
   const newPattern = async (from) => {
     const list = screen.session?.patterns ?? [];
-    const id = await daw("addPattern", from != null ? { from } : { name: `Pattern ${list.length + 1}` });
+    // A new one takes the first unused number.
+    const names = new Set(list.map((p) => p.name));
+    let number = 1;
+    while (names.has(`Pattern ${number}`)) ++number;
+    const id = await daw("addPattern", from != null ? { from } : { name: `Pattern ${number}` });
     if (typeof id === "number") {
       // The session that holds it arrives next and draws it.
       screen.selectedPattern = id;
@@ -133,37 +147,83 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
   //---------------------------------------------------------------- row actions
   const partOf = (pattern, trackId) => pattern.parts.find((p) => p.track === trackId);
   const notesAt = (part, pitch) => (part?.notes ?? []).filter((n) => n.pitch === pitch);
+  // The notes a row's steps show: a drum row's pitch, or every note of a track row (a note per step).
+  const rowNotes = (part, view, row) => (view.drum ? notesAt(part, row.pitch) : part?.notes ?? []);
 
-  const setSteps = (pattern, track, pitch, steps) => daw("setSteps", { pattern: pattern.id, track: track.id, pitch, steps });
+  const setSteps = (pattern, track, view, row, steps) =>
+    daw("setSteps", { pattern: pattern.id, track: track.id, pitch: row.pitch, steps, ...(view.drum ? {} : { anyPitch: true }) });
+
+  // What the row menu and the keys do to one row.
+  const rowActions = (pattern, track, view, row) => {
+    const part = partOf(pattern, track.id);
+    const count = stepCount(pattern);
+    const step = pattern.step;
+    const notes = rowNotes(part, view, row);
+    const byIndex = new Map(notes.map((n) => [noteIndex(n, pattern), n]));
+    const edit = (args) => daw("editPattern", { pattern: pattern.id, track: track.id, ...args });
+    return {
+      fill: (every) => setSteps(pattern, track, view, row, Array.from({ length: count }, (_, i) => [i, i % every === 0 ? STEP_VELOCITY : 0])),
+      rotate: (by) => edit({ change: notes.map((n) => ({ id: n.id, time: ((((n.time + by * step) % pattern.length) + pattern.length) % pattern.length) })) }),
+      clear: () => edit({ remove: notes.map((n) => n.id) }),
+      // Each step on with the chance `density`, velocities a little apart (FL's randomize).
+      randomize: (density) => setSteps(pattern, track, view, row, Array.from({ length: count },
+        (_, i) => [i, Math.random() < density ? Math.round(STEP_VELOCITY - 18 + Math.random() * 27) : 0])),
+      flip: () => setSteps(pattern, track, view, row, Array.from({ length: count }, (_, i) => [i, byIndex.has(i) ? 0 : STEP_VELOCITY])),
+      copy: () => {
+        stepClipboard = [...byIndex].map(([index, n]) => ({
+          index, velocity: n.velocity, length: n.length / step, shift: clamp(n.time / step - index, 0, MAX_SHIFT), offset: n.pitch - row.pitch,
+        }));
+        toast(`Copied ${stepClipboard.length} step${stepClipboard.length === 1 ? "" : "s"} of ${row.name}`);
+      },
+      // The copied steps replace the row's, one undo step. A drum row plays its own sound.
+      paste: () => {
+        if (!stepClipboard) return;
+        edit({
+          remove: notes.map((n) => n.id),
+          add: stepClipboard.filter((s) => s.index < count).map((s) => ({
+            pitch: clamp(row.pitch + (view.drum ? 0 : s.offset), 0, 127), time: (s.index + s.shift) * step,
+            length: s.length * step, velocity: s.velocity,
+          })),
+        });
+      },
+    };
+  };
 
   const rowMenu = (event, pattern, track, view, row) => {
     event.preventDefault();
     const part = partOf(pattern, track.id);
-    const count = stepCount(pattern);
-    const step = pattern.step;
+    const act = rowActions(pattern, track, view, row);
     const edit = (change) => daw("editPattern", { pattern: pattern.id, track: track.id, change });
-    const fill = (every) => setSteps(pattern, track, row.pitch, Array.from({ length: count }, (_, i) => [i, i % every === 0 ? STEP_VELOCITY : 0]));
-    const shift = (by) => edit(notesAt(part, row.pitch).map((n) => ({
-      id: n.id, time: ((((n.time + by * step) % pattern.length) + pattern.length) % pattern.length),
-    })));
+    selectRow(track, row.pitch, false);
     popMenu(event.clientX, event.clientY, ({ item, rule, heading }) => {
       heading(row.name);
-      item("Fill every 2 steps", () => fill(2));
-      item("Fill every 4 steps", () => fill(4));
-      item("Fill every 8 steps", () => fill(8));
-      item("Shift left", () => shift(-1));
-      item("Shift right", () => shift(1));
-      item("Clear", () => daw("editPattern", { pattern: pattern.id, track: track.id, remove: notesAt(part, row.pitch).map((n) => n.id) }));
+      item("Fill every 2 steps", () => act.fill(2));
+      item("Fill every 4 steps", () => act.fill(4));
+      item("Fill every 8 steps", () => act.fill(8));
+      item("Randomize: a few steps", () => act.randomize(0.25), { hint: "Turns about a quarter of the steps on, with slightly different velocities" });
+      item("Randomize: half the steps", () => act.randomize(0.5));
+      item("Randomize: most steps", () => act.randomize(0.75));
+      item("Flip", () => act.flip(), { hint: "Steps that are on go off, and the other way round" });
+      rule();
+      item("Rotate left", () => act.rotate(-1), { shortcut: "Ctrl+Shift+Left" });
+      item("Rotate right", () => act.rotate(1), { shortcut: "Ctrl+Shift+Right" });
+      item("Copy steps", () => act.copy(), { shortcut: "Ctrl+C" });
+      item("Paste steps", () => act.paste(), { shortcut: "Ctrl+V", disabled: !stepClipboard });
+      item("Clear", () => act.clear());
       rule();
       if (!view.drum || !view.named) {
-        // The row's note: "rows per note" for a plug-in, or the one note of a track row.
+        // The row's note: "rows per note" for a plug-in, or the base note of a track row.
         const move = async (delta) => {
           const to = clamp(row.pitch + delta, 0, 127);
           if (view.drum) {
             const rows = view.rows.map((r) => (r.pitch === row.pitch ? to : r.pitch));
             await daw("setPart", { pattern: pattern.id, track: track.id, drum: true, rows });
-          } else await daw("setPart", { pattern: pattern.id, track: track.id, stepNote: to });
-          await edit(notesAt(part, row.pitch).map((n) => ({ id: n.id, pitch: to })));
+            await edit(notesAt(part, row.pitch).map((n) => ({ id: n.id, pitch: to })));
+          } else {
+            // Every step moves with the row, so a melody keeps its shape.
+            await daw("setPart", { pattern: pattern.id, track: track.id, stepNote: to });
+            await edit((part?.notes ?? []).map((n) => ({ id: n.id, pitch: clamp(n.pitch + delta, 0, 127) })));
+          }
         };
         item(`Note ${noteName(row.pitch)}: up a semitone`, () => move(1));
         item("Down a semitone", () => move(-1));
@@ -183,7 +243,7 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
   const trackMenu = (event, pattern, track, view) => {
     event.preventDefault();
     const part = partOf(pattern, track.id);
-    popMenu(event.clientX, event.clientY, ({ item, rule, heading }) => {
+    popMenu(event.clientX, event.clientY, ({ item, heading }) => {
       heading(track.name);
       if (!view.named) item("Rows per note (drum view)", () => daw("setPart", { pattern: pattern.id, track: track.id, drum: !view.drum,
         ...(view.drum ? {} : { rows: [part?.stepNote ?? DEFAULT_NOTE] }) }), { checked: view.drum });
@@ -207,48 +267,219 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     }, event.currentTarget);
   };
 
-  //---------------------------------------------------------------- selected row and velocity bars
-  const selectedRow = () => screen.patternRow ?? null; // { track, pitch }
-  const selectRow = (track, pitch) => {
-    screen.patternRow = { track: track.id, pitch };
-    render(true);
+  //---------------------------------------------------------------- mute, solo, level and pan
+  // The tracks the rack shows: all MIDI tracks, or only those with notes in the pattern.
+  const visibleTracks = (pattern) => {
+    const all = midiTracks();
+    if (!screen.patternOnlyUsed || !pattern) return all;
+    const used = all.filter((t) => partOf(pattern, t.id)?.notes?.length);
+    return used.length ? used : all;
   };
 
-  // The velocity bars of one row, under the track's steps: one bar per step that has a note.
-  // Drag on a bar to set it; drag across several to paint a ramp.
-  const velocityBars = (pattern, track, row) => {
+  // A drum row mutes on its own (the part's `muted` list); a track row mutes the track's part.
+  const rowMuted = (part, view, row) => (view.drum ? (part?.muted ?? []).includes(row.pitch) : Boolean(part?.mute));
+
+  const toggleMute = (pattern, track, view, row) => {
+    const part = partOf(pattern, track.id);
+    if (!view.drum) return daw("setPart", { pattern: pattern.id, track: track.id, mute: !part?.mute });
+    const muted = new Set(part?.muted ?? []);
+    if (muted.has(row.pitch)) muted.delete(row.pitch); else muted.add(row.pitch);
+    return daw("setPart", { pattern: pattern.id, track: track.id, muted: [...muted] });
+  };
+
+  // Right-click on a light: only this row plays; again: every row plays (FL's solo).
+  const soloRow = (pattern, track, row) => {
+    const entries = visibleTracks(pattern).map((t) => { const part = partOf(pattern, t.id); return { t, part, view: trackRows(t, part) }; });
+    const isSelf = (t, r) => t.id === track.id && r.pitch === row.pitch;
+    const soloed = entries.every(({ t, part, view }) => view.rows.every((r) => {
+      const muted = rowMuted(part, view, r) || (view.drum && Boolean(part?.mute));
+      return isSelf(t, r) ? !muted : muted;
+    }));
+    const parts = entries.map(({ t, view }) => {
+      if (soloed) return view.drum ? { track: t.id, mute: false, muted: [] } : { track: t.id, mute: false };
+      if (view.drum) return { track: t.id, mute: false, muted: view.rows.filter((r) => !isSelf(t, r)).map((r) => r.pitch) };
+      return { track: t.id, mute: t.id !== track.id };
+    });
+    daw("setPartMutes", { pattern: pattern.id, parts });
+  };
+
+  // A small knob: drag up or down (Shift: fine), double-click for the default. One command on release.
+  const knob = ({ value, min, max, def, title, format, commit }) => {
+    const element = html("span", "pat-knob");
+    let current = clamp(Number(value) || 0, min, max);
+    const show = () => {
+      element.style.setProperty("--a", `${-135 + ((current - min) / (max - min)) * 270}deg`);
+      element.title = `${title}: ${format(current)}. Drag up or down, double-click to reset.`;
+    };
+    show();
+    element.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const y0 = e.clientY, start = current;
+      let moved = false;
+      screen.dragging = true;
+      element.setPointerCapture?.(e.pointerId);
+      const move = (m) => {
+        const dy = y0 - m.clientY;
+        if (Math.abs(dy) > 1) moved = true;
+        current = clamp(start + (dy / (m.shiftKey ? 600 : 120)) * (max - min), min, max);
+        show();
+      };
+      const up = () => {
+        element.removeEventListener("pointermove", move);
+        element.removeEventListener("pointerup", up);
+        element.removeEventListener("pointercancel", up);
+        screen.dragging = false;
+        if (moved && current !== start) commit(current);
+        screen.flushSession?.();
+      };
+      element.addEventListener("pointermove", move);
+      element.addEventListener("pointerup", up);
+      element.addEventListener("pointercancel", up);
+    });
+    element.addEventListener("dblclick", (e) => { e.stopPropagation(); current = def; show(); commit(def); });
+    return element;
+  };
+
+  const panText = (v) => (Math.abs(v) < 0.01 ? "centre" : `${Math.round(Math.abs(v) * 100)}% ${v < 0 ? "left" : "right"}`);
+  const dbText = (v) => (v <= -59.5 ? "off" : `${v > 0 ? "+" : ""}${v.toFixed(1)} dB`);
+
+  // Left of a row's name: the mute light, pan and level. A track row's knobs are the track's own
+  // volume and pan (the mixer's); a drum row's level scales its velocities, and on a Kit track the
+  // pan knob is the pad's pan.
+  const rowStrip = (pattern, track, view, row) => {
+    const part = partOf(pattern, track.id);
+    const strip = html("span", "pat-strip");
+    const muted = rowMuted(part, view, row);
+    const light = html("button", `pat-light${muted ? "" : " is-on"}`);
+    light.type = "button";
+    light.tabIndex = -1;
+    light.title = `${muted ? "Muted" : "Playing"}: click to ${muted ? "unmute" : "mute"} ${view.drum ? "this row" : "this track"} in the pattern, right-click to solo it`;
+    light.addEventListener("click", () => toggleMute(pattern, track, view, row));
+    light.addEventListener("contextmenu", (e) => { e.preventDefault(); e.stopPropagation(); soloRow(pattern, track, row); });
+    strip.append(light);
+    if (!view.drum)
+      strip.append(knob({ value: track.pan ?? 0, min: -1, max: 1, def: 0, title: `${track.name} pan`, format: panText,
+                          commit: (v) => daw("setTrack", { id: track.id, pan: v }) }),
+                   knob({ value: Math.max(-60, track.volume ?? 0), min: -60, max: 6, def: 0, title: `${track.name} volume`, format: dbText,
+                          commit: (v) => daw("setTrack", { id: track.id, volume: v <= -59.5 ? -100 : v }) }));
+    else {
+      const pan = track.kitPans?.[String(row.pitch)];
+      strip.append(pan != null && row.pitch >= 36 && row.pitch <= 51
+        ? knob({ value: pan, min: -1, max: 1, def: 0, title: `${row.name} pan`, format: panText,
+                 commit: (v) => daw("kitPad", { track: track.id, note: row.pitch, pan: v }) })
+        : html("span", "pat-knob is-blank"));
+      strip.append(knob({ value: part?.levels?.[String(row.pitch)] ?? 1, min: 0, max: 2, def: 1, title: `${row.name} level`,
+                          format: (v) => `${Math.round(v * 100)}%`,
+                          commit: (v) => daw("setPart", { pattern: pattern.id, track: track.id, levels: { [row.pitch]: v } }) }));
+    }
+    return strip;
+  };
+
+  //---------------------------------------------------------------- selected row and step values
+  const selectedRow = () => screen.patternRow ?? null; // { track, pitch }
+  const selectRow = (track, pitch, redraw = true) => {
+    screen.patternRow = { track: track.id, pitch };
+    if (redraw) render(true);
+  };
+
+  // The rows in rack order, for the arrow keys: [{ track, view, row }].
+  const rackRows = (pattern) => visibleTracks(pattern).flatMap((track) => {
+    const part = partOf(pattern, track.id);
+    const view = trackRows(track, part);
+    if (!view.drum && isMelody(part, pattern)) return [];
+    return view.rows.map((row) => ({ track, view, row }));
+  });
+  const chosenRow = (pattern) => {
+    const chosen = selectedRow();
+    return chosen ? rackRows(pattern).find((r) => r.track.id === chosen.track && r.row.pitch === chosen.pitch) ?? null : null;
+  };
+
+  // What the bars under the selected row edit (FL's graph editor): a step's velocity, how long it
+  // holds, how late it plays, or (track rows) its note.
+  const TARGETS = [["velocity", "Velocity"], ["length", "Length"], ["shift", "Shift"], ["pitch", "Pitch"]];
+  const stepValues = (pattern, track, view, row) => {
     const part = partOf(pattern, track.id);
     const count = stepCount(pattern);
-    const byIndex = new Map(notesAt(part, row.pitch).map((n) => [noteIndex(n, pattern), n]));
+    const step = pattern.step;
+    const byIndex = new Map();
+    for (const n of rowNotes(part, view, row)) { const i = noteIndex(n, pattern); if (!byIndex.has(i)) byIndex.set(i, n); }
+    let target = screen.patternTarget ?? "velocity";
+    if (target === "pitch" && view.drum) target = "velocity";
+    const base = row.pitch;
+
+    const frac = (i, n) => {
+      if (target === "velocity") return n.velocity / 127;
+      if (target === "length") return Math.log(clamp(n.length / step, MIN_LEN, MAX_LEN) / MIN_LEN) / Math.log(MAX_LEN / MIN_LEN);
+      if (target === "shift") return clamp(n.time / step - i, 0, MAX_SHIFT) / MAX_SHIFT;
+      return clamp((n.pitch - (base - 12)) / 24, 0, 1);
+    };
+    // A height (0..1) into the change for the note and the text that tells it.
+    const value = (i, f) => {
+      if (target === "velocity") { const v = clamp(Math.round(f * 127), 1, 127); return [{ velocity: v }, `velocity ${v}`]; }
+      if (target === "length") {
+        let r = MIN_LEN * (MAX_LEN / MIN_LEN) ** f;
+        if (Math.abs(r - 1) < 0.06) r = 1;
+        r = Math.round(r * 100) / 100;
+        return [{ length: r * step }, `length ${Math.round(r * 100)}%`];
+      }
+      if (target === "shift") { const s = Math.round(f * MAX_SHIFT * 100) / 100; return [{ time: (i + s) * step }, `shift ${Math.round(s * 100)}%`]; }
+      const p = clamp(Math.round(base - 12 + f * 24), 0, 127);
+      return [{ pitch: p }, noteName(p)];
+    };
+    const describe = (i, n) => value(i, frac(i, n))[1];
+
     const line = html("div", "pat-row pat-vel-row");
-    line.append(html("span", "pat-label is-fixed", `${row.name} velocity`));
-    const strip = html("div", "pat-vel");
+    const head = html("span", "pat-vel-head");
+    const pick = html("select", "dropdown pat-target");
+    pick.title = "What the bars set for each step";
+    for (const [key, text] of TARGETS) if (key !== "pitch" || !view.drum) pick.append(new Option(text, key));
+    pick.value = target;
+    pick.addEventListener("change", () => { screen.patternTarget = pick.value; render(true); });
+    head.append(html("span", "pat-vel-name", row.name), pick);
+    const strip = html("div", `pat-vel is-${target}`);
     strip.style.setProperty("--steps", count);
-    strip.title = "Velocity of each step: drag up or down to set it, drag across steps to draw a ramp";
-    const bars = [];
+    strip.title = {
+      velocity: "Velocity of each step: drag up or down to set it, drag across steps to draw a ramp",
+      length: "How long each step holds (10% to 400% of a step): drag up or down",
+      shift: "How late each step plays (up to 90% of a step): drag up to push it later",
+      pitch: "The note of each step (an octave either side of the row note): drag up or down, you hear it as you go",
+    }[target];
+    const cells = [];
     for (let i = 0; i < count; ++i) {
-      const cell = html("div", `pat-vel-cell${byIndex.has(i) ? " has-note" : ""}`);
+      const note = byIndex.get(i);
+      const cell = html("div", `pat-vel-cell${note ? " has-note" : ""}`);
       const bar = html("i");
-      const v = byIndex.get(i)?.velocity ?? 0;
-      bar.style.height = `${(v / 127) * 100}%`;
-      if (byIndex.has(i)) cell.title = `Step ${i + 1}: velocity ${v}`;
-      cell.append(bar);
+      const label = html("b");
+      if (note) {
+        bar.style.height = `${frac(i, note) * 100}%`;
+        cell.title = `Step ${i + 1}: ${describe(i, note)}`;
+        if (target === "pitch") label.textContent = noteName(note.pitch);
+      }
+      cell.append(bar, label);
       strip.append(cell);
-      bars.push({ cell, bar });
+      cells.push({ cell, bar, label });
     }
     strip.addEventListener("pointerdown", (e) => {
       if (e.button !== 0) return;
       e.preventDefault();
       const changes = new Map();
+      let heard = -1;
       const set = (ev) => {
         const box = strip.getBoundingClientRect();
         const i = clamp(Math.floor((ev.clientX - box.left) / (STEP_W + STEP_GAP)), 0, count - 1);
         const note = byIndex.get(i);
         if (!note) return;
-        const v = clamp(Math.round((1 - (ev.clientY - box.top) / box.height) * 127), 1, 127);
-        changes.set(note.id, v);
-        bars[i].bar.style.height = `${(v / 127) * 100}%`;
-        bars[i].cell.title = `Step ${i + 1}: velocity ${v}`;
+        const f = clamp(1 - (ev.clientY - box.top) / box.height, 0, 1);
+        const [change, text] = value(i, f);
+        changes.set(note.id, change);
+        cells[i].bar.style.height = `${f * 100}%`;
+        cells[i].cell.title = `Step ${i + 1}: ${text}`;
+        if (target === "pitch") {
+          cells[i].label.textContent = text;
+          if (change.pitch !== heard) { heard = change.pitch; audition(track, change.pitch); }
+        }
       };
       set(e);
       screen.dragging = true;
@@ -258,14 +489,14 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
         strip.removeEventListener("pointerup", up);
         strip.removeEventListener("pointercancel", up);
         screen.dragging = false;
-        if (changes.size) daw("editPattern", { pattern: pattern.id, track: track.id, change: [...changes].map(([id, velocity]) => ({ id, velocity })) });
+        if (changes.size) daw("editPattern", { pattern: pattern.id, track: track.id, change: [...changes].map(([id, change]) => ({ id, ...change })) });
         screen.flushSession?.();
       };
       strip.addEventListener("pointermove", set);
       strip.addEventListener("pointerup", up);
       strip.addEventListener("pointercancel", up);
     });
-    line.append(strip);
+    line.append(head, strip);
     return line;
   };
 
@@ -349,17 +580,30 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
   const stepRow = (pattern, track, view, row) => {
     const part = partOf(pattern, track.id);
     const count = stepCount(pattern);
+    const step = pattern.step;
     const on = new Map();
-    for (const n of notesAt(part, row.pitch)) on.set(noteIndex(n, pattern), n.velocity);
+    for (const n of rowNotes(part, view, row)) { const i = noteIndex(n, pattern); if (!on.has(i)) on.set(i, n); }
     const strip = html("div", "pat-steps");
     strip.style.setProperty("--steps", count);
     const buttons = [];
     for (let i = 0; i < count; ++i) {
-      const b = html("button", `pat-step${(i >> 2) % 2 ? " is-alt" : ""}${on.has(i) ? " is-on" : ""}`);
+      const note = on.get(i);
+      const b = html("button", `pat-step${(i >> 2) % 2 ? " is-alt" : ""}${note ? " is-on" : ""}`);
       b.type = "button";
       b.tabIndex = -1;
       b.setAttribute("aria-label", `${row.name} step ${i + 1}`);
-      if (on.has(i)) b.style.setProperty("--vel", String(clamp(on.get(i) / 127, 0.25, 1)));
+      if (note) {
+        b.style.setProperty("--vel", String(clamp(note.velocity / 127, 0.25, 1)));
+        // A track row's step on another note shows it; a longer, shorter or later step shows a bar.
+        if (!view.drum && note.pitch !== row.pitch) b.textContent = noteName(note.pitch).replace(/-?\d+$/, "");
+        const len = note.length / step, shift = clamp(note.time / step - i, 0, MAX_SHIFT);
+        if (Math.abs(len - 1) > 0.02 || shift > 0.005) {
+          b.classList.add("has-shape");
+          b.style.setProperty("--len", String(clamp(len, 0.08, 1 - shift)));
+          b.style.setProperty("--shift", String(shift));
+        }
+        b.title = `Step ${i + 1}: ${noteName(note.pitch)}, velocity ${note.velocity}${Math.abs(len - 1) > 0.02 ? `, length ${Math.round(len * 100)}%` : ""}${shift > 0.005 ? `, shift ${Math.round(shift * 100)}%` : ""}`;
+      }
       strip.append(b);
       buttons.push(b);
       (columns[i] ??= []).push(b);
@@ -381,6 +625,7 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
         changes.set(i, target ? STEP_VELOCITY : 0);
         buttons[i].classList.toggle("is-on", target);
         buttons[i].style.setProperty("--vel", "0.78");
+        if (!target) buttons[i].textContent = "";
       };
       apply(first);
       if (target && changes.size) audition(track, row.pitch);
@@ -395,7 +640,7 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
         strip.removeEventListener("pointerup", up);
         strip.removeEventListener("pointercancel", up);
         screen.dragging = false;
-        if (changes.size) setSteps(pattern, track, row.pitch, [...changes]);
+        if (changes.size) setSteps(pattern, track, view, row, [...changes]);
         screen.flushSession?.();
       };
       strip.addEventListener("pointermove", move);
@@ -405,7 +650,8 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     return strip;
   };
 
-  // A part with notes that the steps can't show: a small preview of them (edit them in the piano roll).
+  // A part with notes that the steps can't show (chords, or two notes on a step): a small preview
+  // of them (edit them in the piano roll).
   const preview = (pattern, part) => {
     const box = html("div", "pat-melody");
     const notes = part.notes;
@@ -418,34 +664,87 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
       bar.style.top = `${hi === lo ? 40 : 8 + (1 - (n.pitch - lo) / (hi - lo)) * 70}%`;
       box.append(bar);
     }
-    box.title = `${notes.length} notes: they don't fit the step grid. Clear the track in the pattern to use steps.`;
+    box.title = `${notes.length} notes, some of them together on a step: edit them with Notes, or clear the track in the pattern to use steps.`;
     return box;
+  };
+
+  // The beat numbers over the steps, and the grip at their end that adds or removes steps
+  // (whole beats; Alt: single steps), like FL's "drag here for more steps".
+  const ruler = (pattern) => {
+    const count = stepCount(pattern);
+    const step = pattern.step;
+    const line = html("div", "pat-row pat-ruler");
+    line.append(html("span", "pat-strip is-blank"), html("span", "pat-label is-blank"));
+    const beats = html("div", "pat-beats");
+    beats.style.setProperty("--steps", count);
+    const perBar = screen.beatsPerBar || 4;
+    for (let i = 0; i < count; ++i) {
+      const at = i * step;
+      if (Math.abs(at - Math.round(at)) > 1e-6) continue;
+      const beat = Math.round(at);
+      const mark = html("span", `pat-beat${beat % perBar === 0 ? " is-bar" : ""}`, beat % perBar === 0 ? `${beat / perBar + 1}` : `${(beat % perBar) + 1}`);
+      mark.style.gridColumn = `${i + 1} / span ${Math.max(1, Math.round(1 / step))}`;
+      beats.append(mark);
+    }
+    const grip = html("span", "pat-grip", "⟷");
+    grip.title = "Drag to add or remove steps (whole beats; hold Alt for single steps)";
+    grip.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const x0 = e.clientX;
+      let length = pattern.length;
+      screen.dragging = true;
+      grip.setPointerCapture?.(e.pointerId);
+      const move = (m) => {
+        const steps = Math.max(1, count + Math.round((m.clientX - x0) / (STEP_W + STEP_GAP)));
+        let beatsLong = steps * step;
+        if (!m.altKey) beatsLong = Math.max(1, Math.round(beatsLong));
+        length = clamp(beatsLong, 0.25, 256);
+        grip.style.transform = `translateX(${(length / step - count) * (STEP_W + STEP_GAP)}px)`;
+        grip.dataset.length = length % perBar === 0 ? `${length / perBar} bar${length / perBar === 1 ? "" : "s"}` : `${+length.toFixed(2)} beats`;
+      };
+      const up = () => {
+        grip.removeEventListener("pointermove", move);
+        grip.removeEventListener("pointerup", up);
+        grip.removeEventListener("pointercancel", up);
+        screen.dragging = false;
+        grip.style.transform = "";
+        delete grip.dataset.length;
+        if (Math.abs(length - pattern.length) > 1e-6) daw("setPattern", { id: pattern.id, length });
+        screen.flushSession?.();
+      };
+      grip.addEventListener("pointermove", move);
+      grip.addEventListener("pointerup", up);
+      grip.addEventListener("pointercancel", up);
+    });
+    line.append(beats, grip);
+    return line;
   };
 
   const trackBlock = (pattern, track, index) => {
     const part = partOf(pattern, track.id);
     const view = trackRows(track, part);
-    const block = html("div", `pat-track${part?.mute ? " is-muted" : ""}`);
+    const block = html("div", `pat-track${part?.mute && view.drum ? " is-muted" : ""}`);
     block.style.setProperty("--track", track.colour || COLOURS[(index + 3) % COLOURS.length]);
     block.dataset.track = track.id;
 
     const head = html("div", "pat-head-row");
-    const mute = html("button", `pat-mute${part?.mute ? " is-on" : ""}`, "M");
-    mute.type = "button";
-    mute.title = "Mute this track in the pattern";
-    mute.addEventListener("click", () => daw("setPart", { pattern: pattern.id, track: track.id, mute: !part?.mute }));
     const name = html("button", "pat-track-name", track.name);
     name.type = "button";
     name.title = `${track.name}${track.instrument?.name ? ` · ${track.instrument.name}` : ""}. Click to select the track, right-click for more.`;
     name.addEventListener("click", () => screen.select?.(track.id, null));
     name.addEventListener("contextmenu", (e) => trackMenu(e, pattern, track, view));
-    head.append(html("span", "pat-dot"), name, mute);
+    head.append(html("span", "pat-dot"), name);
     if (view.drum) {
+      const mute = html("button", `pat-mute${part?.mute ? " is-on" : ""}`, "M");
+      mute.type = "button";
+      mute.title = "Mute the whole track in the pattern";
+      mute.addEventListener("click", () => daw("setPart", { pattern: pattern.id, track: track.id, mute: !part?.mute }));
       const add = html("button", "pat-add-sound", "+ sound");
       add.type = "button";
       add.title = "Add a row for another sound";
       add.addEventListener("click", (e) => addSoundMenu(e, pattern, track, view));
-      head.append(add);
+      head.append(mute, add);
     }
     const edit = html("button", "pat-edit", "Notes");
     edit.type = "button";
@@ -459,36 +758,69 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     head.append(more);
     block.append(head);
 
-    if (!view.drum && isMelody(part, pattern, view.rows)) {
+    if (!view.drum && isMelody(part, pattern)) {
       const row = html("div", "pat-row");
-      row.append(html("span", "pat-label is-fixed", "Notes"), preview(pattern, part));
+      row.append(html("span", "pat-strip is-blank"), html("span", "pat-label is-fixed", "Notes"), preview(pattern, part));
       block.append(row);
       return block;
     }
     for (const row of view.rows) {
-      const line = html("div", "pat-row");
+      const line = html("div", `pat-row${rowMuted(part, view, row) ? " is-row-muted" : ""}`);
       const label = html("button", "pat-label", view.drum ? row.name : noteName(row.pitch));
       label.type = "button";
       label.dataset.track = String(track.id);
       label.dataset.pitch = String(row.pitch);
-      label.title = `${row.name}: click to hear it and show its velocity bars, right-click for fill, shift and more`;
+      label.title = `${row.name}: click to hear it and show its step values, right-click for fill, randomize, copy and more`;
       label.classList.toggle("is-selected", selectedRow()?.track === track.id && selectedRow()?.pitch === row.pitch);
       label.addEventListener("click", () => { audition(track, row.pitch); selectRow(track, row.pitch); });
       label.addEventListener("contextmenu", (e) => rowMenu(e, pattern, track, view, row));
-      line.append(label, stepRow(pattern, track, view, row));
-      line.addEventListener("contextmenu", (e) => { if (!e.target.closest(".pat-steps")) rowMenu(e, pattern, track, view, row); });
+      line.append(rowStrip(pattern, track, view, row), label, stepRow(pattern, track, view, row));
+      line.addEventListener("contextmenu", (e) => { if (!e.target.closest(".pat-steps, .pat-strip")) rowMenu(e, pattern, track, view, row); });
       block.append(line);
     }
     const chosen = selectedRow();
     const shown = chosen?.track === track.id ? view.rows.find((r) => r.pitch === chosen.pitch) : null;
-    if (shown && notesAt(part, shown.pitch).length) block.append(velocityBars(pattern, track, shown));
+    if (shown && rowNotes(part, view, shown).length) block.append(stepValues(pattern, track, view, shown));
     return block;
+  };
+
+  // Previous or next pattern (the arrows and the - and = keys).
+  const stepPattern = (by) => {
+    const list = screen.session?.patterns ?? [];
+    if (list.length < 2) return;
+    const at = list.findIndex((p) => p.id === selected()?.id);
+    choose(list[(at + by + list.length) % list.length].id);
+  };
+
+  const splitByTrack = async (pattern) => {
+    const result = await daw("splitPattern", { id: pattern.id });
+    const made = result?.patterns ?? [];
+    if (!made.length) return;
+    screen.selectedPattern = made[0];
+    toast(`Split into ${made.length} pattern${made.length === 1 ? "" : "s"}, one per track`);
+  };
+
+  const patternMenu = (event, pattern) => {
+    const box = event.currentTarget.getBoundingClientRect();
+    const withNotes = pattern.parts.filter((p) => p.notes?.length).length;
+    popMenu(box.left, box.bottom + 2, ({ item, rule, heading }) => {
+      heading(pattern.name);
+      item("Split by track", () => splitByTrack(pattern), {
+        disabled: withNotes < 2, hint: "A pattern for each track that has notes; the blocks on the song are replaced by blocks of the new patterns",
+      });
+      item("Copy pattern", () => newPattern(pattern.id));
+      rule();
+      item("Only tracks in this pattern", () => { screen.patternOnlyUsed = !screen.patternOnlyUsed; screen.rememberView?.(); render(true); },
+        { checked: Boolean(screen.patternOnlyUsed), hint: "Hide the MIDI tracks that have no notes in this pattern" });
+      rule();
+      item("Delete pattern", () => daw("removePattern", { id: pattern.id }), { danger: true });
+    }, event.currentTarget);
   };
 
   const controls = (pattern, list) => {
     const bar = html("div", "pat-bar");
     const picker = html("select", "dropdown pat-picker");
-    picker.title = "The pattern you edit";
+    picker.title = "The pattern you edit (- and = for the previous and next)";
     list.forEach((p) => picker.append(new Option(p.name, p.id)));
     picker.value = String(pattern.id);
     picker.addEventListener("change", () => choose(Number(picker.value)));
@@ -518,7 +850,7 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     const perBar = screen.beatsPerBar || 4;
     const lengths = [1, 2, 3, 4, 8].map((bars) => bars * perBar);
     const length = html("select", "dropdown pat-length");
-    length.title = "How long the pattern is";
+    length.title = "How long the pattern is (or drag the grip at the end of the steps)";
     if (!lengths.some((l) => Math.abs(l - pattern.length) < 1e-6)) lengths.push(pattern.length);
     lengths.sort((a, b) => a - b).forEach((l) => length.append(new Option(l % perBar === 0 ? `${l / perBar} bar${l / perBar > 1 ? "s" : ""}` : `${+l.toFixed(2)} beats`, l)));
     length.value = String(lengths.find((l) => Math.abs(l - pattern.length) < 1e-6));
@@ -553,11 +885,16 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
 
     const place = small("Place at playhead", "Put this pattern on the song at the playhead (the Patterns lane under the ruler)", () => placeAtPlayhead(pattern), "tool is-accent");
 
-    bar.append(dot, picker, name,
+    const prev = small("‹", "Previous pattern (-)", () => stepPattern(-1), "tool pat-arrow");
+    const next = small("›", "Next pattern (=)", () => stepPattern(1), "tool pat-arrow");
+    prev.disabled = next.disabled = list.length < 2;
+    const more = small("⋯", "Pattern options: split by track, show only the tracks in this pattern", (e) => patternMenu(e, pattern));
+
+    bar.append(dot, prev, picker, next, name,
       small("+", "New pattern", () => newPattern()),
       small("Copy", "Duplicate this pattern", () => newPattern(pattern.id)),
       small("Delete", "Delete this pattern and its blocks", () => daw("removePattern", { id: pattern.id }), "tool is-danger"),
-      html("span", "tb-sep"), length, step, swing, html("span", "pat-spacer"), record, snap, place);
+      more, html("span", "tb-sep"), length, step, swing, html("span", "pat-spacer"), record, snap, place);
     return bar;
   };
 
@@ -600,9 +937,10 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     const pattern = selected();
     if (pattern) screen.selectedPattern = pattern.id;
     const tracks = midiTracks();
-    const key = JSON.stringify([pattern, tracks.map((t) => [t.id, t.name, t.colour, t.keyNames, t.instrument?.name]),
+    const key = JSON.stringify([pattern, tracks.map((t) => [t.id, t.name, t.colour, t.keyNames, t.kitPans, t.volume, t.pan, t.instrument?.name]),
                                 (session.patterns ?? []).map((p) => [p.id, p.name]), screen.beatsPerBar,
-                                session.patternRecording, session.patternSnap, screen.patternRow, rollTrack, session.tempo]);
+                                session.patternRecording, session.patternSnap, screen.patternRow, rollTrack, session.tempo,
+                                screen.patternTarget, screen.patternOnlyUsed]);
     if (!force && key === signature) return;
     signature = key;
     columns = [];
@@ -621,7 +959,8 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
       return;
     }
     const rack = html("div", "pat-rack is-drop-rack");
-    tracks.forEach((track, i) => rack.append(trackBlock(pattern, track, i)));
+    if (tracks.length) rack.append(ruler(pattern));
+    visibleTracks(pattern).forEach((track) => rack.append(trackBlock(pattern, track, tracks.indexOf(track))));
     const add = html("div", "pat-foot");
     const addTrack = html("button", "tool", "+ instrument");
     addTrack.type = "button";
@@ -676,11 +1015,44 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     render(true);
   };
 
+  // The rack's keys, while the pointer last went down in it (DawScreen.onKey asks first):
+  // - and = previous / next pattern, Up / Down the selected row, Ctrl+Shift+Left / Right rotate
+  // it, Ctrl+C / Ctrl+V copy and paste its steps.
+  let active = false;
+  document.addEventListener("pointerdown", (e) => { active = element.contains(e.target); }, true);
+  const onKey = (event) => {
+    if (!active || !element.isConnected || rollTrack != null) return false;
+    const pattern = selected();
+    if (!pattern) return false;
+    const mod = event.ctrlKey || event.metaKey;
+    const go = (action) => { event.preventDefault(); action(); return true; };
+    if (!mod && !event.altKey && (event.key === "-" || event.key === "_" || event.code === "NumpadSubtract")) return go(() => stepPattern(-1));
+    if (!mod && !event.altKey && (event.key === "=" || event.key === "+" || event.code === "NumpadAdd")) return go(() => stepPattern(1));
+    const rows = rackRows(pattern);
+    const chosen = chosenRow(pattern);
+    if (!mod && !event.altKey && !event.shiftKey && (event.key === "ArrowUp" || event.key === "ArrowDown") && rows.length) {
+      return go(() => {
+        const at = chosen ? rows.indexOf(chosen) : -1;
+        const to = rows[clamp(at + (event.key === "ArrowUp" ? -1 : 1), 0, rows.length - 1)];
+        selectRow(to.track, to.row.pitch);
+        element.querySelector(".pat-label.is-selected")?.scrollIntoView({ block: "nearest" });
+      });
+    }
+    if (!chosen) return false;
+    const act = rowActions(pattern, chosen.track, chosen.view, chosen.row);
+    if (mod && event.shiftKey && !event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight"))
+      return go(() => act.rotate(event.key === "ArrowLeft" ? -1 : 1));
+    if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "c") return go(() => act.copy());
+    if (mod && !event.shiftKey && !event.altKey && event.key.toLowerCase() === "v" && stepClipboard) return go(() => act.paste());
+    return false;
+  };
+
   return {
     element,
     update() { render(); },
     ensurePattern,
     dropSample,
+    onKey,
     // The light that runs along the steps while the pattern loops.
     setStatus(status) {
       const pattern = selected();
@@ -705,6 +1077,7 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
 
 //==================================================================================== the lane
 const ROW_H = 30;
+const MAX_LANE_ROWS = 16; // Edit::maxPatternRows
 
 // The Patterns lane under the ruler. screen: zoom, snap, snapTime, tempoMap, beatsPerBar, session,
 // dragging, selectedPattern.
@@ -721,9 +1094,9 @@ export function createPatternLane(screen, daw, { popMenu, openPatterns }) {
 
   // The first row where [start, end) is free (so overlapping blocks stack).
   const freeRow = (start, length, skip) => {
-    for (let row = 0; row < 4; ++row)
+    for (let row = 0; row < MAX_LANE_ROWS; ++row)
       if (!clips.some((c) => c.id !== skip && c.row === row && c.start < start + length - 1e-6 && c.start + c.length > start + 1e-6)) return row;
-    return 3;
+    return MAX_LANE_ROWS - 1;
   };
 
   const preview = (clip, pattern, box) => {

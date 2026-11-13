@@ -45,9 +45,10 @@
 //       (a track in a group also has `group`, the group's RETURN id, and `output` = that id)
 //     PATTERN  id, name, colour, length (beats), step (beats per step), swing (0..1)
 //       PART  track (a TRACK id), drum (a row per note), rows ("36,38,42": rows shown, in order),
-//             stepNote (the note a one-row part's steps play), mute
+//             stepNote (the note a one-row part's steps play), mute, muted ("38,42": drum rows
+//             muted in this pattern), levels ("36:0.8,38:1": a velocity scale per drum row)
 //         NOTE  id, pitch, time (BEATS from the pattern's start), length (beats), velocity
-//     PATTERNCLIP  id, pattern (a PATTERN id), start (beats), length (beats), row (0..3), mute
+//     PATTERNCLIP  id, pattern (a PATTERN id), start (beats), length (beats), row (0..15), mute
 //     RETURN  id, name, colour, volume, pan, mute, solo, inGain, outGain,
 //             group (true: a group track, see below), folded (a group's tracks are hidden)
 //       INSERTS ...
@@ -115,6 +116,7 @@ namespace ids
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
     MICFX_DAW_ID (PATTERN) MICFX_DAW_ID (PART) MICFX_DAW_ID (PATTERNCLIP) MICFX_DAW_ID (track) MICFX_DAW_ID (drum)
     MICFX_DAW_ID (rows) MICFX_DAW_ID (stepNote) MICFX_DAW_ID (step) MICFX_DAW_ID (swing) MICFX_DAW_ID (pattern) MICFX_DAW_ID (row)
+    MICFX_DAW_ID (muted) MICFX_DAW_ID (levels)
 #undef MICFX_DAW_ID
 }
 
@@ -473,7 +475,7 @@ public:
     // block a copy of its own. Each call is one undoable edit.
     static constexpr double minPatternBeats = 0.25, maxPatternBeats = 256.0;
     static constexpr double minStepBeats = 1.0 / 32.0, maxStepBeats = 1.0;
-    static constexpr int maxPatternRows = 4; // block lanes for overlapping blocks
+    static constexpr int maxPatternRows = 16; // block lanes for overlapping blocks
     static constexpr int defaultStepNote = 60;
 
     juce::ValueTree addPattern (const juce::String& name = {}, double lengthBeats = 0.0); // 0: a bar
@@ -500,13 +502,33 @@ public:
     void setPartMute (int patternId, int trackId, bool mute);
     static juce::Array<int> getPartRows (const juce::ValueTree& part);
 
+    // Drum rows muted in the part (their notes don't play), and each row's level: a scale
+    // on its notes' velocities (0..2, 1 when unset; the result is clamped to 1..127).
+    void setPartMuted (int patternId, int trackId, const juce::Array<int>& notes);
+    void setPartLevel (int patternId, int trackId, int note, float level);
+    static juce::Array<int> getPartMuted (const juce::ValueTree& part);
+    static std::map<int, float> getPartLevels (const juce::ValueTree& part);
+
+    // The step a note in a part sits on: notes up to a twentieth of a step early count as
+    // on it, later ones as shifted within it (the rack's "Shift" step value).
+    static int getStepIndex (double timeBeats, double stepBeats);
+
+    // Split by track: a new pattern for each part with notes (named "Pattern · Track", the
+    // same length, step and swing), and every block of the pattern replaced by blocks of the
+    // new ones in the same place. The original pattern stays. Returns the new ids.
+    juce::Array<int> splitPatternByTrack (int patternId);
+
+    // The first block row where [start, start + length) beats is free (the last row if none).
+    int findFreePatternRow (double startBeats, double lengthBeats, int skipClipId = -1) const;
+
     // Notes in a part (times in beats from the pattern's start). setNote and removeNote
     // above take pattern notes too.
     juce::ValueTree addPatternNote (int patternId, int trackId, int pitch, double time, double length, int velocity = 100);
 
     // Step painting: for each (step index, velocity), the note of `pitch` on that step is
-    // removed, then (velocity > 0) a one-step note added. Times are index x the step.
-    void setSteps (int patternId, int trackId, int pitch, const std::vector<std::pair<int, int>>& steps);
+    // removed (any pitch when `anyPitch`: a track row, whose steps each hold one note), then
+    // (velocity > 0) a one-step note added. Times are index x the step.
+    void setSteps (int patternId, int trackId, int pitch, const std::vector<std::pair<int, int>>& steps, bool anyPitch = false);
 
     // Pattern blocks. Length <= 0: one pass of the pattern.
     juce::ValueTree addPatternClip (int patternId, double startBeats, double lengthBeats = 0.0, int row = 0);

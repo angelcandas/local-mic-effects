@@ -102,6 +102,7 @@ private:
     juce::var describePatterns() const;
     juce::var describePatternClips() const;
     juce::var describeKeyNames (int trackId) const;
+    juce::var describeKitPans (int trackId) const;
     juce::var describeInstruments() const;
     juce::var addInstrument (int trackId, const juce::String& instrumentId);
     void showInstrumentWindow (int trackId);
