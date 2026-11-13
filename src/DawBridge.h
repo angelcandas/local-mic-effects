@@ -6,6 +6,7 @@
 #include "daw/Exporter.h"
 #include "analysis/MixAssistant.h"
 #include "analysis/ToMidi.h"
+#include "analysis/MixCheck.h"
 #include "stems/StemSplitter.h"
 
 // Connects the web UI's DAW screen (ui/daw.js) to the processor's DAW session.
@@ -22,6 +23,9 @@
 //                 runs and when it ends (refresh the "instruments" list then)
 //   "dawAutoMix"  { state: "analysing", progress } while Auto Mix listens, then
 //                 { state: "ready", plan... } (see describeAutoMix), or "cancelled"/"error"
+//   "dawMixCheck" { state: "analysing", progress } while Mix Check listens, then
+//                 { state: "ready", report... } (see describeMixCheck), "cancelled"/"error";
+//                 { state: "fixed", index } after a Fix
 //   "dawTakeComp" { state: "analysing", progress } while Auto Comp listens to the takes,
 //                 then { state: "done", tracks: [{ track, picks, summary }] }, "cancelled"
 //                 or { state: "error", error }
@@ -128,6 +132,12 @@ private:
     juce::var describeAutoMix() const;
     juce::var describeAutoMixTags() const;
 
+    // Mix Check (src/analysis/MixCheck.h): measures the tracks and the mix on a background
+    // thread; the report and the fixes are built on the message thread.
+    juce::var handleMixCheck (const juce::var& args, Complete&);
+    juce::var describeMixCheck() const;
+    analysis::CheckContext buildMixCheckContext() const;
+
     // Take lanes and comping (daw::Edit "Takes and comping"), and Auto Comp
     // (src/analysis/TakeComp.h), which listens on a background thread.
     juce::var handleTakes (const juce::var& args);
@@ -204,6 +214,17 @@ private:
     bool autoMixSplit = false;
     juce::String autoMixSplitNote;     // split full songs (instrumentals) into stems before listening
     juce::String autoMixReferenceName;
+
+    // Mix Check: the running measurement (at most one), what it measured and the report.
+    struct MixCheckJob;
+    std::shared_ptr<MixCheckJob> mixCheckJob;
+    std::optional<analysis::SessionAnalyser::Result> mixCheckTracks;
+    analysis::Profile mixCheckMix;
+    analysis::Report mixCheckReport;
+    analysis::MixStyle mixCheckStyle = analysis::MixStyle::pop;
+    float mixCheckTarget = -14.0f;
+    std::map<int, analysis::Role> mixCheckRoles; // by track id, as guessed when it listened
+    std::set<int> mixCheckFixed;                 // findings (by index) already fixed since the last run
 
     // Key detection: the running analysis (at most one) and the last result.
     struct KeyJob;

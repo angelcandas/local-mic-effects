@@ -767,6 +767,7 @@ body.is-daw .chip--live { display: none; }
 .tomidi-panel,
 .stems-panel,
 .automix-panel,
+.mixcheck-panel,
 .key-panel {
   position: absolute;
   top: 52px;
@@ -780,7 +781,7 @@ body.is-daw .chip--live { display: none; }
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
 }
 
-.export-panel[hidden], .tomidi-panel[hidden], .automix-panel[hidden], .key-panel[hidden], .stems-panel[hidden] { display: none; }
+.export-panel[hidden], .tomidi-panel[hidden], .automix-panel[hidden], .key-panel[hidden], .stems-panel[hidden], .mixcheck-panel[hidden] { display: none; }
 .export-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .export-options { display: grid; gap: 8px; }
 .export-options label { display: grid; grid-template-columns: 70px 1fr; align-items: center; color: var(--muted); }
@@ -794,6 +795,7 @@ body.is-daw .chip--live { display: none; }
 .tomidi-panel.is-running .export-bar,
 .stems-panel.is-running .export-bar,
 .automix-panel.is-running .export-bar,
+.mixcheck-panel.is-running .export-bar,
 .key-panel.is-running .export-bar { visibility: visible; }
 .export-footer { display: flex; align-items: center; gap: 8px; }
 .export-result { flex: 1; color: var(--muted); font-size: 11.5px; }

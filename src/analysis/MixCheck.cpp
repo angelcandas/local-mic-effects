@@ -17,7 +17,7 @@ double roundTo (double value, double step) { return std::round (value / step) * 
 
 juce::String formatDb (double db, int decimals = 1)
 {
-    return juce::String (std::abs (db), decimals) + " dB";
+    return (decimals == 0 ? juce::String (juce::roundToInt (std::abs (db))) : juce::String (std::abs (db), decimals)) + " dB";
 }
 
 juce::String formatHz (double hz)
@@ -551,11 +551,11 @@ Report checkMix (const SessionAnalyser::Result& tracks, const Profile& mix, cons
             f.title = name + " is clipped";
             f.detail = juce::String (profile.clippedRuns) + (profile.clippedRuns == 1 ? " stretch" : " stretches") + " hit full scale, the first at "
                      + formatTime (f.from) + ".";
-            f.why = "Clipping adds a rough buzz that no effect removes. Fix is trimming the track down so the rest of the chain has headroom; to repair the clipped parts, re-record or use a de-clipper.";
+            f.why = "Clipping adds a rough buzz that no effect removes. Trimming only gives the effects after it headroom; to repair the clipped parts, re-record or use a de-clipper.";
             add (f);
         }
 
-        if (profile.humHz > 0.0f && profile.getHumProminenceDb() >= 10.0f)
+        if (profile.humHz > 0.0f && profile.getHumProminenceDb() >= 10.0f && context.humCut.count (id) == 0)
         {
             Finding f;
             f.key = "hum";

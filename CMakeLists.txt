@@ -43,6 +43,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/fxviews.js
         ui/fxpresets.js
         ui/daw.js
+        ui/mixcheck.js
         ui/rhythm.js
         ui/tempo.js
         ui/patterns.js

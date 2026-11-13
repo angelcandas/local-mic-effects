@@ -11,8 +11,9 @@ const MODES = [
 export function decorateAiPanels(root) {
   const mix = root.querySelector(".automix-panel");
   const stems = root.querySelector(".stems-panel");
+  const check = root.querySelector(".mixcheck-panel");
   if (mix) decorateAutoMix(mix);
-  for (const panel of [mix, stems]) if (panel) mirrorProgress(panel);
+  for (const panel of [mix, stems, check]) if (panel) mirrorProgress(panel);
 }
 
 function mirrorProgress(panel) {

@@ -70,6 +70,7 @@ struct CheckContext
     std::map<int, juce::String> names;
     std::map<int, float> volumes;     // dB, by track id
     std::set<int> muted;              // left out of every check
+    std::set<int> humCut;             // tracks that already have narrow cuts on the mains (the source measure can't hear them)
     std::map<int, std::vector<fx::ModuleType>> inserts; // by track id (the master is Edit::masterId)
     float masterVolume = 0.0f;
     // The master's insert values by ID (all its inserts together: "limDrive", "meqLowGain"...).

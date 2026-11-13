@@ -10,6 +10,7 @@ import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
 import { decorateAiPanels } from "./aiviews.js";
+import { MixCheckView } from "./mixcheck.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createPatternLane, createPatternsPanel } from "./patterns.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs } from "./rhythm.js";
@@ -130,6 +131,7 @@ const ICONS = {
   save: '<path d="M5 3h11l4 4v13a1 1 0 0 1-1 1H5a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1z"/><path d="M8 3v5h7V3M8 21v-7h8v7"/>',
   saveas: '<path d="M5 3h11l4 4v6M5 3a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h7"/><path d="M8 3v5h7V3M17 15v6M14 18h6"/>',
   import: '<path d="M12 3v12M7 10l5 5 5-5M4 20h16"/>',
+  mixcheck: '<path d="M3 12h3l2-6 4 12 3-9 2 3h4"/>',
   automix: '<path d="M5 4v16M12 4v16M19 4v16"/><circle cx="5" cy="14" r="2" fill="currentColor"/><circle cx="12" cy="8" r="2" fill="currentColor"/><circle cx="19" cy="15" r="2" fill="currentColor"/>',
   export: '<path d="M12 15V3M7 8l5-5 5 5M4 20h16"/>',
   tempo: '<path d="M3 18h5l5-10h8"/><circle cx="8" cy="18" r="1.6" fill="currentColor"/><circle cx="13" cy="8" r="1.6" fill="currentColor"/><path d="M3 21h18" stroke-dasharray="2 3"/>',
@@ -1266,6 +1268,7 @@ class DawScreen {
     this.buildInspector();
     this.buildBanners();
     this.buildAutoMix();
+    this.buildMixCheck();
     this.buildStems();
     this.buildToMidi();
     this.buildLibrary();
@@ -1630,6 +1633,8 @@ class DawScreen {
 
     this.autoMixButton = iconButton("tool has-label automix-button", "automix", "Auto Mix: listen to the voice and backing and set EQ, compression and levels", () => this.toggleAutoMix());
     this.autoMixButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Auto Mix</span>');
+    this.mixCheckButton = iconButton("tool has-label mixcheck-button", "mixcheck", "Mix Check: a report on the mix in plain words, with Fix buttons", () => this.mixCheck.toggle());
+    this.mixCheckButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Check</span>');
     this.buildActivity();
 
     // The mixer is a tab of the bottom panel: this shows or hides it.
@@ -1641,7 +1646,7 @@ class DawScreen {
     this.moreButton = iconButton("tool tb-more", "more", "More", (event) => this.openMoreMenu(event.currentTarget));
     this.moreButton.hidden = true;
 
-    const right = zone("zone-work", this.tools, snap, this.autoMixButton, this.activity.button,
+    const right = zone("zone-work", this.tools, snap, this.autoMixButton, this.mixCheckButton, this.activity.button,
                       html("span", "tb-sep"), this.libraryButton, this.viewTabs, this.dockButton, this.pianoButton, help, this.moreButton);
     bar.append(left, html("span", "tb-spacer"), centre, html("span", "tb-spacer"), right);
 
@@ -1679,6 +1684,7 @@ class DawScreen {
       { level: 4, element: this.libraryButton, label: "Library", run: () => this.library.toggle(), checked: () => !this.library.collapsed },
       { level: 4, element: this.dockButton, label: "Bottom panel", run: () => this.run("toggleDock"), checked: () => !this.root.classList.contains("dock-hidden") },
       { level: 5, element: this.autoMixButton, label: "Auto Mix…", run: () => this.toggleAutoMix() },
+      { level: 5, element: this.mixCheckButton, label: "Mix Check…", run: () => this.mixCheck.toggle() },
     ];
     this.foldLevel = 0;
     // Only a change of width matters (folding changes the height when it wraps).
@@ -4263,6 +4269,7 @@ class DawScreen {
     if (show && this.autoMixPanel) this.autoMixPanel.hidden = true;
     if (show && this.stemsPanel) this.stemsPanel.hidden = true;
     if (show && this.keyPanel) this.keyPanel.hidden = true;
+    if (show && this.mixCheck) this.mixCheck.panel.hidden = true;
     if (show) {
       this.exportPanel.querySelector("[name=loopOnly]").disabled = !this.session?.loop.on;
       this.exportPanel.querySelector(".export-result").replaceChildren();
@@ -4324,7 +4331,7 @@ class DawScreen {
     const panel = this.toMidiPanel;
     panel.hidden = !show;
     if (!show) return;
-    for (const other of [this.exportPanel, this.stemsPanel, this.autoMixPanel]) if (other) other.hidden = true;
+    for (const other of [this.exportPanel, this.stemsPanel, this.autoMixPanel, this.mixCheck?.panel]) if (other) other.hidden = true;
     if (!this.toMidi.running) {
       this.toMidi.clip = clip;
       panel.querySelector("[name=what]").value = what;
@@ -4401,6 +4408,7 @@ class DawScreen {
     if (!show) return;
     if (this.exportPanel) this.exportPanel.hidden = true;
     if (this.autoMixPanel) this.autoMixPanel.hidden = true;
+    if (this.mixCheck) this.mixCheck.panel.hidden = true;
     if (!this.stems.running) {
       this.stems.clip = clip;
       panel.querySelector("strong").textContent = clip ? `Split “${clip.name}” into stems` : "Split into stems";
@@ -4528,6 +4536,23 @@ class DawScreen {
     window.__JUCE__.backend.addEventListener("dawAutoMix", (event) => this.onAutoMix(event));
   }
 
+  buildMixCheck() {
+    this.mixCheck = new MixCheckView(this.root.querySelector(".mixcheck-panel"), {
+      daw,
+      select: (id) => this.select(id, null),
+      seek: (seconds) => this.seek(seconds),
+      setJob: (id, job) => this.setJob(id, job),
+      endJob: (id) => this.endJob(id),
+      closeOthers: () => {
+        this.toggleExportPanel(false);
+        this.autoMixPanel.hidden = true;
+        this.keyPanel.hidden = true;
+        this.stemsPanel.hidden = true;
+        this.toMidiPanel.hidden = true;
+      },
+    });
+  }
+
   toggleAutoMix(show = this.autoMixPanel.hidden) {
     const wasOpen = !this.autoMixPanel.hidden;
     this.autoMixPanel.hidden = !show;
@@ -4535,6 +4560,7 @@ class DawScreen {
     if (!show && wasOpen) this.resetAutoMix();
     if (show) {
       this.toggleExportPanel(false);
+      this.mixCheck.panel.hidden = true;
       this.renderAutoMixMode();
       if (!this.autoMix.plan) this.refreshAutoMixTags(true);
     }
@@ -4665,6 +4691,7 @@ class DawScreen {
     if (show) {
       this.toggleExportPanel(false);
       this.autoMixPanel.hidden = true;
+      this.mixCheck.panel.hidden = true;
       this.renderKeyPanel();
     }
   }

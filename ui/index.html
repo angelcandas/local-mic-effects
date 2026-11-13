@@ -260,6 +260,35 @@
       </div>
       </div>
     </div>
+    <div class="mixcheck-panel ai-plugin" hidden data-accent="check">
+      <header class="ai-head">
+        <span class="ai-logo" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h3l2-6 4 12 3-9 2 3h4" /></svg></span>
+        <div class="ai-title"><strong>Mix Check</strong><small>Mix doctor · listens offline, tells you why</small></div>
+        <span class="ai-led" title="Ready"></span>
+        <button class="mini mixcheck-close" title="Close" aria-label="Close">×</button>
+      </header>
+      <div class="ai-body">
+        <details class="ai-about"><summary>How it works</summary><p class="automix-intro">Measures every track and the whole mix, then says in plain words what is off (loudness, peaks, balance, stereo, clipping, hum, masking...) and why it matters. Fix buttons run the matching Auto Mix move as one undo step. Nothing plays while it listens.</p></details>
+        <div class="export-options">
+          <label title="The kind of song it is judged as">Style <select class="dropdown" name="style"><option value="pop">Pop</option><option value="ballad">Ballad</option><option value="rock">Rock</option><option value="hiphop">Hip-hop</option><option value="rnb">R&amp;B</option><option value="acoustic">Acoustic</option><option value="electronic">Electronic</option><option value="jazz">Jazz</option><option value="lofi">Lo-fi</option><option value="coaching">Coaching (voice up front)</option><option value="speech">Speech / podcast (music bed)</option></select></label>
+          <label title="How loud the finished song should be">Target <select class="dropdown" name="target"><option value="-14">Streaming (-14 LUFS)</option><option value="-16">Dynamic / podcast (-16 LUFS)</option><option value="-10">Loud (-10 LUFS)</option></select></label>
+        </div>
+        <div class="mixcheck-score" hidden>
+          <div class="mc-ring"><span class="mc-score-value">0</span></div>
+          <div class="mc-score-text"><strong class="mc-score-label"></strong><small>out of 100</small></div>
+          <div class="mc-stats"></div>
+        </div>
+        <div class="mixcheck-findings"></div>
+        <div class="export-bar"><div></div></div>
+        <div class="export-footer">
+          <button class="text-button mixcheck-copy" hidden>Copy report</button>
+          <button class="text-button mixcheck-save" hidden>Save…</button>
+          <span class="export-result mixcheck-result"></span>
+          <button class="tool mixcheck-cancel">Cancel</button>
+          <button class="tool is-accent mixcheck-run">Check the mix</button>
+        </div>
+      </div>
+    </div>
     <div class="key-panel" hidden>
       <div class="export-head">
         <strong>Song key</strong>
