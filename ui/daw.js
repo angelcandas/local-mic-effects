@@ -9,6 +9,7 @@ import { FX_PRESETS, createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
+import { BackingVocals } from "./backing.js";
 import { decorateAiPanels } from "./aiviews.js";
 import { MixCheckView } from "./mixcheck.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
@@ -1276,6 +1277,7 @@ class DawScreen {
     this.buildStems();
     this.buildRebalance();
     this.buildToMidi();
+    this.backing = new BackingVocals(this, this.toMidiPanel, { daw, toast: (...args) => toast(...args) });
     this.buildLibrary();
     this.buildKeyPanel();
     decorateAiPanels(this.root);
@@ -5666,6 +5668,9 @@ class DawScreen {
         heading("Convert to MIDI");
         for (const [label, what, hint] of TO_MIDI_PARTS)
           item(label, () => this.toggleToMidi(true, clip, what), { hint, indent: true });
+        heading("Vocals");
+        item("Build backing vocals…", () => this.backing.toggle(true, clip),
+             { hint: "Harmonies and doubles from this sung lead, as new tracks in a folded group", indent: true });
       }
       if (clip.midi) item("Edit notes", () => { this.setDockTab("track"); this.setDock(true); });
     });

@@ -765,6 +765,7 @@ body.is-daw .chip--live { display: none; }
 
 .export-panel,
 .tomidi-panel,
+.backing-panel,
 .rebalance-panel,
 .stems-panel,
 .automix-panel,
@@ -782,7 +783,7 @@ body.is-daw .chip--live { display: none; }
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
 }
 
-.export-panel[hidden], .tomidi-panel[hidden], .automix-panel[hidden], .key-panel[hidden], .stems-panel[hidden], .rebalance-panel[hidden], .mixcheck-panel[hidden] { display: none; }
+.export-panel[hidden], .tomidi-panel[hidden], .backing-panel[hidden], .automix-panel[hidden], .key-panel[hidden], .stems-panel[hidden], .rebalance-panel[hidden], .mixcheck-panel[hidden] { display: none; }
 .export-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .export-options { display: grid; gap: 8px; }
 .export-options label { display: grid; grid-template-columns: 70px 1fr; align-items: center; color: var(--muted); }
@@ -794,6 +795,7 @@ body.is-daw .chip--live { display: none; }
 .export-bar div { height: 100%; width: calc(var(--progress, 0) * 100%); background: linear-gradient(90deg, var(--accent), var(--accent-2)); }
 .export-panel.is-running .export-bar,
 .tomidi-panel.is-running .export-bar,
+.backing-panel.is-running .export-bar,
 .rebalance-panel.is-running .export-bar,
 .stems-panel.is-running .export-bar,
 .automix-panel.is-running .export-bar,
@@ -2410,3 +2412,10 @@ body.is-daw .library-hint { display: none; }
 }
 .daw .capture-button:hover:not(:disabled) { border-color: var(--accent); }
 .daw .capture-button:disabled { opacity: 0.45; cursor: default; }
+
+/* Build backing vocals (ui/backing.js) */
+.backing-panel .backing-note { margin: 10px 0 0; }
+.backing-cancel { display: none; }
+.backing-panel.is-running .backing-cancel { display: inline-block; }
+.backing-panel.is-running .backing-go { display: none; }
+.backing-panel.is-running .export-options { opacity: 0.55; pointer-events: none; }

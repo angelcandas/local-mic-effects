@@ -151,6 +151,14 @@ private:
     struct ToMidiJob;
     std::shared_ptr<ToMidiJob> toMidiJob;
 
+    // Build backing vocals (src/analysis/Harmony.h, src/daw/BackingVocals.h): the lead's pitch
+    // and the other tracks' chords are found on a background thread, the voices go in on the
+    // message thread as one undo step.
+    juce::var handleBackingVocals (const juce::var& args);
+    void finishBackingVocals();
+    struct BackingJob;
+    std::shared_ptr<BackingJob> backingJob;
+
     // Song key (src/analysis/Key.h): detection runs on a background thread.
     juce::var handleKey (const juce::var& args);
     void finishKeyDetection();
