@@ -1713,11 +1713,16 @@ void Edit::addRecording (int trackId, const juce::File& file, const std::vector<
         high = juce::jmax (high, pass.start + pass.length);
     }
 
-    // What the track plays over the recorded stretch now.
+    // Everything the track plays now (the whole first take, not only what the recording overlaps).
     juce::Array<juce::ValueTree> covered;
     for (const auto& clip : track)
-        if (isAudioClip (clip) && juce::jmin (clipEnd (clip), high) - juce::jmax (clipStart (clip), low) > minClipSeconds)
+        if (isAudioClip (clip) && ! clip.hasProperty (ids::take))
             covered.add (clip);
+    const auto overlapsRecording = [&] (const juce::ValueTree& clip)
+    {
+        return juce::jmin (clipEnd (clip), high) - juce::jmax (clipStart (clip), low) > minClipSeconds;
+    };
+    const auto overlapping = std::any_of (covered.begin(), covered.end(), overlapsRecording);
 
     auto takes = getTakes (trackId);
 
@@ -1728,7 +1733,7 @@ void Edit::addRecording (int trackId, const juce::File& file, const std::vector<
     }
 
     // The first time, what was there becomes the first take, so it can still be picked.
-    if (takes.isEmpty() && ! covered.isEmpty())
+    if (takes.isEmpty() && ! covered.isEmpty() && (overlapping || passes.size() > 1))
     {
         auto first = addTake (trackId);
         for (auto clip : covered)
