@@ -8,7 +8,7 @@
 // with named keys such as Beat or Kit) has a row per sound, any other MIDI track one row on its
 // "row note".
 import { clamp, html } from "./widgets.js";
-import { noteName } from "./pianoroll.js";
+import { noteName, PianoRoll } from "./pianoroll.js";
 
 const COLOURS = ["#ff8a5c", "#3fd9c6", "#8c7bff", "#ffb547", "#ff6fb1", "#5aafff", "#9be15d", "#c78bff"];
 export const patternColour = (pattern, index = 0) => (/^#[0-9a-f]{6}$/i.test(pattern?.colour ?? "") ? pattern.colour : COLOURS[(pattern?.id ?? index) % COLOURS.length]);
@@ -58,11 +58,14 @@ const noteIndex = (note, pattern) => Math.round(note.time / pattern.step);
 //==================================================================================== the tab
 // screen: the DAW screen (session, status, selectedPattern, tempoMap, beatsPerBar, setDockTab,
 // popMenu). Returns { element, update(session), setStatus(status), ensurePattern() }.
-export function createPatternsPanel(screen, daw, { popMenu }) {
+export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) {
   const element = html("section", "patterns-panel");
   let signature = "";
   let columns = [];       // the step buttons of each column, for the playing light
   let lit = -1;
+  let rollTrack = null;   // a track id while the piano roll shows that track's part
+  let roll = null;        // { roll, element, key } of the open piano roll
+  let rollKey = "";
 
   const selected = () => {
     const list = screen.session?.patterns ?? [];
@@ -184,6 +187,7 @@ export function createPatternsPanel(screen, daw, { popMenu }) {
       heading(track.name);
       if (!view.named) item("Rows per note (drum view)", () => daw("setPart", { pattern: pattern.id, track: track.id, drum: !view.drum,
         ...(view.drum ? {} : { rows: [part?.stepNote ?? DEFAULT_NOTE] }) }), { checked: view.drum });
+      item("Edit notes in the piano roll", () => openRoll(track));
       item("Show this track in the Track tab", () => { screen.select?.(track.id, null); screen.setDockTab("effects"); });
       item("Clear this track in the pattern", () => daw("editPattern", { pattern: pattern.id, track: track.id, remove: (part?.notes ?? []).map((n) => n.id) }));
     });
@@ -201,6 +205,139 @@ export function createPatternsPanel(screen, daw, { popMenu }) {
         item(soundName(track, pitch), () => daw("setPart", { pattern: pattern.id, track: track.id, drum: true, rows: [...view.rows.map((r) => r.pitch), pitch] }),
           { shortcut: noteName(pitch) });
     }, event.currentTarget);
+  };
+
+  //---------------------------------------------------------------- selected row and velocity bars
+  const selectedRow = () => screen.patternRow ?? null; // { track, pitch }
+  const selectRow = (track, pitch) => {
+    screen.patternRow = { track: track.id, pitch };
+    render(true);
+  };
+
+  // The velocity bars of one row, under the track's steps: one bar per step that has a note.
+  // Drag on a bar to set it; drag across several to paint a ramp.
+  const velocityBars = (pattern, track, row) => {
+    const part = partOf(pattern, track.id);
+    const count = stepCount(pattern);
+    const byIndex = new Map(notesAt(part, row.pitch).map((n) => [noteIndex(n, pattern), n]));
+    const line = html("div", "pat-row pat-vel-row");
+    line.append(html("span", "pat-label is-fixed", `${row.name} velocity`));
+    const strip = html("div", "pat-vel");
+    strip.style.setProperty("--steps", count);
+    strip.title = "Velocity of each step: drag up or down to set it, drag across steps to draw a ramp";
+    const bars = [];
+    for (let i = 0; i < count; ++i) {
+      const cell = html("div", `pat-vel-cell${byIndex.has(i) ? " has-note" : ""}`);
+      const bar = html("i");
+      const v = byIndex.get(i)?.velocity ?? 0;
+      bar.style.height = `${(v / 127) * 100}%`;
+      if (byIndex.has(i)) cell.title = `Step ${i + 1}: velocity ${v}`;
+      cell.append(bar);
+      strip.append(cell);
+      bars.push({ cell, bar });
+    }
+    strip.addEventListener("pointerdown", (e) => {
+      if (e.button !== 0) return;
+      e.preventDefault();
+      const changes = new Map();
+      const set = (ev) => {
+        const box = strip.getBoundingClientRect();
+        const i = clamp(Math.floor((ev.clientX - box.left) / (STEP_W + STEP_GAP)), 0, count - 1);
+        const note = byIndex.get(i);
+        if (!note) return;
+        const v = clamp(Math.round((1 - (ev.clientY - box.top) / box.height) * 127), 1, 127);
+        changes.set(note.id, v);
+        bars[i].bar.style.height = `${(v / 127) * 100}%`;
+        bars[i].cell.title = `Step ${i + 1}: velocity ${v}`;
+      };
+      set(e);
+      screen.dragging = true;
+      strip.setPointerCapture?.(e.pointerId);
+      const up = () => {
+        strip.removeEventListener("pointermove", set);
+        strip.removeEventListener("pointerup", up);
+        strip.removeEventListener("pointercancel", up);
+        screen.dragging = false;
+        if (changes.size) daw("editPattern", { pattern: pattern.id, track: track.id, change: [...changes].map(([id, velocity]) => ({ id, velocity })) });
+        screen.flushSession?.();
+      };
+      strip.addEventListener("pointermove", set);
+      strip.addEventListener("pointerup", up);
+      strip.addEventListener("pointercancel", up);
+    });
+    line.append(strip);
+    return line;
+  };
+
+  //---------------------------------------------------------------- piano roll on a part
+  // The piano roll (pianoroll.js) edits a MIDI clip with notes in seconds. A part is notes in
+  // beats from the pattern's start, so an adapter shows the part as a clip at the tempo of the
+  // song's start and turns every edit back into beats for editPattern.
+  const secondsPerBeat = () => 60 / (screen.session?.tempo || 120);
+
+  const partClip = (pattern, track) => {
+    const spb = secondsPerBeat();
+    const part = partOf(pattern, track.id);
+    return {
+      id: pattern.id, name: `${pattern.name} · ${track.name}`, midi: true, start: 0, offset: 0, length: pattern.length * spb,
+      notes: (part?.notes ?? []).map((n) => ({ id: n.id, pitch: n.pitch, time: n.time * spb, length: n.length * spb, velocity: n.velocity })),
+    };
+  };
+
+  const openRoll = (track) => {
+    rollTrack = track.id;
+    render(true);
+  };
+  const closeRoll = () => {
+    rollTrack = null;
+    render(true);
+  };
+
+  const buildRoll = (pattern, track) => {
+    const spb = secondsPerBeat();
+    const toBeats = (edits) => {
+      const out = {};
+      const fix = (n) => {
+        const r = { ...n };
+        if (r.time != null) r.time = r.time / spb;
+        if (r.length != null) r.length = r.length / spb;
+        return r;
+      };
+      if (edits.add) out.add = edits.add.map(fix);
+      if (edits.change) out.change = edits.change.map(fix);
+      if (edits.remove) out.remove = edits.remove;
+      return out;
+    };
+    const rollDaw = (command, args) => {
+      if (command === "editNotes") return daw("editPattern", { pattern: pattern.id, track: track.id, ...toBeats(args) });
+      if (command === "liveNote") return daw(command, { ...args, track: track.id });
+      return daw(command, args);
+    };
+    const instance = new PianoRoll({ clip: partClip(pattern, track), track, session: screen.session, daw: rollDaw,
+                                     toast, colour: track.colour || COLOURS[0] });
+    return { roll: instance, element: instance.element, track: track.id, pattern: pattern.id };
+  };
+
+  const disposeRoll = () => {
+    roll?.roll.dispose?.();
+    roll = null;
+  };
+
+  const rollView = (pattern, track) => {
+    const box = html("div", "pat-roll");
+    const bar = html("div", "pat-roll-bar");
+    const back = html("button", "tool", "← Steps");
+    back.type = "button";
+    back.title = "Back to the step rack";
+    back.addEventListener("click", closeRoll);
+    bar.append(back, html("span", "pat-roll-title", `${pattern.name} · ${track.name}`),
+      html("span", "pat-hint", "Notes are placed in beats from the pattern's start. Double-click to add, drag to move."));
+    if (!roll || roll.track !== track.id || roll.pattern !== pattern.id) {
+      disposeRoll();
+      roll = buildRoll(pattern, track);
+    } else roll.roll.update(partClip(pattern, track), track, screen.session);
+    box.append(bar, roll.element);
+    return box;
   };
 
   //---------------------------------------------------------------- drawing
@@ -310,6 +447,11 @@ export function createPatternsPanel(screen, daw, { popMenu }) {
       add.addEventListener("click", (e) => addSoundMenu(e, pattern, track, view));
       head.append(add);
     }
+    const edit = html("button", "pat-edit", "Notes");
+    edit.type = "button";
+    edit.title = "Open the piano roll on this track's part of the pattern";
+    edit.addEventListener("click", () => openRoll(track));
+    head.append(edit);
     const more = html("button", "pat-more", "⋯");
     more.type = "button";
     more.title = "Track options";
@@ -327,13 +469,17 @@ export function createPatternsPanel(screen, daw, { popMenu }) {
       const line = html("div", "pat-row");
       const label = html("button", "pat-label", view.drum ? row.name : noteName(row.pitch));
       label.type = "button";
-      label.title = `${row.name}: click to hear it, right-click for fill, shift and more`;
-      label.addEventListener("click", () => audition(track, row.pitch));
+      label.title = `${row.name}: click to hear it and show its velocity bars, right-click for fill, shift and more`;
+      label.classList.toggle("is-selected", selectedRow()?.track === track.id && selectedRow()?.pitch === row.pitch);
+      label.addEventListener("click", () => { audition(track, row.pitch); selectRow(track, row.pitch); });
       label.addEventListener("contextmenu", (e) => rowMenu(e, pattern, track, view, row));
       line.append(label, stepRow(pattern, track, view, row));
       line.addEventListener("contextmenu", (e) => { if (!e.target.closest(".pat-steps")) rowMenu(e, pattern, track, view, row); });
       block.append(line);
     }
+    const chosen = selectedRow();
+    const shown = chosen?.track === track.id ? view.rows.find((r) => r.pitch === chosen.pitch) : null;
+    if (shown && notesAt(part, shown.pitch).length) block.append(velocityBars(pattern, track, shown));
     return block;
   };
 
@@ -391,14 +537,35 @@ export function createPatternsPanel(screen, daw, { popMenu }) {
     swingInput.addEventListener("change", () => daw("setPattern", { id: pattern.id, swing: Number(swingInput.value) / 100 }));
     swing.append(html("span", "", "Swing"), swingInput, swingText);
 
+    const recording = Boolean(screen.session?.patternRecording);
+    const record = small(recording ? "● Stop" : "● Record", recording ? "Stop recording (the pattern keeps looping)"
+      : "Record what you play into this pattern while it loops, pass after pass. Plays on the selected row's track, or on the armed MIDI tracks.",
+      () => toggleRecord(pattern), `tool pat-record${recording ? " is-on" : ""}`);
+    const snapOn = screen.session?.patternSnap !== false;
+    const snap = html("label", "pat-snap");
+    snap.title = "Snap recorded notes to the step grid";
+    const snapBox = html("input");
+    Object.assign(snapBox, { type: "checkbox", checked: snapOn });
+    snapBox.addEventListener("change", () => daw("patternRecord", { on: recording, snap: snapBox.checked }));
+    snap.append(snapBox, html("span", "", "Snap"));
+
     const place = small("Place at playhead", "Put this pattern on the song at the playhead (the Patterns lane under the ruler)", () => placeAtPlayhead(pattern), "tool is-accent");
 
     bar.append(dot, picker, name,
       small("+", "New pattern", () => newPattern()),
       small("Copy", "Duplicate this pattern", () => newPattern(pattern.id)),
       small("Delete", "Delete this pattern and its blocks", () => daw("removePattern", { id: pattern.id }), "tool is-danger"),
-      html("span", "tb-sep"), length, step, swing, html("span", "pat-spacer"), place);
+      html("span", "tb-sep"), length, step, swing, html("span", "pat-spacer"), record, snap, place);
     return bar;
+  };
+
+  // Record into the pattern: Pattern mode first (the loop is the pattern), then the looper.
+  const toggleRecord = async (pattern) => {
+    if (screen.session?.patternRecording) return void daw("patternRecord", { on: false });
+    if ((screen.session?.patternMode ?? -1) < 0) await daw("patternMode", { pattern: pattern.id });
+    const chosen = selectedRow();
+    const track = chosen?.track ?? midiTracks()[0]?.id;
+    await daw("patternRecord", { on: true, snap: screen.session?.patternSnap !== false, ...(track != null ? { track } : {}) });
   };
 
   const placeAtPlayhead = async (pattern) => {
@@ -432,11 +599,19 @@ export function createPatternsPanel(screen, daw, { popMenu }) {
     if (pattern) screen.selectedPattern = pattern.id;
     const tracks = midiTracks();
     const key = JSON.stringify([pattern, tracks.map((t) => [t.id, t.name, t.colour, t.keyNames, t.instrument?.name]),
-                                (session.patterns ?? []).map((p) => [p.id, p.name]), screen.beatsPerBar]);
+                                (session.patterns ?? []).map((p) => [p.id, p.name]), screen.beatsPerBar,
+                                session.patternRecording, session.patternSnap, screen.patternRow, rollTrack, session.tempo]);
     if (!force && key === signature) return;
     signature = key;
     columns = [];
     lit = -1;
+    const rolled = rollTrack != null && pattern ? tracks.find((t) => t.id === rollTrack) : null;
+    if (rolled) {
+      element.replaceChildren(rollView(pattern, rolled));
+      return;
+    }
+    if (rollTrack != null) rollTrack = null;
+    disposeRoll();
     const scroll = element.querySelector(".pat-rack")?.scrollTop ?? 0;
     element.replaceChildren();
     if (!pattern) {
@@ -464,6 +639,12 @@ export function createPatternsPanel(screen, daw, { popMenu }) {
     // The light that runs along the steps while the pattern loops.
     setStatus(status) {
       const pattern = selected();
+      if (roll) {
+        const beats = pattern ? screen.tempoMap.toBeats(status.position) : 0;
+        const inside = pattern ? ((beats % pattern.length) + pattern.length) % pattern.length : 0;
+        const live = pattern && status.playing && status.patternMode === pattern.id;
+        roll.roll.setStatus({ ...status, position: live ? inside * secondsPerBeat() : -1 });
+      }
       let at = -1;
       if (pattern && status.playing && status.patternMode === pattern.id) {
         const beats = screen.tempoMap.toBeats(status.position);

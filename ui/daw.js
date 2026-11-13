@@ -3589,7 +3589,7 @@ class DawScreen {
   buildInspector() {
     this.inspector = this.root.querySelector(".inspector");
     this.inspectorKey = "";
-    this.patternsPanel = createPatternsPanel(this, daw, { popMenu });
+    this.patternsPanel = createPatternsPanel(this, daw, { popMenu, toast: (...args) => toast(...args) });
 
     // The bar above the effects panel: drag to resize, double-click or its button to fold away.
     const main = this.root.querySelector(".daw-main");
