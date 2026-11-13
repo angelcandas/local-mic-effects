@@ -19,6 +19,7 @@ const RECENT = 20;
 const DRAG_THRESHOLD = 4; // px before a press becomes a drag
 
 const SECTIONS = [
+  { id: "project",     name: "Project",     icon: "◆", hint: "Click a pattern or a sound to draw it with the Draw tool (P); drag it onto the song to place it" },
   { id: "favourites",  name: "Favourites",  icon: "♥", hint: "Star anything in the library (☆ on its row) to keep it here" },
   { id: "recent",      name: "Recent",      icon: "↺", hint: "The last 20 things you added from the library" },
   { id: "audio",       name: "Audio", icon: "♪", hint: "Drag a file onto a track, or below the tracks for a new one" },
@@ -280,6 +281,7 @@ export class LibraryBrowser {
       case "effects": list = this.effectItems(); break;
       case "presets": list = this.presetItems(); break;
       case "instruments": list = this.instrumentItems(); break;
+      case "project": list = this.projectItems(); break;
       default: list = this.audioItems();
     }
     this.items.replaceChildren(...list);
@@ -321,13 +323,15 @@ export class LibraryBrowser {
       element.addEventListener("pointerdown", (event) => this.pressItem(event, element, payload));
       element.addEventListener("dblclick", () => this.activate(payload));
       if (payload.kind === "audio") element.addEventListener("focus", () => this.pickPreview(payload));
-      // A star keeps it in Favourites.
+      // What the Draw tool places (FL's picked clip).
+      if (payload.kind === "audio" || payload.kind === "pattern") element.addEventListener("focus", () => this.screen.drawTool?.pick(payload));
+      // A star keeps it in Favourites (not a pattern: it belongs to this project).
       const starred = this.isFavourite(payload);
       const star = html("button", `library-star${starred ? " is-on" : ""}`, starred ? "★" : "☆");
       Object.assign(star, { type: "button", title: starred ? "Remove from Favourites" : "Add to Favourites" });
       star.addEventListener("pointerdown", (event) => event.stopPropagation());
       star.addEventListener("click", (event) => { event.stopPropagation(); this.toggleFavourite(payload); });
-      element.append(star);
+      if (payload.kind !== "pattern") element.append(star);
     }
     if (unfold) {
       // The arrow unfolds the effect's presets.
@@ -357,6 +361,7 @@ export class LibraryBrowser {
       case "preset": return `preset:${payload.name}`;
       case "instrument": return `inst:${payload.id}`;
       case "audio": return `file:${payload.file}`;
+      case "pattern": return `pattern:${payload.id}`;
       default: return `${payload.kind}:${payload.name}`;
     }
   }
@@ -437,6 +442,48 @@ export class LibraryBrowser {
     }
     out.push(...this.group("Audio", null, files.slice(0, 200)));
     return out;
+  }
+
+  //============================================================================ project
+  // The project's own patterns and sounds (FL's picker): click picks one for the Draw tool,
+  // double-click opens a pattern in the rack, drag places either on the song.
+  projectItems() {
+    const session = this.screen.session;
+    if (!session) return [];
+    const patterns = (session.patterns ?? []).filter((p) => this.matches(p.name)).map((p) => {
+      const bars = p.length / (this.screen.beatsPerBar || 4);
+      const element = this.item({ key: `pattern:${p.id}`, name: p.name, detail: Number.isInteger(bars) ? `${bars} bar${bars === 1 ? "" : "s"}` : `${+p.length.toFixed(2)} beats`,
+                                  colour: /^#[0-9a-f]{6}$/i.test(p.colour ?? "") ? p.colour : null,
+                                  payload: { kind: "pattern", id: p.id, name: p.name }, title: `${p.name}: click to draw it, double-click to edit it, drag onto the song` });
+      element.classList.add("is-pattern");
+      element.classList.toggle("is-picked", this.screen.selectedPattern === p.id && this.screen.brush?.kind !== "audio");
+      return element;
+    });
+    const seen = new Map();
+    for (const track of session.tracks ?? [])
+      for (const clip of track.clips ?? [])
+        if (!clip.midi && clip.file && !seen.has(clip.file)) seen.set(clip.file, clip);
+    const sounds = [...seen.values()].map((clip) => {
+      const name = clip.file.split(/[\\/]/).pop();
+      const tempo = clip.musical && clip.clipTempo ? ` · ${+Number(clip.clipTempo).toFixed(1)} BPM` : "";
+      const element = this.item({ key: `file:${clip.file}`, name, detail: `${Number(clip.fileLength || 0).toFixed(1)} s${tempo}`,
+                                  payload: { kind: "audio", file: clip.file, name }, title: `${clip.file}: click to draw it, drag onto a track` });
+      element.classList.toggle("is-picked", this.screen.brush?.kind === "audio" && this.screen.brush.file === clip.file);
+      return element;
+    }).filter((e) => this.matches(e.payload.name));
+    const out = [...this.group("Patterns", null, patterns), ...this.group("Audio in this project", null, sounds)];
+    if (!out.length) out.push(html("div", "library-empty", "No patterns or audio in this project yet."));
+    return out;
+  }
+
+  // The session changed: the Project list follows it.
+  sessionChanged() {
+    if (this.section !== "project" || this.query || this.drag) return;
+    const key = JSON.stringify([(this.screen.session?.patterns ?? []).map((p) => [p.id, p.name, p.colour, p.length]),
+      (this.screen.session?.tracks ?? []).flatMap((t) => (t.clips ?? []).map((c) => c.file)), this.screen.selectedPattern, this.screen.brush?.file]);
+    if (key === this.projectKey) return;
+    this.projectKey = key;
+    this.renderItems();
   }
 
   //============================================================================ preview
@@ -682,12 +729,20 @@ export class LibraryBrowser {
     const hasTrack = this.screen.session?.tracks.some((t) => t.id === selected);
     if (payload.kind === "audio") return this.drop(payload, { track: hasTrack ? selected : -1, start: -1 });
     if (payload.kind === "instrument") return this.drop(payload, { track: hasTrack ? selected : -1 });
+    if (payload.kind === "pattern") { this.screen.selectedPattern = payload.id; return this.screen.openPatterns(); }
     return this.drop(payload, { track: hasTrack || selected === 0 ? selected : -1 });
   }
 
   // target: { track (-1: a new one, 0: master), start (seconds; -1: the playhead) }
   async drop(payload, target) {
     const screen = this.screen;
+    if (payload.kind === "pattern") {
+      const pattern = screen.session?.patterns?.find((p) => p.id === payload.id);
+      if (!pattern) return;
+      const id = await this.run("addPatternClip", { pattern: pattern.id, start: target.beat, length: pattern.length, row: target.row ?? 0 });
+      if (typeof id === "number") screen.selectedPatternClip = id;
+      return;
+    }
     if (payload.kind === "audio" && target.pattern) {
       await screen.patternsPanel.dropSample(payload.file, target);
       this.addRecent(payload);
@@ -817,6 +872,18 @@ export class LibraryBrowser {
     if (!under || !screen.root.contains(under)) return null;
 
     const timeIn = (lane) => screen.snapTime((event.clientX - lane.getBoundingClientRect().left) / screen.zoom, event);
+
+    // A pattern lands in the Patterns lane at the bar under the pointer, wherever it is dropped
+    // over the song (a pattern plays several tracks, so its blocks live in that lane).
+    if (kind === "pattern") {
+      const area = under.closest(".arrange");
+      const lane = screen.patternLane?.element;
+      if (!area || !lane || screen.patternRow?.hidden) return null;
+      const perBar = screen.beatsPerBar || 4;
+      const seconds = Math.max(0, (event.clientX - lane.getBoundingClientRect().left) / screen.zoom);
+      const beat = Math.floor(screen.tempoMap.toBeats(seconds) / perBar + 1e-6) * perBar;
+      return { beat, element: lane, lane, start: screen.tempoMap.toSeconds(beat), label: `Patterns lane, bar ${beat / perBar + 1}` };
+    }
 
     // The Patterns tab takes an audio file as a sample: on a row of a Kit, or as a new row.
     const rack = kind === "audio" ? under.closest(".patterns-panel") : null;

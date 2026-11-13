@@ -12682,6 +12682,14 @@ static void testLoops()
                    && near ((double) result["start"], 2.3, 1e-9),
                "a one-shot is placed as it is");
 
+        result = run ("audioInfo", args ({ { "file", file.getFullPathName() } }));
+        check ((bool) result["ok"] && near ((double) result["seconds"], 4.8, 0.01) && near ((double) result["length"], 4.0, 0.01) && (int) result["loop"]["bars"] == 2,
+               "audioInfo tells the Draw tool a loop's length in tempo");
+        result = run ("importFile", args ({ { "file", file.getFullPathName() }, { "track", -1 }, { "start", 8.0 } }));
+        const auto painted = run ("importFile", args ({ { "file", result["file"] }, { "track", result["track"] }, { "start", 12.0 }, { "continue", true } }));
+        check ((bool) painted["ok"] && (int) painted["track"] == (int) result["track"], "a Draw stroke's second copy joins the first");
+        run ("undo", args ({}));
+        check (! edit.getClip ((int) painted["clip"]).isValid() && ! edit.getClip ((int) result["clip"]).isValid(), "and one undo takes the stroke away");
         check ((bool) run ("matchLoops", args ({ { "on", false } }))["ok"] && ! settings.getBoolValue ("dawMatchLoops", true), "the switch is kept in the settings");
         result = run ("importFile", args ({ { "file", file.getFullPathName() }, { "track", -1 }, { "start", 2.3 } }));
         check (! result["loop"].isObject() && ! daw::Edit::isMusical (edit.getClip ((int) result["clip"])), "and off, loops are placed as they are");
@@ -13150,6 +13158,24 @@ static void testPatterns()
             const auto described = lastSession()["patterns"][0]["parts"][0];
             check (near ((double) described["levels"]["36"], 0.5, 1.0e-3) && described["muted"].size() == 2 && (int) described["muted"][0] == 38,
                    "the session describes them, typed");
+        }
+        {
+            // The Draw tool: a stroke of blocks and an erase, each one undo step; swap a block's pattern.
+            const auto painted = run ("addPatternClips", args ({ { "pattern", patternId }, { "starts", list ({ 32.0, 36.0, 40.0 }) }, { "length", 4.0 } }));
+            check (painted.isArray() && painted.size() == 3 && edit.getPatternClips().size() == 4 && edit.getUndoManager().getUndoDescription() == "Draw patterns",
+                   "addPatternClips paints blocks in one undo step");
+            check ((bool) run ("removePatternClips", args ({ { "ids", list ({ painted[0], painted[2] }) } }))["ok"] && edit.getPatternClips().size() == 2,
+                   "removePatternClips erases them");
+            run ("undo");
+            run ("undo");
+            check (edit.getPatternClips().size() == 1, "(and undo both)");
+            const auto other = (int) run ("addPattern");
+            check ((bool) run ("setPatternClip", args ({ { "id", blockId }, { "pattern", other } }))["ok"] && (int) edit.getPatternClip (blockId)[daw::ids::pattern] == other
+                       && ! (bool) run ("setPatternClip", args ({ { "id", blockId }, { "pattern", 9999 } }))["ok"],
+                   "setPatternClip swaps the block's pattern");
+            run ("undo");
+            run ("undo");
+            check ((int) edit.getPatternClip (blockId)[daw::ids::pattern] == (int) patternId && edit.getPatterns().size() == 1, "(undo)");
         }
         run ("setPartMutes", args ({ { "pattern", patternId }, { "parts", list ({ args ({ { "track", kit }, { "muted", list ({}) } }) }) } }));
         run ("setPart", args ({ { "pattern", patternId }, { "track", kit }, { "levels", args ({ { "36", 1.0 } }) } }));

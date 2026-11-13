@@ -14,7 +14,9 @@ import { decorateAiPanels } from "./aiviews.js";
 import { MixCheckView } from "./mixcheck.js";
 import { SongMapView } from "./songmap.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
-import { createPatternLane, createPatternsPanel } from "./patterns.js";
+import { createPatternsPanel } from "./patterns.js";
+import { createPatternLane, drawGhosts } from "./patternlane.js";
+import { createDrawTool } from "./drawtool.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs } from "./rhythm.js";
 import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
 
@@ -151,6 +153,7 @@ const ICONS = {
   returnstop: '<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-4"/>',
   follow: '<path d="M4 12h12M12 7l5 5-5 5M20 4v16"/>',
   select: '<path d="M5 3l14 8-6 2-3 6z"/>',
+  draw: '<path d="M4 20l1-5L16 4l4 4L9 19z"/><path d="M14 6l4 4"/>',
   cut: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.6 7.6L20 18M8.6 16.4L20 6"/>',
   gain: '<path d="M4 9v6h4l5 4V5L8 9zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>',
   warp: '<path d="M3 12c3-8 6-8 9 0s6 8 9 0"/><path d="M3 20h18" stroke-dasharray="2 3"/>',
@@ -1716,7 +1719,8 @@ class DawScreen {
     this.tools = html("div", "segmented tools");
     for (const [tool, text, title] of [["select", "Select", "Select tool: move, trim and fade clips (V)"],
                                        ["cut", "Cut", "Cut tool: click a clip to split it there (B)"],
-                                       ["gain", "Gain", "Gain tool: drag a clip up or down to change its gain (G)"]]) {
+                                       ["gain", "Gain", "Gain tool: drag a clip up or down to change its gain (G)"],
+                                       ["draw", "Draw", "Draw tool: click to place the picked pattern or sound, drag to paint copies, right-click to erase (P)"]]) {
       const b = iconButton("", tool, title, () => this.setTool(tool));
       b.dataset.tool = tool;
       this.tools.append(b);
@@ -1754,7 +1758,8 @@ class DawScreen {
     this.moreButton = iconButton("tool tb-more", "more", "More", (event) => this.openMoreMenu(event.currentTarget));
     this.moreButton.hidden = true;
 
-    const right = zone("zone-work", this.tools, snap, this.autoMixButton, this.mixCheckButton, this.activity.button,
+    this.drawTool = createDrawTool(this, daw, { toast: (...args) => toast(...args) });
+    const right = zone("zone-work", this.tools, this.drawTool.chip, snap, this.autoMixButton, this.mixCheckButton, this.activity.button,
                       html("span", "tb-sep"), this.libraryButton, this.viewTabs, this.dockButton, this.pianoButton, help, this.moreButton);
     bar.append(left, html("span", "tb-spacer"), centre, html("span", "tb-spacer"), right);
 
@@ -1902,6 +1907,7 @@ class DawScreen {
     this.libraryButton.setAttribute("aria-pressed", String(!this.library?.collapsed));
     this.dockButton.setAttribute("aria-pressed", String(!this.root.classList.contains("dock-hidden")));
     [...this.tools.children].forEach((b) => b.classList.toggle("is-selected", b.dataset.tool === this.tool));
+    this.drawTool?.update();
     if (document.activeElement !== this.zoomSlider)
       this.zoomSlider.value = String(Math.round(1000 * Math.log(this.zoom / MIN_ZOOM) / Math.log(MAX_ZOOM / MIN_ZOOM)));
     if (document.activeElement !== this.heightSlider)
@@ -2060,7 +2066,11 @@ class DawScreen {
     // The patterns lane (ui/patterns.js), under the tempo track: shown once there is a pattern.
     this.patternRow = html("div", "pattern-row");
     const patternCorner = html("div", "corner pattern-corner");
-    patternCorner.append(html("span", "tempo-corner-name", "Patterns"),
+    const fold = button("tool pattern-fold", "▾", "Fold the Patterns lane to one row, or show every row", () => {
+      this.patternLane.toggleFold();
+      fold.textContent = this.patternLaneFolded ? "▸" : "▾";
+    });
+    patternCorner.append(fold, html("span", "tempo-corner-name", "Patterns"),
                          button("tool", "Edit", "Open the pattern in the Patterns tab", () => this.openPatterns()));
     this.patternLane = createPatternLane(this, daw, { popMenu, openPatterns: () => this.openPatterns() });
     this.patternRow.append(patternCorner, this.patternLane.element);
@@ -2094,6 +2104,7 @@ class DawScreen {
     });
     this.autoScrollTime = 0;
     this.arrange.append(this.inner, this.emptyHint);
+    this.drawTool.attach(this.arrange);
 
     this.ruler.addEventListener("pointerdown", (event) => {
       const box = this.ruler.getBoundingClientRect();
@@ -2323,6 +2334,7 @@ class DawScreen {
       for (const canvas of this.rows.querySelectorAll("canvas.clip-wave"))
         if (canvas.clip && canvas.drawn) this.oldWaves.set(canvas.clip.id, canvas);
     this.updateTrackRows(force);
+    drawGhosts(this, session); // what the pattern blocks play on each MIDI track
     this.renderPinnedRows(force);
     this.emptyHint.hidden = session.tracks.some((track) => track.clips.length > 0);
     this.clearButton.hidden = ![...session.tracks, ...(session.returns ?? []), ...(session.groups ?? [])].some((track) => track.mute || track.solo);
@@ -5162,6 +5174,7 @@ class DawScreen {
     session.groups = buses.filter((bus) => bus.group);
     session.returns = buses.filter((bus) => !bus.group);
     this.session = session;
+    this.library?.sessionChanged?.(); // the library's Project list
     // After New or Open the old selection points at tracks that are gone: fall back to the
     // first track, so Import and the effects panel act on something you can see.
     const tracks = session.tracks ?? [];
@@ -5363,7 +5376,7 @@ class DawScreen {
                ["Ctrl+A", "Select every clip"], [", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
-               ["V / B / G", "Select, cut and gain tools"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
+               ["V / B / G / P", "Select, cut, gain and draw tools"], ["Draw tool", "Click places the picked pattern or sound, drag paints copies, right-click (or right-drag) erases"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Ctrl+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
     ["Patterns tab (after clicking in it)", [["- / =", "Previous / next pattern"], ["↑ / ↓", "Select the row above / below"],
                   ["Ctrl+Shift+← / →", "Rotate the selected row's steps"], ["Ctrl+C / V", "Copy / paste the selected row's steps"],
@@ -6100,6 +6113,7 @@ class DawScreen {
     else if (key === "v") { handled(); this.setTool("select"); }
     else if (key === "b") { handled(); this.setTool("cut"); }
     else if (key === "g") { handled(); this.setTool("gain"); }
+    else if (key === "p") { handled(); this.setTool("draw"); }
     else if (key === "w") { handled(); this.openClipEditor(); }
     else if (key === "e") command("toggleDock");
   }
