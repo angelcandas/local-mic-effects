@@ -19,8 +19,8 @@
 //   "dawStems"    { state: "downloading" | "loading" | "splitting", progress } while a
 //                 song splits into stems, then { state: "done", tracks } / "cancelled" /
 //                 { state: "error", error }
-//   "dawPlugins"  { scanning, progress, count, failed } while an instrument plugin scan
-//                 runs and when it ends (refresh the "instruments" list then)
+//   "dawPlugins"  { scanning, progress, count, failed } while a plugin scan runs and
+//                 when it ends (refresh the "instruments" list, with its `effects`, then)
 //   "dawAutoMix"  { state: "analysing", progress } while Auto Mix listens, then
 //                 { state: "ready", plan... } (see describeAutoMix), or "cancelled"/"error"
 //   "dawMixCheck" { state: "analysing", progress } while Mix Check listens, then
@@ -105,6 +105,9 @@ private:
     juce::var describeInstruments() const;
     juce::var addInstrument (int trackId, const juce::String& instrumentId);
     void showInstrumentWindow (int trackId);
+    juce::var addPluginInsert (int trackId, const juce::String& pluginId, int index);
+    void showPluginWindow (int insertId);
+    std::vector<std::pair<int, juce::ValueTree>> getPluginInserts() const; // every effect plugin insert, by id
     void updateInstrumentWindows();
     juce::var getPeaks (const juce::File&, const daw::warp::Settings& = {});
     juce::var getDetailPeaks (const juce::File&, double start, double end, double seconds, const daw::warp::Settings& = {});
@@ -190,6 +193,7 @@ private:
     // Instrument plugin editors, one window per MIDI track, and what the tracks' instruments
     // were last tick (a change redraws the session and closes stale windows).
     std::map<int, std::unique_ptr<juce::Component>> instrumentWindows;
+    std::map<int, std::unique_ptr<juce::Component>> pluginWindows; // effect plugin inserts', by insert id
     juce::String instrumentsSeen;
     int scanTicks = 0, inputTicks = 0;
     juce::StringArray lastInputNames;

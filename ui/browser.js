@@ -5,6 +5,7 @@
 //   effect      -> an insert at the end of that track's chain (or the master's)
 //   preset      -> replaces that track's chain with the preset's effects
 //   instrument  -> that track's instrument (below the tracks: a new MIDI track)
+//   plug-in     -> an effect plug-in (VST3/AU) at the end of that track's chain
 // Double-click (or Enter) does the same on the selected track, at the playhead.
 // The folders come from the native side (DawBridge: places, browse, addPlace,
 // removePlace, importFile); instruments from "instruments" / "addInstrument"; the
@@ -56,6 +57,7 @@ export class LibraryBrowser {
     this.folders = new Map();                // path -> { folders, files, truncated } | "loading" | { error }
     this.open = new Set(prefs.get("open", []));
     this.instruments = null;                 // null: not asked yet; false: not available
+    this.effectPlugins = [];                 // effect plug-ins found by a scan ("instruments"' effects)
     this.drag = null;
 
     this.build();
@@ -252,7 +254,8 @@ export class LibraryBrowser {
   async loadInstruments() {
     const result = await this.call("instruments");
     this.instruments = result?.ok && Array.isArray(result.instruments) ? result.instruments : false;
-    if (this.section === "instruments") this.renderItems();
+    this.effectPlugins = result?.ok && Array.isArray(result.effects) ? result.effects : [];
+    if (this.section === "instruments" || this.section === "effects") this.renderItems();
   }
 
   //============================================================================ items
@@ -376,7 +379,7 @@ export class LibraryBrowser {
     for (const [kind, title] of groups) {
       const children = list.filter((p) => p.kind === kind).map((p) => this.item({
         key: `saved:${this.keyOf(p)}`, name: p.name, title: p.file ?? p.name,
-        detail: p.kind === "audio" ? p.file.split(/[\\/]/).slice(-2, -1)[0] : p.kind === "instrument" ? p.vendor : "",
+        detail: p.kind === "audio" ? p.file.split(/[\\/]/).slice(-2, -1)[0] : p.kind === "instrument" || p.plugin ? p.vendor : "",
         payload: p, colour: p.kind === "effect" ? CATEGORIES[MODULES.find((m) => m.id === p.id)?.category]?.color : null }));
       out.push(...this.group(title, null, children));
     }
@@ -399,6 +402,7 @@ export class LibraryBrowser {
                                    payload: { kind: "effect", id: m.id, name: `${m.name}: ${preset.name}`, preset: preset.name } }));
     }
     out.push(...this.group("Effects", null, effects.slice(0, 60)));
+    out.push(...this.group("Plug-ins", null, this.pluginItems()));
 
     const presets = (this.screen.presets ?? []).map((preset, index) => ({ preset, index }))
       .filter(({ preset }) => this.matches(preset.name) || this.matches(preset.category))
@@ -511,7 +515,27 @@ export class LibraryBrowser {
         });
       list.push(...this.group(category.name, category.color, children));
     }
+    // Effect plug-ins (VST3, and AU on a Mac), after the built-in effects.
+    list.push(...this.group("Plug-ins", null, this.pluginItems()));
+    if (!this.query) {
+      if (!this.effectPlugins.length) list.push(html("div", "library-note", "No effect plug-ins found yet. Rescan after installing some, or add their folder in the Instruments section."));
+      list.push(this.rescanButton());
+    }
     return list;
+  }
+
+  pluginItems() {
+    return this.effectPlugins.filter((p) => this.matches(p.name) || this.matches(p.vendor ?? ""))
+      .map((p) => this.item({ key: `fx:plugin:${p.id}`, name: p.name, detail: p.vendor || p.format,
+                              title: `${p.name}${p.vendor ? ` by ${p.vendor}` : ""} (${p.format} plug-in)`,
+                              payload: { kind: "effect", id: `plugin:${p.id}`, plugin: p.id, name: p.name, vendor: p.vendor } }));
+  }
+
+  rescanButton() {
+    const rescan = html("button", "text-button library-rescan", "Rescan plug-ins");
+    rescan.type = "button";
+    rescan.addEventListener("click", () => { this.run("scanPlugins"); this.toast("Looking for plug-ins…"); });
+    return rescan;
   }
 
   presetItems() {
@@ -544,10 +568,7 @@ export class LibraryBrowser {
     }
     const list = [];
     for (const [kind, children] of byKind) list.push(...this.group(kind, null, children));
-    const rescan = html("button", "text-button library-rescan", "Rescan plug-ins");
-    rescan.type = "button";
-    rescan.addEventListener("click", () => { this.run("scanPlugins"); this.toast("Looking for plug-ins…"); });
-    list.push(rescan);
+    list.push(this.rescanButton());
     return list;
   }
 
@@ -667,7 +688,9 @@ export class LibraryBrowser {
       if (typeof track !== "number") return;
       await screen.waitForTrack(track);
     }
-    if (payload.kind === "effect") {
+    if (payload.kind === "effect" && payload.plugin) {
+      if (await screen.addPluginEffect(track, payload.plugin) < 0) return;
+    } else if (payload.kind === "effect") {
       const id = await screen.addEffect(track, payload.id);
       if (id >= 0 && payload.preset) await screen.applyEffectPreset(id, payload.id, payload.preset);
     }
