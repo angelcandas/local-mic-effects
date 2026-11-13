@@ -14726,9 +14726,9 @@ static void testAutoLevel()
         for (int i = 0; i < processor.getLiveChain().size(); ++i)
         {
             if (processor.getLiveChain()[i].getType() == fx::ModuleType::autoLevel) position = i;
-            if (processor.getLiveChain()[i].getType() == fx::ModuleType::compressor) compressor = i;
+            if (processor.getLiveChain()[i].getType() == fx::ModuleType::opto) compressor = i;
         }
-        check (position == compressor + 1, "right after the compressor");
+        check (position == compressor + 1, "right after the compressors (Compressor, then Opto)");
 
         processor.prepareToPlay (sampleRate, blockSize);
         const auto backingNoise = makeSoundCheckVoice (6.0, 0.0f, juce::Decibels::decibelsToGain (-30.0f));
