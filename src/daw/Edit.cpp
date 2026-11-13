@@ -1298,6 +1298,20 @@ int Edit::duplicateClip (int clipId)
     return id;
 }
 
+int Edit::copyClipTo (int clipId, int trackId)
+{
+    const auto clip = getClip (clipId);
+    auto track = getTrack (trackId);
+    if (! clip.isValid() || ! track.isValid() || isMidiClip (clip) != isMidiTrack (track))
+        return -1;
+
+    auto copy = clip.createCopy();
+    renumber (copy);
+    copy.removeProperty (ids::take, nullptr); // a comp's piece: the copy isn't on that track's takes
+    track.appendChild (copy, undoTarget);
+    return (int) copy[ids::id];
+}
+
 void Edit::setClipGain (int clipId, float decibels)
 {
     getClip (clipId).setProperty (ids::gain, juce::jlimit (-60.0f, 24.0f, decibels), undoTarget);
