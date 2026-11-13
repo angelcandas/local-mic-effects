@@ -219,7 +219,9 @@ public:
     // Library preview: plays a decoded sound (at the engine's sample rate, one or two
     // channels) once, straight to the output, on top of whatever plays. It is not part of
     // the mix, a recording or an export. Message thread; a new preview replaces the last.
-    void startPreview (juce::AudioBuffer<float>&& audio, float gain);
+    // `loop`: it repeats until stopped; `delaySamples`: it starts that much later (a loop
+    // previewed in tempo starts on the next bar while the song plays).
+    void startPreview (juce::AudioBuffer<float>&& audio, float gain, bool loop = false, int delaySamples = 0);
     void stopPreview();
     void setPreviewGain (float gain) noexcept   { previewGain = juce::jlimit (0.0f, 2.0f, gain); }
     bool isPreviewing() const noexcept          { return previewPlaying.load(); }
@@ -480,6 +482,10 @@ private:
     std::atomic<juce::AudioBuffer<float>*> previewIncoming { nullptr };
     juce::AudioBuffer<float>* previewActive = nullptr; // audio thread
     int previewPosition = 0;                           // audio thread
+    bool previewLooping = false;                       // audio thread
+    int previewDelay = 0;                              // audio thread
+    std::atomic<bool> previewLoopIncoming { false };   // set with previewIncoming
+    std::atomic<int> previewDelayIncoming { 0 };
     std::atomic<bool> previewStop { false }, previewPlaying { false };
     std::atomic<float> previewGain { 1.0f };
     static constexpr int previewRetiredCapacity = 8;

@@ -3,10 +3,13 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "PluginProcessor.h"
+
+#include <optional>
 #include "daw/Exporter.h"
 #include "analysis/MixAssistant.h"
 #include "analysis/ToMidi.h"
 #include "analysis/MixCheck.h"
+#include "analysis/Structure.h"
 #include "stems/StemSplitter.h"
 
 // Connects the web UI's DAW screen (ui/daw.js) to the processor's DAW session.
@@ -31,6 +34,9 @@
 //                 or { state: "error", error }
 //   "dawKey"      { state: "analysing", progress } while the key is detected, then
 //                 { state: "ready", key... } (see describeKey), or "cancelled"
+//   "dawSongMap"  { state: "analysing", progress } while the song map listens, then
+//                 { state: "ready", map... } (see describeSongMap), "cancelled" or
+//                 { state: "error", error }
 // See handle() for the commands. Message thread only.
 class DawBridge final : private juce::ValueTree::Listener
 {
@@ -65,7 +71,9 @@ public:
     juce::var newProject (const juce::File& folder);
     juce::var saveProjectAs (const juce::File& folder);
     // start < 0: at the playhead. trackId not a track: on a new track.
-    juce::var importAudio (const juce::File& file, int trackId, double start = -1.0); // -> { ok, error, track, clip, start }
+    // -> { ok, error, track, clip, start, loop? { from, to, bars } }. `match`: a loop (see
+    // daw/Loops.h) starts on the nearest bar and plays at the project's tempo (musical mode).
+    juce::var importAudio (const juce::File& file, int trackId, double start = -1.0, bool match = false);
 
     // The library sidebar (ui/browser.js): the places it shows, and one folder's
     // subfolders and audio files.
@@ -168,6 +176,16 @@ private:
     void finishKeyDetection();
     juce::var describeKey() const;
     int setAutotunesToKey();
+
+    // Song map (src/analysis/Structure.h): sections, bars and the performance's tempo.
+    juce::var handleSongMap (const juce::var& args);
+    void finishSongMap();
+    juce::var describeSongMap() const;
+    struct SongMapJob;
+    std::shared_ptr<SongMapJob> songMapJob;
+    std::optional<analysis::structure::SongMap> lastSongMap;
+    double lastSongMapOffset = 0.0; // seconds from the session's start to the analysed audio's start
+    int lastSongMapClip = -1;       // the clip analysed, -1 for the whole mix
     void withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
                       std::function<juce::var (const juce::File&)> action, Complete);
 
@@ -181,6 +199,7 @@ private:
     daw::DawEngine& engine;
     daw::Project& project;
     juce::PropertiesFile& settings;
+    bool matchLoops = settings.getBoolValue ("dawMatchLoops", true); // the library's "Match loops to the tempo"
     Emit emit;
     std::function<juce::int64()> roundTripLatency;
 

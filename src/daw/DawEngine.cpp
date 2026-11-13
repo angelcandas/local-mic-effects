@@ -1121,7 +1121,7 @@ void DawEngine::publish (std::unique_ptr<Graph> graph)
 }
 
 //==============================================================================
-void DawEngine::startPreview (juce::AudioBuffer<float>&& audio, float gain)
+void DawEngine::startPreview (juce::AudioBuffer<float>&& audio, float gain, bool loop, int delaySamples)
 {
     collectPreviews();
     setPreviewGain (gain);
@@ -1131,6 +1131,8 @@ void DawEngine::startPreview (juce::AudioBuffer<float>&& audio, float gain)
         return;
 
     previewPlaying = true;
+    previewLoopIncoming = loop;
+    previewDelayIncoming = juce::jmax (0, delaySamples);
     // One the audio thread hasn't picked up yet was never played: free it here.
     delete previewIncoming.exchange (new juce::AudioBuffer<float> (std::move (audio)), std::memory_order_acq_rel);
 }
@@ -1172,6 +1174,8 @@ void DawEngine::renderPreview (juce::AudioBuffer<float>& output, int numChannels
         retirePreview (previewActive);
         previewActive = next;
         previewPosition = 0;
+        previewLooping = previewLoopIncoming.load();
+        previewDelay = previewDelayIncoming.load();
     }
 
     if (previewStop.exchange (false))
@@ -1183,20 +1187,32 @@ void DawEngine::renderPreview (juce::AudioBuffer<float>& output, int numChannels
     if (previewActive == nullptr)
         return;
 
-    const auto count = juce::jmin (numSamples, previewActive->getNumSamples() - previewPosition);
     const auto gain = previewGain.load();
     const auto sourceChannels = previewActive->getNumChannels();
+    const auto length = previewActive->getNumSamples();
+    auto at = juce::jmin (previewDelay, numSamples);
+    previewDelay -= at;
 
-    for (int ch = 0; ch < numChannels && count > 0; ++ch)
-        output.addFrom (ch, 0, *previewActive, juce::jmin (ch, sourceChannels - 1), previewPosition, count, gain);
-
-    previewPosition += juce::jmax (0, count);
-
-    if (previewPosition >= previewActive->getNumSamples())
+    while (at < numSamples && previewActive != nullptr)
     {
-        retirePreview (previewActive);
-        previewActive = nullptr;
-        previewPlaying = false;
+        const auto count = juce::jmin (numSamples - at, length - previewPosition);
+        for (int ch = 0; ch < numChannels && count > 0; ++ch)
+            output.addFrom (ch, at, *previewActive, juce::jmin (ch, sourceChannels - 1), previewPosition, count, gain);
+
+        previewPosition += juce::jmax (0, count);
+        at += juce::jmax (0, count);
+
+        if (previewPosition >= length)
+        {
+            if (previewLooping && length > 0)
+            {
+                previewPosition = 0;
+                continue;
+            }
+            retirePreview (previewActive);
+            previewActive = nullptr;
+            previewPlaying = false;
+        }
     }
 }
 

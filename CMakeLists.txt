@@ -44,6 +44,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/fxpresets.js
         ui/daw.js
         ui/mixcheck.js
+        ui/songmap.js
         ui/rhythm.js
         ui/tempo.js
         ui/patterns.js
@@ -139,6 +140,8 @@ set(MICFX_DSP_SOURCES
     src/daw/DawEngine.cpp
     src/daw/Edit.cpp
     src/daw/Patterns.cpp
+    src/daw/Loops.cpp
+    src/daw/Loops.h
     src/daw/Patterns.h
     src/daw/Exporter.cpp
     src/daw/Instruments.cpp
@@ -385,5 +388,9 @@ if(MICFX_BUILD_TESTS)
     # JUCE_PLUGINHOST_AU=1 pulls in AUGenericView, which lives in CoreAudioKit.
     if(APPLE)
         target_link_libraries(MicFXTests PRIVATE "-framework CoreAudioKit")
+    endif()
+    # Function names in the backtrace a crashing test prints.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(MicFXTests PRIVATE -rdynamic)
     endif()
 endif()
