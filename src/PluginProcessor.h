@@ -9,6 +9,7 @@
 #include "PitchTap.h"
 #include "Scenes.h"
 #include "Setlist.h"
+#include "SoundCheck.h"
 #include "Multitrack.h"
 #include "Recorder.h"
 #include "daw/DawEngine.h"
@@ -92,6 +93,9 @@ public:
     // The singer's pitch before the effects, for the Practice view (off until it opens).
     PitchTap& getPitchTap() noexcept                        { return pitchTap; }
 
+    // Sound check: listens to the raw mic and sets the Live chain for it. Message thread.
+    SoundCheck& getSoundCheck() noexcept                    { return soundCheck; }
+
     // Backing track + recorded takes, mixed in after the voice chain (so the music
     // isn't processed or recorded with the voice). Message thread only.
     Multitrack& getMultitrack() noexcept                    { return multitrack; }
@@ -148,6 +152,7 @@ private:
     Looper looper;
     PitchTap pitchTap;
     Scenes scenes { *this, state };
+    SoundCheck soundCheck { state, chain, scenes };
     Setlist setlist { *this, scenes, looper, multitrack };
     MidiMap midiMap { state, looper, juce::JUCEApplicationBase::isStandaloneApp() || wrapperType != wrapperType_Undefined
                                          ? MidiMap::getDefaultFile() : juce::File() };

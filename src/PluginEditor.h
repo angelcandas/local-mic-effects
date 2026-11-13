@@ -15,7 +15,7 @@
 //   getRecorderSettings, startRecording, stopRecording, chooseRecordingFolder,
 //   setRecordDry (bool), revealRecording, getTracks, loadBackingTrack, setTrack (id, { gain, muted }),
 //   removeTrack (id), transport (action, seconds), getParameterInfo, looper (action, args), midi (action, args),
-//   scenes (action, args), setlist (action, args),
+//   scenes (action, args), setlist (action, args), soundCheck (action, args) (see SoundCheck; event "soundCheck"),
 //   daw (command, args) for the DAW screen (see DawBridge), practice (action, args) for the
 //   Practice view (see Practice; events "practice", "practicePitch", "practiceScore"),
 //   window (action): "fullScreen" toggles full screen; returns { available, fullScreen }.

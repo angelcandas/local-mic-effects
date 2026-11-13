@@ -56,6 +56,9 @@ public:
 
     const SpectralDenoiser& getDenoiser() const noexcept { return denoiser; }
 
+    // A noise profile learnt elsewhere (Sound check), taken while running. Message thread.
+    bool offerProfile (const std::vector<float>& powerPerBin) { return denoiser.offerProfile (powerPerBin); }
+
     // noise: the profile per band (dB, 60 Hz..16 kHz log-spaced), reduction: what each
     // band is turned down by right now (dB), learning: seconds learnt while Learn is on.
     void addReadings (juce::DynamicObject& readings) override
