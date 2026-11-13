@@ -5848,6 +5848,99 @@ namespace
             edit.removeTrack (backTrack);
         }
 
+        // Build backing vocals: a folded group of voices under the lead, from the chords of the rest.
+        {
+            const auto melodyFile = folder.getChildFile ("Lead.wav"), chordFile = folder.getChildFile ("Chords.wav");
+            writeWav (melodyFile, makeMelody(), sampleRate);
+            {
+                juce::AudioBuffer<float> chord (1, (int) (2.2 * sampleRate)); // A minor, under A3 B3 C4
+                for (int i = 0; i < chord.getNumSamples(); ++i)
+                {
+                    double v = 0.0;
+                    for (auto midi : { 45.0, 57.0, 60.0, 64.0 })
+                        for (int h = 1; h <= 4; ++h)
+                            v += std::sin (juce::MathConstants<double>::twoPi * h * 440.0 * std::pow (2.0, (midi - 69.0) / 12.0) * i / sampleRate) / h;
+                    chord.setSample (0, i, (float) (0.05 * v));
+                }
+                writeWav (chordFile, chord, sampleRate);
+            }
+            const auto before = edit.getTracks().size();
+            const auto leadTrack = (int) edit.addTrack ("Lead")[daw::ids::id];
+            const auto padTrack = (int) edit.addTrack ("Pad")[daw::ids::id];
+            const auto clipId = (int) bridge.importAudio (melodyFile, leadTrack, 4.0)["clip"];
+            bridge.importAudio (chordFile, padTrack, 4.0);
+
+            const auto build = [&] (juce::var request)
+            {
+                const auto started = run ("backingVocals", request);
+                juce::var done;
+                for (int i = 0; i < 3000 && done.isVoid() && ok (started); ++i)
+                {
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+                    events.clear();
+                    bridge.tick();
+                    for (const auto& [name, payload] : events)
+                        if (name == "dawBackingVocals" && payload["state"].toString() != "analysing")
+                            done = payload;
+                }
+                return std::make_pair (started, done);
+            };
+            const auto parts = juce::Array<juce::var> { "thirdAbove", "fifthBelow", "doubleTrack" };
+
+            check (! ok (run ("backingVocals", args ({ { "action", "start" }, { "id", clipId }, { "parts", juce::Array<juce::var>() } }))),
+                   "backing vocals need at least one voice");
+
+            const auto [started, done] = build (args ({ { "action", "start" }, { "id", clipId }, { "parts", parts }, { "feel", "tight" } }));
+            const auto group = edit.getReturn ((int) done["group"]);
+            juce::Array<juce::ValueTree> voices;
+            for (const auto& track : edit.getTracks())
+                if (daw::Edit::getTrackGroup (track) == (int) done["group"])
+                    voices.add (track);
+            check (ok (started) && done["state"].toString() == "done" && (int) done["count"] == 3 && daw::Edit::isGroup (group)
+                       && (bool) group.getProperty (daw::ids::folded, false) && voices.size() == 3,
+                   "three voices in a folded group (" + done["state"].toString() + " " + done["error"].toString() + ")");
+            check ((bool) done["listened"] && (int) done["chords"] >= 1, "the other tracks were listened to for chords (" + done["chords"].toString() + ", " + done["key"].toString() + ")");
+
+            auto allGood = voices.size() == 3;
+            for (const auto& track : voices)
+            {
+                const auto clip = track.getChildWithName (daw::ids::CLIP);
+                allGood = allGood && track[daw::ids::mixRole].toString() == "background" && (float) track[daw::ids::volume] < -3.0f
+                       && clip.isValid() && std::abs ((double) clip[daw::ids::start] - 4.0) < 1.0e-6 && clip.hasProperty (daw::ids::pitchNotes)
+                       && clip.hasProperty (daw::ids::warp);
+            }
+            check (allGood, "each voice: tagged as a backing vocal, under the lead, a copy of the clip with its notes and timing");
+            if (voices.size() == 3)
+                check (std::abs ((float) voices[0][daw::ids::pan] + 0.35f) < 1.0e-3f && std::abs ((float) voices[1][daw::ids::pan] - 0.35f) < 1.0e-3f
+                           && std::abs ((float) voices[2][daw::ids::pan]) < 1.0e-3f
+                           && edit.getTracks().indexOf (voices[0]) == edit.getTracks().indexOf (edit.getTrack (leadTrack)) + 1,
+                       "panned in a pair, the odd one in the middle, right under the lead");
+            if (! voices.isEmpty())
+            {
+                // A3 B3 C4 over A minor: a third above sings C D E.
+                const auto shifts = daw::Edit::getClipNotes (voices[0].getChildWithName (daw::ids::CLIP));
+                juce::String sung;
+                for (const auto& n : shifts)
+                    sung << juce::String (n.pitch + n.shift, 1) << " ";
+                check (shifts.size() == 3 && std::abs (shifts[0].pitch + shifts[0].shift - 60.0f) < 0.15f
+                           && std::abs (shifts[1].pitch + shifts[1].shift - 62.0f) < 0.15f && std::abs (shifts[2].pitch + shifts[2].shift - 64.0f) < 0.15f,
+                       "the third above sings " + sung.trim());
+            }
+
+            edit.getUndoManager().undo();
+            check (edit.getTracks().size() == before + 2 && ! daw::Edit::isGroup (edit.getReturn ((int) done["group"])),
+                   "Build backing vocals undoes in one step");
+
+            const auto [keyStarted, keyDone] = build (args ({ { "action", "start" }, { "id", clipId }, { "parts", juce::Array<juce::var> { "octaveBelow" } },
+                                                              { "feel", "loose" }, { "follow", "key" } }));
+            check (keyDone["state"].toString() == "done" && (int) keyDone["count"] == 1 && ! (bool) keyDone["listened"],
+                   "key only: one voice, the other tracks not listened to");
+            edit.getUndoManager().undo();
+
+            run ("removeTrack", args ({ { "id", leadTrack } }));
+            run ("removeTrack", args ({ { "id", padTrack } }));
+        }
+
         project.close();
         DawBridge::availableForTesting = false;
         folder.deleteRecursively();
