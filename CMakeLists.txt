@@ -49,6 +49,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/clipeditor.js
         ui/warptool.js
         ui/hitpointtool.js
+        ui/tempotool.js
         ui/pitchedit.js
         ui/tempo.js
         ui/patterns.js
