@@ -52,7 +52,7 @@ public:
     // How fast the file plays at a moment of the rendered copy (1 = normal, 0.5 = half speed).
     double getRateAt (double targetSeconds) const noexcept;
 
-    // "source:target;source:target..." in seconds, for the project file. Empty for the identity.
+    // "source:target;source:target..." in seconds, for the project file. Empty with no markers.
     juce::String toString() const;
     static Map fromString (const juce::String&);
 

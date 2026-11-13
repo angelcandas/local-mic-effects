@@ -806,6 +806,10 @@ body.is-daw .chip--live { display: none; }
 .export-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .export-options { display: grid; gap: 8px; }
 .export-options label { display: grid; grid-template-columns: 70px 1fr; align-items: center; color: var(--muted); }
+.export-options label[hidden] { display: none; }
+.export-options .text-input { min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 8px; background: #080a0e; color: var(--text); font: inherit; }
+.export-folder { display: flex; gap: 6px; min-width: 0; }
+.export-folder .text-input { flex: 1; text-overflow: ellipsis; }
 .export-options label.check { display: flex; gap: 8px; color: var(--text); }
 .export-options input[type=checkbox] { accent-color: var(--accent); }
 .automix-effects { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }
@@ -1510,17 +1514,17 @@ body.library-dragging * { cursor: grabbing !important; }
 
 /* The clip editor: an audio clip's waveform for pitch and warping (rhythm.js). */
 .inspector .clip-editor {
-  flex: 1 0 560px;
+  flex: 3 0 760px;
   align-self: stretch;
   gap: 12px;
-  min-width: 560px;
+  min-width: 700px;
   padding: 8px 10px 10px;
   border: 1px solid var(--line);
   border-radius: 12px;
   background: linear-gradient(180deg, var(--panel-raised), var(--panel));
 }
 .clip-editor .knob { --cat: var(--accent-2); }
-.clip-editor-side { display: flex; flex: none; flex-direction: column; gap: 6px; width: 180px; min-height: 0; overflow-y: auto; }
+.clip-editor-side { display: flex; flex: none; flex-direction: column; gap: 6px; width: 200px; min-height: 0; overflow-y: auto; }
 .clip-editor-side .rhythm-algorithm-row { margin-top: 0; }
 .rhythm-key-info, .rhythm-algorithm-info { margin: 0; line-height: 1.35; }
 .clip-editor-main { display: flex; flex: 1; flex-direction: column; gap: 6px; min-width: 0; min-height: 0; }
@@ -1554,6 +1558,64 @@ body.library-dragging * { cursor: grabbing !important; }
 .inspector .clip-editor.is-notes { flex: 3 0 720px; }
 .clip-editor.is-notes .clip-editor-side { display: none; }
 .clip-editor-views .segment.has-edits::after { content: " \2022"; color: var(--accent-2); }
+
+/* Tool sections on the left (clipeditor.js): the open one is the tool. */
+.clip-tools { display: flex; flex-direction: column; gap: 4px; min-height: 0; }
+.clip-tool { border: 1px solid var(--line); border-radius: 8px; background: rgba(255, 255, 255, 0.02); }
+.clip-tool.is-open { border-color: color-mix(in srgb, var(--accent-2) 55%, var(--line)); background: rgba(255, 255, 255, 0.04); }
+.clip-tool-head {
+  display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 5px 8px;
+  border: 0; background: none; color: var(--muted); font: inherit; font-size: 11.5px; font-weight: 600; text-align: left; cursor: pointer;
+}
+.clip-tool-head:hover, .clip-tool.is-open .clip-tool-head { color: var(--text); }
+.clip-tool-head .key-chip { font-size: 10px; opacity: 0.7; }
+.clip-tool-body { display: flex; flex-direction: column; gap: 6px; padding: 0 8px 8px; }
+.clip-tool-body[hidden] { display: none; }
+.clip-tool-body .panel-caption { margin: 0; line-height: 1.35; }
+.clip-tool-body .panel-actions { margin-top: 0; flex-wrap: wrap; }
+.clip-tool-body .tool { height: 24px; padding: 0 8px; font-size: 11px; }
+.warp-tool-note { color: var(--accent-2) !important; }
+.warp-tool-note[hidden] { display: none; }
+
+/* Toolbar extras. */
+.clip-editor-bar .rhythm-algorithm-row { margin-top: 0; flex-wrap: nowrap; }
+.clip-editor-bar .tool.is-accent, .clip-editor-compare .segment.is-selected { color: var(--accent-2); border-color: var(--accent-2); }
+.clip-editor-compare { display: flex; align-items: center; flex: none; }
+.clip-editor-compare-label { margin-right: 6px; color: var(--muted); font-size: 11px; }
+.clip-editor-compare .segment[hidden] { display: none; }
+
+/* Overview, ruler, playhead, loop, ranges. */
+.clip-editor-overview { flex: none; width: 100%; height: 18px; border: 1px solid var(--line); border-radius: 5px; background: rgba(0, 0, 0, 0.25); cursor: pointer; }
+.clip-editor-overview[hidden] { display: none; }
+.clip-editor-wave { cursor: default; }
+.clip-editor-wave.is-tool { cursor: crosshair; }
+.clip-editor-wave.is-tool.is-on-tab, .clip-editor-wave.is-tool.is-in-ruler.is-on-tab { cursor: ew-resize; }
+.clip-editor-wave.is-tool.is-in-ruler { cursor: default; }
+.clip-editor-hits, .clip-editor-tools { position: absolute; inset: 0; }
+.clip-editor-hits .hitpoint { top: 20px; }
+.clip-editor-playhead { position: absolute; top: 0; bottom: 0; left: 0; z-index: 4; width: 0; border-left: 1px solid #fff; pointer-events: none; }
+.clip-editor-playhead[hidden], .clip-editor-loop[hidden] { display: none; }
+.clip-editor-loop { position: absolute; top: 0; height: 20px; background: rgba(255, 255, 255, 0.08); pointer-events: none; }
+.clip-editor-loop.is-on { background: color-mix(in srgb, var(--accent-2) 30%, transparent); }
+.clip-editor-range { position: absolute; top: 0; height: 20px; background: rgba(255, 255, 255, 0.18); pointer-events: none; }
+.clip-editor-range.is-select { border: 1px dashed rgba(255, 255, 255, 0.7); background: rgba(255, 255, 255, 0.08); }
+
+/* Warp tabs (warptool.js): a line, a handle in the ruler lane, the factor of the audio before it. */
+.warp-tab { position: absolute; z-index: 3; width: 0; border-left: 2px solid var(--accent-2); pointer-events: none; }
+.warp-tab::before { content: ""; position: absolute; top: 3px; left: -6px; width: 10px; height: 13px; border-radius: 3px; background: var(--accent-2); }
+.warp-tab.is-selected { border-left-color: #fff; }
+.warp-tab.is-selected::before { background: #fff; box-shadow: 0 0 0 2px var(--accent-2); }
+.warp-tab.is-quiet { opacity: 0.45; border-left-width: 1px; }
+.warp-tab.is-quiet::before { top: 0; left: -4px; width: 0; height: 0; border: 4px solid transparent; border-top-color: var(--accent-2); border-radius: 0; background: none; }
+.warp-tab.is-dragging { border-left-style: dashed; }
+.warp-factor {
+  position: absolute; top: 4px; right: 8px; padding: 0 3px; border-radius: 3px;
+  background: rgba(0, 0, 0, 0.55); color: var(--text); font-size: 9.5px; line-height: 12px; white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.warp-factor.is-far { color: #f5b942; }
+.warp-factor.is-extreme { color: #ff6b6b; }
+.warp-hover { position: absolute; z-index: 2; width: 0; border-left: 1px dashed rgba(255, 255, 255, 0.55); pointer-events: none; }
+.warp-hover.is-on-hit { border-left: 1px solid var(--accent-2); }
 
 /* The note pitch editor (pitchedit.js): sung notes on a keyboard, with a loudness lane. */
 .note-editor { display: flex; flex: 1; flex-direction: column; gap: 4px; min-height: 150px; outline: none; }
