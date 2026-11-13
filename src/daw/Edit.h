@@ -238,6 +238,13 @@ public:
     TempoMap getTempoMap() const;
     void setTempoMap (const TempoMap&);
 
+    // "Follow the performance": a tempo map from played beats (seconds, e.g. from
+    // analysis::rhythm::detectTempo or the song map), thinned to one tempo point per bar so
+    // the bar lines land on the beats at firstDownbeat, firstDownbeat + beatsPerBar...
+    // (see TempoMap::fromDownbeats). One undoable edit. Returns the whole bars put before the
+    // first downbeat, or -1 (and changes nothing) with fewer than two bars of beats.
+    int setTempoMapFromBeats (const std::vector<double>& beats, int firstDownbeat);
+
     // Sets the tempo of the point in force at a time (the start tempo while it's steady).
     void setTempoAt (double seconds, double bpm);
 

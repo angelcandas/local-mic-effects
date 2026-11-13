@@ -109,6 +109,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/TakeComp.h
     src/analysis/ToMidi.cpp
     src/analysis/ToMidi.h
+    src/analysis/Structure.cpp
+    src/analysis/Structure.h
     src/analysis/Harmony.cpp
     src/analysis/Harmony.h
     src/Parameters.cpp

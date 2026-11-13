@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <vector>
 
 namespace daw
 {
@@ -139,5 +140,63 @@ TempoMap TempoMap::fromProject (double tempo, const juce::String& changes)
     }
 
     return TempoMap (std::move (parsed));
+}
+
+TempoMap TempoMap::fromDownbeats (std::vector<double> downbeats, int beatsPerBar, int* leadInBars)
+{
+    if (leadInBars != nullptr)
+        *leadInBars = 0;
+
+    downbeats.erase (std::remove_if (downbeats.begin(), downbeats.end(), [] (double t) { return ! std::isfinite (t); }), downbeats.end());
+    std::sort (downbeats.begin(), downbeats.end());
+    downbeats.erase (std::unique (downbeats.begin(), downbeats.end(), [] (double a, double b) { return b - a < 1.0e-3; }), downbeats.end());
+
+    if (downbeats.size() < 2)
+        return TempoMap (120.0);
+
+    const auto bar = (double) juce::jlimit (1, 16, beatsPerBar);
+    const auto numBars = downbeats.size() - 1;
+
+    // Misplaced bar lines: bar k runs long and bar k + 1 short (or the other way round) by
+    // more than 12 % of the local bar length, while the two together keep the pace.
+    for (int pass = 0; pass < 2; ++pass)
+        for (size_t k = 0; k + 2 < downbeats.size(); ++k)
+        {
+            std::vector<double> nearby;
+            for (auto j = (size_t) juce::jmax (0, (int) k - 2); j <= juce::jmin (numBars - 1, k + 3); ++j)
+                nearby.push_back (downbeats[j + 1] - downbeats[j]);
+            std::nth_element (nearby.begin(), nearby.begin() + (long) nearby.size() / 2, nearby.end());
+            const auto typical = nearby[nearby.size() / 2];
+
+            const auto first = downbeats[k + 1] - downbeats[k], second = downbeats[k + 2] - downbeats[k + 1];
+            if (std::abs (first - typical) > 0.12 * typical && std::abs (second - typical) > 0.12 * typical
+                && std::abs (first + second - 2.0 * typical) < 0.08 * typical)
+                downbeats[k + 1] = downbeats[k] + 0.5 * (first + second);
+        }
+
+    const auto bpmOf = [bar] (double seconds) { return juce::jlimit (minBpm, maxBpm, 60.0 * bar / seconds); };
+    const auto firstBarBpm = bpmOf (downbeats[1] - downbeats[0]);
+
+    // The lead-in: whole bars from 0 s to the first downbeat, at the tempo nearest the first bar's.
+    int lead = 0;
+    auto leadBpm = firstBarBpm;
+    if (const auto t0 = downbeats.front(); t0 > 1.0e-3)
+    {
+        const auto barSeconds = 60.0 * bar / firstBarBpm;
+        lead = juce::jmax (1, (int) std::lround (t0 / barSeconds));
+        leadBpm = juce::jlimit (minBpm, maxBpm, 60.0 * bar * lead / t0);
+    }
+
+    std::vector<Point> points { { 0.0, leadBpm, false } };
+    for (size_t k = 0; k < numBars; ++k)
+    {
+        const auto bpm = bpmOf (downbeats[k + 1] - downbeats[k]);
+        if (std::abs (bpm - points.back().bpm) > 0.01)
+            points.push_back ({ (lead + (double) k) * bar, bpm, false });
+    }
+
+    if (leadInBars != nullptr)
+        *leadInBars = lead;
+    return TempoMap (std::move (points));
 }
 }

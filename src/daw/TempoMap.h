@@ -57,6 +57,14 @@ public:
     // The nearest line of a grid `steps` beats apart.
     double snap (double seconds, double steps) const noexcept;
 
+    // A tempo map that follows a performance played without a click: the bar lines land on
+    // `downbeats` (seconds, the start of each bar, in order), with one tempo step per bar.
+    // A bar line that is clearly misplaced (its two bars swing apart while the pair keeps
+    // the pace) moves to the middle. The music before the first downbeat becomes whole
+    // lead-in bars at a tempo close to the first bar's (their count goes to `leadInBars`).
+    // Fewer than two downbeats give a steady 120 BPM.
+    static TempoMap fromDownbeats (std::vector<double> downbeats, int beatsPerBar, int* leadInBars = nullptr);
+
     // The points after the first, "beat:bpm:ramp;..." (ramp 0 or 1), for the project file.
     // The first point's tempo is the project's `tempo`.
     juce::String changesToString() const;

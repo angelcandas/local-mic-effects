@@ -616,6 +616,21 @@ void Edit::setTempoMap (const TempoMap& map)
         placeByBeats (placed.clip, after, placed.anchor, placed.start, placed.end);
 }
 
+int Edit::setTempoMapFromBeats (const std::vector<double>& beats, int firstDownbeat)
+{
+    const auto bar = getBeatsPerBar();
+    std::vector<double> downbeats;
+    for (auto i = (size_t) juce::jmax (0, firstDownbeat); i < beats.size(); i += (size_t) bar)
+        downbeats.push_back (beats[i]);
+
+    if (downbeats.size() < 2)
+        return -1;
+
+    int leadIn = 0;
+    setTempoMap (TempoMap::fromDownbeats (std::move (downbeats), bar, &leadIn));
+    return leadIn;
+}
+
 void Edit::placeByBeats (juce::ValueTree& clip, const TempoMap& tempo, double anchorBeat, double startBeat, double endBeat)
 {
     const auto anchor = tempo.toSeconds (anchorBeat);
