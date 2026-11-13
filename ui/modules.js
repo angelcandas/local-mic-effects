@@ -160,13 +160,21 @@ export const MODULES = [
     controls: [knob("doublerMix", "Mix"), knob("doublerSpread", "Spread")] },
 
   { id: "echo", name: "Echo", category: "space", power: "delayOn", wide: true,
-    description: "Repeats that darken as they fade",
-    controls: [knob("delayTime", "Time"), knob("delayFeedback", "Feedback"), knob("delayMix", "Mix"), toggle("delayPingPong", "Ping-pong")] },
+    description: "Repeats that darken as they fade. Sync follows the song's tempo; Duck keeps the repeats out of the way while you sing",
+    controls: [choice("delaySync", "Sync"), { ...knob("delayTime", "Time"), when: { delaySync: [0] } },
+               knob("delayFeedback", "Feedback"), knob("delayMix", "Mix"), toggle("delayPingPong", "Ping-pong"),
+               knob("delayDuck", "Duck"), knob("delayLowCut", "Low cut"), knob("delayHighCut", "High cut")] },
 
   { id: "reverb", name: "Reverb", category: "space", power: "reverbOn", wide: true,
     description: "Puts your voice in a room",
     controls: [{ type: "reverb-graphic" }, knob("reverbMix", "Mix"), knob("reverbSize", "Size"),
                knob("reverbDamping", "Damping"), knob("reverbWidth", "Width")] },
+
+  { id: "plate", name: "Plate Reverb", category: "space", power: "plateOn", wide: true,
+    description: "The classic vocal reverb: smooth, bright and dense. Pre-delay keeps the words clear; Duck lets it bloom in the gaps",
+    controls: [knob("plateMix", "Mix"), knob("plateDecay", "Decay"), knob("platePreDelay", "Pre-delay"),
+               knob("plateDamping", "Damping"), knob("plateLowCut", "Low cut"), knob("plateHighCut", "High cut"),
+               knob("plateMod", "Movement"), knob("plateWidth", "Width"), knob("plateDuck", "Duck")] },
 
   { id: "irverb", name: "IR Reverb", category: "space", power: "irvOn", wide: true,
     description: "A real-sounding room from an impulse response: a built-in space or your own file",
@@ -221,7 +229,7 @@ export const MODULE_KEYS = {
   comp: "compressor", opto: "opto", autolevel: "autoLevel", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
   crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", amp: "amp", cab: "cab", tremolo: "tremolo",
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
-  echo: "echo", reverb: "reverb", irverb: "irReverb", width: "width",
+  echo: "echo", reverb: "reverb", plate: "plate", irverb: "irReverb", width: "width",
   meq: "masterEq", mb: "multiband", imager: "imager", limiter: "limiter", loudness: "loudness",
   transient: "transient", deq: "dynamicEq",
 };

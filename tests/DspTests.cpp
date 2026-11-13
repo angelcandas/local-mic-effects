@@ -1153,6 +1153,246 @@ namespace
         }
     }
 
+    //==========================================================================
+    // Space: the plate reverb, the echo's sync, duck and cuts.
+    void testSpace()
+    {
+        std::cout << "\nSpace (plate reverb, echo sync, duck and cuts)\n";
+
+        const auto runStereo = [] (fx::FxChain& chain, const std::vector<float>& left, const std::vector<float>& right,
+                                   std::vector<float>& outLeft, std::vector<float>& outRight)
+        {
+            chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            outLeft.clear(); outRight.clear();
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            for (size_t start = 0; start + blockSize <= left.size(); start += blockSize)
+            {
+                buffer.copyFrom (0, 0, left.data() + start, blockSize);
+                buffer.copyFrom (1, 0, right.data() + start, blockSize);
+                juce::dsp::AudioBlock<float> block (buffer);
+                chain.process (fx::Module::Context (block));
+                outLeft.insert (outLeft.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+                outRight.insert (outRight.end(), buffer.getReadPointer (1), buffer.getReadPointer (1) + blockSize);
+            }
+        };
+        const auto plateChain = [] ()
+        {
+            auto chain = std::make_unique<fx::FxChain> (std::vector<fx::ModuleType> { fx::ModuleType::plate });
+            chain->setValue ("plateOn", 1.0f);
+            chain->setValue ("plateMix", 100.0f); // wet only
+            return chain;
+        };
+
+        // Decay: the measured RT60 is within 15 % of the knob.
+        for (const auto decay : { 0.8f, 1.8f, 4.0f })
+        {
+            auto chain = plateChain();
+            chain->setValue ("plateDecay", decay);
+            chain->setValue ("plateDamping", 0.0f);
+            chain->setValue ("plateMod", 0.0f);
+            chain->setValue ("platePreDelay", 0.0f);
+            chain->setValue ("plateLowCut", 20.0f);
+            chain->setValue ("plateHighCut", 20000.0f);
+            std::vector<float> impulse ((size_t) ((decay * 1.5 + 0.5) * sampleRate)), l, r;
+            impulse[100] = 1.0f;
+            runStereo (*chain, impulse, impulse, l, r);
+
+            // Schroeder backward integration of the energy.
+            std::vector<double> edc (l.size());
+            double sum = 0.0;
+            for (size_t i = l.size(); i-- > 0;)
+                edc[i] = (sum += (double) l[i] * l[i] + (double) r[i] * r[i]);
+            const auto at = [&] (double db)
+            {
+                for (size_t i = 0; i < edc.size(); ++i)
+                    if (10.0 * std::log10 (edc[i] / edc[0]) < db)
+                        return (double) i / sampleRate;
+                return 99.0;
+            };
+            const auto rt60 = 2.0 * (at (-35.0) - at (-5.0));
+            check (std::abs (rt60 - decay) < 0.15 * decay,
+                   "plate decay " + juce::String (decay, 1) + " s measures " + juce::String (rt60, 2) + " s (within 15 %)");
+        }
+
+        // Longest decay: stays finite, no DC, and the tail falls below -100 dB in silence.
+        {
+            auto chain = plateChain();
+            chain->setValue ("plateDecay", 6.0f);
+            juce::Random random (3);
+            std::vector<float> input ((size_t) (40.0 * sampleRate)), l, r;
+            for (size_t i = 0; i < (size_t) (2.0 * sampleRate); ++i)
+                input[i] = 0.3f * (random.nextFloat() * 2.0f - 1.0f) + 0.2f; // with an offset
+            runStereo (*chain, input, input, l, r);
+            bool finite = true;
+            float peak = 0.0f;
+            double mean = 0.0;
+            for (size_t i = 0; i < l.size(); ++i)
+            {
+                finite = finite && std::isfinite (l[i]) && std::isfinite (r[i]);
+                peak = std::max (peak, std::abs (l[i]));
+            }
+            for (size_t i = (size_t) (0.5 * sampleRate); i < (size_t) (2.0 * sampleRate); ++i)
+                mean += l[i];
+            mean /= 1.5 * sampleRate;
+            check (finite && peak < 4.0f, "plate at 6 s stays finite and bounded (peak " + juce::String (peak, 2) + ")");
+            check (std::abs (mean) < 0.01, "plate passes no DC (mean " + juce::String (mean, 4) + ")");
+            const auto tail = rmsDb (l, l.size() - (size_t) sampleRate, l.size());
+            check (tail < -100.0f, "the 6 s tail falls below -100 dB in silence (" + juce::String (tail, 1) + " dB)");
+        }
+
+        // Mono in gives decorrelated stereo out.
+        {
+            auto chain = plateChain();
+            const auto voice = makeVoice (200.0f, 2.0, 0.3f);
+            std::vector<float> l, r;
+            runStereo (*chain, voice, voice, l, r);
+            double lr = 0.0, ll = 0.0, rr = 0.0;
+            for (size_t i = (size_t) (0.5 * sampleRate); i < l.size(); ++i)
+            {
+                lr += (double) l[i] * r[i]; ll += (double) l[i] * l[i]; rr += (double) r[i] * r[i];
+            }
+            const auto correlation = lr / std::sqrt (ll * rr + 1e-30);
+            check (std::abs (correlation) < 0.5, "mono in gives decorrelated stereo (correlation " + juce::String (correlation, 2) + ")");
+
+            chain->setValue ("plateWidth", 0.0f);
+            runStereo (*chain, voice, voice, l, r);
+            float worst = 0.0f;
+            for (size_t i = 0; i < l.size(); ++i)
+                worst = std::max (worst, std::abs (l[i] - r[i]));
+            check (worst < 1.0e-5f, "width 0 % is mono");
+        }
+
+        // Duck: while the voice is present the reverb is clearly lower.
+        {
+            const auto voice = makeVoice (200.0f, 3.0, 0.3f);
+            const auto wetDuring = [&] (float duck)
+            {
+                auto chain = plateChain();
+                chain->setValue ("plateDuck", duck);
+                std::vector<float> l, r;
+                runStereo (*chain, voice, voice, l, r);
+                return rmsDb (l, (size_t) (1.5 * sampleRate), (size_t) (2.9 * sampleRate));
+            };
+            const auto depth = wetDuring (0.0f) - wetDuring (100.0f);
+            check (depth > 10.0f, "plate duck 100 % dips the reverb under the voice by " + juce::String (depth, 1) + " dB");
+        }
+
+        // Switched off, the tail rings on and the dry is untouched.
+        {
+            auto chain = plateChain();
+            chain->setValue ("plateMix", 30.0f);
+            auto& plate = *chain->find (fx::ModuleType::plate);
+            chain->prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            const auto voice = makeVoice (200.0f, 1.0, 0.3f);
+            for (size_t start = 0; start + blockSize <= voice.size(); start += blockSize)
+            {
+                for (int ch = 0; ch < 2; ++ch) buffer.copyFrom (ch, 0, voice.data() + start, blockSize);
+                juce::dsp::AudioBlock<float> block (buffer);
+                chain->process (fx::Module::Context (block));
+            }
+            plate.findValue ("plateOn")->store (0.0f);
+            buffer.clear();
+            juce::dsp::AudioBlock<float> block (buffer);
+            chain->process (fx::Module::Context (block));
+            check (buffer.getMagnitude (0, 0, blockSize) > 1.0e-3f, "switching the plate off lets its tail ring");
+        }
+
+        // Echo at its defaults is the original echo, bit for bit (this is its old loop).
+        {
+            const auto voice = makeVoice (180.0f, 1.0, 0.4f);
+            auto chain = std::make_unique<fx::FxChain> (std::vector<fx::ModuleType> { fx::ModuleType::echo });
+            chain->setValue ("delayOn", 1.0f);
+            std::vector<float> l, r;
+            runStereo (*chain, voice, voice, l, r);
+
+            juce::dsp::DelayLine<float, juce::dsp::DelayLineInterpolationTypes::Linear> line;
+            line.setMaximumDelayInSamples ((int) std::ceil (sampleRate * 1.6));
+            line.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            juce::SmoothedValue<float, juce::ValueSmoothingTypes::Linear> delaySamples;
+            delaySamples.reset (sampleRate, 0.15);
+            delaySamples.setCurrentAndTargetValue (350.0f * 0.001f * (float) sampleRate);
+            const auto damping = 1.0f - (float) std::exp (-1.0 / ((1.0 / (juce::MathConstants<double>::twoPi * 5000.0)) * sampleRate));
+            std::array<float, 2> state {};
+            float worst = 0.0f;
+            for (size_t i = 0; i < l.size(); ++i)
+            {
+                const auto delay = delaySamples.getNextValue();
+                std::array<float, 2> echoes {};
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    echoes[(size_t) ch] = line.popSample (ch, delay);
+                    state[(size_t) ch] += damping * (echoes[(size_t) ch] - state[(size_t) ch]);
+                }
+                for (int ch = 0; ch < 2; ++ch)
+                    line.pushSample (ch, voice[i] + 0.35f * state[(size_t) ch]);
+                worst = std::max (worst, std::abs (l[i] - (voice[i] + 0.25f * echoes[0])));
+            }
+            check (worst == 0.0f, "echo at its defaults is the original echo, bit for bit");
+        }
+
+        // Sync: 1/4 at 120 bpm is 500 ms; a half note at 50 bpm halves until it fits.
+        {
+            check (std::abs (fx::modules::Echo::syncedMs (7, 120.0) - 500.0f) < 0.01f, "1/4 at 120 bpm is 500 ms");
+            check (std::abs (fx::modules::Echo::syncedMs (6, 120.0) - 375.0f) < 0.01f, "dotted 1/8 at 120 bpm is 375 ms");
+            check (std::abs (fx::modules::Echo::syncedMs (9, 50.0) - 1200.0f) < 0.01f, "a half note at 50 bpm halves to 1200 ms");
+            check (fx::modules::Echo::syncedMs (7, 0.0) == 0.0f, "no tempo: the echo keeps its own time");
+
+            auto chain = std::make_unique<fx::FxChain> (std::vector<fx::ModuleType> { fx::ModuleType::echo });
+            chain->setValue ("delayOn", 1.0f);
+            chain->setValue ("delaySync", 7.0f);
+            chain->setValue ("delayFeedback", 0.0f);
+            chain->setValue ("delayMix", 100.0f);
+            chain->setTempo (96.0); // a quarter is 625 ms
+            std::vector<float> impulse ((size_t) sampleRate), l, r;
+            impulse[0] = 1.0f;
+            runStereo (*chain, impulse, impulse, l, r);
+            size_t loudest = 1;
+            for (size_t i = 1; i < l.size(); ++i)
+                if (std::abs (l[i]) > std::abs (l[loudest])) loudest = i;
+            check (std::abs ((double) loudest / sampleRate - 0.625) < 0.002, "a synced echo follows the chain's tempo (1/4 at 96 bpm repeats at "
+                                                                                + juce::String ((double) loudest / sampleRate * 1000.0, 1) + " ms)");
+        }
+
+        // Duck and cuts on the repeats.
+        {
+            const auto voice = makeVoice (200.0f, 3.0, 0.3f);
+            const auto echoDuring = [&] (float duck, float lowCut, float highCut, std::vector<float>& wetOnly)
+            {
+                auto chain = std::make_unique<fx::FxChain> (std::vector<fx::ModuleType> { fx::ModuleType::echo });
+                chain->setValue ("delayOn", 1.0f);
+                chain->setValue ("delayDuck", duck);
+                chain->setValue ("delayLowCut", lowCut);
+                chain->setValue ("delayHighCut", highCut);
+                std::vector<float> l, r;
+                runStereo (*chain, voice, voice, l, r);
+                wetOnly.resize (l.size());
+                for (size_t i = 0; i < l.size(); ++i)
+                    wetOnly[i] = l[i] - voice[i];
+                return rmsDb (wetOnly, (size_t) (1.5 * sampleRate), (size_t) (2.9 * sampleRate));
+            };
+            std::vector<float> plain, ducked, cut;
+            const auto depth = echoDuring (0.0f, 20.0f, 5000.0f, plain) - echoDuring (100.0f, 20.0f, 5000.0f, ducked);
+            check (depth > 10.0f, "echo duck 100 % dips the repeats under the voice by " + juce::String (depth, 1) + " dB");
+            echoDuring (0.0f, 800.0f, 5000.0f, cut);
+            check (highBandDb (cut) > highBandDb (plain) - 1.0f && rmsDb (cut, 0, cut.size()) < rmsDb (plain, 0, plain.size()) - 2.0f,
+                   "echo low cut thins the repeats");
+        }
+
+        // Live has the plate right after the reverb, off by default.
+        {
+            const auto all = fx::FxChain::getAllTypes();
+            const auto reverb = std::find (all.begin(), all.end(), fx::ModuleType::reverb);
+            check (reverb + 1 != all.end() && *(reverb + 1) == fx::ModuleType::plate, "Live runs the plate right after the reverb");
+            PluginProcessor processor;
+            check (! processor.getLiveChain().find (fx::ModuleType::plate)->isOn(), "the plate starts off in Live");
+            processor.setEchoTapTempo (90.0);
+            check (std::abs (processor.getLiveTempo() - 90.0) < 1.0e-9, "Live's synced echo follows the tapped tempo");
+            processor.setEchoTapTempo (0.0);
+            check (processor.getLiveTempo() > 0.0, "with no tap it follows the looper's tempo");
+        }
+    }
+
     void testAutoMixEffects()
     {
         std::cout << "\nAuto Mix adds effects\n";
@@ -15548,6 +15788,7 @@ int main()
     {
         testFxChain();
         testVocalDynamics();
+    testSpace();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -15765,6 +16006,7 @@ int main()
     testAutoMixSends();
     testDynamics();
     testVocalDynamics();
+    testSpace();
     testEffectAutomation();
     testAnalysisSpeed();
     testLatency();

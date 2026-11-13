@@ -168,6 +168,21 @@ void PluginProcessor::updateDspParameters()
     }
 }
 
+double PluginProcessor::getLiveTempo() noexcept
+{
+    // The echo card's tap, else the host's tempo (in the plug-in), else the looper's,
+    // which follows the setlist song.
+    if (const auto tapped = echoTapTempo.load (std::memory_order_relaxed); tapped > 0.0)
+        return tapped;
+
+    if (auto* head = getPlayHead())
+        if (const auto position = head->getPosition())
+            if (const auto bpm = position->getBpm(); bpm.hasValue() && *bpm > 0.0)
+                return *bpm;
+
+    return looper.getBpm();
+}
+
 void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
@@ -233,6 +248,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     // The Practice view follows the singer's own pitch, before any effect touches it.
     pitchTap.process (buffer.getReadPointer (0), numSamples, multitrack.getPosition());
     soundCheck.capture (buffer.getReadPointer (0), numSamples); // the same raw mic, for Sound check
+
+    chain.setTempo (getLiveTempo());
 
     if (! dryCompare.load())
         chain.process (context);

@@ -847,6 +847,48 @@ public:
     Value& feedback = addValue ("delayFeedback", 35.0f);
     Value& mix      = addValue ("delayMix", 25.0f);
     Value& pingPong = addChoice ("delayPingPong", 0.0f);
+    Value& sync     = addChoice ("delaySync", 0.0f);      // 0 = off, else a note value (getSyncNames)
+    Value& duck     = addValue ("delayDuck", 0.0f);       // %
+    Value& lowCut   = addValue ("delayLowCut", fx::Echo::defaultLowCutHz);
+    Value& highCut  = addValue ("delayHighCut", fx::Echo::defaultHighCutHz);
+
+    static juce::StringArray getSyncNames()
+    {
+        return { "Off", "1/32", "1/16", "1/16 triplet", "1/8", "1/8 triplet", "Dotted 1/8", "1/4", "Dotted 1/4", "1/2" };
+    }
+
+    // The echo time for a synced note value at a tempo: halved while it is longer than
+    // 1.5 s (a slow song's half note), and no shorter than 20 ms. 0 when not synced or
+    // there is no tempo.
+    static float syncedMs (int note, double bpm) noexcept
+    {
+        static constexpr double beats[] = { 0.0, 0.125, 0.25, 1.0 / 6.0, 0.5, 1.0 / 3.0, 0.75, 1.0, 1.5, 2.0 };
+        if (note <= 0 || note >= (int) std::size (beats) || bpm <= 0.0)
+            return 0.0f;
+
+        auto ms = beats[note] * 60000.0 / bpm;
+        while (ms > 1500.0)
+            ms *= 0.5;
+        return (float) std::max (20.0, ms);
+    }
+
+    void setTempo (double bpm) noexcept override { tempo.store (bpm, std::memory_order_relaxed); }
+
+    // The echo time it is using now (ms), for the card.
+    float getEffectiveTimeMs() const noexcept
+    {
+        const auto synced = syncedMs (index (sync), tempo.load (std::memory_order_relaxed));
+        return synced > 0.0f ? synced : time.load (std::memory_order_relaxed);
+    }
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        if (index (sync) > 0)
+        {
+            readings.setProperty ("timeMs", std::round (getEffectiveTimeMs()));
+            readings.setProperty ("bpm", std::round (tempo.load (std::memory_order_relaxed) * 10.0) / 10.0);
+        }
+    }
 
 private:
     void prepareModule (const juce::dsp::ProcessSpec& spec) override { echo.prepare (spec); }
@@ -854,12 +896,69 @@ private:
 
     void update() noexcept override
     {
-        echo.setParameters (get (time), fraction (feedback), fraction (mix), flag (pingPong));
+        const auto synced = syncedMs (index (sync), tempo.load (std::memory_order_relaxed));
+        echo.setParameters (synced > 0.0f ? synced : get (time), fraction (feedback), fraction (mix), flag (pingPong));
+        echo.setTone (get (lowCut), get (highCut));
+        echo.setDuck (fraction (duck));
     }
 
     void render (const Context& c) noexcept override { echo.process (c); }
 
     fx::Echo echo;
+    std::atomic<double> tempo { 0.0 };
+};
+
+// The vocal plate (Space.h). Always runs, like the reverb, so switching it off lets the
+// tail ring out instead of cutting it.
+class Plate final : public Module
+{
+public:
+    Plate() : Module (ModuleType::plate) {}
+
+    Value& on       = addSwitch ("plateOn");
+    Value& mix      = addValue ("plateMix", 20.0f);       // %
+    Value& decay    = addValue ("plateDecay", 1.8f);      // s
+    Value& preDelay = addValue ("platePreDelay", 20.0f);  // ms
+    Value& damping  = addValue ("plateDamping", 40.0f);   // %
+    Value& lowCut   = addValue ("plateLowCut", 150.0f);   // Hz
+    Value& highCut  = addValue ("plateHighCut", 9000.0f); // Hz
+    Value& mod      = addValue ("plateMod", 30.0f);       // %
+    Value& width    = addValue ("plateWidth", 100.0f);    // %
+    Value& duck     = addValue ("plateDuck", 0.0f);       // %
+
+private:
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override { plate.prepare (spec.sampleRate); }
+    void resetModule() override { plate.reset(); }
+
+    void update() noexcept override
+    {
+        PlateReverb::Settings s;
+        s.mix = fraction (mix);
+        s.decaySeconds = get (decay);
+        s.preDelayMs = get (preDelay);
+        s.damping = fraction (damping);
+        s.lowCutHz = get (lowCut);
+        s.highCutHz = get (highCut);
+        s.modulation = fraction (mod);
+        s.width = fraction (width);
+        s.duck = fraction (duck);
+        s.feeding = flag (on);
+        plate.setSettings (s);
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        // Off and rung out: nothing to add, skip the work.
+        if (! flag (on) && plate.isSilent())
+            return;
+
+        auto block = c.getOutputBlock();
+        plate.process (block);
+    }
+
+    bool alwaysProcesses() const noexcept override { return true; }
+
+    PlateReverb plate;
 };
 
 // Always runs: switching it off fades the wet signal out (juce::Reverb smooths gain
@@ -1351,6 +1450,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::doubler:    return std::make_unique<modules::Doubler>();
         case ModuleType::echo:       return std::make_unique<modules::Echo>();
         case ModuleType::reverb:     return std::make_unique<modules::Reverb>();
+        case ModuleType::plate:      return std::make_unique<modules::Plate>();
         case ModuleType::irReverb:   return std::make_unique<modules::IrReverb>();
         case ModuleType::width:      return std::make_unique<modules::Width>();
         case ModuleType::multiband:  return std::make_unique<modules::Multiband>();
