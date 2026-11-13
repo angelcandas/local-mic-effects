@@ -141,6 +141,15 @@ struct DawBridge::AutoMixJob
     analysis::Profile referenceProfile;
 };
 
+struct DawBridge::MixCheckJob
+{
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> cancel { false }, finished { false };
+    analysis::SessionAnalyser::Result tracks;
+    analysis::Profile mix;
+    bool cancelled = false;
+};
+
 struct DawBridge::TakeCompJob
 {
     std::atomic<double> progress { 0.0 };
@@ -202,6 +211,7 @@ namespace
     }
 
     constexpr const char* autoMixUndoName = "Auto Mix";
+    constexpr const char* mixCheckUndoName = "Mix Check";
 
     // A track's volume ride for the page: [[seconds, dB], ...].
     juce::var describeRide (const juce::ValueTree& track)
@@ -274,7 +284,7 @@ namespace
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
             { "quantize", "Quantize" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
             { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "clearMuteSolo", "Clear mute and solo" },
-            { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" },
+            { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
             { "setPart", "Pattern row" }, { "editPattern", "Edit pattern" }, { "setSteps", "Steps" },
             { "addPatternClip", "Place pattern" }, { "setPatternClip", "Pattern block change" },
@@ -349,6 +359,8 @@ DawBridge::~DawBridge()
         exportJob->cancel = true;
     if (autoMixJob != nullptr)
         autoMixJob->cancel = true;
+    if (mixCheckJob != nullptr)
+        mixCheckJob->cancel = true;
     if (stemJob != nullptr)
         stemJob->cancel = true;
     if (keyJob != nullptr)
@@ -989,6 +1001,40 @@ void DawBridge::tick()
         else
         {
             emit ("dawAutoMix", object ({ { "state", "analysing" }, { "progress", autoMixJob->progress.load() } }));
+        }
+    }
+
+    if (mixCheckJob != nullptr)
+    {
+        if (mixCheckJob->finished)
+        {
+            auto job = std::move (mixCheckJob);
+            if (job->cancelled)
+            {
+                emit ("dawMixCheck", object ({ { "state", "cancelled" } }));
+            }
+            else
+            {
+                mixCheckTracks = std::move (job->tracks);
+                mixCheckMix = std::move (job->mix);
+                mixCheckFixed.clear();
+                mixCheckRoles.clear();
+                const auto songSeconds = mixCheckMix.getNumFrames() * analysis::Profile::hopSeconds;
+                for (const auto& [id, profile] : mixCheckTracks->tracks)
+                {
+                    const auto track = edit.getTrack (id);
+                    const auto byInstrument = guessRoleFromTrack (track);
+                    mixCheckRoles[id] = track.hasProperty (ids::mixRole) ? analysis::getRoleFromKey (track[ids::mixRole].toString())
+                                      : byInstrument.has_value() ? *byInstrument
+                                                                 : analysis::guessRole (track[ids::name].toString(), profile, songSeconds);
+                }
+                mixCheckReport = analysis::checkMix (*mixCheckTracks, mixCheckMix, buildMixCheckContext());
+                emit ("dawMixCheck", describeMixCheck());
+            }
+        }
+        else
+        {
+            emit ("dawMixCheck", object ({ { "state", "analysing" }, { "progress", mixCheckJob->progress.load() } }));
         }
     }
 
@@ -2247,6 +2293,223 @@ void DawBridge::finishToMidi()
     sessionChanged = true;
     emit ("dawToMidi", object ({ { "state", "done" }, { "count", (int) placed.size() }, { "track", trackId },
                                  { "clip", midiClipId }, { "kind", job->kind } }));
+}
+
+//==============================================================================
+// Mix Check: the context the checks and the fixes need, read from the session as it is now
+// (so a fix after you moved a fader starts from where the fader is).
+analysis::CheckContext DawBridge::buildMixCheckContext() const
+{
+    analysis::CheckContext context;
+    context.style = mixCheckStyle;
+    context.targetLufs = mixCheckTarget;
+    context.roles = mixCheckRoles;
+    context.masterVolume = (float) edit.getMaster().getProperty (ids::volume, 0.0f);
+
+    const auto readInserts = [&] (const juce::ValueTree& owner, int id)
+    {
+        for (const auto& insert : daw::Edit::getInserts (owner))
+            for (int type = 0; type < fx::numModuleTypes; ++type)
+                if (insert[ids::type].toString() == fx::getModuleKey ((fx::ModuleType) type))
+                {
+                    context.inserts[id].push_back ((fx::ModuleType) type);
+                    if (id == daw::Edit::masterId)
+                        for (int i = 0; i < insert.getNumProperties(); ++i)
+                        {
+                            const auto name = insert.getPropertyName (i);
+                            if (const auto value = insert.getProperty (name); ! value.isVoid() && ! value.isObject() && ! value.isArray())
+                                context.masterValues[name.toString()] = (float) value; // loaded projects hold numbers as text
+                        }
+                }
+    };
+
+    for (const auto& track : edit.getTracks())
+    {
+        const auto id = (int) track[ids::id];
+        context.names[id] = track[ids::name].toString();
+        context.volumes[id] = (float) track.getProperty (ids::volume, 0.0f);
+        if ((bool) track.getProperty (ids::mute, false))
+            context.muted.insert (id);
+        readInserts (track, id);
+
+        // Narrow cuts on the mains and its harmonics: Mix Check measures the sources, so it
+        // wouldn't hear them.
+        for (const auto& insert : daw::Edit::getInserts (track))
+            if (insert[ids::type].toString() == fx::getModuleKey (fx::ModuleType::paraEq))
+                for (int bell = 1; bell <= 3; ++bell)
+                {
+                    const auto prefix = "peqBell" + juce::String (bell);
+                    const auto hz = (float) insert.getProperty (juce::Identifier (prefix + "Freq"), 0.0f);
+                    const auto gain = (float) insert.getProperty (juce::Identifier (prefix + "Gain"), 0.0f);
+                    for (const auto mains : { 50.0f, 60.0f })
+                        for (int harmonic = 1; harmonic <= 4; ++harmonic)
+                            if (gain <= -4.0f && std::abs (hz - mains * (float) harmonic) <= 0.02f * mains * (float) harmonic)
+                                context.humCut.insert (id);
+                }
+    }
+    readInserts (edit.getMaster(), daw::Edit::masterId);
+    return context;
+}
+
+juce::var DawBridge::describeMixCheck() const
+{
+    const auto context = buildMixCheckContext();
+    juce::Array<juce::var> findings;
+    int index = 0;
+    for (const auto& f : mixCheckReport.findings)
+    {
+        const auto nameOf = [&context] (int id) { const auto it = context.names.find (id); return it != context.names.end() ? it->second : juce::String(); };
+        const auto fixLabel = f.fix == analysis::FixKind::master     ? "Master it"
+                            : f.fix == analysis::FixKind::tonal      ? "Even out the balance"
+                            : f.fix == analysis::FixKind::monoLows   ? "Mono the lows"
+                            : f.fix == analysis::FixKind::narrow     ? "Narrow it a little"
+                            : f.fix == analysis::FixKind::masking    ? "Make room"
+                            : f.fix == analysis::FixKind::clipping   ? "Trim the input"
+                            : f.fix == analysis::FixKind::hum        ? "Cut the hum"
+                            : f.fix == analysis::FixKind::deEss      ? "De-ess"
+                            : f.fix == analysis::FixKind::voiceLevel ? "Set the level"
+                                                                     : "";
+        findings.add (object ({ { "index", index }, { "key", f.key }, { "severity", f.severity }, { "track", f.trackId }, { "trackName", nameOf (f.trackId) },
+                                { "other", f.otherTrackId }, { "from", f.from }, { "to", f.to }, { "value", f.value }, { "target", f.target },
+                                { "fix", analysis::getFixKey (f.fix) }, { "fixLabel", fixLabel }, { "fixed", mixCheckFixed.count (index) > 0 },
+                                { "title", f.title }, { "detail", f.detail }, { "why", f.why } }));
+        ++index;
+    }
+
+    return object ({ { "state", "ready" }, { "style", styleKey (mixCheckStyle) }, { "target", mixCheckTarget }, { "score", mixCheckReport.score },
+                     { "empty", mixCheckReport.empty }, { "lufs", mixCheckReport.lufs }, { "truePeak", mixCheckReport.truePeakDb },
+                     { "range", mixCheckReport.loudnessRange }, { "plr", mixCheckReport.plr }, { "seconds", mixCheckReport.seconds },
+                     { "tracks", mixCheckReport.tracksChecked }, { "findings", findings } });
+}
+
+// The "mixCheck" command; args.action is one of:
+//   run {style, target}  measure every track and the mix (background); "dawMixCheck" brings the
+//                        report. target: -14 streaming, -16 dynamic, -10 loud (LUFS)
+//   fix {index}          apply the fix of finding `index` as one undo step ("Mix Check")
+//                        -> { ok, notes, moves }; the finding stays listed (run again to confirm)
+//   text                 the report as plain text -> { ok, text }
+//   copy                 put that text on the clipboard
+//   get                  the last report (describeMixCheck), or { ok: false } before the first run
+//   cancel
+juce::var DawBridge::handleMixCheck (const juce::var& args, Complete& complete)
+{
+    const auto action = args["action"].toString();
+
+    if (action == "cancel")
+    {
+        if (mixCheckJob != nullptr)
+            mixCheckJob->cancel = true;
+        return error ({});
+    }
+
+    if (action == "get")
+        return mixCheckTracks.has_value() ? describeMixCheck() : error ("Nothing checked yet.");
+
+    if (action == "text" || action == "copy")
+    {
+        if (! mixCheckTracks.has_value())
+            return error ("Nothing checked yet.");
+        const auto context = buildMixCheckContext();
+        const auto text = analysis::reportToText (mixCheckReport, context.names);
+        if (action == "copy")
+        {
+            juce::SystemClipboard::copyTextToClipboard (text);
+            return error ({});
+        }
+        return object ({ { "ok", true }, { "text", text } });
+    }
+
+    if (action == "save")
+    {
+        if (! mixCheckTracks.has_value())
+            return error ("Nothing checked yet.");
+        const auto context = buildMixCheckContext();
+        const auto text = analysis::reportToText (mixCheckReport, context.names);
+        withChooser ("Save the Mix Check report", juce::File::getSpecialLocation (juce::File::userDocumentsDirectory).getChildFile ("Mix Check.txt"), "*.txt",
+                     juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::canSelectFiles | juce::FileBrowserComponent::warnAboutOverwriting,
+                     [text] (const juce::File& file)
+                     {
+                         const auto target = file.withFileExtension ("txt");
+                         return target.replaceWithText (text) ? object ({ { "ok", true }, { "path", target.getFullPathName() } })
+                                                              : error ("Couldn't write " + target.getFileName() + ".");
+                     },
+                     complete);
+        return {};
+    }
+
+    if (action == "fix")
+    {
+        if (! mixCheckTracks.has_value())
+            return error ("Check the mix first.");
+        const auto index = (int) args["index"];
+        if (index < 0 || index >= (int) mixCheckReport.findings.size())
+            return error ("That finding is gone: check the mix again.");
+
+        const auto& finding = mixCheckReport.findings[(size_t) index];
+        if (finding.trackId != 0 && ! edit.getTrack (finding.trackId).isValid())
+            return error ("That track is gone: check the mix again.");
+
+        const auto plan = analysis::planFix (finding, *mixCheckTracks, mixCheckMix, buildMixCheckContext());
+        if (plan.moves.empty())
+            return error (plan.notes.isEmpty() ? juce::String ("Nothing to change for this one.") : plan.notes[0]);
+
+        analysis::applyMix (edit, plan, 1.0f, mixCheckUndoName);
+        // Loudness and true peak share one fix: both are done.
+        juce::Array<juce::var> fixedIndexes;
+        for (int i = 0; i < (int) mixCheckReport.findings.size(); ++i)
+            if (i == index || (finding.fix == analysis::FixKind::master && mixCheckReport.findings[(size_t) i].fix == analysis::FixKind::master))
+            {
+                mixCheckFixed.insert (i);
+                fixedIndexes.add (i);
+            }
+
+        juce::Array<juce::var> reasons;
+        for (const auto& move : plan.moves)
+            for (const auto& reason : move.reasons)
+                reasons.add (reason);
+        for (const auto& note : plan.notes)
+            reasons.add (note);
+        emit ("dawMixCheck", object ({ { "state", "fixed" }, { "index", index }, { "reasons", reasons } }));
+        return object ({ { "ok", true }, { "reasons", reasons }, { "fixed", fixedIndexes } });
+    }
+
+    if (action == "run")
+    {
+        if (mixCheckJob != nullptr)
+            return error ("Mix Check is already listening.");
+        if (edit.getTracks().isEmpty() || engine.getLength() <= 0)
+            return error ("Record or import something first.");
+
+        if (args.hasProperty ("style"))
+            mixCheckStyle = styleFromKey (args["style"].toString());
+        if (args.hasProperty ("target"))
+            mixCheckTarget = juce::jlimit (-24.0f, -6.0f, (float) args["target"]);
+
+        engine.captureInstrumentStates();
+        auto job = std::make_shared<MixCheckJob>();
+        // Snapshots on this thread: the tracks as their sources play (shared with Auto Mix through
+        // the cache) and the mix as it plays now, through the master.
+        auto tracks = std::make_shared<analysis::SessionAnalyser> (edit, analysis::SessionAnalyser::Point::source, false, engine.getSampleRate());
+        auto mix = std::make_shared<analysis::SessionAnalyser> (edit, analysis::SessionAnalyser::Point::stem, true, engine.getSampleRate(), false);
+        mixCheckJob = job;
+
+        juce::Thread::launch ([tracks, mix, job, cache = profileCache]
+        {
+            job->tracks = tracks->run ([job] (double p) { job->progress = 0.7 * p; return ! job->cancel.load(); }, cache.get());
+            job->cancelled = job->tracks.cancelled;
+            if (! job->cancelled)
+            {
+                auto result = mix->run ([job] (double p) { job->progress = 0.7 + 0.3 * p; return ! job->cancel.load(); }, cache.get());
+                job->cancelled = result.cancelled;
+                if (result.mix.has_value())
+                    job->mix = std::move (*result.mix);
+            }
+            job->finished = true;
+        });
+        return error ({});
+    }
+
+    return error ("Unknown Mix Check action.");
 }
 
 //==============================================================================
@@ -3703,6 +3966,13 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "autoMix")
     {
         if (auto result = handleAutoMix (args, complete); ! result.isVoid())
+            complete (result);
+        return;
+    }
+
+    if (command == "mixCheck")
+    {
+        if (auto result = handleMixCheck (args, complete); ! result.isVoid())
             complete (result);
         return;
     }

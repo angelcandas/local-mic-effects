@@ -1476,6 +1476,11 @@ namespace
             const auto muted = analysis::checkMix (result, mixProfile, mutedContext);
             check (find (muted, "clipping") == nullptr && find (muted, "neverHeard") == nullptr, "muted tracks aren't checked");
 
+            // A track that already has the cuts isn't reported again.
+            auto cutContext = context;
+            cutContext.humCut = { 1 };
+            check (find (analysis::checkMix (result, mixProfile, cutContext), "hum") == nullptr, "hum already cut: not reported again");
+
             // The fixes.
             auto plan = analysis::planFix (*clip, result, mixProfile, context);
             check (plan.moves.size() == 1 && ! plan.moves[0].insert.has_value() && plan.moves[0].trackId == 3
@@ -5773,6 +5778,72 @@ namespace
             edit.getUndoManager().undo();
 
             run ("removeTrack", args ({ { "id", source } }));
+        }
+
+        // Mix Check through the bridge: listens in the background, answers with a report, a fix
+        // is one undo step named "Mix Check".
+        {
+            const auto audio = folder.getChildFile ("mixcheck");
+            audio.createDirectory();
+            auto hot = makeSungLine (8.0, 2.5, 1.5);
+            hot.applyGain (8.0f);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < hot.getNumSamples(); ++i)
+                    hot.setSample (ch, i, juce::jlimit (-1.0f, 1.0f, hot.getSample (ch, i)));
+            const auto hotFile = audio.getChildFile ("hot.wav"), backingFile = audio.getChildFile ("back.wav");
+            writeWav (hotFile, hot, sampleRate);
+            writeWav (backingFile, makeBacking (8.0), sampleRate);
+            // Only these two tracks (instruments left by the tests above would be loaded too).
+            for (const auto& track : edit.getTracks())
+                if (track[daw::ids::name].toString() != "MixCheckKeep")
+                    edit.removeTrack ((int) track[daw::ids::id]);
+            const auto hotTrack = (int) edit.addTrack ("Guitar")[daw::ids::id];
+            const auto backTrack = (int) edit.addTrack ("Backing")[daw::ids::id];
+            bridge.importAudio (hotFile, hotTrack);
+            bridge.importAudio (backingFile, backTrack);
+
+            check (! (bool) run ("mixCheck", args ({ { "action", "fix" }, { "index", 0 } }))["ok"], "a fix before the first check is refused");
+            check ((bool) run ("mixCheck", args ({ { "action", "run" }, { "style", "pop" }, { "target", -14 } }))["ok"], "Mix Check starts");
+            check (! (bool) run ("mixCheck", args ({ { "action", "run" } }))["ok"], "and doesn't start twice");
+
+            juce::var report;
+            for (int i = 0; i < 6000 && ! report.isObject(); ++i)
+            {
+                events.clear();
+                bridge.tick();
+                for (const auto& [name, payload] : events)
+                {
+                    if (name == "dawMixCheck" && payload["state"].toString() != "analysing")
+                        report = payload;
+                }
+                if (! report.isObject())
+                    juce::Thread::sleep (10);
+            }
+
+            int clipIndex = -1;
+            if (report.isObject())
+                for (const auto& finding : *report["findings"].getArray())
+                    if (finding["key"].toString() == "clipping" && (int) finding["track"] == hotTrack)
+                        clipIndex = (int) finding["index"];
+
+            check (report.isObject() && (int) report["score"] < 100 && clipIndex >= 0 && (float) report["lufs"] > -60.0f,
+                   "the report names the clipped track (score " + report["score"].toString() + ")");
+
+            if (clipIndex >= 0)
+            {
+                const auto before = (float) edit.getTrack (hotTrack).getProperty (daw::ids::inGain, 0.0f);
+                const auto fixed = run ("mixCheck", args ({ { "action", "fix" }, { "index", clipIndex } }));
+                check ((bool) fixed["ok"] && (float) edit.getTrack (hotTrack).getProperty (daw::ids::inGain, 0.0f) < before - 3.0f
+                           && edit.getUndoManager().getUndoDescription() == "Mix Check",
+                       "Fix trims the clipped track's input, as one undo step called Mix Check");
+                edit.getUndoManager().undo();
+                check (std::abs ((float) edit.getTrack (hotTrack).getProperty (daw::ids::inGain, 0.0f) - before) < 1.0e-4f, "and undo puts it back");
+            }
+
+            const auto text = run ("mixCheck", args ({ { "action", "text" } }));
+            check (text["text"].toString().contains ("MIX CHECK") && text["text"].toString().contains ("Guitar"), "the report comes as text");
+            edit.removeTrack (hotTrack);
+            edit.removeTrack (backTrack);
         }
 
         project.close();
