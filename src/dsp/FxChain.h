@@ -13,6 +13,11 @@ namespace fx
 //
 // The list itself is not thread-safe: build it before prepare() and don't change it
 // while process() may be running. Module values can be changed from any thread.
+//
+// Modules are shared: a DAW track's chain is rebuilt when its inserts change, and the new
+// chain takes over the modules that are already running (add (module, true)), so a
+// reverb tail or a compressor's envelope goes on through the edit. Only one chain at a
+// time may process a shared module (the engine's graphs take turns).
 class FxChain
 {
 public:
@@ -35,12 +40,30 @@ public:
 
     Module& add (std::unique_ptr<Module> module)
     {
+        return add (std::shared_ptr<Module> (std::move (module)), false);
+    }
+
+    // A module that may already be running in another chain. `alreadyPrepared`: it was
+    // prepared for this chain's rate and block size, and prepare() leaves it as it is.
+    Module& add (std::shared_ptr<Module> module, bool alreadyPrepared)
+    {
         jassert (module != nullptr);
+        running.push_back (alreadyPrepared);
         return *modules.emplace_back (std::move (module));
     }
 
     int size() const noexcept                  { return (int) modules.size(); }
     Module& operator[] (int index) noexcept    { return *modules[(size_t) index]; }
+
+    // The chain's own reference to a module in it (null if it isn't), for handing it on
+    // to the chain that replaces this one.
+    std::shared_ptr<Module> share (const Module& module) const
+    {
+        for (const auto& held : modules)
+            if (held.get() == &module)
+                return held;
+        return nullptr;
+    }
 
     // The first module of that type, or null.
     Module* find (ModuleType type) noexcept
@@ -97,8 +120,13 @@ public:
         inputSmoothed.setCurrentAndTargetValue (inputGain.load (std::memory_order_relaxed));
         outputSmoothed.setCurrentAndTargetValue (outputGain.load (std::memory_order_relaxed));
 
-        for (auto& module : modules)
-            module->prepare (spec);
+        // Modules handed over already running keep their state (only this time: a later
+        // prepare, for a new rate, prepares them too).
+        for (size_t i = 0; i < modules.size(); ++i)
+            if (! running[i])
+                modules[i]->prepare (spec);
+
+        std::fill (running.begin(), running.end(), false);
     }
 
     void reset()
@@ -142,7 +170,8 @@ private:
             block.multiplyBy (smoothed.getTargetValue());
     }
 
-    std::vector<std::unique_ptr<Module>> modules;
+    std::vector<std::shared_ptr<Module>> modules;
+    std::vector<bool> running; // per module: added already prepared, prepare() skips it
 
     std::atomic<float> inputGain { 1.0f }, outputGain { 1.0f };
     std::atomic<float> inputPeak { 0.0f }, outputPeak { 0.0f };

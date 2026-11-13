@@ -119,6 +119,7 @@ namespace ids
     MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight) MICFX_DAW_ID (polarity) MICFX_DAW_ID (nudge)
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
     MICFX_DAW_ID (PATTERN) MICFX_DAW_ID (PART) MICFX_DAW_ID (PATTERNCLIP) MICFX_DAW_ID (track) MICFX_DAW_ID (drum)
+    MICFX_DAW_ID (label) MICFX_DAW_ID (ab) MICFX_DAW_ID (abOther) // an insert's own name, A/B
     MICFX_DAW_ID (section) MICFX_DAW_ID (letter)
     MICFX_DAW_ID (rows) MICFX_DAW_ID (stepNote) MICFX_DAW_ID (step) MICFX_DAW_ID (swing) MICFX_DAW_ID (pattern) MICFX_DAW_ID (row)
     MICFX_DAW_ID (muted) MICFX_DAW_ID (levels)
@@ -602,6 +603,38 @@ public:
     juce::ValueTree getInsert (int insertId) const;
 
     static juce::ValueTree getInserts (const juce::ValueTree& trackOrMaster);
+
+    // A new insert starting from those values (an effect with a preset, one undo step).
+    // Values the effect doesn't have are ignored.
+    juce::ValueTree addInsert (int trackId, fx::ModuleType, int index, const std::map<juce::String, float>& values);
+
+    // Single-effect edits. Copies keep the values, file, name, automation and A/B set,
+    // with a new id. `channelId` is a track, return, group or the master; index -1 is the end.
+    juce::ValueTree duplicateInsert (int insertId); // a copy right after it
+    juce::ValueTree copyInsertTo (int insertId, int channelId, int index);
+    // The insert itself moves (to another chain, or within its own): the engine keeps it
+    // running, tail and all. False if either end doesn't exist.
+    bool moveInsertTo (int insertId, int channelId, int index);
+    // Copies of those inserts (in that order, from anywhere) into one chain at an index,
+    // leaving what's there. Returns the copies.
+    juce::Array<juce::ValueTree> pasteInserts (const juce::Array<int>& insertIds, int channelId, int index);
+    // A different effect (from its defaults) or plug-in in the same place. The old one goes.
+    juce::ValueTree replaceInsert (int insertId, fx::ModuleType);
+    juce::ValueTree replaceInsertWithPlugin (int insertId, const InstrumentInfo&);
+    // The insert's own name ("label"); empty goes back to the effect's name.
+    void setInsertName (int insertId, const juce::String&);
+    static juce::String getInsertName (const juce::ValueTree& insert) { return insert[ids::label].toString(); }
+
+    // A/B: every insert of a built-in effect can hold a second set of values. The first
+    // switch makes B a copy of A; after that, switching swaps which set is playing (ab: 0
+    // A, 1 B). copyInsertAB writes the playing set over the other. Plug-ins have no A/B.
+    void switchInsertAB (int insertId);
+    void copyInsertAB (int insertId);
+    static bool isShowingB (const juce::ValueTree& insert) { return (int) insert.getProperty (ids::ab, 0) == 1; }
+    static bool hasAB (const juce::ValueTree& insert)      { return insert.hasProperty (ids::abOther); }
+    // The ids of the values an insert plays from (a built-in effect's values; a plug-in's
+    // switch and trims).
+    static juce::StringArray getInsertValueIds (const juce::ValueTree& insert);
 
     // Every module type by its project-file key ("eq", "echo", ...).
     static std::optional<fx::ModuleType> moduleTypeFromKey (const juce::String&);
