@@ -14753,6 +14753,99 @@ static void testSingAlongSession()
     folder.deleteRecursively();
 }
 
+static void testTimeRange()
+{
+    std::cout << "\nArrangement time range commands\n";
+
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-range", {});
+    folder.createDirectory();
+    juce::AudioBuffer<float> audio (1, (int) (8.0 * sampleRate));
+    audio.clear();
+    const auto file = folder.getChildFile ("a.wav");
+    writeWav (file, audio, sampleRate);
+
+    PluginProcessor processor;
+    juce::PropertiesFile::Options options;
+    options.applicationName = "MicFXTests";
+    juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+    DawBridge::availableForTesting = true;
+    {
+        DawBridge bridge (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        auto& edit = processor.getDawEdit();
+        const auto a = (int) edit.addTrack ("A")[daw::ids::id];
+        const auto b = (int) edit.addTrack ("B")[daw::ids::id];
+        edit.addClip (a, file, 0.0, 8.0);
+        edit.addClip (b, file, 1.0, 2.0);
+        edit.addClip (b, file, 5.0, 2.0);
+        const auto marker = (int) edit.addMarker (6.0, "Chorus")[daw::ids::id];
+
+        const auto clips = [&] (int track)
+        {
+            std::vector<std::pair<double, double>> out;
+            for (const auto& child : edit.getTrack (track))
+                if (child.hasType (daw::ids::CLIP))
+                    out.push_back ({ (double) child[daw::ids::start], (double) child[daw::ids::length] });
+            std::sort (out.begin(), out.end());
+            return out;
+        };
+        const auto near = [] (double x, double y) { return std::abs (x - y) < 1e-6; };
+        const auto markerTime = [&]
+        {
+            for (const auto& m : edit.getMarkers())
+                if ((int) m[daw::ids::id] == marker) return (double) m[daw::ids::time];
+            return -1.0;
+        };
+        const auto run = [&] (const juce::String& action, double from, double to, juce::Array<juce::var> tracks)
+        {
+            edit.getUndoManager().beginNewTransaction (action);
+            auto* args = new juce::DynamicObject();
+            args->setProperty ("action", action);
+            args->setProperty ("start", from);
+            args->setProperty ("end", to);
+            args->setProperty ("tracks", tracks);
+            return bridge.editTimeRange (juce::var (args));
+        };
+
+        run ("split", 2.0, 4.0, { a });
+        auto ca = clips (a);
+        check (ca.size() == 3 && near (ca[1].first, 2.0) && near (ca[1].second, 2.0) && clips (b).size() == 2,
+               "split cuts the covered track at both ends, and only that track");
+        edit.getUndoManager().undo();
+        check (clips (a).size() == 1, "one undo joins it again");
+
+        run ("delete", 2.0, 4.0, { a, b });
+        ca = clips (a);
+        const auto cb = clips (b);
+        check (ca.size() == 2 && near (ca[0].second, 2.0) && near (ca[1].first, 4.0)
+                   && cb.size() == 2 && near (cb[0].first, 1.0) && near (cb[0].second, 1.0),
+               "delete removes what's inside the range on every covered track");
+        edit.getUndoManager().undo();
+
+        run ("deleteTime", 2.0, 4.0, {});
+        ca = clips (a);
+        check (ca.size() == 2 && near (ca[1].first, 2.0) && near (ca[1].second, 4.0) && near (clips (b)[1].first, 3.0),
+               "delete time pulls the rest of the song left on every track");
+        check (near (markerTime(), 4.0), "markers after the range move too");
+        edit.getUndoManager().undo();
+
+        run ("insertSilence", 2.0, 3.0, {});
+        ca = clips (a);
+        check (ca.size() == 2 && near (ca[1].first, 3.0) && near (clips (b).back().first, 6.0)
+                   && near (markerTime(), 7.0),
+               "insert silence pushes everything from the start right");
+        edit.getUndoManager().undo();
+
+        const auto dup = run ("duplicate", 1.0, 3.0, { b });
+        const auto cb2 = clips (b);
+        check ((bool) dup["ok"] && cb2.size() == 3 && near (cb2[1].first, 3.0) && near (cb2[1].second, 2.0),
+               "duplicate copies the range to just after it");
+        edit.getUndoManager().undo();
+        check (! (bool) run ("delete", 2.0, 2.0, {})["ok"], "an empty range is an error");
+    }
+    DawBridge::availableForTesting = false;
+    folder.deleteRecursively();
+}
+
 static void testLiveHistory()
 {
     std::cout << "\nLive mode undo\n";
@@ -15594,6 +15687,7 @@ int main()
         testAutoLevel();
         testLiveHistory();
         testSingAlongSession();
+        testTimeRange();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -15728,6 +15822,7 @@ int main()
     testAutoLevel();
     testLiveHistory();
     testSingAlongSession();
+    testTimeRange();
     testSetlist();
     testDawEngine();
     testDeviceEdits();

@@ -1,3 +1,4 @@
+#include <set>
 #include "DawBridge.h"
 
 #include "analysis/TakeComp.h"
@@ -330,6 +331,14 @@ namespace
             { "setPartMutes", "Mute rows" }, { "splitPattern", "Split by track" },
             { "addPatternClips", "Draw patterns" }, { "removePatternClips", "Erase pattern blocks" },
         };
+        if (command == "timeRange")
+        {
+            static const std::map<juce::String, const char*> actions {
+                { "split", "Split at the range" }, { "delete", "Delete the range" }, { "duplicate", "Duplicate the range" },
+                { "deleteTime", "Delete time" }, { "insertSilence", "Insert silence" } };
+            const auto it = actions.find (args["action"].toString());
+            return it != actions.end() ? it->second : "Range edit";
+        }
         if (const auto it = names.find (command); it != names.end())
             return it->second;
         return command;
@@ -1591,6 +1600,141 @@ juce::var DawBridge::addSingAlongTracks (const std::vector<SingAlongRow>& rows)
 
     sessionChanged = true;
     return object ({ { "ok", true }, { "error", juce::String() }, { "tracks", added } });
+}
+
+juce::var DawBridge::editTimeRange (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+    const auto start = juce::jmax (0.0, (double) args.getProperty ("start", 0.0));
+    const auto end = (double) args.getProperty ("end", 0.0);
+    const auto length = end - start;
+    if (length < daw::Edit::minClipSeconds)
+        return error ("Mark a range first: drag with the Range tool (2).");
+
+    // The tracks it covers: those named, or every track for the commands that move time.
+    const auto wholeSong = action == "deleteTime" || action == "insertSilence";
+    std::set<int> covered;
+    if (const auto* list = args["tracks"].getArray(); list != nullptr && ! wholeSong)
+        for (const auto& id : *list)
+            covered.insert ((int) id);
+    juce::Array<juce::ValueTree> tracks;
+    for (const auto& track : edit.getTracks())
+        if (covered.empty() || covered.count ((int) track[ids::id]) > 0)
+            tracks.add (track);
+
+    const auto clipsOf = [] (const juce::ValueTree& track)
+    {
+        std::vector<int> found;
+        for (const auto& child : track)
+            if (child.hasType (ids::CLIP))
+                found.push_back ((int) child[ids::id]);
+        return found;
+    };
+    const auto clipStart = [this] (int id) { return (double) edit.getClip (id)[ids::start]; };
+    const auto clipEnd = [this] (int id) { const auto c = edit.getClip (id); return (double) c[ids::start] + (double) c[ids::length]; };
+    const auto eps = 1e-6;
+
+    // Cuts every clip on the covered tracks that crosses `time`.
+    const auto splitAt = [&] (double time)
+    {
+        for (const auto& track : tracks)
+            for (const auto id : clipsOf (track))
+                if (clipStart (id) < time - eps && clipEnd (id) > time + eps)
+                    edit.splitClip (id, time);
+    };
+    // Removes what lies between from and to on the covered tracks (cutting at both ends first).
+    const auto clear = [&] (double from, double to)
+    {
+        splitAt (from);
+        splitAt (to);
+        for (const auto& track : tracks)
+            for (const auto id : clipsOf (track))
+                if (clipStart (id) >= from - eps && clipEnd (id) <= to + eps)
+                    edit.removeClip (id);
+    };
+    // Moves everything that starts at or after `from` by `delta` seconds: clips, markers, pattern blocks.
+    const auto shiftFrom = [&] (double from, double delta)
+    {
+        for (const auto& track : tracks)
+        {
+            auto ids = clipsOf (track);
+            if (delta > 0.0) std::reverse (ids.begin(), ids.end()); // move the last first so nothing collides
+            for (const auto id : ids)
+                if (clipStart (id) >= from - eps)
+                    edit.moveClip (id, juce::jmax (0.0, clipStart (id) + delta));
+        }
+        for (const auto& marker : edit.getMarkers())
+            if ((double) marker[ids::time] >= from - eps)
+                edit.setMarkerTime ((int) marker[ids::id], juce::jmax (0.0, (double) marker[ids::time] + delta));
+        const auto map = edit.getTempoMap();
+        const auto fromBeats = map.toBeats (from);
+        for (const auto& block : edit.getPatternClips())
+        {
+            const auto startBeats = (double) block[ids::start];
+            if (startBeats < fromBeats - eps)
+                continue;
+            const auto newStart = map.toBeats (juce::jmax (0.0, map.toSeconds (startBeats) + delta));
+            edit.setPatternClip ((int) block[ids::id], newStart, (double) block[ids::length], (int) block[ids::row]);
+        }
+    };
+
+    juce::Array<juce::var> made;
+    if (action == "split")
+    {
+        splitAt (start);
+        splitAt (end);
+    }
+    else if (action == "delete")
+    {
+        clear (start, end);
+    }
+    else if (action == "duplicate")
+    {
+        splitAt (start);
+        splitAt (end);
+        std::vector<int> inside;
+        for (const auto& track : tracks)
+            for (const auto id : clipsOf (track))
+                if (clipStart (id) >= start - eps && clipEnd (id) <= end + eps)
+                    inside.push_back (id);
+        clear (end, end + length);
+        for (const auto id : inside)
+        {
+            const auto copy = edit.duplicateClip (id);
+            if (copy >= 0)
+            {
+                edit.moveClip (copy, clipStart (id) + length);
+                made.add (copy);
+            }
+        }
+    }
+    else if (action == "deleteTime")
+    {
+        clear (start, end);
+        for (const auto& marker : edit.getMarkers())
+            if ((double) marker[ids::time] >= start - eps && (double) marker[ids::time] < end - eps)
+                edit.removeMarker ((int) marker[ids::id]);
+        const auto map = edit.getTempoMap();
+        for (const auto& block : edit.getPatternClips())
+        {
+            const auto at = map.toSeconds ((double) block[ids::start]);
+            if (at >= start - eps && at < end - eps)
+                edit.removePatternClip ((int) block[ids::id]);
+        }
+        shiftFrom (end, -length);
+    }
+    else if (action == "insertSilence")
+    {
+        splitAt (start);
+        shiftFrom (start, length);
+    }
+    else
+    {
+        return error ("Unknown range command: " + action);
+    }
+
+    sessionChanged = true;
+    return object ({ { "ok", true }, { "error", juce::String() }, { "clips", made } });
 }
 
 juce::var DawBridge::handleStems (const juce::var& args)
@@ -4085,6 +4229,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "trimStart")  { edit.trimClipStart (id, args["start"]); ok(); return; }
     if (command == "trimEnd")    { edit.trimClipEnd (id, args["end"]); ok(); return; }
     if (command == "split")      { complete (edit.splitClip (id, args["time"])); return; }
+    if (command == "timeRange")  { complete (editTimeRange (args)); return; }
     if (command == "duplicate")  { complete (edit.duplicateClip (id)); return; }
     if (command == "removeClip") { edit.removeClip (id); ok(); return; }
 

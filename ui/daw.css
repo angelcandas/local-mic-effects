@@ -2531,3 +2531,27 @@ body.is-daw .library-hint { display: none; }
 /* Live mode's hint line: the control under the pointer and its key, at the foot of the window. */
 .live-hint-line { margin-top: 0; padding: 0 2px; }
 .assist-button { white-space: nowrap; }
+
+/* The Range tool's time selection (daw.js startTimeRange / drawTimeRange). */
+.arrange[data-tool="range"] .lane,
+.arrange[data-tool="range"] .clip { cursor: text; }
+.arrange[data-tool="range"] .clip .handle { display: none; }
+.time-range {
+  position: absolute;
+  z-index: 2;
+  pointer-events: none;
+  border-left: 1px solid var(--accent-2);
+  border-right: 1px solid var(--accent-2);
+  background: rgba(63, 217, 198, 0.16);
+}
+.time-range-label {
+  position: absolute;
+  top: 2px;
+  left: 4px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: rgba(12, 14, 19, 0.75);
+  color: var(--accent-2);
+  font-size: 10.5px;
+  white-space: nowrap;
+}

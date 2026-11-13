@@ -155,6 +155,7 @@ const ICONS = {
   draw: '<path d="M4 20l1-5L16 4l4 4L9 19z"/><path d="M14 6l4 4"/>',
   cut: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.6 7.6L20 18M8.6 16.4L20 6"/>',
   gain: '<path d="M4 9v6h4l5 4V5L8 9zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>',
+  range: '<path d="M7 4H4v16h3M17 4h3v16h-3"/><path d="M9 12h6" stroke-dasharray="2 2"/>',
   warp: '<path d="M3 12c3-8 6-8 9 0s6 8 9 0"/><path d="M3 20h18" stroke-dasharray="2 3"/>',
   fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
   undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
@@ -1244,7 +1245,8 @@ class DawScreen {
 
     //---------------------------------------------------------------- right: tools, features, view
     this.tools = html("div", "segmented tools");
-    for (const [tool, text, title] of [["select", "Select", "Select tool: move, trim and fade clips (V)"],
+    for (const [tool, text, title] of [["select", "Select", "Select tool: move, trim and fade clips (V or 1)"],
+                                       ["range", "Range", "Range tool: drag across tracks to mark a stretch of time, then delete, split, duplicate or loop it (2). Right-click it for more."],
                                        ["cut", "Cut", "Cut tool: click a clip to split it there (B)"],
                                        ["gain", "Gain", "Gain tool: drag a clip up or down to change its gain (G)"],
                                        ["draw", "Draw", "Draw tool: click to place the picked pattern or sound, drag to paint copies, right-click to erase (P)"]]) {
@@ -1608,6 +1610,22 @@ class DawScreen {
     this.patternRow.hidden = true;
 
     this.rows = html("div", "track-rows");
+    // The Range tool takes the lanes' pointer before the clips and lanes see it.
+    this.rows.addEventListener("pointerdown", (event) => {
+      if (this.tool !== "range" || event.button !== 0 || !event.target.closest?.(".lane")) return;
+      event.stopPropagation();
+      this.startTimeRange(event);
+    }, true);
+    this.rows.addEventListener("contextmenu", (event) => {
+      const range = this.timeRange;
+      if (!range || !event.target.closest?.(".lane")) return;
+      const row = event.target.closest(".track-row");
+      const time = (event.clientX - this.inner.getBoundingClientRect().left - this.headWidth) / this.zoom;
+      if (!row || !range.tracks.includes(Number(row.dataset.track)) || time < range.start || time > range.end) return;
+      event.preventDefault();
+      event.stopPropagation();
+      this.openRangeMenu(event.clientX, event.clientY);
+    }, true);
     // The returns and the master: rows after the last track that scroll with the list.
     this.pinned = html("div", "pinned-rows");
     this.returnRows = html("div", "return-rows");
@@ -1747,10 +1765,140 @@ class DawScreen {
   }
 
   setTool(tool) {
+    if (tool !== "range" && this.timeRange) this.setTimeRange(null);
     this.tool = tool;
     this.arrange.dataset.tool = tool;
     this.cutGuide.hidden = true;
     this.renderTransport();
+  }
+
+  //============================================================================ time range (Range tool)
+  // A stretch of time across some tracks, as in Live's time selection or Cubase's Range
+  // tool: { start, end (seconds), tracks: [ids] }. Commands act on it (rangeCommand).
+  setTimeRange(range) {
+    this.timeRange = range && range.end - range.start > 1e-3 && range.tracks.length ? range : null;
+    this.drawTimeRange();
+  }
+
+  drawTimeRange() {
+    for (const old of this.inner.querySelectorAll(":scope > .time-range")) old.remove();
+    const range = this.timeRange;
+    if (!range) return;
+    const origin = this.inner.getBoundingClientRect();
+    let first = true;
+    for (const id of range.tracks) {
+      const row = this.rows.querySelector(`:scope > .track-row[data-track="${id}"]`);
+      if (!row) continue;
+      const box = row.getBoundingClientRect();
+      const overlay = html("div", "time-range");
+      Object.assign(overlay.style, { left: `${this.headWidth + range.start * this.zoom}px`, top: `${box.top - origin.top}px`,
+                                     width: `${Math.max(2, (range.end - range.start) * this.zoom)}px`, height: `${box.height}px` });
+      if (first) {
+        const bars = (this.tempoMap.toBeats(range.end) - this.tempoMap.toBeats(range.start)) / this.beatsPerBar;
+        overlay.append(html("span", "time-range-label", `${this.barsBeats(range.start)} – ${this.barsBeats(range.end)} · ${
+          Math.abs(bars - Math.round(bars)) < 1e-3 ? `${Math.round(bars)} bar${Math.round(bars) === 1 ? "" : "s"}` : `${bars.toFixed(2)} bars`}`));
+        first = false;
+      }
+      this.inner.append(overlay);
+    }
+  }
+
+  // Range tool: drag on a lane (over clips too) marks time across the tracks it covers.
+  // Shift+click moves the nearer end of the range there.
+  startTimeRange(event) {
+    const order = [...this.rows.querySelectorAll(":scope > .track-row[data-track]")];
+    const rowAt = (y) => {
+      let best = null;
+      for (const row of order) { const b = row.getBoundingClientRect(); if (y >= b.top) best = row; }
+      return best;
+    };
+    const timeAt = (e) => this.snapTime((e.clientX - this.inner.getBoundingClientRect().left - this.headWidth) / this.zoom, e);
+    const firstRow = rowAt(event.clientY);
+    if (!firstRow) return;
+    const anchorTime = timeAt(event);
+    const old = this.timeRange;
+    if (event.shiftKey && old) {
+      const time = anchorTime;
+      const start = Math.abs(time - old.start) < Math.abs(time - old.end) ? time : old.start;
+      const end = start === time ? old.end : time;
+      return this.setTimeRange({ ...old, start: Math.min(start, end), end: Math.max(start, end) });
+    }
+    const scroller = this.edgeScroller(() => last && move(last));
+    let last = null;
+    const move = (e) => {
+      last = e;
+      scroller.update(e);
+      const a = order.indexOf(firstRow), b = order.indexOf(rowAt(e.clientY) ?? firstRow);
+      const tracks = order.slice(Math.min(a, b), Math.max(a, b) + 1).map((row) => Number(row.dataset.track));
+      const time = timeAt(e);
+      this.setTimeRange({ start: Math.min(anchorTime, time), end: Math.max(anchorTime, time), tracks });
+    };
+    drag(event, (dx, dy, e) => move(e), (moved) => {
+      scroller.stop();
+      if (!moved) {
+        this.setTimeRange(null);
+        this.select(Number(firstRow.dataset.track), null);
+        if (!this.status.playing) daw("transport", { action: "seek", time: anchorTime });
+      }
+    });
+  }
+
+  async rangeCommand(action) {
+    const range = this.timeRange;
+    if (!range) return toast("Mark a range first: pick the Range tool (2) and drag across the tracks.");
+    if (action === "loop") return daw("loop", { on: true, start: range.start, end: range.end });
+    if (action === "zoom") return this.zoomToRange(range.start, range.end);
+    if (action === "export") {
+      await daw("loop", { on: true, start: range.start, end: range.end });
+      this.toggleExportPanel(true);
+      const only = this.exportPanel.querySelector("[name=loopOnly]");
+      only.disabled = false;
+      only.checked = true;
+      return;
+    }
+    const result = await daw("timeRange", { action, start: range.start, end: range.end, tracks: range.tracks });
+    if (!result?.ok) return;
+    const length = range.end - range.start;
+    if (action === "deleteTime") this.setTimeRange(null);
+    else if (action === "duplicate") this.setTimeRange({ ...range, start: range.end, end: range.end + length });
+    else if (action === "delete") this.drawTimeRange();
+  }
+
+  openRangeMenu(x, y) {
+    const range = this.timeRange;
+    popMenu(x, y, ({ item, rule, heading }) => {
+      heading(`Range ${this.barsBeats(range.start)} – ${this.barsBeats(range.end)}`);
+      item("Loop the range", () => this.rangeCommand("loop"), { shortcut: "Ctrl+L" });
+      item("Zoom to the range", () => this.rangeCommand("zoom"), { shortcut: "Z" });
+      rule();
+      item("Split at both ends", () => this.rangeCommand("split"), { shortcut: "Ctrl+E" });
+      item("Delete", () => this.rangeCommand("delete"), { shortcut: "Delete", hint: "Remove what's inside the range on these tracks; the rest stays where it is" });
+      item("Duplicate", () => this.rangeCommand("duplicate"), { shortcut: "Ctrl+D", hint: "Copy it to just after the range" });
+      rule();
+      item("Delete time", () => this.rangeCommand("deleteTime"), { shortcut: "Ctrl+Shift+Delete", hint: "Cut this stretch out of the whole song: everything after it moves left" });
+      item("Insert silence", () => this.rangeCommand("insertSilence"), { hint: "Push the whole song from the range's start right by its length" });
+      rule();
+      item("Export the range…", () => this.rangeCommand("export"), { hint: "Export only this stretch of the song" });
+      item("Clear the range", () => this.setTimeRange(null), { shortcut: "Esc" });
+    });
+  }
+
+  // The keys that act on the range while one is marked. True when handled.
+  onRangeKey(event) {
+    if (!this.timeRange) return false;
+    const mod = event.ctrlKey || event.metaKey;
+    const key = event.key.toLowerCase();
+    const run = (action) => { event.preventDefault(); this.rangeCommand(action); return true; };
+    if (event.key === "Delete" || event.key === "Backspace") {
+      if (mod && !event.shiftKey) return false; // Ctrl+Delete still deletes the track
+      return run(mod ? "deleteTime" : "delete");
+    }
+    if (mod && !event.shiftKey && key === "e") return run("split");
+    if (mod && !event.shiftKey && key === "d") return run("duplicate");
+    if (mod && !event.shiftKey && key === "l") return run("loop");
+    if (!mod && !event.shiftKey && key === "z") return run("zoom");
+    if (event.key === "Escape") { this.setTimeRange(null); return false; } // Esc's other jobs still run
+    return false;
   }
 
   scrollTo(left) {
@@ -1874,6 +2022,7 @@ class DawScreen {
     this.movePlayhead();
     this.revealPending();
     this.oldWaves = null;
+    this.drawTimeRange();
   }
 
   // Updates the track rows to the session in place, matched by track id: a row is only
@@ -4982,7 +5131,7 @@ class DawScreen {
                ["Ctrl+A", "Select every clip"], [", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
-               ["V / B / G / P", "Select, cut, gain and draw tools"], ["Draw tool", "Click places the picked pattern or sound, drag paints copies, right-click (or right-drag) erases"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
+               ["V (1) / 2 / B / G / P", "Select, range, cut, gain and draw tools"], ["Range tool", "Drag across tracks to mark time (Shift+click: move an end)"], ["Draw tool", "Click places the picked pattern or sound, drag paints copies, right-click (or right-drag) erases"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Ctrl+L", "Loop this clip (sets the loop range to it)"], ["Alt+drag", "Move or trim without snapping"]]],
     ["Clip editor (Wave, W)", [["1 / 2 / 4", "Open the Warp, Hitpoints or Quantize section (the open one is the tool); Esc closes it"],
                                ["Click / drag (no tool open)", "Move the playhead / scroll; in the ruler, drag to mark a loop range"],
@@ -4990,6 +5139,9 @@ class DawScreen {
                                ["Warp: drag a handle (ruler)", "Slide a tab along the audio"], ["Warp: Alt+click / double-click", "Remove a tab (Delete: the selected ones)"],
                                ["Warp: ← / → (Shift)", "Nudge the selected tabs 1 ms (10 ms)"], ["Warp: Tab / Shift+Tab", "Select the next / previous tab"],
                                ["Warp: Ctrl/Cmd at the press", "Flip Hold neighbours for one drag"], ["Ctrl/Cmd + scroll", "Zoom (or drag the overview box's edges)"]]],
+    ["Range (after marking one with the Range tool)", [["Delete", "Delete what's inside"], ["Ctrl+Shift+Delete", "Delete time: the rest of the song moves left"],
+                  ["Ctrl+E", "Split at both ends"], ["Ctrl+D", "Duplicate it after itself"], ["Ctrl+L", "Loop the range"], ["Z", "Zoom to the range"],
+                  ["Right-click", "Insert silence, export the range, and the rest"], ["Esc", "Clear the range"]]],
     ["Patterns tab (after clicking in it)", [["- / =", "Previous / next pattern"], ["↑ / ↓", "Select the row above / below"],
                   ["Ctrl+Shift+← / →", "Rotate the selected row's steps"], ["Ctrl+C / V", "Copy / paste the selected row's steps"],
                   ["Right-click a row's light", "Solo the row (again: every row plays)"]]],
@@ -5682,6 +5834,7 @@ class DawScreen {
   onKey(event) {
     if (!this.active || isTyping(event)) return;
     if (this.dockTab === "patterns" && this.patternsPanel?.onKey(event)) return; // the rack's own keys
+    if (this.onRangeKey(event)) return;
     if (event.ctrlKey && event.metaKey) return; // Ctrl+Cmd+F is full screen on a Mac
     const mod = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
@@ -5774,7 +5927,8 @@ class DawScreen {
     else if (key === "x") command("toggleView");
     else if (key === "a") { handled(); this.toggleTrack("arm"); }
     else if (key === "i") { handled(); this.toggleTrack("monitor"); }
-    else if (key === "v") { handled(); this.setTool("select"); }
+    else if (key === "v" || key === "1") { handled(); this.setTool("select"); }
+    else if (key === "2") { handled(); this.setTool("range"); }
     else if (key === "b") { handled(); this.setTool("cut"); }
     else if (key === "g") { handled(); this.setTool("gain"); }
     else if (key === "p") { handled(); this.setTool("draw"); }
