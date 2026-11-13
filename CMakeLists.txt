@@ -100,6 +100,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/Pitch.h
     src/analysis/TakeComp.cpp
     src/analysis/TakeComp.h
+    src/analysis/ToMidi.cpp
+    src/analysis/ToMidi.h
     src/Parameters.cpp
     src/Presets.cpp
     src/PluginProcessor.cpp

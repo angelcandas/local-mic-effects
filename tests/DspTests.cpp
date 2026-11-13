@@ -38,6 +38,7 @@
 #include "daw/Quantize.h"
 #include "daw/Patterns.h"
 #include "analysis/Beats.h"
+#include "analysis/ToMidi.h"
 #include "DeviceFavourites.h"
 #include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
@@ -9626,6 +9627,265 @@ namespace
         folder.deleteRecursively();
     }
 
+
+    //==============================================================================
+    // Audio to MIDI: sung lines to notes, drum loops to GM drum notes.
+    struct DrumEvent { double time; int note; float velocity; };
+
+    juce::AudioBuffer<float> playBeat (const std::vector<DrumEvent>& hits, double seconds, int preset = 0)
+    {
+        auto created = micfx::inst::createInstrument ("beat");
+        auto& instrument = *created;
+        instrument.setRateAndBufferSizeDetails (sampleRate, blockSize);
+        instrument.prepareToPlay (sampleRate, blockSize);
+        instrument.setCurrentProgram (preset);
+        juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+        instrument.reset();
+        std::vector<juce::MidiMessage> events;
+        for (const auto& h : hits)
+        {
+            events.push_back (at (juce::MidiMessage::noteOn (10, h.note, h.velocity), h.time));
+            events.push_back (at (juce::MidiMessage::noteOff (10, h.note), h.time + 0.05));
+        }
+        std::sort (events.begin(), events.end(), [] (const auto& a, const auto& b) { return a.getTimeStamp() < b.getTimeStamp(); });
+        const auto out = playInstrument (instrument, events, seconds);
+        juce::AudioBuffer<float> buffer (2, (int) out[0].size());
+        for (int ch = 0; ch < 2; ++ch)
+            buffer.copyFrom (ch, 0, out[(size_t) ch].data(), (int) out[(size_t) ch].size());
+        return buffer;
+    }
+
+    // How many of the played hits came back as the same drum within 30 ms, and how many
+    // notes were found that weren't played.
+    std::pair<int, int> matchDrums (const std::vector<DrumEvent>& played, const std::vector<analysis::tomidi::Note>& found,
+                                    juce::String& misses)
+    {
+        std::vector<bool> used (found.size(), false);
+        int right = 0;
+        for (const auto& p : played)
+        {
+            auto hit = false;
+            for (size_t i = 0; i < found.size() && ! hit; ++i)
+                if (! used[i] && found[i].pitch == p.note && std::abs (found[i].time - p.time) < 0.03)
+                    used[i] = hit = true;
+            right += hit ? 1 : 0;
+            if (! hit)
+                misses << " missed " << p.note << "@" << juce::String (p.time, 3);
+        }
+        int extra = 0;
+        for (size_t i = 0; i < found.size(); ++i)
+            if (! used[i])
+            {
+                ++extra;
+                misses << " extra " << found[i].pitch << "@" << juce::String (found[i].time, 3);
+            }
+        return { right, extra };
+    }
+
+    void testToMidi()
+    {
+        std::cout << "\nAudio to MIDI (melody and drums)\n";
+        namespace tomidi = analysis::tomidi;
+        const auto describe = [] (const std::vector<tomidi::Note>& notes)
+        {
+            juce::String s;
+            for (const auto& n : notes)
+                s << n.pitch << "@" << juce::String (n.time, 2) << "+" << juce::String (n.length, 2) << "v" << n.velocity << " ";
+            return s.trim();
+        };
+
+        // A sung line: A3, B3 legato, a rest, C4 with vibrato.
+        {
+            const auto melody = makeMelody();
+            const auto notes = tomidi::melodyToMidi (melody, sampleRate);
+            check (notes.size() == 3 && notes[0].pitch == 57 && notes[1].pitch == 59 && notes[2].pitch == 60,
+                   "a sung line comes back as its notes, vibrato or not (" + describe (notes) + ")");
+            if (notes.size() == 3)
+                check (std::abs (notes[0].time - 0.1) < 0.03 && std::abs (notes[1].time - 0.6) < 0.04 && std::abs (notes[2].time - 1.25) < 0.03
+                           && std::abs (notes[2].time + notes[2].length - 1.95) < 0.03 && notes[0].time + notes[0].length <= notes[1].time + 1e-9,
+                       "where they were sung, one after the other");
+
+            // As a bass line: two octaves down, into E1 .. E3.
+            const auto bass = tomidi::melodyToMidi (melody, sampleRate, tomidi::MelodyOptions::bass());
+            check (bass.size() == 3 && bass[0].pitch == 33 && bass[1].pitch == 35 && bass[2].pitch == 36,
+                   "hummed as a bass line, it lands where a bass plays (" + describe (bass) + ")");
+
+            // Quantised to eighths at 120 BPM.
+            tomidi::MelodyOptions onGrid;
+            onGrid.grid = analysis::rhythm::makeGrid (120.0, 0.5, 0.0, 3.0);
+            onGrid.quantise = 1.0f;
+            const auto q = tomidi::melodyToMidi (melody, sampleRate, onGrid);
+            check (q.size() == 3 && std::abs (q[0].time) < 1e-6 && std::abs (q[1].time - 0.5) < 1e-6 && std::abs (q[2].time - 1.25) < 1e-6
+                       && std::abs (q[0].length - 0.5) < 1e-6 && std::abs (q[2].time + q[2].length - 2.0) < 1e-6,
+                   "quantised: starts and ends on the eighths (" + describe (q) + ")");
+            onGrid.quantise = 0.5f;
+            const auto half = tomidi::melodyToMidi (melody, sampleRate, onGrid);
+            check (half.size() == 3 && std::abs (half[0].time - 0.05) < 0.02, "half strength moves them half way");
+        }
+
+        // The coach's scale (C D E F E D), then the same sung 40 cents flat.
+        {
+            const std::vector<int> expected { 60, 62, 64, 65, 64, 62 };
+            for (const auto cents : { 0.0, -0.4, 0.3 })
+            {
+                const auto line = singLine (getCoachMelody(), sampleRate, cents);
+                const auto notes = tomidi::melodyToMidi (line, sampleRate);
+                auto right = notes.size() == expected.size();
+                for (size_t i = 0; right && i < notes.size(); ++i)
+                    right = notes[i].pitch == expected[i] && std::abs (notes[i].time - getCoachMelody()[i].start) < 0.04;
+                check (right, "a sung scale " + juce::String ((int) std::round (cents * 100)) + " cents off comes back as C D E F E D ("
+                                  + describe (notes) + ")");
+            }
+            const auto track = analysis::pitch::analyse (singLine (getCoachMelody(), sampleRate, -0.4), sampleRate);
+            const auto offset = tomidi::getTuningOffset (analysis::pitch::findNotes (track));
+            check (std::abs (offset + 0.4f) < 0.05f, "and how far it was tuned is found (" + juce::String (offset, 2) + " st)");
+        }
+
+        // Snapping to a key; a quieter note plays softer.
+        {
+            check (tomidi::snapToKey (61.3f, -1, false) == 61 && tomidi::snapToKey (61.3f, 0, false) == 62
+                       && tomidi::snapToKey (60.6f, 0, false) == 60 && tomidi::snapToKey (63.4f, 0, true) == 63
+                       && tomidi::snapToKey (63.4f, 0, false) == 64 && tomidi::snapToKey (66.2f, 7, false) == 66,
+                   "snapping goes to the nearest note of the key (C# -> D in C major, Eb stays in C minor, F# in G)");
+
+            const std::vector<SungNote> notes { { 0.2, 0.7, 61.3 }, { 0.9, 1.4, 64 } };
+            auto line = singLine (notes, sampleRate, 0.0, 0.0, 1.8);
+            line.applyGain (0, (int) (0.8 * sampleRate), (int) (sampleRate), juce::Decibels::decibelsToGain (-12.0f));
+            tomidi::MelodyOptions inC;
+            inC.key = 0;
+            inC.followTuning = false;
+            const auto snapped = tomidi::melodyToMidi (line, sampleRate, inC);
+            check (snapped.size() == 2 && snapped[0].pitch == 62 && snapped[1].pitch == 64, "a line snaps to the project key (" + describe (snapped) + ")");
+            check (snapped.size() == 2 && snapped[1].velocity < snapped[0].velocity - 20 && snapped[1].velocity > 20,
+                   "and the note sung 12 dB quieter plays softer");
+        }
+
+        // Drums: Beat patterns played, then turned back into notes.
+        const auto debug = juce::SystemStats::getEnvironmentVariable ("MICFX_TOMIDI_DEBUG", {}).isNotEmpty();
+        const auto runPattern = [&] (const juce::String& name, const std::vector<DrumEvent>& played, double seconds, int preset,
+                                     double minRecall = 0.9)
+        {
+            const auto audio = playBeat (played, seconds, preset);
+            const auto hits = tomidi::findDrumHits (audio, sampleRate);
+            const auto notes = tomidi::toNotes (hits);
+            if (debug)
+                for (const auto& h : hits)
+                {
+                    juce::String line ("    ");
+                    line << juce::String (h.time, 3) << " regions";
+                    for (auto r : h.region)
+                        line << " " << juce::String (r, 1);
+                    line << " body " << juce::String (h.bodyHz, 0) << " Hz, ring " << juce::String (h.ring, 2) << " s ->";
+                    for (auto n : h.notes)
+                        line << " " << n;
+                    std::cout << line << "\n";
+                }
+            juce::String misses;
+            const auto [right, extra] = matchDrums (played, notes, misses);
+            const auto recall = right / (double) played.size(), precision = notes.empty() ? 0.0 : right / (double) notes.size();
+            check (recall > minRecall && precision > 0.9, name + ": " + juce::String (right) + " of " + juce::String ((int) played.size())
+                                                        + " hits right, " + juce::String (extra) + " extra" + (recall > minRecall && precision > 0.9 ? juce::String() : misses));
+            return notes;
+        };
+
+        // A rock beat at 120 BPM: kick, snare, eighth hats, an open hat, then a crash to end
+        // on (hits under a ringing crash are hard to hear, in a mix too).
+        {
+            std::vector<DrumEvent> rock;
+            for (int bar = 0; bar < 2; ++bar)
+                for (int eighth = 0; eighth < 8; ++eighth)
+                {
+                    const auto t = 0.1 + bar * 2.0 + eighth * 0.25;
+                    const auto lastEighth = bar == 1 && eighth == 7;
+                    rock.push_back ({ t, lastEighth ? tomidi::gm::openHat : tomidi::gm::closedHat, eighth % 2 == 0 ? 0.8f : 0.55f });
+                    if (eighth == 0 || eighth == 4 || (bar == 1 && eighth == 5))
+                        rock.push_back ({ t, tomidi::gm::kick, 0.9f });
+                    if (eighth == 2 || eighth == 6)
+                        rock.push_back ({ t, tomidi::gm::snare, 0.85f });
+                }
+            rock.push_back ({ 4.1, tomidi::gm::crash, 0.85f });
+            rock.push_back ({ 4.1, tomidi::gm::kick, 0.9f });
+            runPattern ("a rock beat", rock, 6.5, 0);
+        }
+
+        // Kicks and snares with no cymbals, then the same with a hat on some of them.
+        {
+            std::vector<DrumEvent> bare;
+            for (int beat = 0; beat < 8; ++beat)
+            {
+                const auto t = 0.1 + beat * 0.5;
+                bare.push_back ({ t, beat % 2 == 0 ? tomidi::gm::kick : tomidi::gm::snare, beat < 4 ? 0.9f : 0.6f });
+                if (beat >= 4 && beat % 3 == 1)
+                    bare.push_back ({ t, tomidi::gm::closedHat, 0.7f });
+            }
+            bare.push_back ({ 0.35, tomidi::gm::kick, 0.8f });
+            runPattern ("kicks and snares, a few hats", bare, 4.6, 0);
+        }
+
+        // A fill on the toms, with kicks under it and a crash to finish. A tom struck again
+        // while it still rings adds little new sound, so a few of those can go missing.
+        {
+            std::vector<DrumEvent> fill;
+            for (int s = 0; s < 8; ++s)
+                fill.push_back ({ 0.1 + s * 0.125, s < 4 ? tomidi::gm::highTom : tomidi::gm::lowTom, 0.8f });
+            fill.push_back ({ 0.1, tomidi::gm::kick, 0.9f });
+            fill.push_back ({ 0.6, tomidi::gm::kick, 0.9f });
+            fill.push_back ({ 1.1, tomidi::gm::kick, 0.9f });
+            fill.push_back ({ 1.1, tomidi::gm::crash, 0.9f });
+            fill.push_back ({ 1.6, tomidi::gm::snare, 0.8f });
+            runPattern ("a tom fill", fill, 3.5, 0, 0.8);
+        }
+
+        // Ghost notes: soft snares between loud ones keep their place and play softer.
+        {
+            std::vector<DrumEvent> groove;
+            for (int beat = 0; beat < 8; ++beat)
+            {
+                const auto t = 0.1 + beat * 0.5;
+                groove.push_back ({ t, beat % 2 == 0 ? tomidi::gm::kick : tomidi::gm::snare, 0.9f });
+                groove.push_back ({ t, tomidi::gm::closedHat, 0.7f });
+                groove.push_back ({ t + 0.25, tomidi::gm::closedHat, 0.5f });
+                if (beat % 2 == 1)
+                    groove.push_back ({ t + 0.375, tomidi::gm::snare, 0.3f });
+            }
+            const auto notes = runPattern ("a groove with ghost notes", groove, 4.5, 0);
+            std::vector<int> loud, ghost;
+            for (const auto& n : notes)
+                if (n.pitch == tomidi::gm::snare)
+                    (std::fmod (n.time - 0.1 + 1e-3, 0.5) < 0.1 ? loud : ghost).push_back (n.velocity);
+            check (! loud.empty() && ! ghost.empty() && *std::max_element (ghost.begin(), ghost.end()) < *std::min_element (loud.begin(), loud.end()),
+                   "ghost notes play softer than the backbeat");
+        }
+
+        // Another kit sound (a preset with bigger toms and longer cymbals) and quantising.
+        {
+            std::vector<DrumEvent> beat;
+            for (int eighth = 0; eighth < 16; ++eighth)
+            {
+                const auto t = 0.1 + eighth * 0.25;
+                beat.push_back ({ t, tomidi::gm::closedHat, 0.7f });
+                if (eighth % 4 == 0) beat.push_back ({ t, tomidi::gm::kick, 0.9f });
+                if (eighth % 4 == 2) beat.push_back ({ t, tomidi::gm::snare, 0.9f });
+            }
+            auto created = micfx::inst::createInstrument ("beat");
+            runPattern ("the same on the " + created->getProgramName (juce::jmin (2, created->getNumPrograms() - 1)) + " kit", beat, 4.6,
+                        juce::jmin (2, created->getNumPrograms() - 1));
+
+            tomidi::DrumOptions onGrid;
+            onGrid.grid = analysis::rhythm::makeGrid (120.0, 0.5, 0.0, 5.0, 0.1);
+            onGrid.quantise = 1.0f;
+            const auto quantised = tomidi::drumsToMidi (playBeat (beat, 4.6), sampleRate, onGrid);
+            auto onLines = ! quantised.empty();
+            for (const auto& n : quantised)
+                onLines = onLines && std::abs (std::fmod (n.time - 0.1 + 1e-9, 0.25)) < 1e-6;
+            check (onLines, "quantised, every hit sits on an eighth");
+        }
+
+        juce::AudioBuffer<float> silence (1, (int) sampleRate);
+        silence.clear();
+        check (tomidi::melodyToMidi (silence, sampleRate).empty() && tomidi::drumsToMidi (silence, sampleRate).empty(),
+               "silence gives no notes");
+    }
 }
 
 //==============================================================================
@@ -10303,6 +10563,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=tomidi: just audio to MIDI.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "tomidi")
+    {
+        testToMidi();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=notes: just the note pitch editor.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "notes")
     {
@@ -10353,6 +10621,7 @@ int main()
     testPractice();
     testPracticeLoops();
     testRhythm();
+    testToMidi();
     testTrackTools();
     testDawBridge();
     testPatterns();
