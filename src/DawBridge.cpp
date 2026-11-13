@@ -13,6 +13,7 @@
 #include "dsp/FxModules.h"
 
 #include <map>
+#include <optional>
 #include <numeric>
 #include <variant>
 
@@ -181,6 +182,16 @@ struct DawBridge::ToMidiJob
     std::vector<analysis::tomidi::Note> notes;
 };
 
+struct DawBridge::SongMapJob
+{
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> cancel { false }, finished { false };
+    analysis::structure::SongMap map;
+    juce::String error;
+    double offset = 0.0;
+    int clip = -1;
+};
+
 // One "backingVocals" build. Chord times are the lead file's own seconds.
 struct DawBridge::BackingJob
 {
@@ -307,13 +318,14 @@ namespace
             { "tempo", "Tempo" }, { "tempoMap", "Tempo change" }, { "beatsPerBar", "Time signature" }, { "loop", "Loop range" },
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
             { "quantize", "Quantize" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
-            { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "clearMuteSolo", "Clear mute and solo" },
+            { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
             { "setPart", "Pattern row" }, { "editPattern", "Edit pattern" }, { "setSteps", "Steps" },
             { "addPatternClip", "Place pattern" }, { "setPatternClip", "Pattern block change" },
             { "removePatternClip", "Delete pattern block" }, { "makePatternUnique", "Make pattern unique" },
             { "patternToClips", "Turn into MIDI clips" }, { "clipToPattern", "Make a pattern" },
+            { "setPartMutes", "Mute rows" }, { "splitPattern", "Split by track" },
         };
         if (const auto it = names.find (command); it != names.end())
             return it->second;
@@ -391,6 +403,8 @@ DawBridge::~DawBridge()
         stemJob->cancel = true;
     if (keyJob != nullptr)
         keyJob->cancel = true;
+    if (songMapJob != nullptr)
+        songMapJob->cancel = true;
     if (toMidiJob != nullptr)
         toMidiJob->cancel = true;
     if (backingJob != nullptr)
@@ -662,7 +676,8 @@ juce::var DawBridge::describeSession()
                               { "takesShown", (bool) track.getProperty (ids::takesShown, false) },
                               { "listenTake", daw::Edit::getListenTake (track) },
                               { "instrument", describeInstrument (track) },
-                              { "keyNames", describeKeyNames ((int) track[ids::id]) } }));
+                              { "keyNames", describeKeyNames ((int) track[ids::id]) },
+                              { "kitPans", describeKitPans ((int) track[ids::id]) } }));
     }
 
     const auto master = edit.getMaster();
@@ -702,7 +717,15 @@ juce::var DawBridge::describeSession()
           {
               juce::Array<juce::var> markers;
               for (const auto& m : edit.getMarkers())
-                  markers.add (object ({ { "id", (int) m[ids::id] }, { "name", m[ids::name].toString() }, { "time", number (m, ids::time) } }));
+              {
+                  auto marker = object ({ { "id", (int) m[ids::id] }, { "name", m[ids::name].toString() }, { "time", number (m, ids::time) } });
+                  if (daw::Edit::isSection (m))
+                      for (const auto& [key, value] : std::initializer_list<std::pair<const char*, juce::var>> {
+                               { "length", number (m, ids::length) }, { "section", m[ids::section].toString() },
+                               { "letter", (int) m[ids::letter] }, { "colour", m[ids::colour].toString() } })
+                          marker.getDynamicObject()->setProperty (key, value);
+                  markers.add (marker);
+              }
               return juce::var (markers);
           }() },
         { "metronomeVolume", engine.getMetronomeVolume() },
@@ -727,6 +750,20 @@ juce::var DawBridge::describeSession()
         { "patternRecording", engine.isPatternRecording() },
         { "patternSnap", engine.getPatternSnap() },
     });
+}
+
+juce::var DawBridge::describeKitPans (int trackId) const
+{
+    // A Kit's pad pans by note ("36": -0.2), for the rack's pan knobs; void for other instruments.
+    auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (trackId).get());
+    if (instrument == nullptr || micfx::inst::asKit (instrument->getEngine()) == nullptr)
+        return {};
+
+    auto* pans = new juce::DynamicObject();
+    for (int pad = 0; pad < micfx::inst::KitSampler::numPads; ++pad)
+        if (auto* value = instrument->getState().getRawParameterValue ("p" + juce::String (pad) + "Pan"))
+            pans->setProperty (juce::String (micfx::inst::KitSampler::noteForPad (pad)), (double) value->load());
+    return juce::var (pans);
 }
 
 juce::var DawBridge::describeKeyNames (int trackId) const
@@ -754,13 +791,19 @@ juce::var DawBridge::describePatterns() const
             if (! part.hasType (ids::PART))
                 continue;
 
-            juce::Array<juce::var> rows;
+            juce::Array<juce::var> rows, muted;
             for (auto note : daw::Edit::getPartRows (part))
                 rows.add (note);
+            for (auto note : daw::Edit::getPartMuted (part))
+                muted.add (note);
+            auto* levels = new juce::DynamicObject();
+            for (const auto& [note, level] : daw::Edit::getPartLevels (part))
+                levels->setProperty (juce::String (note), (double) level);
 
             parts.add (object ({ { "track", (int) number (part, ids::track) }, { "drum", (bool) part.getProperty (ids::drum, false) },
                                  { "rows", rows }, { "stepNote", (int) part.getProperty (ids::stepNote, daw::Edit::defaultStepNote) },
-                                 { "mute", (bool) part.getProperty (ids::mute, false) }, { "notes", describeNotes (part) } }));
+                                 { "mute", (bool) part.getProperty (ids::mute, false) }, { "muted", muted }, { "levels", juce::var (levels) },
+                                 { "notes", describeNotes (part) } }));
         }
 
         patterns.add (object ({ { "id", (int) pattern[ids::id] }, { "name", pattern[ids::name].toString() },
@@ -1187,6 +1230,14 @@ void DawBridge::tick()
             finishKeyDetection();
         else
             emit ("dawKey", object ({ { "state", "analysing" }, { "progress", keyJob->progress.load() } }));
+    }
+
+    if (songMapJob != nullptr)
+    {
+        if (songMapJob->finished)
+            finishSongMap();
+        else
+            emit ("dawSongMap", object ({ { "state", "analysing" }, { "progress", songMapJob->progress.load() } }));
     }
 
     if (toMidiJob != nullptr)
@@ -2904,6 +2955,245 @@ juce::var DawBridge::handleKey (const juce::var& args)
 }
 
 //==============================================================================
+// "songMap" { action, ... }: the song's sections, bars and tempo (analysis::structure).
+//   detect  { clip? }   listen to the whole mix, or to one audio clip (an imported song),
+//                       in the background; "dawSongMap" brings the result
+//   cancel
+//   get                 the last result (describeSongMap)
+//   apply   { markers, follow }  as one undo step: the sections become ruler sections
+//                       (replacing the ones there are), and/or "Follow the performance":
+//                       the tempo map follows the played beats, bar lines on the downbeats
+//                       -> { ok, sections, leadInBars }
+//   clear               remove the section markers
+namespace
+{
+    juce::String getSectionColour (const analysis::structure::Section& s)
+    {
+        if (s.kind == "intro" || s.kind == "outro") return "#7d8799";
+        if (s.kind == "verse")  return "#4f8cff";
+        if (s.kind == "chorus") return "#ff7a45";
+        if (s.kind == "bridge") return "#b26bff";
+        static const char* letters[] = { "#2bb5a0", "#e0b23a", "#e05a8a", "#6fbf4a", "#5aa6e0", "#c07a4a" };
+        return letters[juce::jlimit (0, 5, s.letter % 6)];
+    }
+}
+
+juce::var DawBridge::handleSongMap (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+
+    if (action == "detect")
+    {
+        if (songMapJob != nullptr)
+            return error ("Already listening to the song.");
+
+        auto job = std::make_shared<SongMapJob>();
+        const auto beatsPerBar = edit.getBeatsPerBar();
+        const auto clipId = arg (args, "clip", -1);
+
+        if (clipId >= 0)
+        {
+            const auto clip = edit.getClip (clipId);
+            if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+                return error ("Pick an audio clip (a song or a recording) to map.");
+
+            const juce::File file (clip[ids::file].toString());
+            const auto warpSettings = daw::Edit::getWarpSettings (clip);
+            auto audio = engine.getAudioPool().get (file, warpSettings);
+            if (audio == nullptr) // not decoded yet (nothing has played it): decode it now
+                audio = engine.getAudioPool().loadNow (file, warpSettings);
+            if (audio == nullptr)
+                return error ("The clip's audio can't be read.");
+
+            const auto rate = engine.getAudioPool().getSampleRate();
+            const auto offset = juce::jmax ((juce::int64) 0, (juce::int64) std::llround ((double) clip[ids::offset] * rate));
+            const auto length = juce::jmin ((juce::int64) audio->getNumSamples() - offset,
+                                            (juce::int64) std::llround ((double) clip[ids::length] * rate));
+            if (length < (juce::int64) (rate * 4.0))
+                return error ("The clip is too short to map: it needs a few bars of music.");
+
+            job->clip = clipId;
+            job->offset = (double) clip[ids::start];
+            songMapJob = job;
+
+            juce::Thread::launch ([job, audio, rate, offset, length, beatsPerBar]
+            {
+                juce::AudioBuffer<float> region (audio->getNumChannels(), (int) length);
+                for (int ch = 0; ch < region.getNumChannels(); ++ch)
+                    region.copyFrom (ch, 0, *audio, ch, (int) offset, (int) length);
+                job->progress = 0.2;
+
+                analysis::structure::Options options;
+                options.beatsPerBar = beatsPerBar;
+                job->map = analysis::structure::analyse (region, rate, options, [job] { return ! job->cancel.load(); });
+                job->finished = true;
+            });
+        }
+        else
+        {
+            // The whole song as it sounds: the session rendered offline (like an export).
+            double songSeconds = 0.0;
+            for (const auto& track : edit.getTracks())
+                for (const auto& clip : track)
+                    if (clip.hasType (ids::CLIP))
+                        songSeconds = juce::jmax (songSeconds, (double) clip[ids::start] + (double) clip[ids::length]);
+            songSeconds = juce::jmax (songSeconds, daw::patterns::getBlocksEnd (edit.getState(), edit.getTempoMap()));
+            if (songSeconds < 4.0)
+                return error ("Add a few bars of music first (or pick a clip to map).");
+
+            engine.captureInstrumentStates();
+            const auto snapshot = edit.getState().createCopy();
+            const auto rate = 48000.0;
+            songMapJob = job;
+
+            juce::Thread::launch ([job, snapshot, rate, songSeconds, beatsPerBar]
+            {
+                constexpr int blockSize = 4096;
+                const auto total = (juce::int64) std::llround (songSeconds * rate);
+                juce::AudioBuffer<float> mix (1, (int) total);
+                {
+                    daw::Edit copy;
+                    copy.replaceState (snapshot);
+                    daw::DawEngine offline (copy, false);
+                    offline.prepare (rate, blockSize);
+                    offline.loadAllNow();
+                    offline.seek (0);
+                    offline.play();
+
+                    juce::AudioBuffer<float> buffer (2, blockSize);
+                    for (juce::int64 done = 0; done < total && ! job->cancel; done += blockSize)
+                    {
+                        const auto n = (int) juce::jmin ((juce::int64) blockSize, total - done);
+                        offline.process (buffer, 2, n);
+                        auto* out = mix.getWritePointer (0, (int) done);
+                        const auto* left = buffer.getReadPointer (0);
+                        const auto* right = buffer.getReadPointer (1);
+                        for (int i = 0; i < n; ++i)
+                            out[i] = 0.5f * (left[i] + right[i]);
+                        job->progress = 0.6 * (double) (done + n) / (double) total;
+                    }
+                }
+
+                if (! job->cancel)
+                {
+                    analysis::structure::Options options;
+                    options.beatsPerBar = beatsPerBar;
+                    job->map = analysis::structure::analyse (mix, rate, options, [job] { return ! job->cancel.load(); });
+                }
+                job->finished = true;
+            });
+        }
+
+        emit ("dawSongMap", object ({ { "state", "analysing" }, { "progress", 0.0 } }));
+        return error ({});
+    }
+
+    if (action == "cancel")
+    {
+        if (songMapJob != nullptr)
+            songMapJob->cancel = true;
+        return error ({});
+    }
+
+    if (action == "get")
+        return describeSongMap();
+
+    if (action == "clear")
+    {
+        edit.getUndoManager().beginNewTransaction ("Remove song sections");
+        edit.setSongSections ({});
+        return error ({});
+    }
+
+    if (action == "apply")
+    {
+        if (! lastSongMap.has_value())
+            return error ("Map the song first.");
+
+        const auto& map = *lastSongMap;
+        const auto markers = arg (args, "markers", true), follow = arg (args, "follow", false);
+
+        if (follow)
+        {
+            if (! map.hasBeats())
+                return error ("No steady beat was found, so there is no performance tempo to follow.");
+
+            // Clips tied to bars and beats would move with the new tempo map, and the
+            // performance must stay where it was played.
+            for (const auto& track : edit.getTracks())
+                for (const auto& clip : track)
+                    if (clip.hasType (ids::CLIP) && ! daw::Edit::isMidiClip (clip) && daw::Edit::isMusical (clip))
+                        return error ("\"" + clip[ids::name].toString() + "\" follows the tempo (musical mode), so it would move. "
+                                      "Turn musical mode off on it first, or add only the sections.");
+        }
+
+        edit.getUndoManager().beginNewTransaction (follow ? "Follow the performance" : "Song sections");
+        auto leadIn = 0;
+        if (follow)
+        {
+            std::vector<double> beats;
+            for (auto b : map.beats)
+                beats.push_back (b + lastSongMapOffset);
+
+            // Bar lines start at 0 s: a performance that starts later gets whole lead-in bars.
+            leadIn = edit.setTempoMapFromBeats (beats, map.firstDownbeat);
+        }
+
+        if (markers)
+        {
+            std::vector<daw::Edit::SectionMarker> sections;
+            for (const auto& s : map.sections)
+                sections.push_back ({ s.name, s.kind, getSectionColour (s), s.letter, s.start + lastSongMapOffset, s.end - s.start });
+            edit.setSongSections (sections);
+        }
+        edit.getUndoManager().beginNewTransaction();
+
+        return object ({ { "ok", true }, { "sections", markers ? (int) map.sections.size() : 0 }, { "leadInBars", leadIn } });
+    }
+
+    return error ("Unknown song map action: " + action);
+}
+
+void DawBridge::finishSongMap()
+{
+    auto job = std::move (songMapJob);
+
+    if (job->cancel || job->map.cancelled)
+    {
+        emit ("dawSongMap", object ({ { "state", "cancelled" } }));
+        return;
+    }
+
+    lastSongMap = std::move (job->map);
+    lastSongMapOffset = job->offset;
+    lastSongMapClip = job->clip;
+    emit ("dawSongMap", describeSongMap());
+}
+
+juce::var DawBridge::describeSongMap() const
+{
+    if (! lastSongMap.has_value())
+        return object ({ { "state", "none" } });
+
+    const auto& map = *lastSongMap;
+    juce::Array<juce::var> sections;
+    for (const auto& s : map.sections)
+        sections.add (object ({ { "name", s.name }, { "kind", s.kind }, { "letter", s.getLetterName() }, { "bars", s.bars },
+                                { "firstBar", s.firstBar }, { "start", s.start + lastSongMapOffset }, { "end", s.end + lastSongMapOffset },
+                                { "level", s.loudnessDb }, { "colour", getSectionColour (s) } }));
+
+    juce::Array<juce::var> barTempos;
+    for (auto t : map.getBarTempos())
+        barTempos.add (std::round (t * 10.0) / 10.0);
+
+    return object ({ { "state", "ready" }, { "source", lastSongMapClip >= 0 ? "clip" : "mix" }, { "clip", lastSongMapClip },
+                     { "hasBeats", map.hasBeats() }, { "bpm", map.bpm }, { "confidence", map.tempoConfidence },
+                     { "drift", map.getTempoDrift() }, { "beatsPerBar", map.beatsPerBar }, { "bars", map.getNumBars() },
+                     { "firstDownbeat", map.downbeats.empty() ? 0.0 : map.downbeats.front() + lastSongMapOffset },
+                     { "barTempos", barTempos }, { "sections", sections } });
+}
+
+//==============================================================================
 // "takes" { action, ... }: take lanes and comping.
 //   show      { track, on }        unfold (or fold) the track's take lanes
 //   listen    { track, take }      hear one take instead of the comp (take -1: the comp)
@@ -4485,6 +4775,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    if (command == "songMap")
+    {
+        complete (handleSongMap (args));
+        return;
+    }
+
     if (command == "backingVocals")
     {
         complete (handleBackingVocals (args));
@@ -4838,6 +5134,25 @@ bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, 
         return true;
     }
 
+    if (command == "kitPad")
+    {
+        // A Kit pad's pan from the rack (-1..1). The Kit's own parameter, so it is saved with the
+        // instrument and not an undo step, like turning the knob in the Kit's window.
+        auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (arg (args, "track", -1)).get());
+        auto* kit = instrument != nullptr ? micfx::inst::asKit (instrument->getEngine()) : nullptr;
+        if (kit == nullptr) { complete (error ("This track's instrument isn't a Kit.")); return true; }
+
+        const auto pad = micfx::inst::KitSampler::padForNote (arg (args, "note", 36));
+        if (! micfx::inst::KitSampler::isPad (pad)) { complete (error ("The Kit's pads are the notes 36 to 51.")); return true; }
+
+        if (args.hasProperty ("pan"))
+            if (auto* parameter = instrument->getState().getParameter ("p" + juce::String (pad) + "Pan"))
+                parameter->setValueNotifyingHost (parameter->convertTo0to1 (juce::jlimit (-1.0f, 1.0f, (float) (double) args["pan"])));
+        sessionChanged = true;
+        complete (error ({}));
+        return true;
+    }
+
     if (command == "liveNote")
     {
         // With a track: that track's instrument only, armed or not (auditioning a row).
@@ -4904,6 +5219,42 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
     const auto patternId = arg (args, "pattern", -1);
     const auto trackId = arg (args, "track", -1);
 
+    if (command == "splitPattern")
+    {
+        if (! edit.getPattern (id).isValid()) { complete (error ("There's no such pattern.")); return true; }
+        juce::Array<juce::var> made;
+        for (auto pattern : edit.splitPatternByTrack (id))
+            made.add (pattern);
+        if (made.isEmpty()) { complete (error ("This pattern has no notes to split.")); return true; }
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "patterns", made } }));
+        return true;
+    }
+
+    if (command == "setPartMutes")
+    {
+        // Mute or solo rows across the pattern's tracks in one step: parts [{ track, mute
+        // (the whole part), muted (drum rows) }].
+        if (! edit.getPattern (patternId).isValid()) { complete (error ("There's no such pattern.")); return true; }
+        if (auto* list = args["parts"].getArray())
+            for (const auto& item : *list)
+            {
+                const auto track = arg (item, "track", -1);
+                if (! daw::Edit::isMidiTrack (edit.getTrack (track)))
+                    continue;
+                if (item.hasProperty ("mute") && (bool) edit.getPart (patternId, track).getProperty (ids::mute, false) != (bool) item["mute"])
+                    edit.setPartMute (patternId, track, item["mute"]);
+                if (auto* notes = item["muted"].getArray())
+                {
+                    juce::Array<int> muted;
+                    for (const auto& note : *notes)
+                        muted.add ((int) note);
+                    edit.setPartMuted (patternId, track, muted);
+                }
+            }
+        ok();
+        return true;
+    }
+
     if (command == "setPart" || command == "editPattern" || command == "setSteps")
     {
         if (! edit.getPattern (patternId).isValid()) { complete (error ("There's no such pattern.")); return true; }
@@ -4916,6 +5267,16 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
         if (args.hasProperty ("drum"))     edit.setPartDrum (patternId, trackId, args["drum"]);
         if (args.hasProperty ("stepNote")) edit.setPartStepNote (patternId, trackId, args["stepNote"]);
         if (args.hasProperty ("mute"))     edit.setPartMute (patternId, trackId, args["mute"]);
+        if (auto* muted = args["muted"].getArray())
+        {
+            juce::Array<int> notes;
+            for (const auto& note : *muted)
+                notes.add ((int) note);
+            edit.setPartMuted (patternId, trackId, notes);
+        }
+        if (auto* levels = args["levels"].getDynamicObject())
+            for (const auto& level : levels->getProperties())
+                edit.setPartLevel (patternId, trackId, level.name.toString().getIntValue(), (float) (double) level.value);
         if (auto* rows = args["rows"].getArray())
         {
             juce::Array<int> notes;
@@ -4965,7 +5326,7 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
                 if (auto* pair = item.getArray(); pair != nullptr && pair->size() >= 2)
                     steps.emplace_back ((int) (*pair)[0], (int) (*pair)[1]);
 
-        edit.setSteps (patternId, trackId, arg (args, "pitch", daw::Edit::defaultStepNote), steps);
+        edit.setSteps (patternId, trackId, arg (args, "pitch", daw::Edit::defaultStepNote), steps, arg (args, "anyPitch", false));
         ok();
         return true;
     }

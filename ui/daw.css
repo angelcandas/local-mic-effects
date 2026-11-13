@@ -788,6 +788,7 @@ body.is-daw .chip--live { display: none; }
 .stems-panel,
 .automix-panel,
 .mixcheck-panel,
+.songmap-panel,
 .key-panel {
   position: absolute;
   top: 52px;
@@ -801,7 +802,7 @@ body.is-daw .chip--live { display: none; }
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
 }
 
-.export-panel[hidden], .tomidi-panel[hidden], .backing-panel[hidden], .automix-panel[hidden], .key-panel[hidden], .stems-panel[hidden], .rebalance-panel[hidden], .mixcheck-panel[hidden] { display: none; }
+.export-panel[hidden], .tomidi-panel[hidden], .backing-panel[hidden], .automix-panel[hidden], .key-panel[hidden], .stems-panel[hidden], .rebalance-panel[hidden], .mixcheck-panel[hidden], .songmap-panel[hidden] { display: none; }
 .export-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .export-options { display: grid; gap: 8px; }
 .export-options label { display: grid; grid-template-columns: 70px 1fr; align-items: center; color: var(--muted); }
@@ -818,6 +819,7 @@ body.is-daw .chip--live { display: none; }
 .stems-panel.is-running .export-bar,
 .automix-panel.is-running .export-bar,
 .mixcheck-panel.is-running .export-bar,
+.songmap-panel.is-running .export-bar,
 .key-panel.is-running .export-bar { visibility: visible; }
 .export-footer { display: flex; align-items: center; gap: 8px; }
 .export-result { flex: 1; color: var(--muted); font-size: 11.5px; }
@@ -1040,6 +1042,22 @@ body.is-daw .chip--live { display: none; }
   color: var(--text);
   font: 600 10px var(--mono);
 }
+
+/* A song section (from the song map): a coloured range on the ruler behind its flag. */
+.marker.is-section {
+  border-left-color: var(--section, var(--warn));
+  background: color-mix(in srgb, var(--section, var(--warn)) 30%, var(--panel));
+}
+.marker-span {
+  position: absolute;
+  bottom: 0;
+  z-index: 2;
+  height: 14px;
+  border-right: 1px solid color-mix(in srgb, var(--section) 55%, transparent);
+  background: color-mix(in srgb, var(--section) 16%, transparent);
+  pointer-events: none;
+}
+.marker-line.is-section { border-left: 1px solid color-mix(in srgb, var(--section) 40%, transparent); }
 
 .marker-line {
   position: absolute;

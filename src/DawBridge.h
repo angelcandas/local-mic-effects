@@ -3,10 +3,13 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "PluginProcessor.h"
+
+#include <optional>
 #include "daw/Exporter.h"
 #include "analysis/MixAssistant.h"
 #include "analysis/ToMidi.h"
 #include "analysis/MixCheck.h"
+#include "analysis/Structure.h"
 #include "stems/StemSplitter.h"
 
 // Connects the web UI's DAW screen (ui/daw.js) to the processor's DAW session.
@@ -31,6 +34,9 @@
 //                 or { state: "error", error }
 //   "dawKey"      { state: "analysing", progress } while the key is detected, then
 //                 { state: "ready", key... } (see describeKey), or "cancelled"
+//   "dawSongMap"  { state: "analysing", progress } while the song map listens, then
+//                 { state: "ready", map... } (see describeSongMap), "cancelled" or
+//                 { state: "error", error }
 // See handle() for the commands. Message thread only.
 class DawBridge final : private juce::ValueTree::Listener
 {
@@ -102,6 +108,7 @@ private:
     juce::var describePatterns() const;
     juce::var describePatternClips() const;
     juce::var describeKeyNames (int trackId) const;
+    juce::var describeKitPans (int trackId) const;
     juce::var describeInstruments() const;
     juce::var addInstrument (int trackId, const juce::String& instrumentId);
     void showInstrumentWindow (int trackId);
@@ -167,6 +174,16 @@ private:
     void finishKeyDetection();
     juce::var describeKey() const;
     int setAutotunesToKey();
+
+    // Song map (src/analysis/Structure.h): sections, bars and the performance's tempo.
+    juce::var handleSongMap (const juce::var& args);
+    void finishSongMap();
+    juce::var describeSongMap() const;
+    struct SongMapJob;
+    std::shared_ptr<SongMapJob> songMapJob;
+    std::optional<analysis::structure::SongMap> lastSongMap;
+    double lastSongMapOffset = 0.0; // seconds from the session's start to the analysed audio's start
+    int lastSongMapClip = -1;       // the clip analysed, -1 for the whole mix
     void withChooser (const juce::String& title, const juce::File& start, const juce::String& patterns, int flags,
                       std::function<juce::var (const juce::File&)> action, Complete);
 

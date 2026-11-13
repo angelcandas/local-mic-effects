@@ -11,6 +11,11 @@
 
 #include <set>
 #include <thread>
+#include <csignal>
+#include <unistd.h>
+#if JUCE_LINUX || JUCE_MAC
+ #include <execinfo.h>
+#endif
 
 #include "DawBridge.h"
 #include "PluginProcessor.h"
@@ -12576,7 +12581,7 @@ namespace
         {
             std::vector<double> downbeats;
             for (int k = 0; k <= 16; ++k)
-                downbeats.push_back (1.0 + k * 2.0 + (k > 8 ? (k - 8) * 0.05 : 0.0)); // 120 BPM, then slowing a little
+                downbeats.push_back (1.6 + k * 2.0 + (k > 8 ? (k - 8) * 0.05 : 0.0)); // 120 BPM, then slowing a little
             int lead = -1;
             const auto map = daw::TempoMap::fromDownbeats (downbeats, 4, &lead);
             auto worst = 0.0;
@@ -12584,6 +12589,19 @@ namespace
                 worst = juce::jmax (worst, std::abs (map.toSeconds ((lead + (double) k) * 4.0) - downbeats[k]));
             check (lead == 1 && worst < 1.0e-4, "bar lines land on the downbeats (one lead-in bar, worst "
                                                 + juce::String (worst * 1000.0, 3) + " ms)");
+
+            // Music starting 0.4 s in: a whole lead-in bar would need 600 BPM, so the first
+            // bar joins the lead-in at a sensible tempo, and the bar lines follow from the second.
+            std::vector<double> early;
+            for (int k = 0; k <= 8; ++k)
+                early.push_back (0.4 + k * 2.0);
+            const auto soon = daw::TempoMap::fromDownbeats (early, 4, &lead);
+            auto worstLater = 0.0;
+            for (size_t k = 1; k < early.size(); ++k)
+                worstLater = juce::jmax (worstLater, std::abs (soon.toSeconds ((lead + (double) k - 1.0) * 4.0) - early[k]));
+            check (soon.getPoints().front().bpm < 180.0 && worstLater < 1.0e-4,
+                   "music right at the start: a sensible lead-in tempo (" + juce::String (soon.getPoints().front().bpm, 1)
+                       + " BPM), bar lines from the second downbeat on");
             check (map.getPoints().size() <= 10, "a steady stretch needs no extra points (" + juce::String ((int) map.getPoints().size()) + ")");
 
             auto moved = downbeats;
@@ -12598,7 +12616,7 @@ namespace
             daw::Edit edit;
             std::vector<double> beats;
             for (int b = 0; b < 40; ++b)
-                beats.push_back (0.5 + b * 0.55 + b * b * 0.0008);
+                beats.push_back (1.6 + b * 0.55 + b * b * 0.0008);
             edit.getUndoManager().beginNewTransaction();
             const auto lead = edit.setTempoMapFromBeats (beats, 1);
             const auto map = edit.getTempoMap();
@@ -12682,6 +12700,9 @@ namespace
             std::vector<int> starts;
             const auto song = playSong ({ { 'I', 4 }, { 'A', 8 }, { 'B', 8 }, { 'A', 8 }, { 'B', 8 }, { 'C', 8 }, { 'B', 8 } },
                                         [] (double b) { return 0.4 + b * 0.5; }, length, downbeats, starts);
+            // MICFX_SONGMAP_WAV=<file> keeps this song, to try the Song map in the app.
+            if (const auto keep = juce::SystemStats::getEnvironmentVariable ("MICFX_SONGMAP_WAV", {}); keep.isNotEmpty())
+                writeWav (juce::File (keep), song, sampleRate);
             const auto map = structure::analyse (song, sampleRate);
             const juce::StringArray expected { "intro", "verse", "chorus", "verse", "chorus", "bridge", "chorus" };
             juce::StringArray kinds;
@@ -12770,6 +12791,116 @@ namespace
             const auto stopped = structure::analyse (silence, sampleRate, {}, [&] { asked = true; return false; });
             check (asked && stopped.cancelled, "cancelling stops the analysis");
         }
+    }
+
+    // The DAW screen's song map: detect over the mix, then sections on the ruler and the
+    // tempo map following the take, as one undo step.
+    void testDawSongMap()
+    {
+        std::cout << "\nSong map in DAW mode\n";
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-songmap", {});
+        folder.createDirectory();
+        juce::PropertiesFile::Options options;
+        options.applicationName = "MicFXTests";
+        options.filenameSuffix = ".settings";
+        juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+
+        std::vector<std::pair<juce::String, juce::var>> events;
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, settings,
+                          [&] (const juce::Identifier& event, const juce::var& payload) { events.emplace_back (event.toString(), payload); },
+                          [] { return (juce::int64) 0; });
+        const auto run = [&] (const juce::String& command, std::initializer_list<std::pair<const char*, juce::var>> properties = {})
+        {
+            auto* object = new juce::DynamicObject();
+            for (const auto& [name, value] : properties)
+                object->setProperty (name, value);
+            juce::var result;
+            bridge.handle (command, juce::var (object), [&] (juce::var r) { result = r; });
+            return result;
+        };
+        const auto waitForMap = [&]
+        {
+            juce::var result;
+            for (int i = 0; i < 30000 && ! result.isObject(); ++i)
+            {
+                events.clear();
+                bridge.tick();
+                for (const auto& [name, payload] : events)
+                    if (name == "dawSongMap" && payload["state"].toString() != "analysing")
+                        result = payload;
+                if (! result.isObject())
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (10); // the audio pool posts its loads
+            }
+            return result;
+        };
+
+        run ("mode", { { "daw", true } });
+        check (! (bool) run ("songMap", { { "action", "detect" } })["ok"], "an empty session has nothing to map");
+        check (! (bool) run ("songMap", { { "action", "apply" } })["ok"], "nothing to apply before a map");
+
+        // A take played without a click (96 -> 108 BPM), verse and chorus twice.
+        const auto beatTime = [] (double b) { const auto k = 12.0 / 128.0; return 0.8 + 60.0 / k * std::log ((96.0 + k * b) / 96.0); };
+        double length = 0.0;
+        std::vector<double> downbeats;
+        std::vector<int> starts;
+        const auto song = playSong ({ { 'A', 8 }, { 'B', 8 }, { 'A', 8 }, { 'B', 8 } }, beatTime, length, downbeats, starts);
+        const auto file = folder.getChildFile ("take.wav");
+        writeWav (file, song, sampleRate);
+        bridge.importAudio (file, (int) edit.getTracks()[0][daw::ids::id]);
+        edit.addMarker (0.2, "Count-in"); // a plain marker stays
+
+        check ((bool) run ("songMap", { { "action", "detect" } })["ok"], "detect starts over the mix");
+        check (! (bool) run ("songMap", { { "action", "detect" } })["ok"], "and doesn't start twice");
+        const auto result = waitForMap();
+        check (result["state"].toString() == "ready" && result["sections"].size() == 4 && result["source"].toString() == "mix",
+               "the map comes back with four sections (" + juce::JSON::toString (result["sections"], true).substring (0, 300) + ")");
+        check ((double) result["drift"] > 0.02 && (bool) result["hasBeats"], "and shows the tempo drifting ("
+                                                                                + juce::String ((double) result["drift"] * 100.0, 1) + " %)");
+
+        // Musical clips would move under a new tempo map: refused.
+        const auto clipId = (int) edit.getTracks()[0].getChildWithName (daw::ids::CLIP)[daw::ids::id];
+        edit.setClipMusical (clipId, true, 100.0);
+        check (! (bool) run ("songMap", { { "action", "apply" }, { "markers", true }, { "follow", true } })["ok"],
+               "following the performance is refused while the take is in musical mode");
+        edit.setClipMusical (clipId, false);
+
+        const auto applied = run ("songMap", { { "action", "apply" }, { "markers", true }, { "follow", true } });
+        check ((bool) applied["ok"] && (int) applied["sections"] == 4, "apply: sections and tempo");
+
+        const auto session = juce::JSON::parse (juce::JSON::toString (bridge.describeSession()));
+        int sections = 0, plain = 0;
+        for (const auto& m : *session["markers"].getArray())
+            (m.hasProperty ("section") && (double) m["length"] > 1.0 && m["colour"].toString().startsWith ("#") ? sections : plain) += 1;
+        check (sections == 4 && plain == 1, "the ruler shows 4 sections with lengths and colours, the plain marker stays");
+
+        const auto tempo = edit.getTempoMap();
+        int onLine = 0;
+        for (auto d : downbeats)
+            onLine += std::abs (tempo.toSeconds (std::round (tempo.toBeats (d) / 4.0) * 4.0) - d) < 0.03 ? 1 : 0;
+        check (! tempo.isSteady() && onLine >= (int) downbeats.size() - 2, "the tempo map follows the take (" + juce::String (onLine)
+                                                                              + " of " + juce::String ((int) downbeats.size()) + " bar lines on its downbeats)");
+
+        edit.getUndoManager().undo();
+        check (edit.getTempoMap().isSteady() && edit.getSongSections().isEmpty() && edit.getMarkers().size() == 1,
+               "one undo puts the steady tempo back and removes the sections");
+        edit.getUndoManager().redo();
+
+        // Again from the clip alone: the sections replace the old ones.
+        check ((bool) run ("songMap", { { "action", "detect" }, { "clip", clipId } })["ok"], "detect from one clip");
+        const auto again = waitForMap();
+        check (again["source"].toString() == "clip" && again["sections"].size() == 4, "the clip gives the same four sections");
+        run ("songMap", { { "action", "apply" }, { "markers", true } });
+        check (edit.getSongSections().size() == 4, "applying again replaces the sections (still 4)");
+        run ("songMap", { { "action", "clear" } });
+        check (edit.getSongSections().isEmpty() && edit.getMarkers().size() == 1, "clear removes only the sections");
+
+        folder.deleteRecursively();
     }
 }
 
@@ -13033,6 +13164,8 @@ static void testPatterns()
             check (project.saveAs (folder.getChildFile ("Beat")).isEmpty(), "saves a project with patterns");
             edit.setPartDrum (patternId, drums, true);
             edit.setPartRows (patternId, drums, { 36, 38, 42 });
+            edit.setPartLevel (patternId, drums, 38, 0.5f);
+            edit.setPartMuted (patternId, drums, { 46 });
             check (project.save().isEmpty(), "(again, with rows)");
 
             daw::Edit reopened;
@@ -13045,6 +13178,9 @@ static void testPatterns()
                        && daw::patterns::getPatternEvents (back, drums).size() == 6
                        && reopened.getPatternClip (block).isValid() && near ((double) reopened.getPatternClip (block)[daw::ids::start], 4.0),
                    "patterns, parts and blocks come back from the project file");
+            check (daw::Edit::getPartMuted (part) == juce::Array<int> { 46 } && daw::Edit::getPartLevels (part).count (38) == 1
+                       && std::abs (daw::Edit::getPartLevels (part).at (38) - 0.5f) < 1.0e-3f,
+                   "and the rack's muted rows and row levels");
 
             // Export plays the blocks.
             daw::Exporter::Settings settings;
@@ -13057,6 +13193,87 @@ static void testPatterns()
             second.close();
             project.close();
         }
+    }
+
+    // The rack tools: muted rows, row levels, shifted steps, track rows and split by track.
+    {
+        daw::Edit edit;
+        const auto beat = *daw::instruments::findBuiltin ("builtin:beat");
+        const auto drums = (int) edit.addMidiTrack ("Drums", beat)[daw::ids::id];
+        const auto bass = (int) edit.addMidiTrack ("Bass", *daw::instruments::findBuiltin ("builtin:nova"))[daw::ids::id];
+        const auto pattern = edit.addPattern();
+        const auto patternId = (int) pattern[daw::ids::id];
+        edit.setSteps (patternId, drums, 36, { { 0, 100 }, { 8, 100 } });
+        edit.setSteps (patternId, drums, 38, { { 4, 100 }, { 12, 100 } });
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.setPartMuted (patternId, drums, { 38 });
+        auto events = daw::patterns::getPatternEvents (pattern, drums);
+        check (events.size() == 2 && std::all_of (events.begin(), events.end(), [] (const auto& e) { return e.pitch == 36; }),
+               "a muted row doesn't play");
+        edit.getUndoManager().undo();
+        check (daw::patterns::getPatternEvents (pattern, drums).size() == 4, "unmuting (undo) brings it back");
+
+        edit.setPartLevel (patternId, drums, 36, 0.5f);
+        events = daw::patterns::getPatternEvents (pattern, drums);
+        check (events[0].pitch == 36 && events[0].velocity == 50 && events[1].velocity == 100, "a row's level scales its velocities");
+        edit.setPartLevel (patternId, drums, 36, 2.0f);
+        check (daw::patterns::getPatternEvents (pattern, drums)[0].velocity == 127, "(clamped to 127)");
+        edit.setPartLevel (patternId, drums, 36, 1.0f);
+        check (edit.getPart (patternId, drums)[daw::ids::levels].toString().isEmpty(), "a level of 1 is the default and isn't stored");
+
+        // A step shifted late stays on its step: painting the next step doesn't remove it.
+        const auto snare = edit.getPart (patternId, drums).getChild (2);
+        edit.setNote ((int) snare[daw::ids::id], 38, 4 * 0.25 + 0.6 * 0.25, 0.25, 100);
+        check (daw::Edit::getStepIndex (4 * 0.25 + 0.6 * 0.25, 0.25) == 4 && daw::Edit::getStepIndex (0.99, 0.25) == 4
+                   && daw::Edit::getStepIndex (0.95, 0.25) == 3,
+               "the step of a note: shifted late stays, a hair early counts as on it");
+        edit.setSteps (patternId, drums, 38, { { 5, 100 } });
+        check (daw::patterns::getPatternEvents (pattern, drums).size() == 5, "a shifted step isn't cleared by painting the next one");
+        edit.setSteps (patternId, drums, 38, { { 4, 0 } });
+        check (daw::patterns::getPatternEvents (pattern, drums).size() == 4, "and clearing its own step removes it");
+
+        // A track row: one note per step, any pitch.
+        edit.setSteps (patternId, bass, 48, { { 0, 100 }, { 2, 100 } });
+        edit.setNote ((int) edit.getPart (patternId, bass).getChild (1)[daw::ids::id], 55, 0.5, 0.25, 100);
+        edit.setSteps (patternId, bass, 48, { { 2, 100 } }, true);
+        events = daw::patterns::getPatternEvents (pattern, bass);
+        check (events.size() == 2 && events[1].pitch == 48, "a track row's step replaces the note on it, whatever its pitch");
+
+        // Split by track: a pattern per track, blocks replaced in place, the same notes play.
+        const auto tempo = edit.getTempoMap();
+        edit.addPatternClip (patternId, 0.0, 8.0, 0);
+        edit.addPatternClip (patternId, 16.0, 4.0, 1);
+        const auto before = [&] (int track)
+        {
+            auto e = daw::patterns::getBlockEvents (edit.getState(), track, tempo);
+            std::sort (e.begin(), e.end(), [] (const auto& a, const auto& b) { return a.on < b.on || (a.on == b.on && a.pitch < b.pitch); });
+            return e;
+        };
+        const auto drumsBefore = before (drums), bassBefore = before (bass);
+        edit.getUndoManager().beginNewTransaction();
+        const auto made = edit.splitPatternByTrack (patternId);
+        auto blocks = edit.getPatternClips();
+        const auto same = [] (const std::vector<daw::patterns::Event>& a, const std::vector<daw::patterns::Event>& b)
+        {
+            if (a.size() != b.size()) return false;
+            for (size_t i = 0; i < a.size(); ++i)
+                if (a[i].pitch != b[i].pitch || a[i].velocity != b[i].velocity || std::abs (a[i].on - b[i].on) > 1.0e-9 || std::abs (a[i].off - b[i].off) > 1.0e-9)
+                    return false;
+            return true;
+        };
+        check (made.size() == 2 && blocks.size() == 4 && edit.getPattern (patternId).isValid()
+                   && edit.getPattern (made[0])[daw::ids::name].toString().endsWith ("Drums")
+                   && edit.getPart (made[0], drums).isValid() && ! edit.getPart (made[0], bass).isValid()
+                   && std::none_of (blocks.begin(), blocks.end(), [&] (const auto& b) { return (int) b[daw::ids::pattern] == patternId; }),
+               "split by track makes a pattern per track and replaces the blocks");
+        check (same (before (drums), drumsBefore) && same (before (bass), bassBefore), "and the song plays the same notes");
+        const auto rowOf = [&] (int p, double start) { for (const auto& b : edit.getPatternClips()) if ((int) b[daw::ids::pattern] == p && std::abs ((double) b[daw::ids::start] - start) < 1.0e-9) return (int) b[daw::ids::row]; return -1; };
+        check (rowOf (made[0], 0.0) == 0 && rowOf (made[1], 0.0) != 0 && rowOf (made[0], 16.0) == 1 && rowOf (made[1], 16.0) != 1,
+               "the new blocks stack on free rows");
+        edit.getUndoManager().undo();
+        blocks = edit.getPatternClips();
+        check (edit.getPatterns().size() == 1 && blocks.size() == 2, "and it undoes in one step");
     }
 
     // The page's commands.
@@ -13139,6 +13356,26 @@ static void testPatterns()
         check (kitTrack["keyNames"]["36"].toString() == "Kick" && kitTrack["keyNames"]["38"].toString() == "Snare",
                "a drum kit's track names its keys");
 
+        // The rack: row levels and muted rows, set and described; split by track.
+        check (ok (run ("setPart", args ({ { "pattern", patternId }, { "track", kit }, { "levels", args ({ { "36", 0.5 } }) } })))
+                   && ok (run ("setPartMutes", args ({ { "pattern", patternId }, { "parts", list ({ args ({ { "track", kit }, { "muted", list ({ 42, 38 }) } }) }) } }))),
+               "setPart takes row levels and setPartMutes muted rows");
+        check (edit.getUndoManager().getUndoDescription() == "Mute rows", "(one undo step named Mute rows)");
+        {
+            const auto described = lastSession()["patterns"][0]["parts"][0];
+            check (near ((double) described["levels"]["36"], 0.5, 1.0e-3) && described["muted"].size() == 2 && (int) described["muted"][0] == 38,
+                   "the session describes them, typed");
+        }
+        run ("setPartMutes", args ({ { "pattern", patternId }, { "parts", list ({ args ({ { "track", kit }, { "muted", list ({}) } }) }) } }));
+        run ("setPart", args ({ { "pattern", patternId }, { "track", kit }, { "levels", args ({ { "36", 1.0 } }) } }));
+        {
+            const auto split = run ("splitPattern", args ({ { "id", patternId } }));
+            check (ok (split) && split["patterns"].size() == 1 && lastSession()["patterns"].size() == 2, "splitPattern");
+            run ("undo");
+            const auto undone = lastSession();
+            check (undone["patterns"].size() == 1 && undone["patternClips"].size() == 1, "and undo");
+        }
+
         check (ok (run ("patternMode", args ({ { "pattern", patternId } }))) && (int) lastSession()["patternMode"] == (int) patternId
                    && processor.getDawEngine().getPatternMode() == (int) patternId,
                "patternMode switches to the pattern");
@@ -13162,6 +13399,7 @@ static void testPatterns()
                    "and a file that isn't there");
             check (ok (run ("kitSample", args ({ { "track", kitTrackId }, { "note", 39 }, { "file", clapFile.getFullPathName() } }))),
                    "kitSample loads a sample onto a pad");
+
             auto names = [&] (int track)
             {
                 const auto tracks = lastSession()["tracks"];
@@ -13173,6 +13411,16 @@ static void testPatterns()
             check (names (kitTrackId)["39"].toString() == "My Clap", "the track's keyNames name the pad after the sample");
             check (ok (run ("kitSample", args ({ { "track", kitTrackId }, { "note", 39 }, { "file", "" } }))) && names (kitTrackId)["39"].toString() != "My Clap",
                    "an empty file clears the pad");
+            check (! ok (run ("kitPad", args ({ { "track", kit }, { "note", 39 }, { "pan", 0.5 } }))), "kitPad refuses a track that isn't a Kit");
+            check (ok (run ("kitPad", args ({ { "track", kitTrackId }, { "note", 39 }, { "pan", -0.5 } }))), "kitPad pans a pad");
+            {
+                const auto tracks = lastSession()["tracks"];
+                juce::var pans;
+                for (int i = 0; i < tracks.size(); ++i)
+                    if ((int) tracks[i]["id"] == kitTrackId)
+                        pans = tracks[i]["kitPans"];
+                check (near ((double) pans["39"], -0.5, 1.0e-3) && near ((double) pans["36"], 0.0, 1.0e-3), "and the track's kitPans show it");
+            }
             run ("removeTrack", args ({ { "id", kitTrackId } }));
             sampleFolder.deleteRecursively();
         }
@@ -13939,8 +14187,27 @@ namespace
     }
 }
 
+// A crash prints where it happened (CI keeps no core dumps), and stdout goes out line by
+// line so the last PASS before it is the last one shown.
+static void printCrash (int signal)
+{
+   #if JUCE_LINUX || JUCE_MAC
+    void* frames[64];
+    const auto count = backtrace (frames, 64);
+    const char header[] = "\n*** crashed, backtrace:\n";
+    [[maybe_unused]] const auto written = write (STDERR_FILENO, header, sizeof (header) - 1);
+    backtrace_symbols_fd (frames, count, STDERR_FILENO);
+   #endif
+    std::signal (signal, SIG_DFL);
+    std::raise (signal);
+}
+
 int main()
 {
+    std::cout << std::unitbuf;
+    std::signal (SIGSEGV, printCrash);
+    std::signal (SIGBUS, printCrash);
+    std::signal (SIGABRT, printCrash);
     juce::ScopedJuceInitialiser_GUI juce;
 
     // MICFX_TEST_ONLY=instruments runs just those (quicker while working on them).
@@ -14090,6 +14357,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "songmap")
     {
         testSongMap();
+        testDawSongMap();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -14148,6 +14416,7 @@ int main()
     testRhythm();
     testToMidi();
     testSongMap();
+    testDawSongMap();
     testBackingVocals();
     testTrackTools();
     testDawBridge();
