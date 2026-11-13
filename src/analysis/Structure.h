@@ -35,6 +35,9 @@ struct Section
     float loudnessDb = -200.0f;    // mean level over the section, dBFS
 
     juce::String getLetterName() const { return juce::String::charToString ((juce::juce_wchar) ('A' + juce::jlimit (0, 25, letter))); }
+
+    // The colour the app shows it in ("#rrggbb"): by kind, or by letter for plain parts.
+    juce::String getColour() const;
 };
 
 struct SongMap
