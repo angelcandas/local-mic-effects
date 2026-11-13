@@ -1890,6 +1890,10 @@ void DawBridge::startExport (const juce::var& args, const juce::File& destinatio
     daw::Exporter::Settings exportSettings;
     exportSettings.sampleRate = engine.getSampleRate();
     exportSettings.bitDepth = arg (args, "bitDepth", 24);
+    exportSettings.format = args["format"].toString();
+    exportSettings.oggQuality = arg (args, "quality", 8);
+    if (const int rate = arg (args, "sampleRate", 0); rate >= 8000 && rate <= 192000)
+        exportSettings.sampleRate = rate;
     exportSettings.normalise = arg (args, "normalise", false);
     exportSettings.tail = arg (args, "tail", 2.0);
 
@@ -4838,6 +4842,41 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    if (command == "exportSetup")
+    {
+        // What the Export panel starts from: the last choices, and where files go by default.
+        const auto exports = project.isOpen() ? project.getExportsFolder() : documents;
+        auto saved = juce::JSON::parse (settings.getValue ("dawExportOptions"));
+        if (! saved.getDynamicObject())
+            saved = new juce::DynamicObject();
+
+        const auto folder = juce::File (saved["folder"].toString());
+        saved.getDynamicObject()->setProperty ("folder", folder.isDirectory() ? folder.getFullPathName() : exports.getFullPathName());
+        if (saved["name"].toString().isEmpty())
+            saved.getDynamicObject()->setProperty ("name", project.isOpen() ? project.getName() : juce::String ("Mix"));
+
+        juce::Array<juce::var> quality;
+        for (const auto& q : daw::Exporter::oggQualityNames())
+            quality.add (q);
+
+        complete (object ({ { "ok", true }, { "options", saved }, { "oggQualities", quality },
+                            { "sampleRate", engine.getSampleRate() }, { "defaultName", project.isOpen() ? project.getName() : juce::String ("Mix") } }));
+        return;
+    }
+
+    if (command == "pickExportFolder")
+    {
+        withChooser ("Export to which folder?", juce::File (args["folder"].toString()), {},
+                     Flags::openMode | Flags::canSelectDirectories,
+                     [] (const juce::File& folder)
+                     {
+                         return folder.isDirectory() ? object ({ { "ok", true }, { "folder", folder.getFullPathName() } })
+                                                     : error (folder.getFileName() + " isn't a folder.");
+                     },
+                     complete);
+        return;
+    }
+
     if (command == "export")
     {
         if (exportJob != nullptr)
@@ -4847,18 +4886,38 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         }
 
         const auto stems = args["kind"].toString() == "stems";
-        const auto exports = project.isOpen() ? project.getExportsFolder() : documents;
-        const auto name = project.isOpen() ? project.getName() : juce::String ("Mix");
+        const auto format = daw::Exporter::formatExtension (args["format"].toString());
+        const juce::File folder (args["folder"].toString());
+        auto name = juce::File::createLegalFileName (args["name"].toString().trim());
+        if (name.isEmpty())
+            name = project.isOpen() ? project.getName() : juce::String ("Mix");
+        if (stems)
+            name += " stems";
 
-        withChooser (stems ? "Export stems to a folder" : "Export the mix",
-                     stems ? exports.getChildFile (name + " stems") : exports.getChildFile (name + ".wav"),
-                     stems ? juce::String() : "*.wav", saveFlags,
-                     [this, args, stems] (const juce::File& file)
-                     {
-                         startExport (args, stems ? file : file.withFileExtension ("wav"));
-                         return error ({});
-                     },
-                     complete);
+        if (folder == juce::File() || (! folder.isDirectory() && ! folder.createDirectory().wasOk()))
+        {
+            complete (error ("Pick a folder to export to."));
+            return;
+        }
+
+        const auto destination = stems ? folder.getChildFile (name) : folder.getChildFile (name + "." + format);
+
+        // Replacing a file or a stems folder with files in it needs a second click.
+        if (! (bool) arg (args, "overwrite", false)
+            && (stems ? destination.getNumberOfChildFiles (juce::File::findFiles, "*." + format) > 0 : destination.existsAsFile()))
+        {
+            complete (object ({ { "ok", false }, { "exists", true }, { "error", destination.getFileName() + " already exists." } }));
+            return;
+        }
+
+        auto saved = new juce::DynamicObject();
+        for (const char* key : { "kind", "format", "bitDepth", "quality", "sampleRate", "tail", "normalise", "name" })
+            saved->setProperty (key, args[key]);
+        saved->setProperty ("folder", folder.getFullPathName());
+        settings.setValue ("dawExportOptions", juce::JSON::toString (juce::var (saved), true));
+
+        startExport (args, destination);
+        complete (error ({}));
         return;
     }
 
