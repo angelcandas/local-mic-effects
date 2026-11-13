@@ -6,6 +6,7 @@
 #include "daw/ClipTools.h"
 #include "daw/Patterns.h"
 #include "instruments/InstrumentProcessor.h"
+#include "instruments/Kit.h"
 
 #include "Presets.h"
 #include "dsp/FxModules.h"
@@ -642,9 +643,9 @@ juce::var DawBridge::describeKeyNames (int trackId) const
     // itself (so a kit with its own samples can name them). Empty for plugins and synths.
     auto* names = new juce::DynamicObject();
     if (auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (trackId).get()))
-        if (const auto& keyName = instrument->getSpec().keyName)
+        if (instrument->getSpec().keyName)
             for (int note = 0; note < 128; ++note)
-                if (const auto name = keyName (note); name.isNotEmpty())
+                if (const auto name = instrument->getKeyName (note); name.isNotEmpty()) // a Kit names its keys per instance
                     names->setProperty (juce::String (note), name);
     return juce::var (names);
 }
@@ -3462,6 +3463,31 @@ bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, 
                 added.add (edit.addNote (clipId, n["pitch"], n["time"], n["length"], arg (n, "velocity", 100))[ids::id]);
 
         complete (object ({ { "ok", true }, { "error", juce::String() }, { "added", added } }));
+        return true;
+    }
+
+    if (command == "kitSample")
+    {
+        // Loads an audio file onto a pad of the track's Kit (file empty: clears the pad). `note`
+        // is the pad's key (36-51); the rack then names that row after the sample.
+        auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (arg (args, "track", -1)).get());
+        auto* kit = instrument != nullptr ? micfx::inst::asKit (instrument->getEngine()) : nullptr;
+        if (kit == nullptr) { complete (error ("This track's instrument isn't a Kit.")); return true; }
+
+        const auto pad = micfx::inst::KitSampler::padForNote (arg (args, "note", 36));
+        if (! micfx::inst::KitSampler::isPad (pad)) { complete (error ("The Kit's pads are the notes 36 to 51.")); return true; }
+
+        const auto path = args["file"].toString();
+        if (path.isEmpty()) { kit->clearPad (pad); sessionChanged = true; complete (error ({})); return true; }
+
+        juce::String problem;
+        if (! kit->loadSample (pad, juce::File (path), problem))
+        {
+            complete (error (problem.isNotEmpty() ? problem : "That sample couldn't be loaded."));
+            return true;
+        }
+        sessionChanged = true;
+        complete (error ({}));
         return true;
     }
 

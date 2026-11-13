@@ -10799,6 +10799,37 @@ static void testPatterns()
         check (ok (run ("liveNote", args ({ { "note", 36 }, { "velocity", 100 }, { "track", kit } }))), "liveNote takes a track");
         run ("liveNote", args ({ { "note", 36 }, { "velocity", 0 }, { "track", kit } }));
 
+        // A Kit track: samples dropped on its pads name the rack's rows (per-instance key names).
+        {
+            const auto sampleFolder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-kit-samples");
+            sampleFolder.createDirectory();
+            const auto clapFile = sampleFolder.getChildFile ("My Clap.wav");
+            writeWav (clapFile, makeTones ({ { 0.2, 440.0, 0.3f, 0.3f } }), 44100.0);
+            const auto kitTrackId = (int) run ("addMidiTrack", args ({ { "instrument", "builtin:kit" }, { "name", "Samples" } }));
+            processor.getDawEngine().rebuildNow();
+            check (! ok (run ("kitSample", args ({ { "track", kit }, { "note", 36 }, { "file", clapFile.getFullPathName() } }))),
+                   "kitSample refuses a track that isn't a Kit");
+            check (! ok (run ("kitSample", args ({ { "track", kitTrackId }, { "note", 80 }, { "file", clapFile.getFullPathName() } }))),
+                   "and a note that isn't a pad");
+            check (! ok (run ("kitSample", args ({ { "track", kitTrackId }, { "note", 36 }, { "file", sampleFolder.getChildFile ("missing.wav").getFullPathName() } }))),
+                   "and a file that isn't there");
+            check (ok (run ("kitSample", args ({ { "track", kitTrackId }, { "note", 39 }, { "file", clapFile.getFullPathName() } }))),
+                   "kitSample loads a sample onto a pad");
+            auto names = [&] (int track)
+            {
+                const auto tracks = lastSession()["tracks"];
+                for (int i = 0; i < tracks.size(); ++i)
+                    if ((int) tracks[i]["id"] == track)
+                        return tracks[i]["keyNames"];
+                return juce::var();
+            };
+            check (names (kitTrackId)["39"].toString() == "My Clap", "the track's keyNames name the pad after the sample");
+            check (ok (run ("kitSample", args ({ { "track", kitTrackId }, { "note", 39 }, { "file", "" } }))) && names (kitTrackId)["39"].toString() != "My Clap",
+                   "an empty file clears the pad");
+            run ("removeTrack", args ({ { "id", kitTrackId } }));
+            sampleFolder.deleteRecursively();
+        }
+
         check (! ok (run ("patternRecord", args ({ { "on", true }, { "track", kit } }))), "patternRecord needs Pattern mode");
         run ("patternMode", args ({ { "pattern", patternId } }));
         check (ok (run ("patternRecord", args ({ { "on", true }, { "track", kit }, { "snap", true } })))
