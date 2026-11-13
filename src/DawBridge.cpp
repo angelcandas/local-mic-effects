@@ -329,6 +329,7 @@ namespace
             { "patternToClips", "Turn into MIDI clips" }, { "clipToPattern", "Make a pattern" },
             { "setPartMutes", "Mute rows" }, { "splitPattern", "Split by track" },
             { "addPatternClips", "Draw patterns" }, { "removePatternClips", "Erase pattern blocks" },
+            { "splitPatternClip", "Cut pattern block" },
         };
         if (const auto it = names.find (command); it != names.end())
             return it->second;
@@ -881,7 +882,8 @@ juce::var DawBridge::describePatternClips() const
         clips.add (object ({ { "id", (int) clip[ids::id] }, { "pattern", (int) number (clip, ids::pattern) },
                              { "start", start }, { "length", length },
                              { "startSeconds", tempo.toSeconds (start) }, { "endSeconds", tempo.toSeconds (start + length) },
-                             { "row", (int) number (clip, ids::row) }, { "mute", (bool) clip.getProperty (ids::mute, false) } }));
+                             { "row", (int) number (clip, ids::row) }, { "mute", (bool) clip.getProperty (ids::mute, false) },
+                             { "offset", (double) number (clip, ids::offset) } }));
     }
     return clips;
 }
@@ -5855,6 +5857,10 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
     if (command == "addPatternClip")
     {
         const auto clip = edit.addPatternClip (patternId, arg (args, "start", 0.0), arg (args, "length", 0.0), arg (args, "row", 0));
+        if (clip.isValid() && args.hasProperty ("offset"))
+            edit.setPatternClipOffset ((int) clip[ids::id], arg (args, "offset", 0.0));
+        if (clip.isValid() && arg (args, "mute", false))
+            edit.setPatternClipMute ((int) clip[ids::id], true);
         complete (clip.isValid() ? clip[ids::id] : error ("There's no such pattern."));
         return true;
     }
@@ -5869,6 +5875,8 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
                                  arg (args, "row", (int) number (clip, ids::row)));
         if (args.hasProperty ("mute"))
             edit.setPatternClipMute (id, args["mute"]);
+        if (args.hasProperty ("offset"))
+            edit.setPatternClipOffset (id, arg (args, "offset", 0.0));
         if (args.hasProperty ("pattern"))
         {
             if (! edit.getPattern (patternId).isValid()) { complete (error ("There's no such pattern.")); return true; }
@@ -5906,6 +5914,14 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
     }
 
     if (command == "removePatternClip") { edit.removePatternClip (id); ok(); return true; }
+
+    if (command == "splitPatternClip")
+    {
+        // The Cut tool on a block: {id, at (beats)} -> the right half's id.
+        const auto right = edit.splitPatternClip (id, arg (args, "at", 0.0));
+        complete (right >= 0 ? juce::var (right) : error ("Cut inside the block."));
+        return true;
+    }
 
     if (command == "makePatternUnique")
     {

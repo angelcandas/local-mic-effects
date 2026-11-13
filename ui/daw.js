@@ -1689,7 +1689,7 @@ class DawScreen {
 
     // The cut tool shows where a click will split.
     this.arrange.addEventListener("pointermove", (event) => {
-      const clip = this.tool === "cut" && event.target.closest?.(".clip");
+      const clip = this.tool === "cut" && event.target.closest?.(".clip, .pl-block");
       this.cutGuide.hidden = !clip;
       if (!clip) return;
       const box = this.inner.getBoundingClientRect();
@@ -2512,7 +2512,7 @@ class DawScreen {
     element.classList.toggle("is-midi", Boolean(clip.midi));
     // Double-click: the clip's editor on the Track tab (notes, or pitch and timing).
     element.addEventListener("dblclick", () => { this.select(track.id, clip.id); this.openClipEditor(); });
-    element.title = clip.midi ? `${clip.name} (${clip.notes.length} notes)\nDouble-click to edit the notes · Drag to move · Edges to trim` : clip.missing ? `Missing file: ${clip.file}` : `${clip.name}\nDrag to move · Edges to trim · Corners to fade · S splits at the playhead`;
+    element.title = clip.midi ? `${clip.name} (${clip.notes.length} notes)\nDouble-click to edit the notes · Drag to move (Ctrl: copy) · Edges to trim` : clip.missing ? `Missing file: ${clip.file}` : `${clip.name}\nDrag to move (Ctrl: copy) · Edges to trim · Corners to fade · S splits at the playhead`;
 
     const place = (start, length) => {
       element.style.left = `${start * this.zoom}px`;
@@ -2568,12 +2568,14 @@ class DawScreen {
     element.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       event.stopPropagation();
-      // Shift or Ctrl+click: add the clip to the selection, or take it out.
-      if ((event.shiftKey || event.ctrlKey || event.metaKey) && this.tool === "select") {
+      // Shift+click: add the clip to the selection, or take it out. Ctrl+click does the
+      // same, and Ctrl+drag copies (the clip, or the group it's in).
+      const ctrl = (event.ctrlKey || event.metaKey) && this.tool === "select";
+      if (event.shiftKey && this.tool === "select") {
         event.preventDefault();
         return this.toggleClipInSelection(track, clip);
       }
-      this.select(track.id, clip.id, false);
+      if (!ctrl) this.select(track.id, clip.id, false);
 
       if (this.tool === "cut") {
         const box = this.inner.getBoundingClientRect();
@@ -2600,7 +2602,8 @@ class DawScreen {
         return;
       }
 
-      const mode = ["trim-start", "trim-end", "fade-in", "fade-out"].find((c) => event.target.classList.contains(c)) ?? "move";
+      const mode = ctrl ? "move" : ["trim-start", "trim-end", "fade-in", "fade-out"].find((c) => event.target.classList.contains(c)) ?? "move";
+      let copying = ctrl;
       const end = clip.start + clip.length;
       const maxEnd = clip.fileLength > 0 ? clip.start - clip.offset + clip.fileLength : Infinity;
       let edit = null;
@@ -2624,6 +2627,9 @@ class DawScreen {
           // The group keeps its spacing, and no clip goes before 0.
           const start = Math.max(clip.start - earliest, this.snapTime(clip.start + dt, e));
           edit = { command: "moveClip", args: { id: clip.id, start } };
+          copying = ctrl || e.ctrlKey || e.metaKey;
+          element.classList.toggle("is-copying", copying);
+          for (const g of group) g.element?.classList.toggle("is-copying", copying);
           place(start, clip.length);
           for (const g of group) if (g.element) g.element.style.left = `${(g.found.clip.start + start - clip.start) * this.zoom}px`;
           if (group.length) { edit.delta = start - clip.start; return; }
@@ -2660,8 +2666,24 @@ class DawScreen {
       drag(event, onMove, async (moved) => {
         scroller.stop();
         this.dragging = false;
-        element.classList.remove("is-dragging");
-        if (moved && edit && group.length) {
+        element.classList.remove("is-dragging", "is-copying");
+        for (const g of group) g.element?.classList.remove("is-copying");
+        if (!moved && ctrl) {
+          this.toggleClipInSelection(track, clip);
+        } else if (moved && copying && edit?.command === "moveClip") {
+          // Ctrl+drag: copies where the drop is; the originals stay (one undo step).
+          const delta = edit.delta ?? edit.args.start - clip.start;
+          const items = [[clip.id, clip.start, edit.args.track], ...group.map((g) => [g.found.clip.id, g.found.clip.start, undefined])];
+          const made = [];
+          await this.eachStep(items, async ([id, start, onTrack], more) => {
+            const copy = await daw("duplicate", { id, ...(more ? { continue: true } : {}) });
+            if (!(copy >= 0)) return;
+            await daw("moveClip", { id: copy, start: start + delta, ...(onTrack != null ? { track: onTrack } : {}), continue: true });
+            made.push(copy);
+          });
+          if (made.length > 1) this.selectClips(made, made[0]);
+          else if (made.length) this.select(targetTrack, made[0]);
+        } else if (moved && edit && group.length) {
           // One undo step for the whole group.
           const moves = [[clip.id, clip.start], ...group.map((g) => [g.found.clip.id, g.found.clip.start])];
           await this.eachStep(moves, ([id, start], more) => daw("moveClip", { id, start: start + edit.delta, continue: more }));
@@ -4978,11 +5000,11 @@ class DawScreen {
                                  ["A S D F G H J K", "White keys, C to C (; adds one more)"], ["W E T Y U O P", "Black keys"],
                                  ["Z / X", "Octave down / up"], ["C / V", "Velocity down / up"],
                                  ["While on", "Opens a floating piano and plays the armed (or selected) MIDI track. Single-letter shortcuts (R, S...) are off; Space, Shift+letter and Ctrl / Cmd ones still work. Esc closes it."]]],
-    ["Clips", [["Shift / Ctrl+click", "Add a clip (or a track header) to the selection"], ["Drag on an empty lane", "Select the clips in a box"],
+    ["Clips", [["Shift / Ctrl+click", "Add a clip (or a track header) to the selection"], ["Ctrl+drag a clip or block", "Copy it (the picked group too) where you drop it"], ["Drag on an empty lane", "Select the clips in a box"],
                ["Ctrl+A", "Select every clip"], [", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
-               ["V / B / G / P", "Select, cut, gain and draw tools"], ["Draw tool", "Click places the picked pattern or sound, drag paints copies, right-click (or right-drag) erases"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
+               ["V / B / G / P", "Select, cut, gain and draw tools"], ["Draw tool", "Click places the picked pattern or sound, drag paints copies, right-click (or right-drag) erases"], ["Pattern blocks", "Shift+click picks several (Ctrl+A all); Delete, Ctrl+C / X / V / D act on them; drag the left edge to trim; the Cut tool (B) cuts a block"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Ctrl+L", "Loop this clip (sets the loop range to it)"], ["Alt+drag", "Move or trim without snapping"]]],
     ["Clip editor (Wave, W)", [["1 / 2 / 4", "Open the Warp, Hitpoints or Quantize section (the open one is the tool); Esc closes it"],
                                ["Click / drag (no tool open)", "Move the playhead / scroll; in the ruler, drag to mark a loop range"],
@@ -5682,6 +5704,7 @@ class DawScreen {
   onKey(event) {
     if (!this.active || isTyping(event)) return;
     if (this.dockTab === "patterns" && this.patternsPanel?.onKey(event)) return; // the rack's own keys
+    if (this.patternLane?.onKey(event)) return; // picked pattern blocks: Delete, Ctrl+C/X/V/D/A
     if (event.ctrlKey && event.metaKey) return; // Ctrl+Cmd+F is full screen on a Mac
     const mod = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();
