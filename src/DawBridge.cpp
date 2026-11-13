@@ -3004,19 +3004,6 @@ juce::var DawBridge::handleKey (const juce::var& args)
 //                       the tempo map follows the played beats, bar lines on the downbeats
 //                       -> { ok, sections, leadInBars }
 //   clear               remove the section markers
-namespace
-{
-    juce::String getSectionColour (const analysis::structure::Section& s)
-    {
-        if (s.kind == "intro" || s.kind == "outro") return "#7d8799";
-        if (s.kind == "verse")  return "#4f8cff";
-        if (s.kind == "chorus") return "#ff7a45";
-        if (s.kind == "bridge") return "#b26bff";
-        static const char* letters[] = { "#2bb5a0", "#e0b23a", "#e05a8a", "#6fbf4a", "#5aa6e0", "#c07a4a" };
-        return letters[juce::jlimit (0, 5, s.letter % 6)];
-    }
-}
-
 juce::var DawBridge::handleSongMap (const juce::var& args)
 {
     const auto action = args["action"].toString();
@@ -3182,7 +3169,7 @@ juce::var DawBridge::handleSongMap (const juce::var& args)
         {
             std::vector<daw::Edit::SectionMarker> sections;
             for (const auto& s : map.sections)
-                sections.push_back ({ s.name, s.kind, getSectionColour (s), s.letter, s.start + lastSongMapOffset, s.end - s.start });
+                sections.push_back ({ s.name, s.kind, s.getColour(), s.letter, s.start + lastSongMapOffset, s.end - s.start });
             edit.setSongSections (sections);
         }
         edit.getUndoManager().beginNewTransaction();
@@ -3219,7 +3206,7 @@ juce::var DawBridge::describeSongMap() const
     for (const auto& s : map.sections)
         sections.add (object ({ { "name", s.name }, { "kind", s.kind }, { "letter", s.getLetterName() }, { "bars", s.bars },
                                 { "firstBar", s.firstBar }, { "start", s.start + lastSongMapOffset }, { "end", s.end + lastSongMapOffset },
-                                { "level", s.loudnessDb }, { "colour", getSectionColour (s) } }));
+                                { "level", s.loudnessDb }, { "colour", s.getColour() } }));
 
     juce::Array<juce::var> barTempos;
     for (auto t : map.getBarTempos())

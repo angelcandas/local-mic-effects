@@ -7545,6 +7545,40 @@ namespace
         check (! practice.isLooping() && ! multitrack.isLooping() && practice.getSong().notes.size() == song.notes.size(),
                "and back to the whole song");
 
+        // Looping a section of the song (from the song map): every phrase that starts in it.
+        {
+            namespace structure = analysis::structure;
+            structure::Section verse, all;
+            verse.name = "Verse 1"; verse.kind = "verse"; verse.start = 0.0; verse.end = song.phrases[1].start - 0.4; verse.bars = 2;
+            all.name = "Chorus"; all.kind = "chorus"; all.letter = 1; all.start = 0.0; all.end = song.phrases[1].end + 0.5; all.bars = 4;
+            const auto text = Practice::sectionsToText ({ verse, all });
+            const auto back = Practice::sectionsFromText (text);
+            check (back.size() == 2 && back[1].name == "Chorus" && back[1].kind == "chorus" && back[1].letter == 1
+                       && std::abs (back[1].end - all.end) < 1e-3,
+                   "sections go to the cache file and back");
+            check (Practice::getPhrasesIn (song, verse.start, verse.end) == std::make_pair (0, 0)
+                       && Practice::getPhrasesIn (song, all.start, all.end) == std::make_pair (0, 1)
+                       && Practice::getPhrasesIn (song, all.end + 1.0, all.end + 5.0).first == -1,
+                   "a section holds the phrases that start in it");
+            const auto both = Practice::cutSong (song, 0, 1, 0.5, 1.0, 0.0);
+            check (both.phrases.size() == 2 && both.notes.size() == song.notes.size() && both.phrases[1].firstNote == song.phrases[1].firstNote
+                       && std::abs (both.notes[0].start - (song.notes[0].start - 0.5)) < 1e-9,
+                   "two phrases cut together stay two phrases");
+
+            practice.setSections ({ verse, all });
+            options = new juce::DynamicObject();
+            options->setProperty ("section", 1);
+            options->setProperty ("speed", 1.0);
+            practice.handle ("loop", juce::var (options));
+            const auto described = juce::JSON::parse (juce::JSON::toString (practice.describe()));
+            check (practice.isLooping() && multitrack.isLooping() && multitrack.getLoopStart() == 0
+                       && practice.getSong().phrases.size() == 2 && practice.getSong().notes.size() == song.notes.size()
+                       && (int) described["song"]["loop"]["section"] == 1 && described["song"]["sections"].size() == 2,
+                   "looping the chorus section: both its phrases to sing, the section in the loop");
+            practice.handle ("unloop", {});
+            check (! practice.isLooping(), "and back from the section");
+        }
+
         // Slower and higher: rendered in the background, played in place of the song's tracks.
         options = new juce::DynamicObject();
         options->setProperty ("phrase", 1);
