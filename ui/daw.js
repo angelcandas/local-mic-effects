@@ -5319,6 +5319,9 @@ class DawScreen {
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
                ["V / B / G", "Select, cut and gain tools"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Ctrl+L", "Loop the selected clip"], ["Alt+drag", "Move or trim without snapping"]]],
+    ["Patterns tab (after clicking in it)", [["- / =", "Previous / next pattern"], ["↑ / ↓", "Select the row above / below"],
+                  ["Ctrl+Shift+← / →", "Rotate the selected row's steps"], ["Ctrl+C / V", "Copy / paste the selected row's steps"],
+                  ["Right-click a row's light", "Solo the row (again: every row plays)"]]],
     ["File", [["Ctrl+N", "New project"], ["Ctrl+O", "Open a project"], ["Ctrl+S", "Save (Shift: save as)"],
               ["Ctrl+I", "Import audio"], ["Ctrl+Shift+R / Ctrl+B", "Export (bounce)"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"]]],
     ["View", [["Tab / X", "Tracks / mixer"], ["E / Shift+Tab", "Show / hide the effects panel"], ["Shift+B / Ctrl+Alt+B", "Show / hide the library"],
@@ -5952,6 +5955,7 @@ class DawScreen {
 
   onKey(event) {
     if (!this.active || isTyping(event)) return;
+    if (this.dockTab === "patterns" && this.patternsPanel?.onKey(event)) return; // the rack's own keys
     if (event.ctrlKey && event.metaKey) return; // Ctrl+Cmd+F is full screen on a Mac
     const mod = event.ctrlKey || event.metaKey;
     const key = event.key.toLowerCase();

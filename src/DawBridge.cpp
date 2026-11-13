@@ -312,6 +312,7 @@ namespace
             { "addPatternClip", "Place pattern" }, { "setPatternClip", "Pattern block change" },
             { "removePatternClip", "Delete pattern block" }, { "makePatternUnique", "Make pattern unique" },
             { "patternToClips", "Turn into MIDI clips" }, { "clipToPattern", "Make a pattern" },
+            { "setPartMutes", "Mute rows" }, { "splitPattern", "Split by track" },
         };
         if (const auto it = names.find (command); it != names.end())
             return it->second;
@@ -653,7 +654,8 @@ juce::var DawBridge::describeSession()
                               { "takesShown", (bool) track.getProperty (ids::takesShown, false) },
                               { "listenTake", daw::Edit::getListenTake (track) },
                               { "instrument", describeInstrument (track) },
-                              { "keyNames", describeKeyNames ((int) track[ids::id]) } }));
+                              { "keyNames", describeKeyNames ((int) track[ids::id]) },
+                              { "kitPans", describeKitPans ((int) track[ids::id]) } }));
     }
 
     const auto master = edit.getMaster();
@@ -720,6 +722,20 @@ juce::var DawBridge::describeSession()
     });
 }
 
+juce::var DawBridge::describeKitPans (int trackId) const
+{
+    // A Kit's pad pans by note ("36": -0.2), for the rack's pan knobs; void for other instruments.
+    auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (trackId).get());
+    if (instrument == nullptr || micfx::inst::asKit (instrument->getEngine()) == nullptr)
+        return {};
+
+    auto* pans = new juce::DynamicObject();
+    for (int pad = 0; pad < micfx::inst::KitSampler::numPads; ++pad)
+        if (auto* value = instrument->getState().getRawParameterValue ("p" + juce::String (pad) + "Pan"))
+            pans->setProperty (juce::String (micfx::inst::KitSampler::noteForPad (pad)), (double) value->load());
+    return juce::var (pans);
+}
+
 juce::var DawBridge::describeKeyNames (int trackId) const
 {
     // The names on an instrument's keys (a drum kit's sounds), from the running instrument
@@ -745,13 +761,19 @@ juce::var DawBridge::describePatterns() const
             if (! part.hasType (ids::PART))
                 continue;
 
-            juce::Array<juce::var> rows;
+            juce::Array<juce::var> rows, muted;
             for (auto note : daw::Edit::getPartRows (part))
                 rows.add (note);
+            for (auto note : daw::Edit::getPartMuted (part))
+                muted.add (note);
+            auto* levels = new juce::DynamicObject();
+            for (const auto& [note, level] : daw::Edit::getPartLevels (part))
+                levels->setProperty (juce::String (note), (double) level);
 
             parts.add (object ({ { "track", (int) number (part, ids::track) }, { "drum", (bool) part.getProperty (ids::drum, false) },
                                  { "rows", rows }, { "stepNote", (int) part.getProperty (ids::stepNote, daw::Edit::defaultStepNote) },
-                                 { "mute", (bool) part.getProperty (ids::mute, false) }, { "notes", describeNotes (part) } }));
+                                 { "mute", (bool) part.getProperty (ids::mute, false) }, { "muted", muted }, { "levels", juce::var (levels) },
+                                 { "notes", describeNotes (part) } }));
         }
 
         patterns.add (object ({ { "id", (int) pattern[ids::id] }, { "name", pattern[ids::name].toString() },
@@ -4720,6 +4742,25 @@ bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, 
         return true;
     }
 
+    if (command == "kitPad")
+    {
+        // A Kit pad's pan from the rack (-1..1). The Kit's own parameter, so it is saved with the
+        // instrument and not an undo step, like turning the knob in the Kit's window.
+        auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (arg (args, "track", -1)).get());
+        auto* kit = instrument != nullptr ? micfx::inst::asKit (instrument->getEngine()) : nullptr;
+        if (kit == nullptr) { complete (error ("This track's instrument isn't a Kit.")); return true; }
+
+        const auto pad = micfx::inst::KitSampler::padForNote (arg (args, "note", 36));
+        if (! micfx::inst::KitSampler::isPad (pad)) { complete (error ("The Kit's pads are the notes 36 to 51.")); return true; }
+
+        if (args.hasProperty ("pan"))
+            if (auto* parameter = instrument->getState().getParameter ("p" + juce::String (pad) + "Pan"))
+                parameter->setValueNotifyingHost (parameter->convertTo0to1 (juce::jlimit (-1.0f, 1.0f, (float) (double) args["pan"])));
+        sessionChanged = true;
+        complete (error ({}));
+        return true;
+    }
+
     if (command == "liveNote")
     {
         // With a track: that track's instrument only, armed or not (auditioning a row).
@@ -4786,6 +4827,42 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
     const auto patternId = arg (args, "pattern", -1);
     const auto trackId = arg (args, "track", -1);
 
+    if (command == "splitPattern")
+    {
+        if (! edit.getPattern (id).isValid()) { complete (error ("There's no such pattern.")); return true; }
+        juce::Array<juce::var> made;
+        for (auto pattern : edit.splitPatternByTrack (id))
+            made.add (pattern);
+        if (made.isEmpty()) { complete (error ("This pattern has no notes to split.")); return true; }
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "patterns", made } }));
+        return true;
+    }
+
+    if (command == "setPartMutes")
+    {
+        // Mute or solo rows across the pattern's tracks in one step: parts [{ track, mute
+        // (the whole part), muted (drum rows) }].
+        if (! edit.getPattern (patternId).isValid()) { complete (error ("There's no such pattern.")); return true; }
+        if (auto* list = args["parts"].getArray())
+            for (const auto& item : *list)
+            {
+                const auto track = arg (item, "track", -1);
+                if (! daw::Edit::isMidiTrack (edit.getTrack (track)))
+                    continue;
+                if (item.hasProperty ("mute") && (bool) edit.getPart (patternId, track).getProperty (ids::mute, false) != (bool) item["mute"])
+                    edit.setPartMute (patternId, track, item["mute"]);
+                if (auto* notes = item["muted"].getArray())
+                {
+                    juce::Array<int> muted;
+                    for (const auto& note : *notes)
+                        muted.add ((int) note);
+                    edit.setPartMuted (patternId, track, muted);
+                }
+            }
+        ok();
+        return true;
+    }
+
     if (command == "setPart" || command == "editPattern" || command == "setSteps")
     {
         if (! edit.getPattern (patternId).isValid()) { complete (error ("There's no such pattern.")); return true; }
@@ -4798,6 +4875,16 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
         if (args.hasProperty ("drum"))     edit.setPartDrum (patternId, trackId, args["drum"]);
         if (args.hasProperty ("stepNote")) edit.setPartStepNote (patternId, trackId, args["stepNote"]);
         if (args.hasProperty ("mute"))     edit.setPartMute (patternId, trackId, args["mute"]);
+        if (auto* muted = args["muted"].getArray())
+        {
+            juce::Array<int> notes;
+            for (const auto& note : *muted)
+                notes.add ((int) note);
+            edit.setPartMuted (patternId, trackId, notes);
+        }
+        if (auto* levels = args["levels"].getDynamicObject())
+            for (const auto& level : levels->getProperties())
+                edit.setPartLevel (patternId, trackId, level.name.toString().getIntValue(), (float) (double) level.value);
         if (auto* rows = args["rows"].getArray())
         {
             juce::Array<int> notes;
@@ -4847,7 +4934,7 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
                 if (auto* pair = item.getArray(); pair != nullptr && pair->size() >= 2)
                     steps.emplace_back ((int) (*pair)[0], (int) (*pair)[1]);
 
-        edit.setSteps (patternId, trackId, arg (args, "pitch", daw::Edit::defaultStepNote), steps);
+        edit.setSteps (patternId, trackId, arg (args, "pitch", daw::Edit::defaultStepNote), steps, arg (args, "anyPitch", false));
         ok();
         return true;
     }

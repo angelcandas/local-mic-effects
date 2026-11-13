@@ -1,5 +1,8 @@
 #include "Patterns.h"
 
+#include <algorithm>
+#include <cmath>
+
 // The pattern editing part of Edit (declared in Edit.h), and how patterns play.
 namespace daw
 {
@@ -190,7 +193,69 @@ juce::ValueTree Edit::addPatternNote (int patternId, int trackId, int pitch, dou
     return note;
 }
 
-void Edit::setSteps (int patternId, int trackId, int pitch, const std::vector<std::pair<int, int>>& steps)
+void Edit::setPartMuted (int patternId, int trackId, const juce::Array<int>& notes)
+{
+    if (auto part = ensurePart (patternId, trackId); part.isValid())
+    {
+        juce::Array<int> sorted (notes);
+        sorted.sort();
+        juce::Array<int> unique;
+        for (auto note : sorted)
+            unique.addIfNotAlreadyThere (juce::jlimit (0, 127, note));
+        const auto text = rowsToString (unique);
+        if (part[ids::muted].toString() != text)
+            part.setProperty (ids::muted, text, undoTarget);
+    }
+}
+
+void Edit::setPartLevel (int patternId, int trackId, int note, float level)
+{
+    auto part = ensurePart (patternId, trackId);
+    if (! part.isValid())
+        return;
+
+    auto levels = getPartLevels (part);
+    note = juce::jlimit (0, 127, note);
+    level = juce::jlimit (0.0f, 2.0f, level);
+    if (std::abs (level - 1.0f) < 1.0e-4f)
+        levels.erase (note);
+    else
+        levels[note] = level;
+
+    juce::StringArray list;
+    for (const auto& [n, l] : levels)
+        list.add (juce::String (n) + ":" + juce::String (l, 3));
+    part.setProperty (ids::levels, list.joinIntoString (","), undoTarget);
+}
+
+juce::Array<int> Edit::getPartMuted (const juce::ValueTree& part)
+{
+    juce::Array<int> notes;
+    for (const auto& item : juce::StringArray::fromTokens (part[ids::muted].toString(), ",", {}))
+        if (item.trim().isNotEmpty())
+            notes.addIfNotAlreadyThere (juce::jlimit (0, 127, item.trim().getIntValue()));
+    return notes;
+}
+
+std::map<int, float> Edit::getPartLevels (const juce::ValueTree& part)
+{
+    std::map<int, float> levels;
+    for (const auto& item : juce::StringArray::fromTokens (part[ids::levels].toString(), ",", {}))
+    {
+        const auto note = item.upToFirstOccurrenceOf (":", false, false).trim();
+        const auto level = item.fromFirstOccurrenceOf (":", false, false).trim();
+        if (note.isNotEmpty() && level.isNotEmpty())
+            levels[juce::jlimit (0, 127, note.getIntValue())] = juce::jlimit (0.0f, 2.0f, level.getFloatValue());
+    }
+    return levels;
+}
+
+int Edit::getStepIndex (double timeBeats, double stepBeats)
+{
+    return (int) std::floor (timeBeats / juce::jmax (1.0e-6, stepBeats) + 0.05);
+}
+
+void Edit::setSteps (int patternId, int trackId, int pitch, const std::vector<std::pair<int, int>>& steps, bool anyPitch)
 {
     auto part = ensurePart (patternId, trackId);
     if (! part.isValid())
@@ -208,10 +273,11 @@ void Edit::setSteps (int patternId, int trackId, int pitch, const std::vector<st
 
         const auto at = index * step;
 
+        // Whatever sits on the step, shifted notes too (a note shifted late stays on its step).
         for (int i = part.getNumChildren(); --i >= 0;)
         {
             const auto note = part.getChild (i);
-            if (note.hasType (ids::NOTE) && (int) note[ids::pitch] == pitch && std::abs ((double) note[ids::time] - at) < step * 0.5)
+            if (note.hasType (ids::NOTE) && (anyPitch || (int) note[ids::pitch] == pitch) && getStepIndex ((double) note[ids::time], step) == index)
                 part.removeChild (i, undoTarget);
         }
 
@@ -275,6 +341,74 @@ juce::Array<juce::ValueTree> Edit::getPatternClips() const
         if (child.hasType (ids::PATTERNCLIP))
             result.add (child);
     return result;
+}
+
+int Edit::findFreePatternRow (double startBeats, double lengthBeats, int skipClipId) const
+{
+    const auto clips = getPatternClips();
+    for (int row = 0; row < maxPatternRows; ++row)
+    {
+        const auto busy = std::any_of (clips.begin(), clips.end(), [&] (const juce::ValueTree& c)
+        {
+            const auto start = (double) c[ids::start], length = (double) c[ids::length];
+            return (int) c[ids::id] != skipClipId && (int) c[ids::row] == row
+                   && start < startBeats + lengthBeats - 1.0e-6 && start + length > startBeats + 1.0e-6;
+        });
+        if (! busy)
+            return row;
+    }
+    return maxPatternRows - 1;
+}
+
+juce::Array<int> Edit::splitPatternByTrack (int patternId)
+{
+    juce::Array<int> made;
+    const auto source = getPattern (patternId);
+    if (! source.isValid())
+        return made;
+
+    juce::Array<juce::ValueTree> parts;
+    for (const auto& part : source)
+        if (part.hasType (ids::PART) && part.getChildWithName (ids::NOTE).isValid() && getTrack ((int) part[ids::track]).isValid())
+            parts.add (part);
+    if (parts.isEmpty())
+        return made;
+
+    auto at = state.indexOf (source);
+    for (const auto& part : parts)
+    {
+        auto copy = source.createCopy();
+        copy.removeAllChildren (nullptr);
+        auto partCopy = part.createCopy();
+        renumber (partCopy);
+        copy.appendChild (partCopy, nullptr);
+        copy.setProperty (ids::id, takeNextId(), nullptr);
+        const auto trackName = getTrack ((int) part[ids::track])[ids::name].toString();
+        copy.setProperty (ids::name, (source[ids::name].toString() + juce::String (juce::CharPointer_UTF8 (" \xc2\xb7 ")) + trackName).substring (0, 60), nullptr);
+        copy.setProperty (ids::colour, patternColours[(size_t) (getPatterns().size() + made.size()) % std::size (patternColours)], nullptr);
+        state.addChild (copy, ++at, undoTarget);
+        made.add ((int) copy[ids::id]);
+    }
+
+    // Every block of the old pattern: blocks of the new ones in its place, stacked on free rows.
+    for (const auto& block : getPatternClips())
+    {
+        if ((int) block[ids::pattern] != patternId)
+            continue;
+
+        const auto start = (double) block[ids::start], length = (double) block[ids::length];
+        const auto mute = (bool) block.getProperty (ids::mute, false);
+        const auto row = (int) block[ids::row];
+        state.removeChild (block, undoTarget);
+
+        for (int i = 0; i < made.size(); ++i)
+        {
+            auto added = addPatternClip (made[i], start, length, i == 0 ? row : findFreePatternRow (start, length));
+            if (mute)
+                added.setProperty (ids::mute, true, undoTarget);
+        }
+    }
+    return made;
 }
 
 int Edit::makePatternUnique (int clipId)
@@ -391,11 +525,21 @@ std::vector<Event> getPatternEvents (const juce::ValueTree& pattern, int trackId
     const auto length = Edit::getPatternLength (pattern);
     const auto step = Edit::getPatternStep (pattern);
     const auto swing = step < 1.0 ? juce::jlimit (0.0, 1.0, (double) pattern.getProperty (ids::swing, 0.0)) : 0.0;
+    const auto muted = Edit::getPartMuted (part);
+    const auto levels = Edit::getPartLevels (part);
 
     for (const auto& note : part)
     {
         if (! note.hasType (ids::NOTE))
             continue;
+
+        const auto pitch = juce::jlimit (0, 127, (int) note[ids::pitch]);
+        if (muted.contains (pitch))
+            continue;
+
+        auto velocity = juce::jlimit (1, 127, (int) note.getProperty (ids::velocity, 100));
+        if (const auto level = levels.find (pitch); level != levels.end())
+            velocity = juce::jlimit (1, 127, juce::roundToInt ((float) velocity * level->second));
 
         const auto time = juce::jmax (0.0, (double) note[ids::time]);
         if (time >= length)
@@ -409,8 +553,7 @@ std::vector<Event> getPatternEvents (const juce::ValueTree& pattern, int trackId
                 on += swing * step / 3.0;
         }
 
-        events.push_back ({ juce::jlimit (0, 127, (int) note[ids::pitch]), juce::jlimit (1, 127, (int) note.getProperty (ids::velocity, 100)),
-                            on, on + juce::jmax (0.001, (double) note[ids::length]) });
+        events.push_back ({ pitch, velocity, on, on + juce::jmax (0.001, (double) note[ids::length]) });
     }
 
     std::stable_sort (events.begin(), events.end(), [] (const Event& a, const Event& b) { return a.on < b.on; });
