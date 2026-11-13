@@ -1267,6 +1267,22 @@ void Edit::forPartners (int clipId, const std::function<void (int)>& apply)
     propagating = false;
 }
 
+warp::Map Edit::getTimeBypassMap (const juce::ValueTree& clip)
+{
+    const auto free = getClipWarp (clip);
+    const auto effective = getEffectiveWarp (clip);
+    if (free.getMarkers().empty())
+        return effective;
+
+    const auto offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+    const auto from = effective.toSource (offset), to = effective.toSource (offset + length);
+    if (to - from < 1.0e-3)
+        return effective;
+
+    const warp::Map straight ({ { from, free.toTarget (from) }, { to, free.toTarget (to) } });
+    return isMusical (clip) ? warp::compose (straight, getMusicalMap (clip)) : straight;
+}
+
 warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
 {
     warp::Settings settings;
@@ -1285,6 +1301,11 @@ warp::Settings Edit::getWarpSettings (const juce::ValueTree& clip)
         settings.semitones = 0.0;
         settings.notes.clear();
     }
+
+    // Time compare: the free warp is replaced by the straight line between the window's two
+    // ends, so the clip keeps its place and length (a musical clip keeps its bend).
+    if ((bool) clip.getProperty (ids::timeBypass, false))
+        settings.map = getTimeBypassMap (clip);
 
     // Linked: rendered with its partners' files, so they all stay in phase.
     if (! settings.isNeutral())
@@ -1891,6 +1912,189 @@ juce::ValueTree Edit::addInsert (int trackId, fx::ModuleType type, int index)
 
     inserts.addChild (insert, index, undoTarget);
     return insert;
+}
+
+juce::ValueTree Edit::addInsert (int trackId, fx::ModuleType type, int index, const std::map<juce::String, float>& values)
+{
+    auto insert = addInsert (trackId, type, index);
+    if (! insert.isValid())
+        return {};
+
+    // Straight onto the new insert: still one undo step (its adding).
+    for (const auto& [valueId, value] : values)
+        if (const juce::Identifier name (valueId); insert.hasProperty (name) && name != ids::id && name != ids::type && std::isfinite (value))
+            insert.setProperty (name, value, nullptr);
+
+    return insert;
+}
+
+juce::StringArray Edit::getInsertValueIds (const juce::ValueTree& insert)
+{
+    juce::StringArray result;
+
+    if (isPluginInsert (insert))
+    {
+        for (const auto* id : { "pluginOn", "pluginInGain", "pluginOutGain" })
+            if (insert.hasProperty (id))
+                result.add (id);
+        return result;
+    }
+
+    if (const auto type = moduleTypeFromKey (insert[ids::type].toString()))
+    {
+        const auto module = fx::createModule (*type);
+        for (int v = 0; v < module->getNumValues(); ++v)
+            if (insert.hasProperty (juce::Identifier (module->getValueId (v))))
+                result.add (module->getValueId (v));
+    }
+
+    return result;
+}
+
+juce::ValueTree Edit::copyInsertTo (int insertId, int channelId, int index)
+{
+    const auto insert = getInsert (insertId);
+    auto inserts = getInserts (getChannel (channelId));
+    if (! insert.isValid() || ! inserts.isValid())
+        return {};
+
+    auto copy = insert.createCopy();
+    copy.setProperty (ids::id, takeNextId(), nullptr);
+    inserts.addChild (copy, index, undoTarget);
+    return copy;
+}
+
+juce::ValueTree Edit::duplicateInsert (int insertId)
+{
+    const auto insert = getInsert (insertId);
+    if (! insert.isValid())
+        return {};
+
+    auto inserts = insert.getParent();
+    auto copy = insert.createCopy();
+    copy.setProperty (ids::id, takeNextId(), nullptr);
+    inserts.addChild (copy, inserts.indexOf (insert) + 1, undoTarget);
+    return copy;
+}
+
+bool Edit::moveInsertTo (int insertId, int channelId, int index)
+{
+    auto insert = getInsert (insertId);
+    auto target = getInserts (getChannel (channelId));
+    if (! insert.isValid() || ! target.isValid())
+        return false;
+
+    auto source = insert.getParent();
+    if (source == target)
+    {
+        const auto last = source.getNumChildren() - 1;
+        source.moveChild (source.indexOf (insert), index < 0 ? last : juce::jlimit (0, last, index), undoTarget);
+        return true;
+    }
+
+    source.removeChild (insert, undoTarget);
+    target.addChild (insert, index < 0 ? -1 : juce::jmin (index, target.getNumChildren()), undoTarget);
+    return true;
+}
+
+juce::Array<juce::ValueTree> Edit::pasteInserts (const juce::Array<int>& insertIds, int channelId, int index)
+{
+    juce::Array<juce::ValueTree> copies;
+    auto inserts = getInserts (getChannel (channelId));
+    if (! inserts.isValid())
+        return copies;
+
+    // Copy them all first, so pasting a chain into itself copies what was there.
+    juce::Array<juce::ValueTree> sources;
+    for (const auto insertId : insertIds)
+        if (const auto insert = getInsert (insertId); insert.isValid())
+            sources.add (insert.createCopy());
+
+    auto at = index < 0 ? inserts.getNumChildren() : juce::jmin (index, inserts.getNumChildren());
+    for (auto copy : sources)
+    {
+        copy.setProperty (ids::id, takeNextId(), nullptr);
+        inserts.addChild (copy, at++, undoTarget);
+        copies.add (copy);
+    }
+
+    return copies;
+}
+
+juce::ValueTree Edit::replaceInsert (int insertId, fx::ModuleType type)
+{
+    const auto insert = getInsert (insertId);
+    if (! insert.isValid())
+        return {};
+
+    auto inserts = insert.getParent();
+    const auto index = inserts.indexOf (insert);
+    const auto ownerId = (int) inserts.getParent()[ids::id];
+    inserts.removeChild (insert, undoTarget);
+    return addInsert (ownerId, type, index);
+}
+
+juce::ValueTree Edit::replaceInsertWithPlugin (int insertId, const InstrumentInfo& info)
+{
+    const auto insert = getInsert (insertId);
+    if (! insert.isValid() || info.id.isEmpty())
+        return {};
+
+    auto inserts = insert.getParent();
+    const auto index = inserts.indexOf (insert);
+    const auto ownerId = (int) inserts.getParent()[ids::id];
+    inserts.removeChild (insert, undoTarget);
+    return addPluginInsert (ownerId, info, index);
+}
+
+void Edit::setInsertName (int insertId, const juce::String& name)
+{
+    auto insert = getInsert (insertId);
+    if (! insert.isValid())
+        return;
+
+    const auto trimmed = name.trim().substring (0, 60);
+    if (trimmed.isEmpty())
+        insert.removeProperty (ids::label, undoTarget);
+    else
+        insert.setProperty (ids::label, trimmed, undoTarget);
+}
+
+// A value set as text ("id=value;id=value"), for the set that isn't playing.
+static juce::String writeValueSet (const juce::ValueTree& insert, const juce::StringArray& valueIds)
+{
+    juce::StringArray parts;
+    for (const auto& valueId : valueIds)
+        parts.add (valueId + "=" + juce::String ((float) insert[juce::Identifier (valueId)]));
+    return parts.joinIntoString (";");
+}
+
+void Edit::switchInsertAB (int insertId)
+{
+    auto insert = getInsert (insertId);
+    if (! insert.isValid() || isPluginInsert (insert))
+        return;
+
+    const auto valueIds = getInsertValueIds (insert);
+    const auto playing = writeValueSet (insert, valueIds);
+    const auto other = hasAB (insert) ? insert[ids::abOther].toString() : playing;
+
+    for (const auto& part : juce::StringArray::fromTokens (other, ";", ""))
+    {
+        const auto valueId = part.upToFirstOccurrenceOf ("=", false, false);
+        if (valueIds.contains (valueId) && part.containsChar ('='))
+            insert.setProperty (juce::Identifier (valueId), part.fromFirstOccurrenceOf ("=", false, false).getFloatValue(), undoTarget);
+    }
+
+    insert.setProperty (ids::abOther, playing, undoTarget);
+    insert.setProperty (ids::ab, isShowingB (insert) ? 0 : 1, undoTarget);
+}
+
+void Edit::copyInsertAB (int insertId)
+{
+    auto insert = getInsert (insertId);
+    if (insert.isValid() && ! isPluginInsert (insert))
+        insert.setProperty (ids::abOther, writeValueSet (insert, getInsertValueIds (insert)), undoTarget);
 }
 
 juce::ValueTree Edit::addPluginInsert (int trackId, const InstrumentInfo& info, int index)
