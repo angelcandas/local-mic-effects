@@ -115,6 +115,9 @@ PluginEditor::PluginEditor (PluginProcessor& p)
         };
    #endif
 
+    processorRef.getSoundCheck().onChange = [this] (const juce::var& status)
+    { webView->emitEventIfBrowserIsVisible ("soundCheck", status); };
+
     // MIDI learn tells the page what it learned, and passes on the actions only the page
     // can do (record, scenes).
     {
@@ -152,6 +155,8 @@ PluginEditor::~PluginEditor()
 {
     practice.reset();
     daw.reset();
+
+    processorRef.getSoundCheck().onChange = nullptr;
 
     auto& map = processorRef.getMidiMap();
     map.onLearned = nullptr;
@@ -266,6 +271,14 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                return complete ({});
                            complete (practice->handle (args.size() > 0 ? args[0].toString() : juce::String(),
                                                        args.size() > 1 ? args[1] : juce::var()));
+                       })
+
+                       // (action, options) -> the sound check's state (see SoundCheck::handle); the
+                       // "soundCheck" event follows its progress.
+                       .withNativeFunction ("soundCheck", [this] (const auto& args, auto complete)
+                       {
+                           complete (processorRef.getSoundCheck().handle (args.size() > 0 ? args[0].toString() : juce::String(),
+                                                                          args.size() > 1 ? args[1] : juce::var()));
                        })
 
                        // (action, on) -> { muted, dry }. "mute": the panic button; "dry": hear the mic without effects.
@@ -685,6 +698,7 @@ void PluginEditor::timerCallback()
         daw->tick();
     if (practice != nullptr && ! processorRef.isDawMode())
         practice->tick();
+    processorRef.getSoundCheck().tick();
 
     // The title bar button or the system can change full screen too; keep the page's button in step.
     if (auto* window = getAppWindow(); window != nullptr && window->isFullScreen() != lastFullScreen)

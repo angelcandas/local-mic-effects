@@ -916,7 +916,7 @@ namespace
         const auto playing = percentile (loud, 0.5);
         if (floor < -65.0f)
         {
-            notes.add (name + " is already quiet between phrases (" + juce::String (floor, 0) + " dBFS): no gate needed.");
+            notes.add (name + " is already quiet between phrases (" + juce::String (juce::roundToInt (floor)) + " dBFS): no gate needed.");
             return;
         }
         if (playing - floor < 20.0f)
@@ -929,8 +929,8 @@ namespace
         const auto threshold = roundTo (juce::jmin (floor + 12.0f, playing - 8.0f), 1.0);
         move.insert = fx::ModuleType::gate;
         move.values = { { "gateOn", 1.0f }, { "gateThreshold", threshold } };
-        move.reasons.add ("Gate from " + juce::String (threshold, 0) + " dB: the noise between phrases (around "
-                          + juce::String (floor, 0) + " dBFS) goes quiet");
+        move.reasons.add ("Gate from " + juce::String (juce::roundToInt (threshold)) + " dB: the noise between phrases (around "
+                          + juce::String (juce::roundToInt (floor)) + " dBFS) goes quiet");
     }
 
     // Narrow cuts on the mains hum and its harmonics (the three strongest lines).

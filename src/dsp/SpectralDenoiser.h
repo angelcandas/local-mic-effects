@@ -172,8 +172,37 @@ public:
     // the instance is shared with the audio thread.
     void seedProfile (std::vector<float> powerPerBin) { seed = std::move (powerPerBin); }
 
+    // Hands a profile (power per bin, from copyProfile() of an instance at the same frame
+    // size) to an instance that is already running: the audio thread takes it at its next
+    // block, as if it had just been learnt. False when the size doesn't match or an offer
+    // is still waiting. Message thread (never while prepare() runs).
+    bool offerProfile (const std::vector<float>& powerPerBin)
+    {
+        if (powerPerBin.size() != (size_t) numBins || offered.size() != (size_t) numBins)
+            return false;
+
+        auto expected = offerIdle;
+        if (! offerState.compare_exchange_strong (expected, offerWriting))
+            return false;
+
+        std::copy (powerPerBin.begin(), powerPerBin.end(), offered.begin());
+        offerState.store (offerReady, std::memory_order_release);
+        return true;
+    }
+
+    bool hasPendingOffer() const noexcept { return offerState.load() != offerIdle; }
+
     void process (const juce::dsp::ProcessContextReplacing<float>& context) noexcept
     {
+        if (offerState.load (std::memory_order_acquire) == offerReady)
+        {
+            std::copy (offered.begin(), offered.end(), noise.begin());
+            seedTrackerFromProfile();
+            learnedFrames = 0;
+            publishProfile();
+            offerState.store (offerIdle, std::memory_order_release);
+        }
+
         auto& block = context.getOutputBlock();
         const auto numChannels = juce::jmin (block.getNumChannels(), channels.size());
 
@@ -246,6 +275,9 @@ private:
         for (auto* bins : { &power, &smoothed, &minimum, &candidate, &presence, &noise,
                             &previousGain, &previousSnr, &gain, &scratch, &quick, &quickMinimum })
             bins->assign ((size_t) numBins, 0.0f);
+
+        offered.assign ((size_t) numBins, 0.0f);
+        offerState.store (offerIdle);
 
         std::fill (gain.begin(), gain.end(), 1.0f);
 
@@ -519,6 +551,11 @@ private:
     // Noise power fluctuates around its mean, so a bin is only treated as signal once
     // it's comfortably above it; without this margin a third of the hiss leaks through.
     static constexpr float noiseMarginDb = 6.0f;
+
+    // offerProfile(): the message thread writes `offered`, the audio thread takes it.
+    static constexpr int offerIdle = 0, offerWriting = 1, offerReady = 2;
+    std::vector<float> offered;
+    std::atomic<int> offerState { offerIdle };
 
     double sampleRate = 48000.0;
     std::unique_ptr<juce::dsp::FFT> fft;
