@@ -7416,6 +7416,235 @@ namespace
         folder.deleteRecursively();
     }
 
+    void testDefinition()
+    {
+        std::cout << "\nTempo definition (beat maps), stretch by the edge\n";
+        using daw::warp::Map;
+        daw::Edit edit;
+        edit.setTempo (135.0);
+        const auto track = (int) edit.addTrack ("Take")[daw::ids::id];
+        const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-definition.wav");
+
+        // A clip without a definition keeps today's maths; a steady definition from the
+        // file's start at the same tempo gives the very same bend.
+        const auto plainId = (int) edit.addClip (track, file, 1.0, 8.0)[daw::ids::id];
+        edit.setClipMusical (plainId, true, 120.0);
+        auto plain = edit.getClip (plainId);
+        const auto tempo = edit.getTempoMap();
+        const auto anchorSeconds = (double) plain[daw::ids::start] - (double) plain[daw::ids::offset];
+        const auto anchor = tempo.toBeats (anchorSeconds);
+        auto exact = true;
+        const auto bend = daw::Edit::getMusicalMap (plain);
+        for (auto x = 0.0; x < 8.0; x += 0.37)
+            exact = exact && std::abs (bend.toTarget (x) - (tempo.toSeconds (anchor + x * 2.0) - anchorSeconds)) < 1e-9;
+        check (exact && ! plain.hasProperty (daw::ids::beatMap), "no definition: the musical bend is clipTempo from the file's start, as before");
+
+        const auto definedId = (int) edit.addClip (track, file, 12.0, 8.0)[daw::ids::id];
+        edit.setClipMusical (definedId, true, 120.0);
+        const auto before = daw::Edit::getMusicalMap (edit.getClip (definedId));
+        edit.setBeatMap (definedId, daw::Edit::steadyBeatMap (0.0, 120.0));
+        auto defined = edit.getClip (definedId);
+        const auto after = daw::Edit::getMusicalMap (defined);
+        exact = true;
+        for (auto x = 0.0; x < 8.0; x += 0.37)
+            exact = exact && std::abs (before.toTarget (x) - after.toTarget (x)) < 1e-9;
+        check (exact && std::abs (daw::Edit::getClipTempo (defined) - 120.0) < 1e-9, "a steady definition at 120 from 0 plays exactly as clipTempo 120 did");
+
+        // x2 then /2 is the identity.
+        const auto text = defined[daw::ids::beatMap].toString();
+        edit.setBeatMap (definedId, daw::Edit::scaleBeatMap (daw::Edit::getBeatMap (defined), 2.0));
+        check (std::abs (daw::Edit::getClipTempo (edit.getClip (definedId)) - 240.0) < 1e-9, "x2 doubles the clip's tempo");
+        edit.setBeatMap (definedId, daw::Edit::scaleBeatMap (daw::Edit::getBeatMap (edit.getClip (definedId)), 0.5));
+        check (edit.getClip (definedId)[daw::ids::beatMap].toString() == text, "x2 then /2 gives the same definition back");
+
+        // A take that drifts (each beat a little longer than the one before) comes out
+        // straight in musical mode: every beat within 10 ms of the project's grid.
+        edit.setTempo (120.0);
+        daw::Edit::BeatMap drift;
+        auto t = 0.25;
+        for (int k = 0; k <= 32; ++k)
+        {
+            drift.push_back ({ t, (double) k });
+            t += 0.5 + 0.004 * k; // 120 BPM sliding to about 105
+        }
+        const auto driftId = (int) edit.addClip (track, file, 24.0, 20.0)[daw::ids::id];
+        edit.setBeatMap (driftId, drift);
+        edit.setClipMusical (driftId, true);
+        auto driftClip = edit.getClip (driftId);
+        const auto grid = edit.getTempoMap();
+        const auto driftAnchor = (double) driftClip[daw::ids::start] - (double) driftClip[daw::ids::offset];
+        const auto effective = daw::Edit::getEffectiveWarp (driftClip);
+        const auto firstBeat = grid.toBeats (driftAnchor + effective.toTarget (drift[0].seconds));
+        auto worst = 0.0;
+        for (const auto& p : drift)
+        {
+            const auto at = driftAnchor + effective.toTarget (p.seconds);
+            worst = std::max (worst, std::abs (at - grid.toSeconds (firstBeat + p.beat)));
+        }
+        check (worst < 0.010, "a drifting take plays every beat on the grid in musical mode (worst " + juce::String (worst * 1000.0, 2) + " ms)");
+
+        // A downbeat after the file's start: with the window starting there and the clip
+        // on bar 2, the clip's bar 2 lands on the project's bar 3, at another tempo.
+        edit.setTempo (100.0);
+        const auto downId = (int) edit.addClip (track, file, 60.0, 8.0)[daw::ids::id];
+        edit.setBeatMap (downId, daw::Edit::steadyBeatMap (0.3, 120.0));
+        edit.setClipMusical (downId, true);
+        auto down = edit.getClip (downId);
+        down.setProperty (daw::ids::offset, daw::Edit::getEffectiveWarp (down).toTarget (0.3), nullptr);
+        down.setProperty (daw::ids::start, 2.4, nullptr); // bar 2 at 100 BPM
+        const auto downMap = daw::Edit::getEffectiveWarp (down);
+        const auto downAnchor = 2.4 - (double) down[daw::ids::offset];
+        check (std::abs (downAnchor + downMap.toTarget (0.3) - 2.4) < 1e-6 && std::abs (downAnchor + downMap.toTarget (0.3 + 2.0) - 4.8) < 1e-6,
+               "the downbeat sits on the clip's start, and its next bar on the project's next bar (100 BPM)");
+
+        // The free warp under a definition round-trips through setEffectiveWarp.
+        edit.setClipWarp (driftId, Map ({ { 1.0, 1.0 }, { 2.0, 2.2 }, { 6.0, 6.0 } }));
+        driftClip = edit.getClip (driftId);
+        const auto whole = daw::Edit::getEffectiveWarp (driftClip);
+        edit.setEffectiveWarp (driftId, whole);
+        const auto again = daw::Edit::getEffectiveWarp (edit.getClip (driftId));
+        auto same = true;
+        for (auto x = 0.5; x < 8.0; x += 0.25)
+            same = same && std::abs (whole.toTarget (x) - again.toTarget (x)) < 1e-6;
+        check (same, "a free warp under a drifting definition round-trips through setEffectiveWarp");
+
+        // Stretch by the edge: the same part of the file, the asked length.
+        edit.setTempo (120.0);
+        const auto stretchId = (int) edit.addClip (track, file, 80.0, 4.0)[daw::ids::id];
+        auto stretched = edit.getClip (stretchId);
+        stretched.setProperty (daw::ids::offset, 1.0, nullptr);
+        auto map = daw::Edit::getEffectiveWarp (stretched);
+        const auto from = map.toSource (1.0), to = map.toSource (5.0);
+        edit.stretchClip (stretchId, 80.0, 6.0);
+        stretched = edit.getClip (stretchId);
+        map = daw::Edit::getEffectiveWarp (stretched);
+        const auto offset = (double) stretched[daw::ids::offset], length = (double) stretched[daw::ids::length];
+        check (std::abs (length - 6.0) < 1e-6 && std::abs ((double) stretched[daw::ids::start] - 80.0) < 1e-9
+                   && std::abs (map.toSource (offset) - from) < 1e-6 && std::abs (map.toSource (offset + length) - to) < 1e-6,
+               "stretching the right edge to 6 s keeps the start and the part of the file shown");
+        edit.stretchClip (stretchId, 82.0, 4.0); // the left edge: start moves, the end stays
+        stretched = edit.getClip (stretchId);
+        map = daw::Edit::getEffectiveWarp (stretched);
+        check (std::abs ((double) stretched[daw::ids::length] - 4.0) < 1e-6 && std::abs ((double) stretched[daw::ids::start] - 82.0) < 1e-9
+                   && std::abs (map.toSource ((double) stretched[daw::ids::offset]) - from) < 1e-6,
+               "stretching from the left edge: 4 s from 82 s, same audio");
+        edit.stretchClip (stretchId, 82.0, 100.0);
+        check (std::abs ((double) edit.getClip (stretchId)[daw::ids::length] - 16.0) < 1e-6, "an edge stretch stops at 4x");
+        edit.getUndoManager().beginNewTransaction();
+
+        // A musical clip changes its tempo instead.
+        const auto musicalId = (int) edit.addClip (track, file, 100.0, 4.0)[daw::ids::id];
+        edit.setClipMusical (musicalId, true, 120.0);
+        edit.stretchClip (musicalId, 100.0, 8.0);
+        auto musical = edit.getClip (musicalId);
+        map = daw::Edit::getEffectiveWarp (musical);
+        check (std::abs (daw::Edit::getClipTempo (musical) - 240.0) < 1e-6 && daw::Edit::getClipWarp (musical).getMarkers().empty()
+                   && std::abs ((double) musical[daw::ids::length] - 8.0) < 1e-6 && std::abs (map.toSource ((double) musical[daw::ids::offset] + 8.0) - 4.0) < 1e-6,
+               "a musical clip stretched to twice its length: its own tempo doubles (120 -> 240, twice the beats), no free warp added");
+    }
+
+    void testDefinitionBridge()
+    {
+        std::cout << "\nTempo definition and make permanent (bridge)\n";
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-definition", {});
+        folder.createDirectory();
+        juce::PropertiesFile::Options settingsOptions;
+        settingsOptions.applicationName = "MicFXTests";
+        settingsOptions.filenameSuffix = ".settings";
+        juce::PropertiesFile settings (folder.getChildFile ("test.settings"), settingsOptions);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+        auto& pool = processor.getDawEngine().getAudioPool();
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        const auto run = [&] (const juce::String& command, juce::var args)
+        {
+            juce::var result;
+            bridge.handle (command, args, [&] (juce::var r) { result = r; });
+            for (int i = 0; i < 3000 && result.isVoid(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (20);
+            return result;
+        };
+        const auto args = [] (std::initializer_list<std::pair<const char*, juce::var>> properties)
+        {
+            auto* object = new juce::DynamicObject();
+            for (const auto& [name, value] : properties)
+                object->setProperty (name, value);
+            return juce::var (object);
+        };
+        run ("mode", args ({ { "daw", true } }));
+        edit.setTempo (120.0);
+
+        // A beat at 100 BPM, the first downbeat 0.2 s in.
+        juce::AudioBuffer<float> take (1, (int) (12.0 * sampleRate));
+        take.clear();
+        for (int n = 0; n < 20; ++n)
+            for (int i = 0; i < (int) (0.08 * sampleRate); ++i)
+                take.addSample (0, (int) ((0.2 + n * 0.6) * sampleRate) + i, (n % 4 == 0 ? 0.9f : 0.4f) * (float) std::exp (-i / (0.01 * sampleRate)) * (float) std::sin (0.25 * i));
+        const auto file = folder.getChildFile ("beat.wav");
+        writeWav (file, take, sampleRate);
+        const auto track = (int) edit.getTracks()[0][daw::ids::id];
+        const auto clipId = (int) edit.addClip (track, file, 1.0, 12.0)[daw::ids::id];
+
+        auto found = run ("defineTempo", args ({ { "id", clipId }, { "mode", "steady" } }));
+        auto clip = edit.getClip (clipId);
+        const auto definition = daw::Edit::getBeatMap (clip);
+        const auto phase = definition.empty() ? 1.0 : std::fmod (daw::Edit::secondsAt (definition, 0.0) - 0.2 + 60.0, 0.6);
+        check ((bool) found["ok"] && std::abs (daw::Edit::getClipTempo (clip) - 100.0) < 0.5 && std::min (phase, 0.6 - phase) < 0.02,
+               "Detect steady: 100 BPM with its beats on the hits (" + juce::String (daw::Edit::getClipTempo (clip), 2) + " BPM)");
+        check (! daw::Edit::isMusical (clip) && std::abs ((double) clip[daw::ids::length] - 12.0) < 1e-9, "defining the tempo doesn't move or stretch a clip that isn't musical");
+
+        auto bars = run ("defineTempo", args ({ { "id", clipId }, { "mode", "bars" }, { "bars", 5 } }));
+        check ((bool) bars["ok"] && std::abs (daw::Edit::getClipTempo (edit.getClip (clipId)) - 100.0) < 1e-6, "12 s is 5 bars: 100 BPM");
+        auto tooFast = run ("defineTempo", args ({ { "id", clipId }, { "mode", "bars" }, { "bars", 20 } }));
+        check (! (bool) tooFast["ok"], "a tempo past 300 BPM is refused");
+
+        // From the project, then a tempo change: the clip keeps its bars.
+        const auto projectId = (int) edit.addClip (track, file, 20.0, 12.0)[daw::ids::id];
+        auto fromProject = run ("defineTempo", args ({ { "id", projectId }, { "mode", "project" } }));
+        run ("setClip", args ({ { "id", projectId }, { "musical", true } }));
+        auto placed = edit.getClip (projectId);
+        check ((bool) fromProject["ok"] && std::abs ((double) placed[daw::ids::start] - 20.0) < 1e-6 && std::abs ((double) placed[daw::ids::length] - 12.0) < 1e-6
+                   && std::abs (daw::Edit::getEffectiveWarp (placed).toTarget (3.0) - 3.0) < 1e-6,
+               "From the project, then musical: the clip plays exactly as before");
+        edit.setTempo (100.0);
+        placed = edit.getClip (projectId);
+        const auto at = (double) placed[daw::ids::start] - (double) placed[daw::ids::offset] + daw::Edit::getEffectiveWarp (placed).toTarget (3.0);
+        check (std::abs (at - edit.getTempoMap().toSeconds ((20.0 + 3.0) * 2.0)) < 1e-3, "after a tempo change, file second 3 is still on beat 46");
+
+        // The project's tempo from a clip.
+        edit.setTempo (120.0);
+        auto fromClip = run ("tempoFromClip", args ({ { "id", clipId } }));
+        check ((bool) fromClip["ok"] && std::abs (edit.getTempo() - 100.0) < 0.5, "Project tempo from the clip: 100 BPM (" + juce::String (edit.getTempo(), 2) + ")");
+
+        // Make warp permanent: the new file plays what the clip played, sample for sample.
+        edit.getUndoManager().undo();
+        const auto warpedId = (int) edit.addClip (track, file, 40.0, 12.0)[daw::ids::id];
+        edit.setClipWarp (warpedId, daw::warp::Map ({ { 0.0, 0.0 }, { 2.0, 2.5 }, { 12.0, 12.5 } }));
+        auto warped = edit.getClip (warpedId);
+        warped.setProperty (daw::ids::length, 12.5, nullptr);
+        const auto expected = pool.loadNow (file, daw::Edit::getWarpSettings (warped));
+        auto flat = run ("flattenClip", args ({ { "id", warpedId } }));
+        warped = edit.getClip (warpedId);
+        const juce::File newFile (warped[daw::ids::file].toString());
+        const auto written = pool.loadNow (newFile);
+        auto equal = expected != nullptr && written != nullptr && written->getNumSamples() == expected->getNumSamples();
+        for (int i = 0; equal && i < expected->getNumSamples(); i += 7)
+            equal = std::abs (written->getSample (0, i) - expected->getSample (0, i)) < 1e-6f;
+        check ((bool) flat["ok"] && newFile != file && newFile.existsAsFile() && daw::Edit::getClipWarp (warped).getMarkers().empty() && equal,
+               "Make warp permanent: a new file, no warp, and it plays the same samples");
+        edit.getUndoManager().undo();
+        check (juce::File (edit.getClip (warpedId)[daw::ids::file].toString()) == file && ! daw::Edit::getClipWarp (edit.getClip (warpedId)).getMarkers().empty()
+                   && file.existsAsFile(),
+               "undo puts the original file and its warp back");
+        auto nothing = run ("flattenClip", args ({ { "id", projectId } }));
+        check (! (bool) nothing["ok"], "nothing to make permanent on a clip that plays its file as recorded");
+
+        folder.deleteRecursively();
+    }
+
     void testLinkedTracks()
     {
         std::cout << "\nLinked tracks (multi-mic warping stays in phase)\n";
@@ -15105,6 +15334,15 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=definition: tempo definitions, edge stretch, make permanent.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "definition")
+    {
+        testDefinition();
+        testDefinitionBridge();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=hitpoints: stored hitpoints and what uses them.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "hitpoints")
     {
@@ -15237,6 +15475,8 @@ int main()
     testTimeBypass();
     testHitpoints();
     testHitpointActions();
+    testDefinition();
+    testDefinitionBridge();
     testLinkedTracks();
     testWarp();
     testOfflineEngineStaysOffTheMessageThread();

@@ -1059,7 +1059,7 @@ void Edit::setClipWarp (int clipId, const warp::Map& map)
     forPartners (clipId, [&] (int partnerId)
     {
         const auto partner = getClip (partnerId);
-        if (isMusical (partner) == isMusical (clip) && (! isMusical (clip) || juce::approximatelyEqual (getClipTempo (partner), getClipTempo (clip))))
+        if (isMusical (partner) == isMusical (clip) && (! isMusical (clip) || sameBend (partner, clip)))
             setClipWarp (partnerId, map);
         else
             setEffectiveWarp (partnerId, isMusical (clip) ? warp::compose (map, getMusicalMap (clip)) : map);
@@ -1088,6 +1088,8 @@ TempoMap Edit::getTempoMapFor (const juce::ValueTree& clip)
 
 double Edit::getClipTempo (const juce::ValueTree& clip)
 {
+    if (const auto map = getBeatMap (clip); map.size() >= 2)
+        return juce::jlimit (minClipTempo, maxClipTempo, 60.0 * (map[1].beat - map[0].beat) / (map[1].seconds - map[0].seconds));
     if (const auto bpm = (double) clip.getProperty (ids::clipTempo, 0.0); bpm > 0.0)
         return juce::jlimit (minClipTempo, maxClipTempo, bpm);
     const auto start = (double) clip.getProperty (ids::start, 0.0);
@@ -1100,18 +1102,27 @@ warp::Map Edit::getMusicalMap (const juce::ValueTree& clip)
         return {};
 
     const auto tempo = getTempoMapFor (clip);
-    const auto beatsPerSecond = getClipTempo (clip) / 60.0; // of the file's own time
     const auto anchorSeconds = (double) clip[ids::start] - (double) clip[ids::offset];
     const auto anchor = tempo.toBeats (anchorSeconds);
 
-    // Straight time x plays at timeline beat anchor + x * beatsPerSecond.
-    const auto rendered = [&] (double x) { return tempo.toSeconds (anchor + x * beatsPerSecond) - anchorSeconds; };
-    const auto straight = [&] (double beat) { return (beat - anchor) / beatsPerSecond; };
+    // The file's own beat at straight time x: its tempo definition, or steady at clipTempo
+    // (the maths of clips without a definition is kept exactly as it was).
+    const auto definition = getBeatMap (clip);
+    const auto beatsPerSecond = getClipTempo (clip) / 60.0;
+    const auto origin = definition.empty() ? 0.0 : beatAt (definition, 0.0);
+    const auto ownBeat = [&] (double x) { return definition.empty() ? x * beatsPerSecond : beatAt (definition, x) - origin; };
+    const auto ownSeconds = [&] (double beat) { return definition.empty() ? beat / beatsPerSecond : secondsAt (definition, beat + origin); };
+
+    // Straight time x (file time 0 at the clip's anchor) plays at timeline beat anchor + its own beat.
+    const auto rendered = [&] (double x) { return tempo.toSeconds (anchor + ownBeat (x)) - anchorSeconds; };
+    const auto straight = [&] (double beat) { return ownSeconds (beat - anchor); };
 
     // Corners: far before and after (the map runs on at its last slope only through
     // markers), every tempo point, and every half beat along ramps.
     constexpr double far = 1.0e5;
     std::vector<double> xs { -far, 0.0, far };
+    for (const auto& point : definition)
+        xs.push_back (point.seconds);
     const auto& points = tempo.getPoints();
     for (size_t i = 0; i < points.size(); ++i)
     {
@@ -1186,7 +1197,10 @@ void Edit::setClipMusical (int clipId, bool on, double clipTempo)
     const auto before = getEffectiveWarp (clip);
     const auto bpm = clipTempo > 0.0 ? juce::jlimit (minClipTempo, maxClipTempo, clipTempo) : getClipTempo (clip);
 
-    // The free warp stays as it is: while musical it's read in the file's own time.
+    // The free warp stays as it is: while musical it's read in the file's own time. A tempo
+    // definition scales around its downbeat to the new tempo.
+    if (auto map = getBeatMap (clip); map.size() >= 2 && clipTempo > 0.0)
+        clip.setProperty (ids::beatMap, beatMapToString (scaleBeatMap (map, bpm / getClipTempo (clip))), undoTarget);
     clip.setProperty (ids::clipTempo, bpm, undoTarget);
     if (on)
         clip.setProperty (ids::musical, true, undoTarget);
@@ -1194,6 +1208,219 @@ void Edit::setClipMusical (int clipId, bool on, double clipTempo)
         clip.removeProperty (ids::musical, undoTarget);
 
     keepWindow (clip, before);
+}
+
+bool Edit::sameBend (const juce::ValueTree& a, const juce::ValueTree& b)
+{
+    return juce::approximatelyEqual (getClipTempo (a), getClipTempo (b)) && a[ids::beatMap].toString() == b[ids::beatMap].toString();
+}
+
+//==============================================================================
+Edit::BeatMap Edit::parseBeatMap (const juce::String& text)
+{
+    BeatMap map;
+    for (const auto& item : juce::StringArray::fromTokens (text, ";", ""))
+    {
+        if (! item.containsChar (':'))
+            continue;
+        const BeatPoint point { item.upToFirstOccurrenceOf (":", false, false).getDoubleValue(),
+                                item.fromFirstOccurrenceOf (":", false, false).getDoubleValue() };
+        if (! std::isfinite (point.seconds) || ! std::isfinite (point.beat))
+            continue;
+        if (! map.empty())
+        {
+            const auto& last = map.back();
+            const auto seconds = point.seconds - last.seconds, beats = point.beat - last.beat;
+            if (seconds <= 1.0e-4 || beats <= 1.0e-4)
+                continue;
+            if (const auto bpm = 60.0 * beats / seconds; bpm < minSegmentTempo || bpm > maxSegmentTempo)
+                continue;
+        }
+        map.push_back (point);
+    }
+    if (map.size() < 2)
+        map.clear();
+    return map;
+}
+
+juce::String Edit::beatMapToString (const BeatMap& map)
+{
+    juce::StringArray items;
+    for (const auto& p : map)
+        items.add (juce::String (p.seconds, 6) + ":" + juce::String (p.beat, 6));
+    return map.size() < 2 ? juce::String() : items.joinIntoString (";");
+}
+
+Edit::BeatMap Edit::getBeatMap (const juce::ValueTree& clip)
+{
+    return clip.hasProperty (ids::beatMap) ? parseBeatMap (clip[ids::beatMap].toString()) : BeatMap();
+}
+
+Edit::BeatMap Edit::getDefinition (const juce::ValueTree& clip)
+{
+    if (auto map = getBeatMap (clip); ! map.empty())
+        return map;
+    return steadyBeatMap (0.0, getClipTempo (clip));
+}
+
+Edit::BeatMap Edit::steadyBeatMap (double downbeatSeconds, double bpm)
+{
+    bpm = juce::jlimit (minClipTempo, maxClipTempo, bpm);
+    return { { downbeatSeconds, 0.0 }, { downbeatSeconds + 240.0 / bpm, 4.0 } };
+}
+
+Edit::BeatMap Edit::scaleBeatMap (const BeatMap& map, double factor)
+{
+    auto scaled = map;
+    if (factor > 0.0)
+        for (auto& p : scaled)
+            p.beat *= factor;
+    return scaled;
+}
+
+double Edit::beatAt (const BeatMap& map, double seconds)
+{
+    if (map.size() < 2)
+        return seconds * 2.0; // 120 BPM: never asked for in practice
+    size_t i = 1;
+    while (i + 1 < map.size() && seconds > map[i].seconds)
+        ++i;
+    const auto& a = map[i - 1];
+    const auto& b = map[i];
+    return a.beat + (seconds - a.seconds) * (b.beat - a.beat) / (b.seconds - a.seconds);
+}
+
+double Edit::secondsAt (const BeatMap& map, double beat)
+{
+    if (map.size() < 2)
+        return beat * 0.5;
+    size_t i = 1;
+    while (i + 1 < map.size() && beat > map[i].beat)
+        ++i;
+    const auto& a = map[i - 1];
+    const auto& b = map[i];
+    return a.seconds + (beat - a.beat) * (b.seconds - a.seconds) / (b.beat - a.beat);
+}
+
+void Edit::setBeatMap (int clipId, const BeatMap& map)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid() || isMidiClip (clip))
+        return;
+
+    const auto text = beatMapToString (parseBeatMap (beatMapToString (map)));
+    forPartners (clipId, [&] (int partner) { setBeatMap (partner, parseBeatMap (text)); });
+
+    const auto before = getEffectiveWarp (clip);
+    const auto tempo = getClipTempo (clip); // kept when the definition goes
+    if (text.isEmpty())
+    {
+        clip.removeProperty (ids::beatMap, undoTarget);
+        clip.setProperty (ids::clipTempo, tempo, undoTarget);
+    }
+    else
+    {
+        clip.setProperty (ids::beatMap, text, undoTarget);
+        clip.setProperty (ids::clipTempo, getClipTempo (clip), undoTarget);
+    }
+    keepWindow (clip, before);
+}
+
+void Edit::placeWindow (juce::ValueTree& clip, double from, double to, double start)
+{
+    clip.setProperty (ids::start, juce::jmax (0.0, start), undoTarget);
+    // A musical clip's bend depends on where it sits, so settle it twice (exact on a steady tempo).
+    for (int pass = 0; pass < 2; ++pass)
+    {
+        const auto map = getEffectiveWarp (clip);
+        const auto offset = map.toTarget (from);
+        clip.setProperty (ids::offset, offset, undoTarget);
+        clip.setProperty (ids::length, juce::jmax (minClipSeconds, map.toTarget (to) - offset), undoTarget);
+    }
+}
+
+void Edit::stretchClip (int clipId, double start, double length)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid() || isMidiClip (clip))
+        return;
+
+    const auto oldStart = (double) clip[ids::start], offset = (double) clip[ids::offset], oldLength = (double) clip[ids::length];
+    if (oldLength < minClipSeconds || length <= 0.0)
+        return;
+    const auto factor = juce::jlimit (minEdgeStretch, maxEdgeStretch, length / oldLength);
+    length = oldLength * factor;
+
+    forPartners (clipId, [&] (int partner)
+    {
+        const auto other = getClip (partner);
+        stretchClip (partner, (double) other[ids::start] + (start - oldStart), (double) other[ids::length] * factor);
+    });
+
+    const auto before = getEffectiveWarp (clip);
+    const auto from = before.toSource (offset), to = before.toSource (offset + oldLength);
+
+    if (isMusical (clip))
+    {
+        // Longer at the same project tempo = more of the audio's own beats in it: they're
+        // shorter than it was told, so its tempo goes up by the same factor.
+        const auto map = getDefinition (clip);
+        clip.setProperty (ids::beatMap, beatMapToString (scaleBeatMap (map, factor)), undoTarget);
+        clip.setProperty (ids::clipTempo, getClipTempo (clip), undoTarget);
+        placeWindow (clip, from, to, start);
+        return;
+    }
+
+    // The whole map scaled about rendered time 0, pinned at the file's start and at the
+    // window's two ends so nothing outside the markers runs on at the old speed.
+    std::vector<warp::Marker> markers { { 0.0, before.toTarget (0.0) * factor },
+                                        { from, before.toTarget (from) * factor },
+                                        { to, before.toTarget (to) * factor } };
+    for (const auto& m : before.getMarkers())
+        markers.push_back ({ m.source, m.target * factor });
+    std::sort (markers.begin(), markers.end(), [] (auto& a, auto& b) { return a.source < b.source; });
+    std::vector<warp::Marker> unique;
+    for (const auto& m : markers)
+        if (m.source >= 0.0 && (unique.empty() || m.source - unique.back().source > 1.0e-6))
+            unique.push_back (m);
+
+    setClipWarp (clipId, warp::Map (std::move (unique)));
+    placeWindow (clip, from, to, start);
+}
+
+warp::Settings Edit::getFlattenSettings (const juce::ValueTree& clip)
+{
+    // What the clip plays, without the compare switches and without its track's transpose
+    // (that stays on the track and keeps applying).
+    warp::Settings settings;
+    settings.map = getEffectiveWarp (clip);
+    settings.semitones = juce::jlimit (-warp::Settings::maxSemitones, warp::Settings::maxSemitones, (double) clip.getProperty (ids::transpose, 0.0));
+    settings.algorithm = warp::algorithmFromKey (clip[ids::stretch].toString());
+    settings.formant = (bool) clip.getProperty (ids::formant, false);
+    const auto partners = getLinkedClips (clip);
+    if (partners.isEmpty())
+        settings.notes = getClipNotes (clip);
+    if (! settings.isNeutral() && ! partners.isEmpty())
+    {
+        settings.linked.add (clip[ids::file].toString());
+        for (const auto& partner : partners)
+            settings.linked.addIfNotAlreadyThere (partner[ids::file].toString());
+        settings.linked.sort (false);
+    }
+    return settings;
+}
+
+void Edit::flattenClip (int clipId, const juce::File& file)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid() || isMidiClip (clip))
+        return;
+
+    // Offset and length were already in the rendered copy's time, which is the new file's.
+    clip.setProperty (ids::file, file.getFullPathName(), undoTarget);
+    for (const auto& id : { ids::warp, ids::transpose, ids::pitchNotes, ids::musical, ids::clipTempo, ids::beatMap,
+                            ids::timeBypass, ids::warpBypass, ids::hitpoints })
+        clip.removeProperty (id, undoTarget);
 }
 
 //==============================================================================

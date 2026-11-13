@@ -437,7 +437,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     if (tree.hasType (ids::CLIP))
     {
         // The real edit (or an undo) replaces what was being previewed.
-        if (property == ids::warp || property == ids::pitchNotes || property == ids::musical || property == ids::clipTempo)
+        if (property == ids::warp || property == ids::pitchNotes || property == ids::musical || property == ids::clipTempo || property == ids::beatMap)
             previews.erase ((int) tree[ids::id]);
         requestRebuild();
     }
