@@ -22,6 +22,10 @@ public:
     bool loadPreset (const juce::String& name);
     juce::String getPresetName() const;
 
+    // The engine (the Kit's samples are reached through it), and the name of a key on this instance.
+    Engine& getEngine() noexcept { return *engine; }
+    juce::String getKeyName (int note) const;
+
     // The last `count` output samples (mono), oldest first. Any thread.
     void readScope (float* destination, int count) const;
 

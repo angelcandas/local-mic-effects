@@ -33,6 +33,7 @@
 #include "PitchTap.h"
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
+#include "instruments/Kit.h"
 #include "daw/Quantize.h"
 #include "daw/Patterns.h"
 #include "analysis/Beats.h"
@@ -8546,6 +8547,8 @@ namespace
 
         for (const auto* spec : specs)
         {
+            if (spec->key == "kit") // a sampler with no samples of its own: testKit
+                continue;
             auto created = micfx::inst::createInstrument (spec->key);
             auto& instrument = dynamic_cast<micfx::inst::InstrumentProcessor&> (*created);
             instrument.setRateAndBufferSizeDetails (sampleRate, blockSize);
@@ -8696,6 +8699,325 @@ namespace
                    "a project's \"builtin:pad\" opens on Nova's Warm Pad, with a window");
         }
     }
+    //==============================================================================
+    // Kit: the sampler drum kit. Samples are made here (no sample ships with it).
+    juce::File writeTestSample (const juce::File& folder, const juce::String& name, double rate, double seconds, float frequency,
+                                bool stereo, float decaySeconds)
+    {
+        const auto file = folder.getChildFile (name);
+        file.deleteFile();
+        juce::WavAudioFormat wav;
+        std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
+        auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions().withSampleRate (rate)
+                                                                                  .withNumChannels (stereo ? 2 : 1).withBitsPerSample (16));
+        const auto n = (int) (seconds * rate);
+        juce::AudioBuffer<float> buffer (stereo ? 2 : 1, n);
+        for (int i = 0; i < n; ++i)
+        {
+            const auto t = (double) i / rate;
+            const auto v = (float) (0.8 * std::sin (juce::MathConstants<double>::twoPi * frequency * t) * std::exp (-t / decaySeconds));
+            for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+                buffer.setSample (ch, i, v);
+        }
+        writer->writeFromAudioSampleBuffer (buffer, 0, n);
+        return file;
+    }
+
+    // When the sound is over: the last time (seconds) the signal is above the threshold.
+    double lastAbove (const std::vector<float>& x, float threshold)
+    {
+        for (size_t i = x.size(); i-- > 0;)
+            if (std::abs (x[i]) > threshold)
+                return (double) i / sampleRate;
+        return 0.0;
+    }
+
+    float peakOf (const std::vector<float>& x)
+    {
+        auto p = 0.0f;
+        for (auto v : x)
+            p = std::max (p, std::abs (v));
+        return p;
+    }
+
+    void testKit()
+    {
+        std::cout << "\nKit (sampler drum kit)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-kit");
+        folder.createDirectory();
+        const auto demoFolder = juce::SystemStats::getEnvironmentVariable ("MICFX_INSTRUMENT_DEMO", {});
+
+        const auto kickFile = writeTestSample (folder, "Kick 808.wav", 44100.0, 1.0, 60.0f, false, 0.25f);
+        const auto snareFile = writeTestSample (folder, "Snare.wav", 22050.0, 1.0, 400.0f, true, 0.3f);
+        const auto hatFile = writeTestSample (folder, "Hat.wav", 48000.0, 1.5, 6000.0f, true, 0.6f);
+        const auto openFile = writeTestSample (folder, "Open Hat.wav", 48000.0, 1.5, 7000.0f, true, 0.6f);
+        const auto notAudio = folder.getChildFile ("notes.txt");
+        notAudio.replaceWithText ("not audio");
+
+        auto make = [] (std::unique_ptr<juce::AudioProcessor>& owner) -> micfx::inst::InstrumentProcessor&
+        {
+            owner = micfx::inst::createInstrument ("kit");
+            auto& p = dynamic_cast<micfx::inst::InstrumentProcessor&> (*owner);
+            p.setRateAndBufferSizeDetails (sampleRate, blockSize);
+            p.prepareToPlay (sampleRate, blockSize);
+            return p;
+        };
+
+        std::unique_ptr<juce::AudioProcessor> owner;
+        auto& kit = make (owner);
+        auto* sampler = micfx::inst::asKit (kit.getEngine());
+        check (sampler != nullptr && micfx::inst::findSpec ("kit") != nullptr, "the Kit is listed and its engine is a sampler");
+
+        // Empty: silent, and the keys are named after the General MIDI drums.
+        {
+            const auto out = playInstrument (kit, chord ({ 36, 38, 42, 46 }, 0.0, 0.2), 0.5);
+            check (peakOf (out[0]) == 0.0f && kit.getKeyName (36) == "Kick" && kit.getKeyName (38) == "Snare" && kit.getKeyName (46) == "Open hat"
+                       && kit.getKeyName (70).isEmpty(),
+                   "an empty kit is silent and its keys have the drum names");
+        }
+
+        juce::String error;
+        check (sampler->loadSample (0, kickFile, error) && sampler->loadSample (2, snareFile, error)
+                   && sampler->loadSample (6, hatFile, error) && sampler->loadSample (10, openFile, error),
+               "four samples load (mono, stereo, 22 kHz, 48 kHz): " + error);
+        error = {};
+        check (! sampler->loadSample (1, folder.getChildFile ("nothing.wav"), error) && error.isNotEmpty()
+                   && ! sampler->loadSample (1, notAudio, error) && ! sampler->loadSample (99, kickFile, error)
+                   && sampler->getSample (1) == nullptr,
+               "a missing file, a file that isn't audio and a pad that doesn't exist are refused");
+        check (kit.getKeyName (36) == "Kick 808" && kit.getKeyName (38) == "Snare" && kit.getKeyName (37) == "Rim",
+               "a loaded pad is named after its sample, an empty one after the drum");
+
+        // Plays on its own note, once, at the right length (the 22 kHz sample is resampled).
+        kit.reset();
+        const auto kick = playInstrument (kit, chord ({ 36 }, 0.1, 0.15), 2.0);
+        kit.reset();
+        const auto snare = playInstrument (kit, chord ({ 38 }, 0.1, 0.15), 2.0);
+        const auto kickEnd = lastAbove (kick[0], 1.0e-3f), snareEnd = lastAbove (snare[0], 1.0e-3f);
+        check (peakOf (kick[0]) > 0.05f && kickEnd > 0.95f && kickEnd < 1.15 && snareEnd > 0.95 && snareEnd < 1.15,
+               "a pad plays its whole sample whatever the file's sample rate (" + juce::String (kickEnd, 2) + " s, " + juce::String (snareEnd, 2) + " s)");
+        check (std::abs (kick[0][(size_t) (0.5 * sampleRate)]) > 0.0f && peakOf (kick[1]) > 0.0f, "a mono sample plays on both sides");
+        kit.reset();
+        const auto other = playInstrument (kit, chord ({ 37, 52, 60 }, 0.0, 0.2), 0.5);
+        check (peakOf (other[0]) == 0.0f, "an empty pad and notes outside the kit are silent");
+        kit.reset();
+        const auto early = playInstrument (kit, chord ({ 36 }, 0.0, 0.01), 0.3);
+        check (std::abs (early[0][0]) < 0.02f, "a hit starts without a click");
+
+        // Pad settings.
+        const auto setParam = [&] (const char* id, float value)
+        {
+            auto* p = kit.getState().getParameter (id);
+            p->setValueNotifyingHost (p->convertTo0to1 (value));
+        };
+        const auto playKick = [&] (float velocity = 0.8f, double seconds = 2.0)
+        {
+            kit.reset();
+            return playInstrument (kit, chord ({ 36 }, 0.0, 0.05, velocity), seconds);
+        };
+
+        const auto base = peakOf (playKick (0.9f)[0]);
+        setParam ("p1Level", -12.0f);
+        const auto quiet = peakOf (playKick (0.9f)[0]);
+        setParam ("p1Level", 0.0f);
+        check (std::abs (quiet / base - 0.251f) < 0.03f, "level moves the pad in dB (" + juce::String (quiet / base, 3) + " of " + juce::String (base, 3) + ")");
+
+        const auto soft = peakOf (playKick (0.3f)[0]), hard = peakOf (playKick (1.0f)[0]);
+        check (soft < hard * 0.6f && soft > 0.0f, "a harder hit is louder (" + juce::String (soft, 3) + " < " + juce::String (hard, 3) + ")");
+        setParam ("velocity", 0.0f);
+        check (std::abs (peakOf (playKick (0.3f)[0]) / peakOf (playKick (1.0f)[0]) - 1.0f) < 0.05f, "with velocity at 0 every hit is as loud");
+        setParam ("velocity", 0.7f);
+
+        setParam ("p1Tune", 12.0f);
+        const auto up = lastAbove (playKick()[0], 1.0e-3f);
+        setParam ("p1Tune", -12.0f);
+        const auto down = lastAbove (playKick (0.8f, 3.0)[0], 1.0e-3f);
+        setParam ("p1Tune", 0.0f);
+        check (std::abs (up - (kickEnd - 0.1) / 2.0) < 0.06 && std::abs (down - (kickEnd - 0.1) * 2.0) < 0.12,
+               "tune shifts the pitch and the length (" + juce::String (up, 2) + " s up, " + juce::String (down, 2) + " s down)");
+
+        setParam ("p1Decay", 0.1f);
+        const auto cut = lastAbove (playKick()[0], 1.0e-2f);
+        setParam ("p1Decay", 8.0f);
+        check (cut < 0.2 && cut > 0.03, "decay fades the sample out early (" + juce::String (cut, 3) + " s)");
+
+        setParam ("p1Pan", -1.0f);
+        const auto hardLeft = playKick();
+        setParam ("p1Pan", 1.0f);
+        const auto hardRight = playKick();
+        setParam ("p1Pan", 0.0f);
+        check (peakOf (hardLeft[0]) > 0.1f && peakOf (hardLeft[1]) < 1.0e-3f && peakOf (hardRight[1]) > 0.1f && peakOf (hardRight[0]) < 1.0e-3f,
+               "pan puts a pad on one side");
+
+        // Choke: the closed hat (note 42) stops the open one (46); pad 1 has no group, so a re-hit just restarts it.
+        {
+            kit.reset();
+            const auto open = playInstrument (kit, chord ({ 46 }, 0.0, 0.05), 1.0);
+            kit.reset();
+            auto events = chord ({ 46 }, 0.0, 0.05);
+            const auto hit = chord ({ 42 }, 0.3, 0.35);
+            events.insert (events.end(), hit.begin(), hit.end());
+            const auto choked = playInstrument (kit, events, 1.0);
+            kit.reset();
+            const auto closedAlone = playInstrument (kit, hit, 1.0);
+            const auto window = [&] (const std::array<std::vector<float>, 2>& x) { return rms (x[0], (size_t) (0.5 * sampleRate), (size_t) (0.7 * sampleRate)); };
+            check (window (open) > 0.005f && window (choked) < window (closedAlone) * 1.1f,
+                   "a closed hat chokes the open one (" + juce::String (window (choked), 4) + " vs " + juce::String (window (closedAlone), 4) + " alone)");
+
+            setParam ("p11Choke", 0.0f);
+            kit.reset();
+            const auto free = playInstrument (kit, events, 1.0);
+            setParam ("p11Choke", 1.0f);
+            check (window (free) > window (closedAlone) * 1.1f, "with its choke group off the open hat rings on (" + juce::String (window (free), 4) + ")");
+        }
+
+        // Many hits at once don't overload it, and nothing is left sounding.
+        {
+            kit.reset();
+            std::vector<juce::MidiMessage> events;
+            for (int i = 0; i < 80; ++i)
+                for (auto n : { 36, 38, 42, 46 })
+                    events.push_back (at (juce::MidiMessage::noteOn (1, n, 0.7f), 0.01 * i));
+            const auto out = playInstrument (kit, events, 4.0);
+            auto finite = true;
+            for (const auto v : out[0])
+                finite = finite && std::isfinite (v);
+            check (finite && lastAbove (out[0], 1.0e-3f) < 3.5, "a flood of hits stays finite and dies away");
+        }
+
+        // Swapping a sample while it plays is safe (the old one is kept until nothing uses it).
+        {
+            kit.reset();
+            auto events = chord ({ 36 }, 0.0, 0.05);
+            const auto total = (int) (1.0 * sampleRate);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            auto ok = true;
+            for (int start = 0; start < total; start += blockSize)
+            {
+                juce::MidiBuffer midi;
+                if (start == 0)
+                    midi.addEvent (events[0], 0);
+                if ((start / blockSize) % 3 == 0)
+                    ok = sampler->loadSample (0, (start / blockSize) % 2 == 0 ? kickFile : snareFile, error) && ok;
+                buffer.clear();
+                kit.processBlock (buffer, midi);
+                for (int i = 0; i < blockSize; ++i)
+                    ok = ok && std::isfinite (buffer.getSample (0, i));
+            }
+            check (ok, "a sample can be replaced while the pad is playing");
+            sampler->loadSample (0, kickFile, error);
+        }
+
+        // The state keeps the sample paths and the pad settings.
+        setParam ("p3Level", -6.0f);
+        setParam ("p3Tune", 5.0f);
+        juce::MemoryBlock saved;
+        kit.getStateInformation (saved);
+        {
+            std::unique_ptr<juce::AudioProcessor> otherOwner;
+            auto& again = make (otherOwner);
+            again.setStateInformation (saved.getData(), (int) saved.getSize());
+            auto* again2 = micfx::inst::asKit (again.getEngine());
+            const auto a = playInstrument (kit, chord ({ 38, 36 }, 0.0, 0.1), 1.0);
+            const auto b = playInstrument (again, chord ({ 38, 36 }, 0.0, 0.1), 1.0);
+            auto same = a[0].size() == b[0].size();
+            for (size_t i = 0; same && i < a[0].size(); ++i)
+                same = std::abs (a[0][i] - b[0][i]) < 1.0e-4f;
+            check (again2->getSample (0) != nullptr && again2->getSample (2) != nullptr && again2->getSample (1) == nullptr
+                       && again.getKeyName (36) == "Kick 808" && same,
+                   "the samples and the pad settings come back from the saved state");
+        }
+
+        // A moved sample is found again by name in the search folders; a lost one keeps its path.
+        {
+            const auto moved = juce::File::createTempFile ("micfx-kit-moved");
+            moved.createDirectory();
+            const auto elsewhere = moved.getChildFile ("sub");
+            elsewhere.createDirectory();
+            kickFile.copyFileTo (elsewhere.getChildFile (kickFile.getFileName()));
+            const auto gone = folder.getChildFile ("gone");
+            gone.createDirectory();
+            const auto temporary = writeTestSample (gone, "Temp.wav", 44100.0, 0.3, 300.0f, false, 0.1f);
+            sampler->loadSample (3, temporary, error);
+            const auto kickBackup = kickFile.getFullPathName();
+            sampler->loadSample (0, kickFile, error);
+
+            juce::MemoryBlock withMoved;
+            kit.getStateInformation (withMoved);
+            // Pretend the project went to another computer: paths that don't exist there.
+            auto xml = juce::AudioProcessor::getXmlFromBinary (withMoved.getData(), (int) withMoved.getSize());
+            auto* extra = xml->getChildByName ("Extra");
+            for (auto* pad : extra->getChildWithTagNameIterator ("Pad"))
+                pad->setAttribute ("path", "/no/such/place/" + pad->getStringAttribute ("name"));
+            juce::MemoryBlock relocated;
+            juce::AudioProcessor::copyXmlToBinary (*xml, relocated);
+
+            micfx::inst::setKitSearchFolders ({ moved });
+            std::unique_ptr<juce::AudioProcessor> otherOwner;
+            auto& again = make (otherOwner);
+            again.setStateInformation (relocated.getData(), (int) relocated.getSize());
+            auto* again2 = micfx::inst::asKit (again.getEngine());
+            check (again2->getSample (0) != nullptr && again2->getSample (0)->file.getParentDirectory() == elsewhere
+                       && again2->getSample (2) == nullptr && again2->getPadFile (2).getFileName() == "Snare.wav",
+                   "a sample that moved is found by its name in the search folders; one that's gone shows as missing");
+
+            juce::MemoryBlock resaved;
+            again.getStateInformation (resaved);
+            std::unique_ptr<juce::AudioProcessor> thirdOwner;
+            auto& third = make (thirdOwner);
+            micfx::inst::setKitSearchFolders ({ folder });
+            third.setStateInformation (resaved.getData(), (int) resaved.getSize());
+            check (micfx::inst::asKit (third.getEngine())->getSample (2) != nullptr,
+                   "a missing sample keeps its place: it loads once its file is back in reach");
+            micfx::inst::setKitSearchFolders ({});
+            moved.deleteRecursively();
+            juce::ignoreUnused (kickBackup);
+        }
+
+        // Clearing a pad.
+        sampler->clearPad (0);
+        check (peakOf (playKick (0.8f, 0.5)[0]) == 0.0f && sampler->getSample (0) == nullptr && kit.getKeyName (36) == "Kick",
+               "clearing a pad silences it");
+        sampler->loadSample (0, kickFile, error);
+
+        // Its window.
+        {
+            sampler->loadSample (1, openFile, error);
+            sampler->loadSample (4, hatFile, error);
+            std::unique_ptr<juce::AudioProcessorEditor> editor (kit.createEditor());
+            check (editor != nullptr && editor->getWidth() >= 700 && editor->getHeight() >= 500,
+                   "the Kit has its own window (" + juce::String (editor->getWidth()) + "x" + juce::String (editor->getHeight()) + ")");
+            if (demoFolder.isNotEmpty())
+            {
+                playInstrument (kit, chord ({ 36, 42 }, 0.0, 0.1), 0.1);
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (100);
+                const auto image = editor->createComponentSnapshot (editor->getLocalBounds(), true, 2.0f);
+                const auto file = juce::File (demoFolder).getChildFile ("Kit.png");
+                file.deleteFile();
+                juce::FileOutputStream stream (file);
+                juce::PNGImageFormat().writeImageToStream (image, stream);
+            }
+            kit.editorBeingDeleted (editor.get());
+        }
+
+        // Built into the DAW: the library lists it and a MIDI track plays it.
+        {
+            auto listed = false;
+            for (const auto& info : daw::instruments::getBuiltins())
+                listed = listed || info.id == "builtin:kit";
+            juce::ValueTree tree (daw::ids::INSTRUMENT);
+            tree.setProperty (daw::ids::plugin, "builtin:kit", nullptr);
+            juce::String problem;
+            const auto instrument = daw::instruments::create (tree, sampleRate, blockSize, false, problem);
+            check (listed && instrument != nullptr && daw::instruments::hasWindow ("builtin:kit"),
+                   "the DAW lists the Kit as an instrument for MIDI tracks " + problem);
+        }
+
+        micfx::inst::setKitSearchFolders ({});
+        folder.deleteRecursively();
+    }
+
 }
 
 //==============================================================================
@@ -9006,6 +9328,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "instruments")
     {
         testInstruments();
+        testKit();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -9069,6 +9392,7 @@ int main()
     testStereoInputs();
     testMidiTracks();
     testInstruments();
+    testKit();
     testPluginHosting();
     testProjects();
     testExport();

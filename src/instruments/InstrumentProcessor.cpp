@@ -150,7 +150,19 @@ void InstrumentProcessor::readScope (float* destination, int count) const
 
 double InstrumentProcessor::getTailLengthSeconds() const { return engine->getTailSeconds(); }
 
-juce::AudioProcessorEditor* InstrumentProcessor::createEditor() { return new InstrumentEditor (*this); }
+juce::AudioProcessorEditor* InstrumentProcessor::createEditor()
+{
+    if (spec.makeEditor)
+        return spec.makeEditor (*this);
+    return new InstrumentEditor (*this);
+}
+
+juce::String InstrumentProcessor::getKeyName (int note) const
+{
+    if (const auto own = engine->getKeyName (note); own.isNotEmpty())
+        return own;
+    return spec.keyName ? spec.keyName (note) : juce::String();
+}
 
 //==============================================================================
 int InstrumentProcessor::getNumPrograms() { return juce::jmax (1, (int) spec.presets.size()); }
@@ -208,6 +220,8 @@ void InstrumentProcessor::getStateInformation (juce::MemoryBlock& block)
     xml.setAttribute ("version", 1);
     if (auto params = copy.createXml())
         xml.addChildElement (params.release());
+    if (auto* extra = xml.createNewChildElement ("Extra"))
+        engine->saveExtraState (*extra);
     copyXmlToBinary (xml, block);
 }
 
@@ -223,5 +237,7 @@ void InstrumentProcessor::setStateInformation (const void* data, int size)
 
     if (auto* params = xml->getChildByName (state.state.getType()))
         state.replaceState (juce::ValueTree::fromXml (*params));
+    if (auto* extra = xml->getChildByName ("Extra"))
+        engine->loadExtraState (*extra);
 }
 }

@@ -115,7 +115,17 @@ public:
     virtual void reset() = 0;
     virtual void process (juce::AudioBuffer<float>& stereo, const juce::MidiBuffer& midi) = 0;
     virtual double getTailSeconds() const { return 2.0; }
+
+    // State beyond the float parameters (the Kit's sample paths): saved with the plug-in
+    // state and read back by it. Message thread.
+    virtual void saveExtraState (juce::XmlElement&) const {}
+    virtual void loadExtraState (const juce::XmlElement&) {}
+
+    // The name of a key in this instance (the Kit's sample names); empty: use Spec::keyName.
+    virtual juce::String getKeyName (int /*note*/) const { return {}; }
 };
+
+class InstrumentProcessor;
 
 struct Spec
 {
@@ -130,6 +140,7 @@ struct Spec
     std::function<std::unique_ptr<Engine> (Params)> makeEngine;
     int lowestKey = 36, highestKey = 96; // the window's keyboard
     std::function<juce::String (int note)> keyName; // a name on each key (a drum kit's), or C octave labels
+    std::function<juce::AudioProcessorEditor* (InstrumentProcessor&)> makeEditor; // a window of its own; else drawn from rows
 };
 
 //==============================================================================
