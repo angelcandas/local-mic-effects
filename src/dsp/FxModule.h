@@ -15,7 +15,7 @@ namespace fx
 enum class ModuleType
 {
     highPass, denoise, gate, pitch, eq, paraEq, smooth, compressor, autoLevel, deEsser, exciter, saturation, radio, bitcrusher,
-    robot, filter, autoWah, cab, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, irReverb, width,
+    robot, filter, autoWah, amp, cab, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, irReverb, width,
     multiband, limiter, masterEq, imager, loudness, // mastering (see Mastering.h)
     transient, dynamicEq
 };
@@ -27,7 +27,7 @@ inline const char* getModuleKey (ModuleType type)
 {
     static constexpr const char* keys[] = {
         "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "smooth", "compressor", "autoLevel", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
-        "robot", "filter", "autoWah", "cab", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "irReverb", "width",
+        "robot", "filter", "autoWah", "amp", "cab", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "irReverb", "width",
         "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq"
     };
     static_assert (std::size (keys) == numModuleTypes);

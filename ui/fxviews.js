@@ -431,6 +431,9 @@ const views = {
     };
   },
 
+  // Amp: its tone stack's curve (bass / mid / treble), relative to the knobs at noon.
+  amp(access) { return views.cab(access); },
+
   // IR reverb: the room's decay (built-in space or the loaded file's length), after the
   // pre-delay, with the early reflections as ticks. Mix sets how tall it stands.
   irReverb({ get }) {

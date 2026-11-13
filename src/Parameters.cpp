@@ -208,12 +208,12 @@ Parameters::Parameters (Layout& l)
         decibels (l, key + "OutGain", name + " Out Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
     };
 
-    // (The denoiser, auto level, the resonance suppressor, the cabinet and the IR reverb
+    // (The denoiser, auto level, the resonance suppressor, the cabinet, the IR reverb and the amp
     // came later: their gains are at the end with their other parameters.)
     for (int i = 0; i < fx::numModuleTypes; ++i)
         if (const auto type = (fx::ModuleType) i;
             type != fx::ModuleType::denoise && type != fx::ModuleType::autoLevel && type != fx::ModuleType::smooth
-            && type != fx::ModuleType::cab && type != fx::ModuleType::irReverb)
+            && type != fx::ModuleType::cab && type != fx::ModuleType::irReverb && type != fx::ModuleType::amp)
             moduleGains (type);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
@@ -329,4 +329,16 @@ Parameters::Parameters (Layout& l)
     hertz (l, "irvLowCut", "IR Reverb Low Cut", 20.0f, 1000.0f, 150.0f, 150.0f);
     hertz (l, "irvHighCut", "IR Reverb High Cut", 1000.0f, 20000.0f, 12000.0f, 6000.0f);
     moduleGains (fx::ModuleType::irReverb);
+
+    // Guitar amp (GuitarAmp.h), after those. It runs before the cabinet.
+    toggle (l, "ampOn", "Amp On");
+    choice (l, "ampModel", "Amp Model", fx::GuitarAmp::getModelNames(), (int) fx::GuitarAmp::Model::crunch);
+    number (l, "ampGain", "Amp Gain", 0.0f, 10.0f, 0.1f, 5.0f, "");
+    number (l, "ampBass", "Amp Bass", 0.0f, 10.0f, 0.1f, 5.0f, "");
+    number (l, "ampMid", "Amp Mid", 0.0f, 10.0f, 0.1f, 5.0f, "");
+    number (l, "ampTreble", "Amp Treble", 0.0f, 10.0f, 0.1f, 5.0f, "");
+    number (l, "ampPresence", "Amp Presence", 0.0f, 10.0f, 0.1f, 5.0f, "");
+    number (l, "ampMaster", "Amp Master", 0.0f, 10.0f, 0.1f, 3.0f, "");
+    decibels (l, "ampOutput", "Amp Output", -24.0f, 12.0f, 0.0f);
+    moduleGains (fx::ModuleType::amp);
 }

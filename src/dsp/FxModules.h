@@ -10,6 +10,7 @@
 #include "SpectralDenoiser.h"
 #include "Smooth.h"
 #include "Cabinet.h"
+#include "GuitarAmp.h"
 #include "Convolver.h"
 
 #include <memory>
@@ -990,6 +991,73 @@ private:
     std::vector<float> fileResponse; // message thread
 };
 
+// A guitar or bass amp (GuitarAmp.h): preamp gain stages, the three-knob tone stack and
+// a power stage, 4x oversampled. Built in, so it works with no file. Model is a choice.
+class Amp final : public Module
+{
+public:
+    Amp() : Module (ModuleType::amp) {}
+
+    Value& on       = addSwitch ("ampOn");
+    Value& model    = addChoice ("ampModel", (float) GuitarAmp::Model::crunch);
+    Value& gain     = addValue ("ampGain", 5.0f);     // 0..10
+    Value& bass     = addValue ("ampBass", 5.0f);
+    Value& mid      = addValue ("ampMid", 5.0f);
+    Value& treble   = addValue ("ampTreble", 5.0f);
+    Value& presence = addValue ("ampPresence", 5.0f);
+    Value& master   = addValue ("ampMaster", 3.0f);
+    Value& output   = addValue ("ampOutput", 0.0f);   // dB
+
+    // The oversampling filters' delay while it's on.
+    int getLatencySamples() const noexcept override { return flag (on) ? latency.load (std::memory_order_relaxed) : 0; }
+
+    // response: the tone stack's curve (dB at Cab::pictureBands points, 40 Hz - 16 kHz).
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        std::vector<double> frequencies;
+        for (int i = 0; i < Cab::pictureBands; ++i)
+            frequencies.push_back (Cab::getPictureHz (i));
+
+        juce::Array<juce::var> response;
+        for (auto db : GuitarAmp::getToneStackResponseDb (makeSettings(), frequencies))
+            response.add (std::round (db * 10.0f) / 10.0f);
+        readings.setProperty ("response", response);
+    }
+
+private:
+    GuitarAmp::Settings makeSettings() const noexcept
+    {
+        GuitarAmp::Settings s;
+        s.model = (GuitarAmp::Model) juce::jlimit (0, GuitarAmp::numModels - 1, index (model));
+        s.gain = get (gain);
+        s.bass = get (bass);
+        s.mid = get (mid);
+        s.treble = get (treble);
+        s.presence = get (presence);
+        s.master = get (master);
+        return s;
+    }
+
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override
+    {
+        amp.prepare (spec);
+        latency.store (amp.getLatencySamples(), std::memory_order_relaxed);
+    }
+
+    void resetModule() override { amp.reset(); }
+    void update() noexcept override { amp.setSettings (makeSettings()); }
+
+    void render (const Context& c) noexcept override
+    {
+        amp.process (c);
+        if (const auto db = get (output); std::abs (db) > 0.001f)
+            c.getOutputBlock().multiplyBy (juce::Decibels::decibelsToGain (db, -100.0f));
+    }
+
+    GuitarAmp amp;
+    std::atomic<int> latency { 0 };
+};
+
 // A convolution reverb (Convolver.h): built-in rooms made by MicFX, or a room, hall or
 // plate impulse response file the user loads. Pre-delay and low/high cut shape the reverb
 // only; the dry sound passes untouched.
@@ -1087,6 +1155,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::robot:      return std::make_unique<modules::Robot>();
         case ModuleType::filter:     return std::make_unique<modules::Filter>();
         case ModuleType::autoWah:    return std::make_unique<modules::AutoWah>();
+        case ModuleType::amp:        return std::make_unique<modules::Amp>();
         case ModuleType::cab:        return std::make_unique<modules::Cab>();
         case ModuleType::tremolo:    return std::make_unique<modules::Tremolo>();
         case ModuleType::vibrato:    return std::make_unique<modules::Vibrato>();
