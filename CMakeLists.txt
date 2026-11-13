@@ -88,6 +88,8 @@ set(MICFX_DSP_SOURCES
     ${MICFX_INSTRUMENT_SOURCES}
     src/analysis/Analysis.cpp
     src/analysis/Analysis.h
+    src/analysis/Alignment.cpp
+    src/analysis/Alignment.h
     src/analysis/Key.cpp
     src/analysis/Key.h
     src/analysis/Chords.cpp
@@ -108,6 +110,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/ToMidi.h
     src/analysis/Structure.cpp
     src/analysis/Structure.h
+    src/analysis/Harmony.cpp
+    src/analysis/Harmony.h
     src/Parameters.cpp
     src/Presets.cpp
     src/PluginProcessor.cpp
@@ -129,6 +133,8 @@ set(MICFX_DSP_SOURCES
     src/SoundCheck.h
     src/Multitrack.cpp
     src/daw/AudioPool.cpp
+    src/daw/BackingVocals.cpp
+    src/daw/BackingVocals.h
     src/daw/DawEngine.cpp
     src/daw/Edit.cpp
     src/daw/Patterns.cpp
