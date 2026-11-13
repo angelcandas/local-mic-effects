@@ -10,6 +10,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstring>
 #include <complex>
 #include <numeric>
 
@@ -243,11 +244,67 @@ double Analyser::getKWeightingDb (double frequency, double sampleRate)
     return 10.0 * std::log10 (response (k.shelf) * response (k.highPass));
 }
 
+//==============================================================================
+void Analyser::Biquad::setup (double sampleRate, double frequency, bool highPass)
+{
+    // RBJ Butterworth (Q = 1/sqrt 2).
+    const auto w0 = juce::MathConstants<double>::twoPi * frequency / sampleRate;
+    const auto alpha = std::sin (w0) / (2.0 * 0.70710678);
+    const auto c = std::cos (w0);
+    const auto a0 = 1.0 + alpha;
+    b0 = (highPass ? (1.0 + c) / 2.0 : (1.0 - c) / 2.0) / a0;
+    b1 = (highPass ? -(1.0 + c) : (1.0 - c)) / a0;
+    b2 = b0;
+    a1 = -2.0 * c / a0;
+    a2 = (1.0 - alpha) / a0;
+    z1 = z2 = 0.0;
+}
+
+double Analyser::Biquad::process (double x) noexcept
+{
+    const auto y = b0 * x + z1;
+    z1 = b1 * x - a1 * y + z2;
+    z2 = b2 * x - a2 * y;
+    return y;
+}
+
+namespace
+{
+    // 4x oversampling for the true peak (ITU-R BS.1770 Annex 2 idea, a 12-tap windowed sinc
+    // per phase): the value a quarter, a half and three quarters of the way between the
+    // two samples in the middle of a 12-sample window.
+    const std::array<std::array<float, 12>, 3>& getTruePeakKernels()
+    {
+        static const auto kernels = []
+        {
+            std::array<std::array<float, 12>, 3> k {};
+            for (int phase = 0; phase < 3; ++phase)
+            {
+                const auto f = 0.25 * (phase + 1);
+                for (int j = 0; j < 12; ++j)
+                {
+                    const auto x = (double) (j - 5) - f; // distance from the target point
+                    const auto sinc = std::abs (x) < 1.0e-9 ? 1.0 : std::sin (juce::MathConstants<double>::pi * x) / (juce::MathConstants<double>::pi * x);
+                    const auto hann = 0.5 + 0.5 * std::cos (juce::MathConstants<double>::pi * x / 6.0);
+                    k[(size_t) phase][(size_t) j] = (float) (sinc * hann);
+                }
+            }
+            return k;
+        }();
+        return kernels;
+    }
+}
+
 Analyser::Analyser (double sampleRate)
     : hopSize (juce::jmax (1, (int) std::lround (sampleRate * Profile::hopSeconds)))
 {
     profile.sampleRate = sampleRate;
     kWeighting.setup (sampleRate);
+    for (int i = 0; i < 2; ++i)
+    {
+        msLow[i].setup (sampleRate, 120.0, false);
+        msHigh[i].setup (sampleRate, 4000.0, true);
+    }
     pitch.prepare (sampleRate);
     pitch.setAutoAnalyse (false); // once per hop, in endHop()
 
@@ -282,6 +339,58 @@ void Analyser::push (const float* left, const float* right, int numSamples)
         hopSquares += right != nullptr ? 0.5 * ((double) l * l + (double) r * r) : (double) l * l;
         peak = juce::jmax (peak, std::abs (l), std::abs (r));
 
+        // Mix Check: mid/side per band, correlation, DC, clipped runs and the true peak.
+        if (right != nullptr)
+        {
+            const double mid = 0.5 * ((double) l + r), side = 0.5 * ((double) l - r);
+            const double midLow = msLow[0].process (mid), sideLow = msLow[1].process (side);
+            const double midHigh = msHigh[0].process (mid), sideHigh = msHigh[1].process (side);
+            hopMid[0] += midLow * midLow;
+            hopSide[0] += sideLow * sideLow;
+            hopMid[2] += midHigh * midHigh;
+            hopSide[2] += sideHigh * sideHigh;
+            hopMid[1] += mid * mid; // the whole band for now: the other two come off at the end of the hop
+            hopSide[1] += side * side;
+            hopLL += (double) l * l;
+            hopRR += (double) r * r;
+            hopLR += (double) l * r;
+        }
+
+        sumL += l;
+        sumR += r;
+        ++samplesSeen;
+
+        const float channels[2] = { l, r };
+        for (int c = 0; c < (right != nullptr ? 2 : 1); ++c)
+        {
+            if (std::abs (channels[c]) >= 0.999f)
+            {
+                if (++clipRun[c] >= 3 && ! clipCounted[c])
+                {
+                    clipCounted[c] = true;
+                    ++profile.clippedRuns;
+                    if (profile.clipTimes.size() < 64)
+                        profile.clipTimes.push_back ((float) ((double) (samplesSeen - 1) / profile.sampleRate));
+                }
+            }
+            else
+                clipRun[c] = 0, clipCounted[c] = false;
+
+            auto& h = history4[c];
+            std::memmove (h, h + 1, 11 * sizeof (float));
+            h[11] = channels[c];
+            truePeak = juce::jmax (truePeak, std::abs (channels[c]));
+            // Between the 6th and 7th of the last twelve: only worth the work when they're loud.
+            if (std::abs (h[5]) > 0.5f || std::abs (h[6]) > 0.5f)
+                for (const auto& kernel : getTruePeakKernels())
+                {
+                    float sum = 0.0f;
+                    for (int j = 0; j < 12; ++j)
+                        sum += kernel[(size_t) j] * h[j];
+                    truePeak = juce::jmax (truePeak, std::abs (sum));
+                }
+        }
+
         const auto mono = 0.5f * (l + r);
         pitch.push (&mono, 1);
         hopMono.push_back (mono);
@@ -300,6 +409,28 @@ void Analyser::endHop()
     profile.rmsDb.push_back (toDb (hopSquares / n));
     pitch.analyseNow();
     profile.pitchHz.push_back (pitch.getFrequency());
+    if (stereo)
+    {
+        Profile::StereoHop hop;
+        for (int b = 0; b < Profile::stereoBands; ++b)
+        {
+            auto mid = hopMid[b] / n, side = hopSide[b] / n;
+            if (b == 1)
+            {
+                mid = juce::jmax (0.0, mid - hopMid[0] / n - hopMid[2] / n); // what's left between the two
+                side = juce::jmax (0.0, side - hopSide[0] / n - hopSide[2] / n);
+            }
+            hop.mid[(size_t) b] = (float) mid;
+            hop.side[(size_t) b] = (float) side;
+        }
+        const auto denominator = std::sqrt (hopLL * hopRR);
+        hop.correlation = denominator > 1.0e-12 ? (float) juce::jlimit (-1.0, 1.0, hopLR / denominator) : 1.0f;
+        profile.stereoHops.push_back (hop);
+    }
+    std::fill (std::begin (hopMid), std::end (hopMid), 0.0);
+    std::fill (std::begin (hopSide), std::end (hopSide), 0.0);
+    hopLL = hopRR = hopLR = 0.0;
+
     hopWeighted[0] = hopWeighted[1] = hopSquares = 0.0;
     hopFill = 0;
 
@@ -406,10 +537,15 @@ Profile Analyser::finish()
         hopWeighted[0] *= factor;
         hopWeighted[1] *= factor;
         hopSquares *= factor;
+        for (int b = 0; b < Profile::stereoBands; ++b)
+            hopMid[b] *= factor, hopSide[b] *= factor;
         endHop();
     }
 
     auto result = profile;
+    result.stereo = stereo;
+    result.truePeakDb = truePeak > 0.0f ? juce::Decibels::gainToDecibels (truePeak, silenceDb) : silenceDb;
+    result.dcOffset = samplesSeen > 0 ? (float) (juce::jmax (std::abs (sumL), std::abs (sumR)) / (double) samplesSeen) : 0.0f;
     result.peakDb = peak > 0.0f ? juce::Decibels::gainToDecibels (peak, silenceDb) : silenceDb;
 
     // Integrated loudness: 400 ms blocks every 100 ms, gated at -70 LUFS and then at

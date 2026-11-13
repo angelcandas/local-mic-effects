@@ -254,5 +254,5 @@ MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float 
 // the track already has one of that type (or that many, for a move's instance), otherwise added at the start of the chain
 // (at the end for a move with atEnd). `amount` 0..1 scales every move from neutral
 // (EQ gains, compression, reverb mix) or from the current volume.
-void applyMix (daw::Edit&, const MixPlan&, float amount = 1.0f);
+void applyMix (daw::Edit&, const MixPlan&, float amount = 1.0f, const char* undoName = "Auto Mix");
 }
