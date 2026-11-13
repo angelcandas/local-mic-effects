@@ -2,6 +2,7 @@
 
 #include <juce_cryptography/juce_cryptography.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <limits>
@@ -52,7 +53,7 @@ namespace
 
     // Downloads `url` to `part` (replacing it), reporting progress up to 99%. Empty on success;
     // "cancelled" when progress asked to stop. Leaves no half file behind on failure.
-    juce::String downloadFile (const juce::String& url, const juce::File& part, juce::int64 approxBytes,
+    juce::String fetchFile (const juce::String& url, const juce::File& part, juce::int64 approxBytes,
                                const Progress& progress, const juce::String& what)
     {
         if (! part.getParentDirectory().createDirectory())
@@ -159,7 +160,7 @@ std::vector<juce::AudioBuffer<float>> separate (const juce::AudioBuffer<float>& 
                 return ! cancelled.load();
             });
 
-            if (piece.stems.size() != (size_t) numStems)
+            if (piece.stems.empty() || piece.stems.size() > (size_t) maxStems)
             {
                 cancelled = true;
                 break;
@@ -183,8 +184,13 @@ std::vector<juce::AudioBuffer<float>> separate (const juce::AudioBuffer<float>& 
         return {};
 
     // Crossfade the chunks back together.
+    const auto stemCount = pieces.front().stems.size();
+    for (const auto& piece : pieces)
+        if (piece.stems.size() != stemCount)
+            return {};
+
     std::vector<juce::AudioBuffer<float>> result;
-    for (int s = 0; s < numStems; ++s)
+    for (size_t s = 0; s < stemCount; ++s)
     {
         result.emplace_back (2, total);
         result.back().clear();
@@ -201,9 +207,9 @@ std::vector<juce::AudioBuffer<float>> separate (const juce::AudioBuffer<float>& 
             const auto w = chunkWeight (piece.from + i, piece.from, piece.to, overlap, k == 0, k == numChunks - 1);
             weightSum[(size_t) (piece.from + i)] += w;
 
-            for (int s = 0; s < numStems; ++s)
+            for (size_t s = 0; s < stemCount; ++s)
                 for (int ch = 0; ch < 2; ++ch)
-                    result[(size_t) s].getWritePointer (ch)[piece.from + i]
+                    result[s].getWritePointer (ch)[piece.from + i]
                         += w * piece.stems[(size_t) s].getSample (ch, juce::jmin (i, piece.stems[(size_t) s].getNumSamples() - 1));
         }
     }
@@ -246,7 +252,7 @@ Result split (const juce::File& source, const juce::File& folder, const juce::St
     }
 
     const auto separated = separate (stereo, separator, stage (0.02, 0.97), settings);
-    if (separated.size() != (size_t) numStems)
+    if (separated.empty())
     {
         result.cancelled = true;
         return result;
@@ -259,7 +265,8 @@ Result split (const juce::File& source, const juce::File& folder, const juce::St
     }
 
     juce::WavAudioFormat wav;
-    for (int s = 0; s < numStems; ++s)
+    result.files.resize (separated.size());
+    for (int s = 0; s < (int) separated.size(); ++s)
     {
         const auto file = folder.getNonexistentChildFile (juce::File::createLegalFileName (name + " - " + stemNames[(size_t) s]), ".wav", false);
         std::unique_ptr<juce::OutputStream> stream (file.createOutputStream());
@@ -278,16 +285,202 @@ Result split (const juce::File& source, const juce::File& folder, const juce::St
             file.deleteFile();
             for (const auto& written : result.files)
                 written.deleteFile();
-            result.files = {};
+            result.files.clear();
             result.error = "Couldn't write " + file.getFullPathName() + ".";
             return result;
         }
 
         result.files[(size_t) s] = file;
-        stage (0.97, 1.0) ((s + 1.0) / numStems);
+        stage (0.97, 1.0) ((s + 1.0) / (double) separated.size());
     }
 
     return result;
+}
+
+//==============================================================================
+juce::File getDefaultCacheRoot()
+{
+    return Model::getDefaultFile().getParentDirectory().getChildFile ("StemCache");
+}
+
+juce::File getCacheFolder (const juce::File& source, Quality quality, const juce::File& root)
+{
+    const auto hash = juce::SHA256 (source).toHexString().substring (0, 20);
+    return (root == juce::File() ? getDefaultCacheRoot() : root)
+        .getChildFile (hash + "-" + qualityKeys[(size_t) quality]);
+}
+
+std::vector<juce::File> getCachedStems (const juce::File& folder, Quality quality)
+{
+    std::vector<juce::File> files;
+    for (int s = 0; s < getStemCount (quality); ++s)
+    {
+        const auto file = folder.getChildFile (juce::String ("Stem - ") + stemNames[(size_t) s] + ".wav");
+        if (! file.existsAsFile() || file.getSize() < 64)
+            return {};
+        files.push_back (file);
+    }
+    return files;
+}
+
+namespace
+{
+    void pruneCache (const juce::File& root, const juce::File& keep, juce::int64 maxBytes)
+    {
+        auto folders = root.findChildFiles (juce::File::findDirectories, false);
+        const auto sizeOf = [] (const juce::File& folder)
+        {
+            juce::int64 total = 0;
+            for (const auto& file : folder.findChildFiles (juce::File::findFiles, false))
+                total += file.getSize();
+            return total;
+        };
+
+        juce::int64 total = 0;
+        for (const auto& folder : folders)
+            total += sizeOf (folder);
+
+        std::sort (folders.begin(), folders.end(), [] (const juce::File& a, const juce::File& b)
+                   { return a.getLastModificationTime() < b.getLastModificationTime(); });
+
+        for (const auto& folder : folders)
+        {
+            if (total <= maxBytes)
+                break;
+            if (folder == keep)
+                continue;
+            total -= sizeOf (folder);
+            folder.deleteRecursively();
+        }
+    }
+}
+
+Result splitToCache (const juce::File& source, Quality quality, const Separator& separator, const Progress& progress,
+                     const Settings& settings, const juce::File& rootArgument)
+{
+    const auto root = rootArgument == juce::File() ? getDefaultCacheRoot() : rootArgument;
+    const auto folder = getCacheFolder (source, quality, root);
+
+    Result result;
+    result.files = getCachedStems (folder, quality);
+    if (! result.files.empty())
+    {
+        folder.setLastModificationTime (juce::Time::getCurrentTime()); // used lately: pruned last
+        if (progress != nullptr)
+            progress (1.0);
+        return result;
+    }
+
+    if (separator == nullptr)
+    {
+        result.error = "The stem splitter isn't loaded.";
+        return result;
+    }
+
+    const auto temp = folder.getSiblingFile (folder.getFileName() + ".tmp");
+    temp.deleteRecursively();
+    result = split (source, temp, "Stem", separator, progress, settings);
+
+    if (result.cancelled || result.error.isNotEmpty())
+    {
+        temp.deleteRecursively();
+        result.files.clear();
+        return result;
+    }
+
+    folder.deleteRecursively();
+    if (! temp.moveFileTo (folder))
+    {
+        temp.deleteRecursively();
+        result.files.clear();
+        result.error = "Couldn't save the stems to " + folder.getFullPathName() + ".";
+        return result;
+    }
+
+    result.files = getCachedStems (folder, quality);
+    if (result.files.empty())
+        result.error = "The separated stems couldn't be saved.";
+
+    pruneCache (root, folder, (juce::int64) 4 * 1000 * 1000 * 1000);
+    return result;
+}
+
+juce::String mixStems (const std::vector<juce::File>& files, const std::vector<float>& gainsDb,
+                       const juce::File& destination, const Progress& progress)
+{
+    if (files.empty() || gainsDb.size() != files.size())
+        return "There are no stems to mix.";
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+
+    std::vector<std::unique_ptr<juce::AudioFormatReader>> readers;
+    std::vector<float> gains;
+    for (size_t i = 0; i < files.size(); ++i)
+    {
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (files[i]));
+        if (reader == nullptr || reader->numChannels < 1)
+            return "Couldn't read the stem " + files[i].getFileName() + ".";
+        readers.push_back (std::move (reader));
+        gains.push_back (gainsDb[i] <= -100.0f ? 0.0f : juce::Decibels::decibelsToGain (juce::jlimit (-100.0f, 24.0f, gainsDb[i])));
+    }
+
+    const auto rate = readers.front()->sampleRate;
+    auto length = readers.front()->lengthInSamples;
+    for (const auto& reader : readers)
+        length = juce::jmin (length, reader->lengthInSamples);
+
+    destination.getParentDirectory().createDirectory();
+    destination.deleteFile();
+    std::unique_ptr<juce::OutputStream> stream (destination.createOutputStream());
+    if (stream == nullptr)
+        return "Couldn't write " + destination.getFullPathName() + ".";
+
+    juce::WavAudioFormat wav;
+    std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream, juce::AudioFormatWriterOptions{}.withSampleRate (rate)
+                                                                                                                .withNumChannels (2)
+                                                                                                                .withBitsPerSample (32)));
+    if (writer == nullptr)
+        return "Couldn't write " + destination.getFullPathName() + ".";
+
+    constexpr int block = 1 << 16;
+    juce::AudioBuffer<float> sum (2, block), part (2, block);
+
+    for (juce::int64 at = 0; at < length; at += block)
+    {
+        const auto n = (int) juce::jmin ((juce::int64) block, length - at);
+        sum.clear();
+
+        for (size_t i = 0; i < readers.size(); ++i)
+        {
+            if (gains[i] == 0.0f)
+                continue;
+
+            part.clear();
+            readers[i]->read (&part, 0, n, at, true, true);
+            if (readers[i]->numChannels == 1)
+                part.copyFrom (1, 0, part, 0, 0, n);
+            for (int ch = 0; ch < 2; ++ch)
+                sum.addFrom (ch, 0, part, ch, 0, n, gains[i]);
+        }
+
+        if (! writer->writeFromAudioSampleBuffer (sum, 0, n))
+        {
+            writer.reset();
+            destination.deleteFile();
+            return "Couldn't write " + destination.getFullPathName() + " (is the disk full?).";
+        }
+
+        if (progress != nullptr && ! progress ((double) (at + n) / (double) length))
+        {
+            writer.reset();
+            destination.deleteFile();
+            return "cancelled";
+        }
+    }
+
+    writer.reset();
+    return {};
 }
 
 //==============================================================================
@@ -300,24 +493,69 @@ juce::File Model::getDefaultFile()
         .getChildFile ("MicFX").getChildFile ("Models").getChildFile (fileName);
 }
 
-juce::String Model::verify (const juce::File& file)
+juce::String Model::verifyFile (const juce::File& file, const WeightFile& weights)
 {
     if (! file.existsAsFile())
         return "The stem model isn't downloaded yet.";
 
-    if (juce::SHA256 (file).toHexString() != juce::String (sha256))
+    if (juce::SHA256 (file).toHexString() != juce::String (weights.sha256))
         return file.getFileName() + " isn't the expected Demucs model (its checksum doesn't match).";
 
     return {};
 }
 
-juce::String Model::download (const juce::File& destination, const Progress& progress)
+juce::String Model::verify (const juce::File& file)
 {
+    return verifyFile (file, getWeightFiles (Quality::fourStems).front());
+}
+
+std::vector<Model::WeightFile> Model::getWeightFiles (Quality quality)
+{
+    switch (quality)
+    {
+        case Quality::sixStems:
+            return { { "ggml-model-htdemucs-6s-f16.bin", "09704f4ceae204e56e77d5eefd6ac71d7275be81fd507e6913371d59abcee856", 55 } };
+        case Quality::best:
+            // The fine-tuned models, one per stem: drums, bass, other, vocals.
+            return { { "ggml-model-htdemucs_ft_drums-4s-f16.bin", "cda268755cc80deb5f4616a99f9d09f26bc5ce3882aa35e0bc504708a12604bb", 84 },
+                     { "ggml-model-htdemucs_ft_bass-4s-f16.bin", "e6ded215aa15fb4eff7a37f3a51fd596ee17c94ae0ddb7ef3f2f6ecf8b86cdb5", 84 },
+                     { "ggml-model-htdemucs_ft_other-4s-f16.bin", "cbc315571584d512e7853c9d40a499182393a7f4155cb8723a9040a685c2435b", 84 },
+                     { "ggml-model-htdemucs_ft_vocals-4s-f16.bin", "19186500a45a551a034d96e9500415ebe73c8bd570bf55337ddc8cc8f53a9120", 84 } };
+        case Quality::fourStems: break;
+    }
+
+    return { { fileName, sha256, approxMegabytes } };
+}
+
+juce::File Model::getFile (const WeightFile& weights)
+{
+    return getDefaultFile().getSiblingFile (weights.fileName);
+}
+
+bool Model::isDownloaded (Quality quality)
+{
+    for (const auto& weights : getWeightFiles (quality))
+        if (verifyFile (getFile (weights), weights).isNotEmpty())
+            return false;
+    return true;
+}
+
+int Model::getMegabytes (Quality quality)
+{
+    auto total = 0;
+    for (const auto& weights : getWeightFiles (quality))
+        total += weights.megabytes;
+    return total;
+}
+
+juce::String Model::downloadFile (const WeightFile& weights, const Progress& progress)
+{
+    const auto destination = getFile (weights);
     const auto part = destination.withFileExtension (".part");
-    if (const auto problem = downloadFile (downloadUrl, part, (juce::int64) approxMegabytes * 1000 * 1000, progress, "the stem model"); problem.isNotEmpty())
+    if (const auto problem = fetchFile (juce::String (baseUrl) + weights.fileName, part, (juce::int64) weights.megabytes * 1000 * 1000, progress, "the stem model"); problem.isNotEmpty())
         return problem;
 
-    if (const auto problem = verify (part); problem.isNotEmpty())
+    if (const auto problem = verifyFile (part, weights); problem.isNotEmpty())
     {
         part.deleteFile();
         return "The stem model download was incomplete or damaged. Try again.";
@@ -330,6 +568,11 @@ juce::String Model::download (const juce::File& destination, const Progress& pro
     if (progress != nullptr)
         progress (1.0);
     return {};
+}
+
+juce::String Model::download (const juce::File&, const Progress& progress)
+{
+    return downloadFile (getWeightFiles (Quality::fourStems).front(), progress);
 }
 
 juce::File GpuModel::getDefaultFile()
@@ -364,7 +607,7 @@ juce::String GpuModel::install (const juce::File& zip, const juce::File& destina
 juce::String GpuModel::download (const juce::File& destination, const Progress& progress)
 {
     const auto part = destination.withFileExtension (".zip.part");
-    if (const auto problem = downloadFile (downloadUrl, part, (juce::int64) approxMegabytes * 1000 * 1000, progress, "the GPU model"); problem.isNotEmpty())
+    if (const auto problem = fetchFile (downloadUrl, part, (juce::int64) approxMegabytes * 1000 * 1000, progress, "the GPU model"); problem.isNotEmpty())
         return problem;
 
     const auto problem = install (part, destination);
@@ -431,11 +674,39 @@ double matchOnTestSignal (const Separator& candidate, const Separator& reference
     return errorEnergy <= 0.0 ? 200.0 : 10.0 * std::log10 (signalEnergy / errorEnergy);
 }
 
-Loaded loadBest (const std::function<void (LoadPhase)>& onPhase, const Progress& progress)
+Loaded loadBest (const std::function<void (LoadPhase)>& onPhase, const Progress& progress, Quality quality)
 {
     Loaded result;
     const auto setPhase = [&] (LoadPhase phase) { if (onPhase != nullptr) onPhase (phase); };
     const auto cancelled = [&] { return progress != nullptr && ! progress (0.0); };
+
+    if (quality != Quality::fourStems)
+    {
+        // Six stems and Best quality: CPU only (the Core ML export covers the four-stem network).
+        const auto files = Model::getWeightFiles (quality);
+        std::vector<Model::WeightFile> missing;
+        for (const auto& weights : files)
+            if (Model::verifyFile (Model::getFile (weights), weights).isNotEmpty())
+                missing.push_back (weights);
+
+        if (! missing.empty())
+            setPhase (LoadPhase::downloading);
+
+        for (size_t i = 0; i < missing.size(); ++i)
+        {
+            const auto part = [&] (double p) { return progress == nullptr || progress ((double) (i + p) / (double) missing.size()); };
+            if (const auto problem = Model::downloadFile (missing[i], part); problem.isNotEmpty())
+            {
+                result.cancelled = cancelled();
+                result.error = result.cancelled ? juce::String() : problem;
+                return result;
+            }
+        }
+
+        setPhase (LoadPhase::loading);
+        result.separator = Model::loadQuality (quality, result.error);
+        return result;
+    }
 
     // The CPU model, downloading it the first time. False with result.error / result.cancelled set.
     const auto loadCpu = [&] (Separator& separator, juce::String& error) -> bool
@@ -555,6 +826,12 @@ Separator GpuModel::load (const juce::File&, juce::String& error)
 
 #if ! MICFX_HAS_DEMUCS
 bool Model::isBuiltIn() { return false; }
+
+Separator Model::loadQuality (Quality, juce::String& error)
+{
+    error = "This build of MicFX doesn't include the stem splitter.";
+    return nullptr;
+}
 
 Separator Model::load (const juce::File&, juce::String& error)
 {

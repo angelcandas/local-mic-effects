@@ -10285,6 +10285,164 @@ static void testStems()
         DawBridge::availableForTesting = false;
     }
 
+    // Six stems, quality levels, the stem cache and Rebalance.
+    {
+        check (stems::getQualityFromKey ("6") == stems::Quality::sixStems && stems::getQualityFromKey ("best") == stems::Quality::best
+                   && stems::getQualityFromKey ("nonsense") == stems::Quality::fourStems
+                   && stems::getStemCount (stems::Quality::sixStems) == 6 && stems::getStemCount (stems::Quality::best) == 4,
+               "quality keys and stem counts");
+
+        const auto isHash = [] (const juce::String& s) { return s.length() == 64 && s.containsOnly ("0123456789abcdef"); };
+        auto hashesOk = stems::Model::getWeightFiles (stems::Quality::fourStems).size() == 1
+                     && stems::Model::getWeightFiles (stems::Quality::sixStems).size() == 1
+                     && stems::Model::getWeightFiles (stems::Quality::best).size() == 4;
+        for (int q = 0; q < stems::numQualities; ++q)
+            for (const auto& weights : stems::Model::getWeightFiles ((stems::Quality) q))
+                hashesOk = hashesOk && isHash (weights.sha256) && juce::String (weights.fileName).endsWith (".bin") && weights.megabytes > 0;
+        check (hashesOk, "every quality level names its weight files with a SHA-256");
+        check (juce::String (stems::Model::getWeightFiles (stems::Quality::fourStems).front().sha256) == juce::String (stems::Model::sha256),
+               "the four-stem entry is the original model");
+        check (stems::Model::getMegabytes (stems::Quality::best) > 300 && stems::Model::getMegabytes (stems::Quality::sixStems) < stems::Model::getMegabytes (stems::Quality::fourStems),
+               "Best quality is about four models' worth of download");
+
+        // A six-stem stand-in: stem s is (s + 1) / 20 of the input.
+        const stems::Separator fake6 = [] (const juce::AudioBuffer<float>& input, const stems::Progress& progress)
+        {
+            std::vector<juce::AudioBuffer<float>> out;
+            for (int s = 0; s < stems::maxStems; ++s)
+            {
+                auto& stem = out.emplace_back (input);
+                stem.applyGain ((float) (s + 1) / 20.0f);
+            }
+            return progress (1.0) ? out : std::vector<juce::AudioBuffer<float>>();
+        };
+
+        const auto six = stems::split (song, folder.getChildFile ("Six"), "Song", fake6, nullptr, settings);
+        check (six.error.isEmpty() && six.files.size() == 6 && six.files[4].getFileName() == "Song - Guitar.wav"
+                   && six.files[5].getFileName() == "Song - Piano.wav" && six.files[5].existsAsFile(),
+               "a six-stem separator makes six files, guitar and piano last");
+
+        // The cache: separated once, found again without separating.
+        std::atomic<int> sepCalls { 0 };
+        const stems::Separator counted = [&sepCalls, fake6] (const juce::AudioBuffer<float>& input, const stems::Progress& progress)
+        {
+            ++sepCalls;
+            return fake6 (input, progress);
+        };
+        const auto root = folder.getChildFile ("StemCache");
+        const auto cacheFolder = stems::getCacheFolder (song, stems::Quality::sixStems, root);
+        check (cacheFolder.getParentDirectory() == root && cacheFolder.getFileName().endsWith ("-6")
+                   && stems::getCacheFolder (song, stems::Quality::best, root) != cacheFolder
+                   && stems::getCachedStems (cacheFolder, stems::Quality::sixStems).empty(),
+               "the cache folder is named by the file's content and the quality");
+
+        const auto cached = stems::splitToCache (song, stems::Quality::sixStems, counted, nullptr, settings, root);
+        const auto firstCalls = sepCalls.load();
+        const auto again = stems::splitToCache (song, stems::Quality::sixStems, nullptr, nullptr, settings, root);
+        check (cached.error.isEmpty() && cached.files.size() == 6 && firstCalls > 0 && again.error.isEmpty() && again.files == cached.files
+                   && sepCalls.load() == firstCalls && ! cacheFolder.getSiblingFile (cacheFolder.getFileName() + ".tmp").exists(),
+               "splitToCache separates once, then finds the stems in the cache");
+        check (stems::splitToCache (song, stems::Quality::best, nullptr, nullptr, settings, root).error.isNotEmpty(),
+               "splitToCache without a separator or a cache says so");
+
+        // mixStems: each stem scaled and summed, 32-bit float so boosts don't clip.
+        const auto mixFile = folder.getChildFile ("Rebalanced.wav");
+        const std::vector<float> gains { 0.0f, -100.0f, 6.0206f, 0.0f, 0.0f, 0.0f };
+        std::vector<double> reportedMix;
+        const auto problem = stems::mixStems (cached.files, gains, mixFile, [&] (double p) { reportedMix.push_back (p); return true; });
+        const std::unique_ptr<juce::AudioFormatReader> mixReader (formats.createReaderFor (mixFile));
+        auto mixOk = problem.isEmpty() && mixReader != nullptr && mixReader->numChannels == 2 && mixReader->bitsPerSample == 32;
+        float mixWorst = 1.0e9f;
+        if (mixOk)
+        {
+            juce::AudioBuffer<float> got (2, (int) mixReader->lengthInSamples);
+            mixReader->read (&got, 0, got.getNumSamples(), 0, true, true);
+            std::vector<juce::AudioBuffer<float>> parts;
+            for (const auto& file : cached.files)
+            {
+                const std::unique_ptr<juce::AudioFormatReader> r (formats.createReaderFor (file));
+                auto& part = parts.emplace_back (2, (int) r->lengthInSamples);
+                r->read (&part, 0, part.getNumSamples(), 0, true, true);
+            }
+            mixWorst = 0.0f;
+            mixOk = got.getNumSamples() == parts[0].getNumSamples();
+            for (int ch = 0; ch < 2 && mixOk; ++ch)
+                for (int i = 0; i < got.getNumSamples(); ++i)
+                {
+                    const auto want = parts[0].getSample (ch, i) + 2.0f * parts[2].getSample (ch, i) + parts[3].getSample (ch, i)
+                                    + parts[4].getSample (ch, i) + parts[5].getSample (ch, i);
+                    mixWorst = std::max (mixWorst, std::abs (got.getSample (ch, i) - want));
+                }
+        }
+        check (mixOk && mixWorst < 1.0e-4f && ! reportedMix.empty() && reportedMix.back() >= 0.999,
+               "mixStems sums the stems at their levels (worst error " + juce::String (mixWorst, 6) + ")");
+        check (stems::mixStems (cached.files, { 0.0f }, mixFile, nullptr).isNotEmpty() && stems::mixStems ({}, {}, mixFile, nullptr).isNotEmpty(),
+               "mixStems refuses a mismatch between files and levels");
+        check (stems::mixStems (cached.files, gains, folder.getChildFile ("Cancelled.wav"), [] (double) { return false; }) == "cancelled"
+                   && ! folder.getChildFile ("Cancelled.wav").existsAsFile(),
+               "cancelling a mix leaves no file");
+
+        // The edit: the clip plays the mix; undo and reset bring the original back.
+        juce::PropertiesFile::Options options;
+        options.applicationName = "MicFXTests";
+        options.filenameSuffix = ".settings";
+        juce::PropertiesFile props (folder.getChildFile ("rebalance.settings"), options);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, props, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        bridge.handle ("mode", juce::JSON::parse ("{\"daw\": true}"), [] (juce::var) {});
+
+        const auto track = (int) edit.getTracks()[0][daw::ids::id];
+        const auto clip = edit.addClip (track, song, 1.0, 2.0, 0.25);
+        const auto id = (int) clip[daw::ids::id];
+        edit.getUndoManager().beginNewTransaction();
+
+        juce::var info;
+        bridge.handle ("rebalance", juce::JSON::parse ("{\"action\": \"info\", \"id\": " + juce::String (id) + "}"), [&] (juce::var r) { info = r; });
+        check ((bool) info["ok"] && ! (bool) info["rebalanced"] && info["stems"].size() == 6 && info["gains"].size() == 6
+                   && info["quality"].toString() == "4" && (bool) info["cached"].getDynamicObject()->hasProperty ("best"),
+               "rebalance info lists the stems, zero levels and what is cached");
+
+        edit.getUndoManager().beginNewTransaction ("Rebalance");
+        edit.setClipRebalance (id, mixFile, song, "{\"quality\":\"6\",\"gains\":[0,-100,6,0,0,0]}");
+        auto changed = edit.getClip (id);
+        check (changed[daw::ids::file].toString() == mixFile.getFullPathName() && daw::Edit::getRebalanceOriginal (changed) == song
+                   && (double) changed[daw::ids::offset] == 0.25 && (double) changed[daw::ids::length] == 2.0,
+               "a rebalanced clip plays the mix and keeps its window");
+
+        bridge.handle ("rebalance", juce::JSON::parse ("{\"action\": \"info\", \"id\": " + juce::String (id) + "}"), [&] (juce::var r) { info = r; });
+        check ((bool) info["rebalanced"] && info["quality"].toString() == "6" && (double) info["gains"][2] == 6.0 && (double) info["gains"][1] == -100.0,
+               "info reports the levels last applied");
+
+        edit.getUndoManager().undo();
+        check (edit.getClip (id)[daw::ids::file].toString() == song.getFullPathName() && ! edit.getClip (id).hasProperty (daw::ids::rebalanceFrom),
+               "one undo puts the original file back");
+        edit.getUndoManager().redo();
+
+        juce::var reset;
+        bridge.handle ("rebalance", juce::JSON::parse ("{\"action\": \"reset\", \"id\": " + juce::String (id) + "}"), [&] (juce::var r) { reset = r; });
+        check (edit.getClip (id)[daw::ids::file].toString() == song.getFullPathName() && ! edit.getClip (id).hasProperty (daw::ids::rebalance),
+               "Reset goes back to the original file");
+
+        juce::var nothing;
+        bridge.handle ("rebalance", juce::JSON::parse ("{\"action\": \"reset\", \"id\": " + juce::String (id) + "}"), [&] (juce::var r) { nothing = r; });
+        bridge.handle ("rebalance", juce::JSON::parse ("{\"action\": \"start\", \"id\": -5}"), [&] (juce::var r) { reset = r; });
+        check (! (bool) nothing["ok"] && ! (bool) reset["ok"] && reset["error"].toString().isNotEmpty(), "Rebalance without a rebalanced clip or a clip says why");
+
+        // Six stems on tracks: guitar and piano get their own tracks before Other.
+        const auto added = bridge.addStemTracks (clip.createCopy(), track, six.files);
+        const auto tracks = edit.getTracks();
+        const char* order6[] { "Vocals", "Drums", "Bass", "Guitar", "Piano", "Other" };
+        auto sixOk = (bool) added["ok"] && tracks.size() >= 7;
+        for (int i = 0; i < 6 && sixOk; ++i)
+            sixOk = tracks[i + 1][daw::ids::name].toString() == order6[i];
+        check (sixOk, "a six-stem split adds Guitar and Piano tracks before Other");
+        DawBridge::availableForTesting = false;
+    }
+
     folder.deleteRecursively();
 }
 

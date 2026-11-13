@@ -177,7 +177,14 @@
           <div class="stem-lane" style="--c:#3fd9c6"><i></i><span>Bass</span><b></b></div>
           <div class="stem-lane" style="--c:#8c7bff"><i></i><span>Other</span><b></b></div>
         </div>
-        <p class="ai-note stems-intro">Each part lands on its own track under the song and the original is muted. A 4-minute song takes a few minutes. The first time it downloads the separation model (about 84 MB).</p>
+        <label class="stems-quality" title="4 stems is the standard model. 6 stems also pulls guitar and piano out of Other. Best quality runs four fine-tuned models, about four times slower.">Quality
+          <select class="dropdown" name="stemQuality">
+            <option value="4">4 stems: vocals, drums, bass, other</option>
+            <option value="6">6 stems: adds guitar and piano</option>
+            <option value="best">Best quality: 4 stems, about 4× slower</option>
+          </select>
+        </label>
+        <p class="ai-note stems-intro">Each part lands on its own track under the song and the original is muted. A 4-minute song takes a few minutes (6 stems and Best quality run on the CPU only). The first time it downloads the separation model (84 MB; 55 MB for 6 stems, 336 MB for Best quality).</p>
         <div class="export-bar"><div></div></div>
         <div class="export-footer">
           <span class="export-result stems-status"></span>
@@ -202,6 +209,27 @@
         <button class="tool tomidi-stems" hidden>Split into stems first…</button>
         <button class="tool tomidi-cancel">Cancel</button>
         <button class="tool is-accent tomidi-go">Convert</button>
+      </div>
+    </div>
+    <div class="rebalance-panel" hidden>
+      <div class="export-head"><strong class="rebalance-title">Rebalance</strong><button class="mini rebalance-close" title="Close" aria-label="Close">×</button></div>
+      <div class="export-options">
+        <label title="4 stems is the standard model. 6 stems adds guitar and piano; Best quality is four fine-tuned models, about 4× slower">Quality
+          <select class="dropdown" name="quality">
+            <option value="4">4 stems</option>
+            <option value="6">6 stems (guitar, piano)</option>
+            <option value="best">Best quality (4 stems, slower)</option>
+          </select>
+        </label>
+      </div>
+      <div class="rebalance-sliders"></div>
+      <p class="ai-note rebalance-note"></p>
+      <div class="export-bar"><div></div></div>
+      <div class="export-footer">
+        <span class="export-result rebalance-status"></span>
+        <button class="tool rebalance-reset" hidden title="Go back to the original audio">Reset</button>
+        <button class="tool rebalance-cancel">Cancel</button>
+        <button class="tool is-accent rebalance-go">Apply</button>
       </div>
     </div>
     <div class="automix-panel ai-plugin" hidden data-accent="mix">
