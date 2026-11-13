@@ -30,7 +30,12 @@ const MIN_ROW = 44, MAX_ROW = 200; // track height range, px (vertical zoom)
 const MIN_ZOOM = 4, MAX_ZOOM = 2000; // pixels per second
 const METER_FLOOR_DB = -60;
 const FADER_MIN_DB = -60, FADER_MAX_DB = 6;
-const GRIDS = [["bar", "Bar"], [1, "Beat"], [0.5, "1/2 beat"], [0.25, "1/4 beat"]];
+// The snap grid, in beats (a quarter note), named as note values. "adaptive" follows the zoom.
+const GRIDS = [["adaptive", "Adaptive"], ["bar", "Bar"], [2, "1/2"], [1, "1/4"], [0.5, "1/8"], [0.25, "1/16"], [0.125, "1/32"],
+               [4 / 3, "1/2 triplet"], [2 / 3, "1/4 triplet"], [1 / 3, "1/8 triplet"], [1 / 6, "1/16 triplet"], [1 / 12, "1/32 triplet"]];
+const STRAIGHT_GRIDS = [2, 1, 0.5, 0.25, 0.125]; // Ctrl+1 / Ctrl+2 step through these (Ctrl+3: triplets)
+const ADAPTIVE_MIN_PX = 18;   // the adaptive grid's smallest step on screen
+const OBJECT_SNAP_PX = 8;     // clip edges, markers, the playhead and the loop pull within this
 const SCALE_STEPS = { major: [0, 2, 4, 5, 7, 9, 11], minor: [0, 2, 3, 5, 7, 8, 10] };
 // Auto Mix's track roles (the bridge sends the same list with its tags).
 const AUTOMIX_ROLES = [
@@ -861,7 +866,7 @@ class DawScreen {
     this.clipboard = null;     // a copied clip
     this.recLevels = [];       // [seconds, gain] of the input while recording, for the live take
     this.snap = true;
-    this.grid = prefs.get("grid", 1);           // snap step in beats, or "bar"
+    this.grid = prefs.get("grid", 1);           // snap step in beats, "bar" or "adaptive"
     this.returnOnStop = prefs.get("returnOnStop", false);
     this.playStart = null;     // where play was pressed, for Return on stop
     this.taps = [];            // tap tempo times, ms
@@ -923,7 +928,38 @@ class DawScreen {
   get beat() { return 60 / this.tempo; }
   get beatsPerBar() { return this.session?.beatsPerBar ?? 4; }
   get bar() { return this.beat * this.beatsPerBar; }
-  get gridBeats() { return this.grid === "bar" ? this.beatsPerBar : this.grid; }
+  get gridBeats() {
+    if (this.grid === "bar") return this.beatsPerBar;
+    if (this.grid !== "adaptive") return this.grid;
+    // Adaptive: the finest note value that is still ADAPTIVE_MIN_PX wide at this zoom.
+    const beatPx = this.zoom * (this.tempoMap.toSeconds(1) - this.tempoMap.toSeconds(0));
+    for (const beats of [0.125, 0.25, 0.5, 1, 2]) if (beats * beatPx >= ADAPTIVE_MIN_PX) return beats;
+    return this.beatsPerBar;
+  }
+
+  // Ctrl+1 narrower, Ctrl+2 wider, Ctrl+3 triplets on / off, Ctrl+4 snap on / off (Live's keys).
+  stepGrid(how) {
+    if (how === "snap") { this.snap = !this.snap; toast(this.snap ? "Snap on." : "Snap off."); }
+    else {
+      let beats = this.grid === "adaptive" ? this.gridBeats : this.grid === "bar" ? this.beatsPerBar : this.grid;
+      const triplet = Math.abs(beats * 3 - Math.round(beats * 3)) < 1e-9 && STRAIGHT_GRIDS.every((g) => Math.abs(g - beats) > 1e-9);
+      const straight = triplet ? beats * 3 / 2 : beats;
+      let next;
+      if (how === "triplet") next = triplet ? straight : straight * 2 / 3;
+      else {
+        const i = STRAIGHT_GRIDS.findIndex((g) => Math.abs(g - straight) < 1e-9);
+        const j = clamp((i < 0 ? 1 : i) + (how === "narrow" ? 1 : -1), 0, STRAIGHT_GRIDS.length - 1);
+        next = triplet ? STRAIGHT_GRIDS[j] * 2 / 3 : STRAIGHT_GRIDS[j];
+      }
+      const match = GRIDS.find(([g]) => typeof g === "number" && Math.abs(g - next) < 1e-9);
+      if (!match) return;
+      this.grid = match[0];
+      prefs.set("grid", this.grid);
+      toast(`Grid: ${match[1]}.`);
+    }
+    this.renderTransport();
+    this.rememberView();
+  }
 
   // The tempo over the song (src/daw/TempoMap): beats <-> seconds through every change.
   get tempoMap() {
@@ -943,9 +979,31 @@ class DawScreen {
   get markers() { return this.session?.markers ?? []; }
 
   // Seconds snapped to the grid (unless snap is off or Alt is held).
-  snapTime(seconds, event) {
+  // Snaps a time to the grid. With `objects` ({ exclude: clip ids, length }), clip edges,
+  // markers, the playhead and the loop range also pull it when they're within a few
+  // pixels (Live: "the edges of other clips, locators..."); `length` lets the end snap too.
+  snapTime(seconds, event, objects = null) {
     if (!this.snap || event?.altKey) return Math.max(0, seconds);
-    return Math.max(0, this.tempoMap.snap(seconds, this.gridBeats));
+    const grid = Math.max(0, this.tempoMap.snap(seconds, this.gridBeats));
+    if (!objects || !this.session) return grid;
+    const exclude = new Set(objects.exclude ?? []);
+    const length = objects.length ?? 0;
+    const targets = [[this.status.position, "the playhead"]];
+    for (const track of this.session.tracks)
+      for (const clip of track.clips ?? [])
+        if (!exclude.has(clip.id)) targets.push([clip.start, "a clip's start"], [clip.start + clip.length, "a clip's end"]);
+    for (const marker of this.session.markers ?? []) targets.push([marker.time, `marker “${marker.name || "Marker"}”`]);
+    if (this.session.loop?.on) targets.push([this.session.loop.start, "the loop start"], [this.session.loop.end, "the loop end"]);
+    let best = null;
+    for (const [time, name] of targets)
+      for (const [edge, what] of length > 0 ? [[0, "start"], [length, "end"]] : [[0, ""]]) {
+        const distance = Math.abs(seconds + edge - time) * this.zoom;
+        if (distance <= OBJECT_SNAP_PX && (!best || distance < best.distance))
+          best = { distance, start: time - edge, text: `${what ? `Its ${what} snapped` : "Snapped"} to ${name}` };
+      }
+    const hint = this.hintLine?.querySelector(".hint-text");
+    if (best && hint) hint.textContent = best.text;
+    return best ? Math.max(0, best.start) : grid;
   }
 
   barsBeats(seconds) {
@@ -1265,7 +1323,8 @@ class DawScreen {
     this.gridSelect.title = "Snap grid";
     GRIDS.forEach(([value, text]) => this.gridSelect.append(new Option(text, value)));
     this.gridSelect.addEventListener("change", () => {
-      this.grid = this.gridSelect.value === "bar" ? "bar" : Number(this.gridSelect.value);
+      const value = this.gridSelect.value;
+      this.grid = value === "bar" || value === "adaptive" ? value : Number(value);
       prefs.set("grid", this.grid);
       this.rememberView();
     });
@@ -1772,6 +1831,42 @@ class DawScreen {
     this.renderTransport();
   }
 
+  // Dragging a track header up or down moves the track (a line shows where it lands).
+  dragTrackHead(event, id, row) {
+    const y0 = event.clientY;
+    let line = null, index = -1;
+    const rows = () => [...this.rows.querySelectorAll(":scope > .track-row:not(.group-row)")]
+      .filter((r) => this.session.tracks.some((t) => String(t.id) === r.dataset.track));
+    const move = (e) => {
+      if (!line && Math.abs(e.clientY - y0) < 6) return;
+      if (!line) { line = html("div", "track-drop-line"); this.inner.append(line); row.classList.add("is-moving"); }
+      const others = rows();
+      const origin = this.inner.getBoundingClientRect();
+      let gap = others.length, y = null;
+      for (let i = 0; i < others.length; i++) {
+        const box = others[i].getBoundingClientRect();
+        if (e.clientY < box.top + box.height / 2) { gap = i; y = box.top - origin.top; break; }
+      }
+      if (y === null) { const last = others[others.length - 1]?.getBoundingClientRect(); y = last ? last.bottom - origin.top : 0; }
+      line.style.top = `${y - 1}px`;
+      // moveTrack's index is the slot in the list without the track itself.
+      const from = others.indexOf(row);
+      index = from >= 0 && gap > from ? gap - 1 : gap;
+    };
+    const up = () => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      if (!line) return;
+      line.remove();
+      row.classList.remove("is-moving");
+      const tracks = this.session.tracks;
+      const from = tracks.findIndex((t) => t.id === id);
+      if (index >= 0 && index !== from) daw("moveTrack", { id, index: Math.min(index, tracks.length - 1) });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+  }
+
   //============================================================================ time range (Range tool)
   // A stretch of time across some tracks, as in Live's time selection or Cubase's Range
   // tool: { start, end (seconds), tracks: [ids] }. Commands act on it (rangeCommand).
@@ -1812,7 +1907,7 @@ class DawScreen {
       for (const row of order) { const b = row.getBoundingClientRect(); if (y >= b.top) best = row; }
       return best;
     };
-    const timeAt = (e) => this.snapTime((e.clientX - this.inner.getBoundingClientRect().left - this.headWidth) / this.zoom, e);
+    const timeAt = (e) => this.snapTime((e.clientX - this.inner.getBoundingClientRect().left - this.headWidth) / this.zoom, e, {});
     const firstRow = rowAt(event.clientY);
     if (!firstRow) return;
     const anchorTime = timeAt(event);
@@ -2282,6 +2377,7 @@ class DawScreen {
       // Shift or Ctrl+click: several tracks, so a fader, mute, solo or colour change on one applies to all.
       if (event.shiftKey || event.ctrlKey || event.metaKey) return this.toggleTrackInSelection(track.id);
       this.select(track.id, null);
+      if (event.button === 0) this.dragTrackHead(event, track.id, row);
     });
     head.addEventListener("contextmenu", (event) => {
       if (event.target.closest("input")) return;
@@ -2771,7 +2867,7 @@ class DawScreen {
 
         if (mode === "move") {
           // The group keeps its spacing, and no clip goes before 0.
-          const start = Math.max(clip.start - earliest, this.snapTime(clip.start + dt, e));
+          const start = Math.max(clip.start - earliest, this.snapTime(clip.start + dt, e, { exclude: [clip.id, ...this.clipSelection], length: clip.length }));
           edit = { command: "moveClip", args: { id: clip.id, start } };
           place(start, clip.length);
           for (const g of group) if (g.element) g.element.style.left = `${(g.found.clip.start + start - clip.start) * this.zoom}px`;
@@ -2788,13 +2884,13 @@ class DawScreen {
           }
           if (targetTrack !== track.id) edit.args.track = targetTrack;
         } else if (mode === "trim-start") {
-          const start = clamp(this.snapTime(clip.start + dt, e), Math.max(0, clip.start - clip.offset), end - 0.01);
+          const start = clamp(this.snapTime(clip.start + dt, e, { exclude: [clip.id] }), Math.max(0, clip.start - clip.offset), end - 0.01);
           edit = { command: "trimStart", args: { id: clip.id, start } };
           place(start, end - start);
           canvas.clip = { ...clip, start, offset: clip.offset + (start - clip.start), length: end - start };
           this.drawWaveform(canvas);
         } else if (mode === "trim-end") {
-          const newEnd = clamp(this.snapTime(end + dt, e), clip.start + 0.01, maxEnd);
+          const newEnd = clamp(this.snapTime(end + dt, e, { exclude: [clip.id] }), clip.start + 0.01, maxEnd);
           edit = { command: "trimEnd", args: { id: clip.id, end: newEnd } };
           place(clip.start, newEnd - clip.start);
           canvas.clip = { ...clip, length: newEnd - clip.start };
@@ -3396,7 +3492,7 @@ class DawScreen {
     this.rowHeight = Math.round(clamp(num(state.rowHeight, this.rowHeight), MIN_ROW, MAX_ROW));
     if (typeof state.follow === "boolean") this.follow = state.follow;
     if (typeof state.snap === "boolean") this.snap = state.snap;
-    if (state.grid === "bar" || GRIDS.some(([g]) => g === state.grid)) this.grid = state.grid;
+    if (GRIDS.some(([g]) => g === state.grid)) this.grid = state.grid;
     if (state.track === 0 || this.session.tracks.some((t) => t.id === state.track) || (this.session.returns ?? []).some((r) => r.id === state.track) || (this.session.groups ?? []).some((r) => r.id === state.track)) {
       this.selectedTrack = state.track;
       this.selectedClip = null;
@@ -3666,6 +3762,28 @@ class DawScreen {
   selectAllClips() {
     const ids = this.session.tracks.flatMap((t) => t.clips.filter((c) => !(c.take >= 0)).map((c) => c.id));
     if (ids.length) this.selectClips(ids, this.findClip(this.selectedClip) ? this.selectedClip : ids[0]);
+  }
+
+  // The audio clip on the same track that starts where `clip` ends (within 2 ms), if any.
+  nextClipTouching(clip) {
+    const track = this.session?.tracks.find((t) => t.clips?.some((c) => c.id === clip.id));
+    return track?.clips.find((c) => c.id !== clip.id && !c.midi && Math.abs(c.start - (clip.start + clip.length)) < 0.002) ?? null;
+  }
+
+  // A crossfade at the join of two butted clips: each reaches into the other by up to half
+  // of `seconds` (as far as their files allow), with fades across the overlap. One undo step.
+  async crossfade(left, right, seconds) {
+    const half = seconds / 2;
+    const leftRoom = left.fileLength > 0 ? Math.max(0, left.fileLength - (left.offset + left.length)) : half;
+    const extendLeft = Math.min(half, leftRoom), extendRight = Math.min(half, Math.max(0, right.offset));
+    const overlap = extendLeft + extendRight;
+    if (overlap < 0.002) return toast("These clips have no audio to spare past the join for a crossfade.");
+    const join = left.start + left.length;
+    await daw("trimEnd", { id: left.id, end: join + extendLeft });
+    await daw("trimStart", { id: right.id, start: join - extendRight, continue: true });
+    await daw("clipFades", { id: left.id, fadeIn: left.fadeIn, fadeOut: overlap, continue: true });
+    await daw("clipFades", { id: right.id, fadeIn: overlap, fadeOut: right.fadeOut, continue: true });
+    toast(`Crossfade of ${Math.round(overlap * 1000)} ms.`, "", "undo");
   }
 
   // Runs one command per item (clip or track) as one undo step.
@@ -5132,7 +5250,9 @@ class DawScreen {
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
                ["V (1) / 2 / B / G / P", "Select, range, cut, gain and draw tools"], ["Range tool", "Drag across tracks to mark time (Shift+click: move an end)"], ["Draw tool", "Click places the picked pattern or sound, drag paints copies, right-click (or right-drag) erases"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
-               ["Ctrl+L", "Loop this clip (sets the loop range to it)"], ["Alt+drag", "Move or trim without snapping"]]],
+               ["Ctrl+L", "Loop this clip (sets the loop range to it)"], ["Alt+drag", "Move or trim without snapping"],
+               ["Ctrl+1 / Ctrl+2", "Narrower / wider grid"], ["Ctrl+3", "Triplet grid on / off"], ["Ctrl+4", "Snap on / off"],
+               ["Snap", "Clips also snap to other clips' edges, markers, the playhead and the loop range"]]],
     ["Clip editor (Wave, W)", [["1 / 2 / 4", "Open the Warp, Hitpoints or Quantize section (the open one is the tool); Esc closes it"],
                                ["Click / drag (no tool open)", "Move the playhead / scroll; in the ruler, drag to mark a loop range"],
                                ["Warp: click", "Pin a warp tab where the audio plays now"], ["Warp: drag", "Move that moment of the audio; it stretches between the tabs either side"],
@@ -5628,6 +5748,9 @@ class DawScreen {
       item("Zoom to the clip", () => this.run("zoomClip"), { shortcut: "Z" });
       if (audio) {
         item("Edit pitch and timing", () => this.openClipEditor(), { shortcut: "W", hint: "The clip's waveform on the Clip tab: transpose it, drag notes in time" });
+        const next = this.nextClipTouching(clip);
+        item("Crossfade with the next clip", () => this.crossfade(clip, next, 0.05), { disabled: !next,
+             hint: next ? "Both clips reach into each other by 25 ms and fade across (50 ms in all), so the join can't click" : "Only when another clip starts where this one ends" });
         item("Keep as a take", () => daw("takes", { action: "fromClip", clip: clip.id }), { hint: "Copy this clip into a new take lane, so you can record over it and still pick parts of it" });
         heading("Audio");
         for (const [label, command, hint] of AUDIO_PROCESSES)
@@ -5874,6 +5997,10 @@ class DawScreen {
       else if (key === "f") command("searchLibrary");
       else if (key === "a") command("selectAll");
       else if (key === "k") { handled(); if (!event.repeat) this.togglePiano(); }
+      else if (code === "Digit1") { handled(); this.stepGrid("narrow"); }
+      else if (code === "Digit2") { handled(); this.stepGrid("widen"); }
+      else if (code === "Digit3") { handled(); this.stepGrid("triplet"); }
+      else if (code === "Digit4") { handled(); this.stepGrid("snap"); }
       else if (event.key === "Delete" || event.key === "Backspace") command("deleteTrack");
     }
     else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { handled(); this.nudgeSelected(event.key === "ArrowLeft" ? -step : step); }

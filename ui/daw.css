@@ -2555,3 +2555,6 @@ body.is-daw .library-hint { display: none; }
   font-size: 10.5px;
   white-space: nowrap;
 }
+/* Dragging a track header to move the track. */
+.track-drop-line { position: absolute; left: 0; right: 0; z-index: 6; height: 2px; background: var(--accent-2); pointer-events: none; }
+.track-row.is-moving { opacity: 0.55; }
