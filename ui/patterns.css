@@ -93,3 +93,19 @@
 .pat-empty h3 { margin: 0 0 6px; }
 .pat-empty p { margin: 0 0 12px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .pat-empty-actions { display: flex; justify-content: center; gap: 8px; }
+
+/* recording, velocity bars, piano roll on a part */
+.pat-record.is-on { background: #d6453d; border-color: #d6453d; color: #fff; animation: pat-rec 1.2s ease-in-out infinite; }
+@keyframes pat-rec { 50% { opacity: 0.65; } }
+.pat-snap { display: inline-flex; align-items: center; gap: 4px; color: var(--muted); font-size: 12px; }
+.pat-edit { border: 1px solid var(--line); border-radius: 6px; background: none; color: var(--muted); font-size: 11px; padding: 1px 7px; cursor: pointer; }
+.pat-edit:hover { color: var(--text); border-color: var(--line-strong); }
+.pat-label.is-selected { color: var(--text); box-shadow: inset 2px 0 0 var(--track, #8c7bff); }
+.pat-vel { display: grid; grid-template-columns: repeat(var(--steps), 24px); gap: 2px; height: 44px; touch-action: none; user-select: none; cursor: ns-resize; }
+.pat-vel-cell { display: flex; align-items: flex-end; border-radius: 3px; background: #131720; }
+.pat-vel-cell.has-note i { display: block; width: 100%; border-radius: 3px 3px 0 0; background: var(--track, #8c7bff); }
+.pat-vel-row .pat-label { font-size: 10px; }
+.pat-roll { display: flex; flex-direction: column; height: 100%; min-height: 0; }
+.pat-roll-bar { display: flex; align-items: center; gap: 10px; padding: 6px 10px; }
+.pat-roll-title { font-size: 12px; font-weight: 600; }
+.pat-roll .piano-panel { flex: 1; min-height: 0; }
