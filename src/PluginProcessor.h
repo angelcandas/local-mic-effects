@@ -20,7 +20,7 @@
 // Signal chain, in order (every module except gain/reverb/limiter is skipped when off):
 //   input gain -> [effect chain] -> output gain -> safety limiter
 // where the effect chain (fx::FxChain, every module type) runs:
-//   high-pass -> gate -> autotune / pitch shift / harmonizer -> EQ -> compressor
+//   high-pass -> gate -> autotune / pitch shift / harmonizer -> EQ -> compressor -> auto level
 //   -> de-esser -> exciter -> saturation -> radio -> bitcrusher -> robot -> filter
 //   -> auto-wah -> tremolo -> vibrato -> chorus -> flanger -> phaser -> doubler
 //   -> echo -> reverb -> stereo width
@@ -145,6 +145,7 @@ private:
     juce::dsp::Gain<float> inputGain, outputGain;
     fx::FxChain chain { fx::FxChain::getAllTypes() };
     fx::modules::Pitch& pitchModule;
+    fx::modules::AutoLevel& autoLevelModule;
     juce::dsp::Limiter<float> limiter;
 
     Recorder recorder;
@@ -157,6 +158,12 @@ private:
     MidiMap midiMap { state, looper, juce::JUCEApplicationBase::isStandaloneApp() || wrapperType != wrapperType_Undefined
                                          ? MidiMap::getDefaultFile() : juce::File() };
     juce::AudioBuffer<float> loopInput; // the voice before the limiter, for the looper
+
+    // The backing (the Multitrack's playback) on its own before it joins the voice, and
+    // its momentary loudness, for auto level's "over the backing".
+    juce::AudioBuffer<float> backingBuffer;
+    fx::LoudnessMeter backingMeter;
+    bool backingWasPlaying = false;
 
     juce::SharedResourcePointer<daw::PluginHost> pluginHost; // before the engine, which loads instruments through it
     daw::Edit dawEdit;

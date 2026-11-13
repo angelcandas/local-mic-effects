@@ -18,6 +18,8 @@ export function formatValue(value, label) {
     case "ms": return `${Math.round(value)} ms`;
     case "bit": return `${value.toFixed(1)} bit`;
     case ":1": return `${value.toFixed(1)}:1`;
+    case "LUFS": return `${value.toFixed(1)} LUFS`;
+    case "LU": return `${signed(value.toFixed(1))} LU`;
     default: return value.toFixed(2);
   }
 }

@@ -624,6 +624,52 @@ const views = {
     };
   },
 
+  // Auto level: the ride (the gain it applies, dB) over the last few seconds, between
+  // +/- range; the corner says how loud the voice is against what it aims at.
+  autoLevel({ get }) {
+    const element = frame("is-ride");
+    element.append(svg("line", { class: "grid zero", x1: 0, x2: W, y1: H / 2, y2: H / 2 }));
+    const top = svg("line", { class: "grid dashed", x1: 0, x2: W }), bottom = svg("line", { class: "grid dashed", x1: 0, x2: W });
+    element.append(top, bottom);
+    const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
+    const marker = dot(element);
+    label(element, 3, 11, "Up");
+    label(element, 3, H - 3, "Down");
+    const history = [];
+    const HISTORY = 120; // about 4 s of readings
+    const scale = () => Math.max(3, get("alRange") + 1);
+    const yOf = (db) => yOfDb(db, scale());
+
+    const draw = () => {
+      const points = history.map((db, i) => `${((i / (HISTORY - 1)) * W).toFixed(1)},${yOf(db).toFixed(1)}`);
+      if (!points.length) { curve.setAttribute("d", ""); fill.setAttribute("d", ""); marker.move(0, 0, false); return; }
+      curve.setAttribute("d", `M${points.join(" L")}`);
+      fill.setAttribute("d", `M0,${H / 2} L${points.join(" L")} L${(((history.length - 1) / (HISTORY - 1)) * W).toFixed(1)},${H / 2} Z`);
+      marker.move(((history.length - 1) / (HISTORY - 1)) * W, yOf(history[history.length - 1]));
+    };
+
+    return {
+      element,
+      update() {
+        for (const [line, db] of [[top, get("alRange")], [bottom, -get("alRange")]]) {
+          line.setAttribute("y1", yOf(db));
+          line.setAttribute("y2", yOf(db));
+        }
+        draw();
+      },
+      live(reading) {
+        if (!reading) { history.length = 0; draw(); return ""; }
+        history.push(reading.ride ?? 0);
+        if (history.length > HISTORY) history.shift();
+        draw();
+        const ride = reading.ride ?? 0;
+        const sign = ride >= 0.05 ? "+" : ride <= -0.05 ? "−" : "";
+        return reading.frozen ? `holding ${sign}${Math.abs(ride).toFixed(1)} dB`
+                              : `${sign}${Math.abs(ride).toFixed(1)} dB → ${Math.round(reading.target)} LUFS`;
+      },
+    };
+  },
+
   compressor({ get, set, range }) {
     return dynamics({ get, set, range, threshold: "compThreshold", ratio: () => get("compRatio"), above: true });
   },

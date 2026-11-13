@@ -79,6 +79,12 @@ export const MODULES = [
     controls: [knob("compThreshold", "Threshold"), knob("compRatio", "Ratio"), knob("compAttack", "Attack"),
                knob("compRelease", "Release"), knob("compMakeup", "Makeup")] },
 
+  { id: "autolevel", name: "Auto Level", category: "cleanup", power: "alOn", wide: true,
+    description: "Rides your level like an engineer on the fader: a steady loudness, or a few LU over the backing track (Live)",
+    controls: [choice("alMode", "Aim"), { ...knob("alTarget", "Target"), when: { alMode: [0] } },
+               { ...bipolar("alOverBacking", "Over backing"), when: { alMode: [1] } },
+               knob("alRange", "Range"), knob("alSpeed", "Speed")] },
+
   { id: "deess", name: "De-esser", category: "cleanup", power: "deessOn",
     description: "Tames harsh S and T sounds",
     controls: [knob("deessThreshold", "Threshold"), knob("deessFreq", "Freq")] },
@@ -189,7 +195,7 @@ export const MODULES = [
 // harmonizer).
 export const MODULE_KEYS = {
   hpf: "highPass", denoise: "denoise", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq", peq: "paraEq", smooth: "smooth",
-  comp: "compressor", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
+  comp: "compressor", autolevel: "autoLevel", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
   crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", tremolo: "tremolo",
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
   echo: "echo", reverb: "reverb", width: "width",
