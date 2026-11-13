@@ -297,7 +297,7 @@ namespace
             { "clipFades", "Fade" }, { "clipGain", "Clip gain" }, { "split", "Split clip" }, { "removeClip", "Delete clip" },
             { "duplicate", "Duplicate clip" }, { "pasteClip", "Paste clip" }, { "setClip", "Clip change" },
             { "normaliseClip", "Normalise clip" }, { "stripSilence", "Strip silence" }, { "addMidiClip", "Add MIDI clip" },
-            { "editNotes", "Edit notes" }, { "addInsert", "Add effect" }, { "removeInsert", "Remove effect" },
+            { "editNotes", "Edit notes" }, { "addInsert", "Add effect" }, { "addPluginInsert", "Add plug-in" }, { "removeInsert", "Remove effect" },
             { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "insertFile", "Load effect file" }, { "pasteInserts", "Paste effects" },
             { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
             { "groupTracks", "Group tracks" }, { "ungroup", "Ungroup tracks" }, { "setGroup", "Move to group" },
@@ -365,6 +365,7 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
     processor.getPluginHost().onScanFinished = [this]
     {
         auto& host = processor.getPluginHost();
+        engine.retryMissingPlugins(); // an effect plugin that wasn't there may be now
         emit ("dawPlugins", object ({ { "scanning", false }, { "progress", 1.0 }, { "count", host.getInstruments().size() },
                                       { "failed", host.getFailedFiles().size() } }));
     };
@@ -376,6 +377,7 @@ DawBridge::~DawBridge()
     edit.getState().removeListener (this);
     processor.getPluginHost().onScanFinished = nullptr;
     instrumentWindows.clear();
+    pluginWindows.clear();
 
     if (exportJob != nullptr)
         exportJob->cancel = true;
@@ -466,12 +468,27 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
 
     for (const auto& insert : daw::Edit::getInserts (owner))
     {
+        const auto isPlugin = daw::Edit::isPluginInsert (insert);
         auto* values = new juce::DynamicObject();
         for (int i = 0; i < insert.getNumProperties(); ++i)
-            if (const auto name = insert.getPropertyName (i); name != ids::id && name != ids::type && name != ids::file)
+            if (const auto name = insert.getPropertyName (i); name != ids::id && name != ids::type && name != ids::file
+                && (! isPlugin || name.toString().startsWith ("plugin") && name != ids::plugin))
                 values->setProperty (name, number (insert, name));
 
         auto entry = object ({ { "id", (int) insert[ids::id] }, { "type", insert[ids::type].toString() }, { "values", juce::var (values) } });
+
+        // An effect plugin: which one, whether it's running (or why not), and its window.
+        if (isPlugin)
+        {
+            const auto insertId = (int) insert[ids::id];
+            const auto running = engine.getInsertPlugin (insertId) != nullptr;
+            auto error = engine.getInsertPluginError (insertId);
+            entry.getDynamicObject()->setProperty ("plugin", object ({
+                { "id", insert[ids::plugin].toString() }, { "name", insert[ids::name].toString() },
+                { "vendor", insert[ids::vendor].toString() }, { "format", insert[ids::format].toString() },
+                { "loaded", running }, { "error", error },
+                { "windowOpen", pluginWindows.count (insertId) > 0 } }));
+        }
         if (insert.hasProperty (ids::file))
             entry.getDynamicObject()->setProperty ("file", insert[ids::file].toString());
         list.add (entry);
@@ -907,6 +924,15 @@ void DawBridge::updateInstrumentWindows()
                  << ":" << engine.getInstrumentError (id) << ";";
         }
 
+    // And each effect plugin insert's.
+    for (const auto& [insertId, tree] : getPluginInserts())
+        seen << "fx" << insertId << ":" << juce::String::toHexString ((juce::pointer_sized_int) engine.getInsertPlugin (insertId).get())
+             << ":" << engine.getInsertPluginError (insertId) << ";";
+
+    // A plugin whose delay changed (a look-ahead switched on in its window): the latency
+    // compensation follows.
+    engine.checkPluginLatency();
+
     if (seen == instrumentsSeen)
         return;
 
@@ -922,6 +948,33 @@ void DawBridge::updateInstrumentWindows()
         else
             ++it;
     }
+
+    for (auto it = pluginWindows.begin(); it != pluginWindows.end();)
+    {
+        const auto* window = static_cast<InstrumentWindow*> (it->second.get());
+        if (window->instrument != engine.getInsertPlugin (it->first))
+            it = pluginWindows.erase (it);
+        else
+            ++it;
+    }
+}
+
+std::vector<std::pair<int, juce::ValueTree>> DawBridge::getPluginInserts() const
+{
+    std::vector<std::pair<int, juce::ValueTree>> found;
+    const auto collect = [&] (const juce::ValueTree& owner)
+    {
+        for (const auto& insert : daw::Edit::getInserts (owner))
+            if (daw::Edit::isPluginInsert (insert))
+                found.emplace_back ((int) insert[ids::id], insert);
+    };
+
+    collect (edit.getMaster());
+    for (const auto& track : edit.getTracks())
+        collect (track);
+    for (const auto& bus : edit.getReturns())
+        collect (bus);
+    return found;
 }
 
 juce::StringArray DawBridge::getInputNames() const
@@ -3312,8 +3365,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
-    if (command == "duplicateTrack") { complete (edit.duplicateTrack (id)); return; }
-    if (command == "pasteInserts")   { edit.copyInserts (arg (args, "from", -1), arg (args, "to", -1)); ok(); return; }
+    // (Plugins' current settings into the tree first, so the copies get them.)
+    if (command == "duplicateTrack") { engine.captureInstrumentStates(); complete (edit.duplicateTrack (id)); return; }
+    if (command == "pasteInserts")   { engine.captureInstrumentStates(); edit.copyInserts (arg (args, "from", -1), arg (args, "to", -1)); ok(); return; }
     if (command == "soloExclusive")  { edit.soloExclusive (id); ok(); return; }
     if (command == "clearMuteSolo")  { edit.clearMuteAndSolo(); ok(); return; }
     if (command == "removeTrack") { edit.removeTrack (id); ok(); return; }
@@ -4384,8 +4438,48 @@ juce::var DawBridge::describeInstruments() const
         list.add (object ({ { "id", info.id }, { "name", info.name }, { "kind", instrumentKind (info.format) },
                             { "vendor", info.vendor }, { "format", info.format } }));
 
-    return object ({ { "ok", true }, { "instruments", list }, { "scanning", host.isScanning() },
+    juce::Array<juce::var> effects;
+    for (const auto& info : host.getEffects())
+        effects.add (object ({ { "id", info.id }, { "name", info.name }, { "kind", instrumentKind (info.format) },
+                               { "vendor", info.vendor }, { "format", info.format } }));
+
+    return object ({ { "ok", true }, { "instruments", list }, { "effects", effects }, { "scanning", host.isScanning() },
                      { "folders", host.getExtraFolders() } });
+}
+
+juce::var DawBridge::addPluginInsert (int trackId, const juce::String& pluginId, int index)
+{
+    const auto info = processor.getPluginHost().findEffect (pluginId);
+    if (! info.has_value())
+        return error ("That plug-in isn't available. Rescan plug-ins and try again.");
+
+    const auto insert = edit.addPluginInsert (trackId, *info, index);
+    if (! insert.isValid())
+        return error ("Pick a track first.");
+
+    return object ({ { "ok", true }, { "error", juce::String() }, { "insert", (int) insert[ids::id] } });
+}
+
+void DawBridge::showPluginWindow (int insertId)
+{
+    if (const auto it = pluginWindows.find (insertId); it != pluginWindows.end())
+    {
+        it->second->toFront (true);
+        return;
+    }
+
+    const auto plugin = engine.getInsertPlugin (insertId);
+    if (plugin == nullptr)
+        return;
+
+    const auto owner = edit.getInsert (insertId).getParent().getParent();
+    const auto ownerName = owner.hasType (ids::MASTER) ? juce::String ("Master") : owner[ids::name].toString();
+    pluginWindows[insertId] = std::make_unique<InstrumentWindow> (ownerName + " - " + plugin->getName(), plugin, [this, insertId]
+    {
+        pluginWindows.erase (insertId);
+        sessionChanged = true;
+    });
+    sessionChanged = true;
 }
 
 juce::var DawBridge::addInstrument (int trackId, const juce::String& instrumentId)
@@ -4450,6 +4544,10 @@ void DawBridge::showInstrumentWindow (int trackId)
 //   scanPlugins {full}               look for instrument plugins ("dawPlugins" reports)
 //   addPluginFolder / removePluginFolder {path}   extra folders to scan
 //   showInstrument {track}           opens the plugin's own window
+//   addPluginInsert {track, plugin, index}  an effect plugin (an id from "instruments"'
+//                                    `effects`) into a track's (0: the master's) chain at
+//                                    index (-1: the end) -> { ok, insert }
+//   showPluginInsert {id}            opens an effect plugin insert's own window
 //   addMidiClip {track, start, length} -> the new clip's id
 //   editNotes {clip, add: [{pitch, time, length, velocity}], change: [{id, ...}], remove: [ids]}
 //                                    one undo step -> { ok, added: [ids] }
@@ -4511,6 +4609,27 @@ bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, 
         auto folders = host.getExtraFolders();
         folders.removeString (args["path"].toString());
         host.setExtraFolders (folders);
+        complete (error ({}));
+        return true;
+    }
+
+    if (command == "addPluginInsert")
+    {
+        complete (addPluginInsert (arg (args, "track", -1), args["plugin"].toString(), arg (args, "index", -1)));
+        return true;
+    }
+
+    if (command == "showPluginInsert")
+    {
+        const auto insertId = arg (args, "id", -1);
+        if (engine.getInsertPlugin (insertId) == nullptr)
+        {
+            const auto reason = engine.getInsertPluginError (insertId);
+            complete (error (reason.isNotEmpty() ? reason : juce::String ("The plug-in is still loading.")));
+            return true;
+        }
+
+        showPluginWindow (insertId);
         complete (error ({}));
         return true;
     }

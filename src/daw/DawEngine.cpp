@@ -183,6 +183,21 @@ juce::String DawEngine::getInsertPluginError (int insertId) const
     return {};
 }
 
+void DawEngine::retryMissingPlugins()
+{
+    auto any = false;
+    for (auto& [id, strip] : strips)
+        for (const auto& [insertId, slot] : strip->plugins)
+            if (slot.module == nullptr)
+            {
+                strip->insertLayout = {}; // a new chain: the running plugins carry over, the others load again
+                any = true;
+            }
+
+    if (any)
+        triggerAsyncUpdate();
+}
+
 void DawEngine::checkPluginLatency()
 {
     for (const auto& [id, strip] : strips)

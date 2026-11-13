@@ -5415,6 +5415,26 @@ namespace
                        "the export plays the effect with its settings (peak " + juce::String (result.peakDecibels, 1) + " dB)");
             }
 
+            // A plugin whose file went away is tried again after a scan (it may be back).
+            {
+                const auto bundle = plugins.getChildFile (effectFile.getFileName());
+                const auto aside = data.getChildFile ("aside.vst3");
+                bundle.moveFileTo (aside);
+                daw::Edit later;
+                later.replaceState (edit.getState().createCopy());
+                daw::DawEngine fourth (later);
+                fourth.prepare (sampleRate, blockSize);
+                fourth.rebuildNow();
+                const auto failedFirst = fourth.getInsertPlugin (insert) == nullptr && fourth.getInsertPluginError (insert).isNotEmpty();
+                aside.moveFileTo (bundle);
+                fourth.retryMissingPlugins();
+                fourth.rebuildNow();
+                const auto restored = fourth.getInsertPlugin (insert);
+                check (failedFirst && restored != nullptr && fourth.getInsertPluginError (insert).isEmpty()
+                           && std::abs (restored->getParameters()[0]->getValue() - 0.25f) < 1.0e-3f,
+                       "a plugin that couldn't load loads when tried again, with its saved settings");
+            }
+
             // A plugin that isn't installed: the sound goes on past it, and its settings stay.
             {
                 daw::Edit missing;

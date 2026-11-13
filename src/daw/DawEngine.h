@@ -174,6 +174,8 @@ public:
     // look-ahead switched on in its window), so latency compensation follows. Message
     // thread; the DAW screen calls it on its timer.
     void checkPluginLatency();
+    // Tries again to load the effect plugins that didn't load (after a scan found them).
+    void retryMissingPlugins();
     // Live MIDI from code (the on-screen keyboard), as if from the MIDI input. Any thread.
     void addLiveMidi (const juce::MidiMessage&) noexcept;
     // Live MIDI for one track's instrument only, armed or not (auditioning a pattern row).

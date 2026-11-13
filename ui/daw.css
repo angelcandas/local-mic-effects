@@ -729,6 +729,24 @@ body.is-daw .chip--live { display: none; }
 .is-reordering .insert { transition: transform 0.12s ease; }
 .is-reordering .insert.is-dragging { transition: none; z-index: 5; cursor: grabbing; box-shadow: 0 8px 22px rgba(0, 0, 0, 0.5); opacity: 0.92; }
 .insert-name { flex: 1; font-weight: 650; }
+/* An effect plug-in (VST3/AU): no picture of its own, so a plate with its format, its
+   maker and a button for its window. A missing one is outlined in amber. */
+.insert.is-plugin { --cat: #a48cf0; }
+.insert.is-plugin .insert-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.plugin-face {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 5px;
+  margin: 8px 0 6px; padding: 10px; border: 1px solid var(--line); border-radius: 9px;
+  background: repeating-linear-gradient(135deg, rgba(255, 255, 255, 0.025) 0 6px, transparent 6px 12px);
+}
+.plugin-badge { padding: 1px 6px; border: 1px solid var(--line); border-radius: 5px; color: var(--muted); font-size: 10px; font-weight: 650; letter-spacing: 0.6px; }
+.plugin-maker { color: var(--muted); font-size: 11.5px; }
+.plugin-maker:empty { display: none; }
+.plugin-status { color: var(--muted); font-size: 11px; line-height: 1.35; }
+.plugin-status[hidden] { display: none; }
+.plugin-open { padding: 0; font-size: 12px; }
+.plugin-open:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
+.insert.is-missing { border-color: #c9922e; }
+.insert.is-missing .plugin-status { color: #e0b25c; }
 .insert-sub { display: flex; align-items: center; gap: 7px; margin: 8px 0 2px; color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; }
 
 .insert-controls {
