@@ -8737,6 +8737,51 @@ namespace
                    "the card gets the cut per band: deepest " + juce::String (most, 1) + " dB near " + juce::String (bandHz, 0) + " Hz");
         }
 
+        // A bright sung note (harmonics of 220 Hz up to 9 kHz, with vibrato) is mostly left
+        // alone at every resolution, even where the frame resolves the harmonics; one
+        // harmonic 10 dB louder than its neighbours (a resonance) comes down.
+        {
+            const auto makeBright = [&] (int loudHarmonic)
+            {
+                std::vector<float> voice (length, 0.0f);
+                double phase = 0.0;
+                for (size_t i = 0; i < length; ++i)
+                {
+                    const auto t = (double) i / sampleRate;
+                    phase += juce::MathConstants<double>::twoPi * 220.0 * std::exp2 (0.3 / 12.0 * std::sin (juce::MathConstants<double>::twoPi * 5.5 * t)) / sampleRate;
+                    double value = 0.0;
+                    for (int h = 1; h <= 40; ++h)
+                        value += std::sin (phase * h) / std::sqrt ((double) h) * (h == loudHarmonic ? 3.16 : 1.0);
+                    voice[i] = (float) (value * 0.03);
+                }
+                return mixSignals (voice, makePinkNoise (seconds, -60.0f, 5));
+            };
+
+            const auto plain = makeBright (0), ringing = makeBright (14); // 3080 Hz
+            juce::String report;
+            auto worstPlain = 0.0, leastCut = 100.0;
+
+            for (int resolution = 0; resolution < 3; ++resolution)
+            {
+                SmoothSettings s;
+                s.resolution = resolution;
+                fx::modules::Smooth a, b;
+                const auto outPlain = runSmooth (a, plain, plain, s)[0];
+                const auto outRinging = runSmooth (b, ringing, ringing, s)[0];
+                const auto latency = (size_t) a.getLatencySamples();
+                const auto spectrumIn = powerSpectrum (plain, tail, length - latency), spectrumOut = powerSpectrum (outPlain, tail + latency, length);
+                const auto change = bandDb (spectrumOut, 1000.0, 9000.0) - bandDb (spectrumIn, 1000.0, 9000.0);
+                const auto ringIn = powerSpectrum (ringing, tail, length - latency), ringOut = powerSpectrum (outRinging, tail + latency, length);
+                const auto cut = bandDb (ringIn, 2950.0, 3200.0) - bandDb (ringOut, 2950.0, 3200.0);
+                worstPlain = std::max (worstPlain, std::abs (change));
+                leastCut = std::min (leastCut, cut);
+                report << " " << juce::String (change, 2) << "/" << juce::String (cut, 1);
+            }
+
+            check (worstPlain < 1.0 && leastCut > 3.0,
+                   "a bright sung note keeps its harmonics, a ringing one comes down (fast, balanced, quality: plain change / ring cut, dB:" + report + ")");
+        }
+
         // Only while it sticks out: a tone for the first 2 s, then the noise alone is back
         // to its own level once the release is over.
         {

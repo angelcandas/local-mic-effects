@@ -21,7 +21,8 @@ namespace fx
 //   1. Detection: each bin's power, smoothed over ~10 ms so noise doesn't flicker.
 //   2. Envelope: a line fitted to the detection in dB over the bins around each one (a
 //      window a fixed fraction of an octave wide, leaving out the bin's own main lobe),
-//      which is the "shape" of the sound without its narrow peaks. Sharpness sets the window:
+//      raised to the window's mean power: the "shape" of the sound without its narrow
+//      peaks, riding along the tops of a note's harmonics where the frame resolves them. Sharpness sets the window:
 //      sharper is narrower, so only narrower peaks stand out from it.
 //   3. Excess: how far each bin is over its envelope, minus the threshold (Focus tilts
 //      the threshold towards the lows or the highs and limits it to a range of
@@ -107,7 +108,7 @@ public:
         for (auto* bins : { &power, &levelDb, &envelopeDb, &targetDb, &spreadDb, &thresholdDb, &logBin })
             bins->assign ((size_t) maxBins + 1, 0.0f);
 
-        for (auto* sums : { &sumX, &sumXX, &sumY, &sumXY })
+        for (auto* sums : { &sumX, &sumXX, &sumY, &sumXY, &sumP })
             sums->assign ((size_t) maxBins + 1, 0.0);
 
         logBin[0] = 0.0f;
@@ -416,6 +417,7 @@ private:
             sumXX[(size_t) k + 1] = sumXX[(size_t) k] + x * x;
             sumY[(size_t) k + 1] = sumY[(size_t) k] + y;
             sumXY[(size_t) k + 1] = sumXY[(size_t) k] + x * y;
+            sumP[(size_t) k + 1] = sumP[(size_t) k] + (double) detection[(size_t) k] / fullScalePower;
         }
 
         const auto range = [] (const std::vector<double>& sums, int from, int to) { return sums[(size_t) to + 1] - sums[(size_t) from]; }; // inclusive
@@ -439,7 +441,13 @@ private:
             const auto meanX = sx / n, meanY = sy / n;
             const auto spread = sxx / n - meanX * meanX;
             const auto slope = spread > 1.0e-9 ? (sxy / n - meanX * meanY) / spread : 0.0;
-            envelopeDb[(size_t) k] = (float) (meanY + slope * ((double) logBin[(size_t) k] - meanX));
+
+            // Raised from the mean dB to the mean power: where the frame resolves a note's
+            // harmonics, the envelope rides along their tops rather than through the gaps
+            // between them, so only a harmonic louder than its neighbours stands out.
+            const auto meanPower = (range (sumP, low, high) - range (sumP, lobeLow, lobeHigh)) / n;
+            const auto lift = juce::jmax (0.0, 10.0 * std::log10 (juce::jmax (1.0e-30, meanPower)) - meanY);
+            envelopeDb[(size_t) k] = (float) (meanY + lift + slope * ((double) logBin[(size_t) k] - meanX));
         }
 
         // 3. The target cut: the excess over envelope + threshold, up to Depth. Quiet bins
@@ -515,7 +523,7 @@ private:
     std::array<Channel, 2> channels;
     std::array<Path, 2> paths;
     std::vector<float> power, levelDb, envelopeDb, targetDb, spreadDb, thresholdDb, logBin;
-    std::vector<double> sumX, sumXX, sumY, sumXY; // running sums for the envelope's line fits
+    std::vector<double> sumX, sumXX, sumY, sumXY, sumP; // running sums for the envelope's line fits
     std::vector<int> windowLow, windowHigh;
     std::array<int, numBands + 1> bandEdges {};
 
