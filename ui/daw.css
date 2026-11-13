@@ -2112,9 +2112,9 @@ body:not(.is-daw) .daw-project-actions { display: none; }
 }
 .knob .readout, .hslider, .fader { position: relative; }
 
-/* ---------- Returns and master, pinned under the tracks ---------- */
+/* ---------- Returns and master: ordinary rows after the last track, they scroll with the list ---------- */
 
-.pinned-rows { position: sticky; bottom: 0; z-index: 5; border-top: 1px solid var(--line-strong); background: var(--bg, #0b0d12); box-shadow: 0 -6px 14px rgba(0, 0, 0, 0.35); }
+.pinned-rows { border-top: 1px solid var(--line-strong); }
 .pinned-rows .track-row.bus-row { height: 30px; }
 .pinned-rows.is-folded .track-row.bus-row { height: 22px; }
 .bus-row .track-head { padding-top: 2px; padding-bottom: 2px; }
