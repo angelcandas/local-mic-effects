@@ -402,6 +402,80 @@ const views = {
     };
   },
 
+  // Speaker cabinet: its frequency response (from C++: the built-in model with the mic and
+  // cuts, or the loaded impulse response) over the live spectrum.
+  cab() {
+    const RANGE = 24, BANDS = 48, LOW = 40, HIGH = 16000; // modules::Cab::pictureBands, getPictureHz
+    const element = frame("is-filter");
+    frequencyGrid(element);
+    const spectrum = spectrumLayer(element);
+    const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
+    const xs = Array.from({ length: BANDS }, (_, i) => xOfF(LOW * Math.pow(HIGH / LOW, i / (BANDS - 1))));
+    let drawn = "";
+    return {
+      element,
+      update() {},
+      live(reading) {
+        spectrum(reading);
+        const response = reading?.response;
+        if (Array.isArray(response) && response.length === BANDS) {
+          const d = `M${response.map((db, i) => `${xs[i].toFixed(1)},${yOfDb(clamp(db, -RANGE, RANGE), RANGE).toFixed(1)}`).join(" L")}`;
+          if (d !== drawn) {
+            drawn = d;
+            curve.setAttribute("d", d);
+            fill.setAttribute("d", `${d} L${xs[BANDS - 1].toFixed(1)},${H} L${xs[0].toFixed(1)},${H} Z`);
+          }
+        }
+        return "";
+      },
+    };
+  },
+
+  // IR reverb: the room's decay (built-in space or the loaded file's length), after the
+  // pre-delay, with the early reflections as ticks. Mix sets how tall it stands.
+  irReverb({ get }) {
+    const SPACES = [[0.45, 18], [0.8, 28], [1.7, 0], [2.3, 60], [4.0, 90]]; // spaces::getSpaces(): decay s, early ms
+    const SPAN = 4.5; // seconds across the picture
+    const element = frame("is-decay");
+    const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
+    const ticks = path(element, "fx-curve");
+    let fileSeconds = 0;
+    const draw = () => {
+      const space = Math.round(get("irvSpace"));
+      const [decay, early] = SPACES[space] ?? [Math.max(0.2, fileSeconds * 0.6), 30];
+      const mix = clamp(get("irvMix") / 100);
+      const x0 = (get("irvPreDelay") / 1000 / SPAN) * W;
+      const top = H - 6 - (H - 14) * Math.sin(mix * Math.PI / 2);
+      const points = [];
+      for (let i = 0; i <= 60; i++) {
+        const t = (i / 60) * SPAN;
+        const level = Math.exp(-6.9 * t / decay); // -60 dB at the decay time
+        points.push(`${(x0 + (t / SPAN) * W).toFixed(1)},${(H - 6 - (H - 6 - top) * Math.max(0, 1 + Math.log10(Math.max(level, 1e-3)) / 3)).toFixed(1)}`);
+      }
+      const d = `M${x0.toFixed(1)},${H - 6} L${points.join(" L")}`;
+      curve.setAttribute("d", d);
+      fill.setAttribute("d", `${d} L${W},${H - 6} Z`);
+      const tickD = [];
+      for (let k = 1; early > 0 && k <= 6; k++) {
+        const x = x0 + ((early * k / 6) / 1000 / SPAN) * W;
+        tickD.push(`M${x.toFixed(1)},${H - 6} L${x.toFixed(1)},${(top + (H - 6 - top) * (k / 8)).toFixed(1)}`);
+      }
+      ticks.setAttribute("d", tickD.join(" "));
+    };
+    label(element, 3, 11, "Decay");
+    return {
+      element,
+      update: draw,
+      live(reading) {
+        if (reading?.seconds && Math.abs(reading.seconds - fileSeconds) > 0.01) {
+          fileSeconds = reading.seconds;
+          draw();
+        }
+        return reading?.seconds ? `${reading.seconds.toFixed(1)} s` : "";
+      },
+    };
+  },
+
   // Resonance suppressor: the live spectrum behind, the Focus range shaded, and the cut
   // right now hanging from the top (deepest bin per band, so a narrow cut shows at its
   // full depth). The dashed line is Depth, the most any frequency comes down.

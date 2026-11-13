@@ -4,7 +4,7 @@ import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, SCALES, isControlShown } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
-import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
+import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, polar, svg } from "./widgets.js";
 import { initDaw } from "./daw.js";
 import { LOOPER_KEYS, LoopPanel } from "./looper.js";
 import { MidiLearn, markLearnable } from "./midilearn.js";
@@ -919,6 +919,13 @@ class Rack {
       }
       case "choice": return new Choice(control.param, control.label, this.onUserChange).element;
       case "toggle": return new Pill(control.param, control.label, this.onUserChange).element;
+      case "file": {
+        const moduleFile = Juce.getNativeFunction("moduleFile");
+        const picker = createFilePicker({ label: control.label, load: () => moduleFile(control.module, "choose"),
+                                          clear: () => moduleFile(control.module, "clear") });
+        moduleFile(control.module, "get").then((result) => picker.update(result?.file)).catch(() => {});
+        return picker.element;
+      }
       case "tuner": return (this.tuner = new Tuner()).element;
       case "chord": return (this.chordReadout = new ChordReadout()).element;
       case "keys": return (this.keyPicker = new KeyPicker(control.param, control.scaleParam, this.onUserChange)).element;

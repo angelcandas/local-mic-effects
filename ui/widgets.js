@@ -58,3 +58,37 @@ export function arcPath(fromDeg, toDeg, radius) {
 export const IS_MAC = /Mac|iPhone|iPad/.test(globalThis.navigator?.platform || globalThis.navigator?.userAgent || "");
 export const keyText = (text) => (IS_MAC && typeof text === "string"
   ? text.replace(/\bCtrl\+(?!Cmd)/g, "Cmd+").replace(/\bAlt\+/g, "Option+") : text);
+
+// The file an effect plays through (an impulse response): its name, Load... and a clear
+// button. load() and clear() resolve to { file, error?, cancelled? }; update(path) shows a
+// file the effect has (an empty path: none).
+export function createFilePicker({ label, load, clear }) {
+  const element = html("div", "file-picker");
+  const name = html("span", "file-name");
+  const loadButton = html("button", "file-load", "Load…");
+  const clearButton = html("button", "file-clear", "×");
+  const message = html("span", "file-error");
+  clearButton.title = "Stop using this file";
+  element.append(html("span", "name", label), name, loadButton, clearButton, message);
+
+  const update = (path) => {
+    const file = typeof path === "string" ? path : "";
+    const base = file.split(/[\\/]/).pop();
+    name.textContent = base || "No file";
+    name.title = file;
+    element.classList.toggle("has-file", Boolean(base));
+    clearButton.hidden = !base;
+  };
+
+  const run = async (action) => {
+    message.textContent = "";
+    const result = await action();
+    if (result?.error) message.textContent = result.error;
+    else if (result && !result.cancelled && "file" in result) update(result.file);
+  };
+
+  loadButton.addEventListener("click", () => run(load));
+  clearButton.addEventListener("click", () => run(clear));
+  update("");
+  return { element, update };
+}
