@@ -117,6 +117,11 @@ export const MODULES = [
     description: "A filter that follows your voice",
     controls: [knob("wahSensitivity", "Sensitivity"), knob("wahFreq", "Freq"), knob("wahMix", "Mix")] },
 
+  { id: "amp", name: "Amp", category: "character", power: "ampOn", wide: true,
+    description: "A guitar or bass amp: gain, the classic bass / mid / treble tone stack, presence and a power stage. Put a Cabinet after it",
+    controls: [choice("ampModel", "Model"), knob("ampGain", "Gain"), knob("ampBass", "Bass"), knob("ampMid", "Mid"),
+               knob("ampTreble", "Treble"), knob("ampPresence", "Presence"), knob("ampMaster", "Master"), bipolar("ampOutput", "Output")] },
+
   { id: "cab", name: "Cabinet", category: "character", power: "cabOn", wide: true,
     description: "A guitar or bass speaker cabinet and its mic, built in or from your own impulse response file",
     controls: [{ type: "file", module: "cab", label: "IR file" }, choice("cabModel", "Cabinet"), choice("cabMic", "Mic"),
@@ -206,7 +211,7 @@ export const MODULES = [
 export const MODULE_KEYS = {
   hpf: "highPass", denoise: "denoise", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq", peq: "paraEq", smooth: "smooth",
   comp: "compressor", autolevel: "autoLevel", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
-  crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", cab: "cab", tremolo: "tremolo",
+  crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", amp: "amp", cab: "cab", tremolo: "tremolo",
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
   echo: "echo", reverb: "reverb", irverb: "irReverb", width: "width",
   meq: "masterEq", mb: "multiband", imager: "imager", limiter: "limiter", loudness: "loudness",

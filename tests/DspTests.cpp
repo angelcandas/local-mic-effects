@@ -13312,6 +13312,129 @@ namespace
 
         folder.deleteRecursively();
     }
+
+    void testGuitarAmp()
+    {
+        std::cout << "\nAmp\n";
+
+        const auto seconds = 2.0;
+        const auto length = (size_t) (seconds * sampleRate);
+        const auto settle = (size_t) (0.5 * sampleRate);
+        const auto guitar = makeVoice (110.0f, seconds, 0.35f);
+
+        {
+            fx::modules::Amp amp;
+            amp.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            const auto off = amp.getLatencySamples();
+            amp.on.store (1.0f);
+            check (off == 0 && amp.getLatencySamples() > 0 && amp.getLatencySamples() < 16,
+                   "the oversampling delay is reported while it's on (" + juce::String (amp.getLatencySamples()) + " samples)");
+        }
+
+        // Steady level across models and Gain; silence stays silent (no DC, no hiss).
+        {
+            auto worst = 0.0f, loudestSilence = 0.0f;
+            juce::String list;
+            for (int model = 0; model < fx::GuitarAmp::numModels; ++model)
+                for (auto gain : { 0.0f, 5.0f, 10.0f })
+                {
+                    fx::modules::Amp amp;
+                    amp.on.store (1.0f);
+                    amp.model.store ((float) model);
+                    amp.gain.store (gain);
+                    const auto out = runModuleMono (amp, guitar);
+                    const auto change = levelDb (out, settle, length) - levelDb (guitar, settle, length);
+                    worst = std::max (worst, std::abs (change));
+                    list << juce::String (change, 1) << " ";
+
+                    const auto quiet = runModuleMono (amp, std::vector<float> (length, 0.0f));
+                    for (auto x : quiet)
+                        loudestSilence = std::max (loudestSilence, std::abs (x));
+                }
+            check (worst < 6.0f, "every model at Gain 0, 5 and 10 stays within 6 dB of the input level (" + list.trim() + ")");
+            check (loudestSilence < 1.0e-5f, "silence in is silence out");
+        }
+
+        // More Gain, more grit: harmonics of a pure 220 Hz tone grow.
+        {
+            std::vector<float> tone (length);
+            for (size_t i = 0; i < length; ++i)
+                tone[i] = 0.3f * std::sin (juce::MathConstants<float>::twoPi * 220.0f * (float) i / (float) sampleRate);
+            const auto grit = [&] (int model, float gain)
+            {
+                fx::modules::Amp amp;
+                amp.on.store (1.0f);
+                amp.model.store ((float) model);
+                amp.gain.store (gain);
+                const auto spectrum = powerSpectrum (runModuleMono (amp, tone), settle, length);
+                return bandDb (spectrum, 400.0, 8000.0) - bandDb (spectrum, 200.0, 240.0);
+            };
+            const auto clean = grit (0, 0.0f), crunch = grit (1, 10.0f), lead = grit (2, 10.0f);
+            check (crunch - clean > 10.0 && lead > crunch - 3.0,
+                   "Gain adds harmonics (clean at 0: " + juce::String (clean, 1) + " dB, crunch at 10: " + juce::String (crunch, 1)
+                       + " dB, lead at 10: " + juce::String (lead, 1) + " dB vs the note)");
+        }
+
+        // The tone stack: each knob lifts its own range (clean model, low level, so it's linear).
+        {
+            const auto pink = makePinkNoise (seconds, -45.0f, 21);
+            const auto band = [&] (const char* knob, float value, double lo, double hi)
+            {
+                fx::modules::Amp amp;
+                amp.on.store (1.0f);
+                amp.model.store (0.0f);
+                amp.gain.store (0.0f);
+                amp.findValue (knob)->store (value);
+                const auto spectrum = powerSpectrum (runModuleMono (amp, pink), settle, length);
+                return bandDb (spectrum, lo, hi) - bandDb (spectrum, 20.0, 20000.0);
+            };
+            const auto bassLift = band ("ampBass", 10.0f, 60.0, 150.0) - band ("ampBass", 0.0f, 60.0, 150.0);
+            const auto midLift = band ("ampMid", 10.0f, 400.0, 900.0) - band ("ampMid", 0.0f, 400.0, 900.0);
+            const auto trebleLift = band ("ampTreble", 10.0f, 2500.0, 6000.0) - band ("ampTreble", 0.0f, 2500.0, 6000.0);
+            check (bassLift > 5.0 && midLift > 3.0 && trebleLift > 3.0,
+                   "Bass, Mid and Treble each lift their range (+" + juce::String (bassLift, 1) + ", +" + juce::String (midLift, 1)
+                       + ", +" + juce::String (trebleLift, 1) + " dB)");
+
+            fx::modules::Amp amp;
+            amp.on.store (1.0f);
+            juce::DynamicObject readings;
+            amp.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            amp.addReadings (readings);
+            check (readings.getProperty ("response").size() == fx::modules::Cab::pictureBands, "the card gets the tone stack's curve");
+        }
+
+        // Every knob at its ends, every model: the output stays finite and bounded.
+        {
+            auto peak = 0.0f;
+            auto finite = true;
+            for (int model = 0; model < fx::GuitarAmp::numModels; ++model)
+                for (auto end : { 0.0f, 10.0f })
+                {
+                    fx::modules::Amp amp;
+                    amp.on.store (1.0f);
+                    amp.model.store ((float) model);
+                    for (auto* knob : { "ampGain", "ampBass", "ampMid", "ampTreble", "ampPresence", "ampMaster" })
+                        amp.findValue (knob)->store (end);
+                    for (auto x : runModuleMono (amp, guitar))
+                    {
+                        finite = finite && std::isfinite (x);
+                        peak = std::max (peak, std::abs (x));
+                    }
+                }
+            check (finite && peak < 8.0f, "knobs at their ends stay stable (peak " + juce::String (peak, 2) + ")");
+        }
+
+        // Speed: a high-gain lead, 4x oversampled.
+        {
+            fx::modules::Amp amp;
+            amp.on.store (1.0f);
+            amp.model.store (2.0f);
+            const auto start = juce::Time::getMillisecondCounterHiRes();
+            runModuleMono (amp, guitar);
+            const auto ms = juce::Time::getMillisecondCounterHiRes() - start;
+            std::cout << "        (lead amp: " << juce::String (ms / (seconds * 1000.0) * 100.0, 1) << "% of real time, stereo, this build)\n";
+        }
+    }
 }
 
 int main()
@@ -13360,6 +13483,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "cab")
     {
         testCabAndIrReverb();
+        testGuitarAmp();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -13540,6 +13664,7 @@ int main()
     testResonanceSuppressor();
     testSmoothAutoMix();
     testCabAndIrReverb();
+    testGuitarAmp();
     testSmoothing();
     testStems();
 #if MICFX_HAS_DEMUCS
