@@ -208,10 +208,11 @@ Parameters::Parameters (Layout& l)
         decibels (l, key + "OutGain", name + " Out Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
     };
 
-    // (The denoiser and auto level came later: their gains are at the end with their
-    // other parameters.)
+    // (The denoiser, auto level and the resonance suppressor came later: their gains are
+    // at the end with their other parameters.)
     for (int i = 0; i < fx::numModuleTypes; ++i)
-        if ((fx::ModuleType) i != fx::ModuleType::denoise && (fx::ModuleType) i != fx::ModuleType::autoLevel)
+        if ((fx::ModuleType) i != fx::ModuleType::denoise && (fx::ModuleType) i != fx::ModuleType::autoLevel
+            && (fx::ModuleType) i != fx::ModuleType::smooth)
             moduleGains ((fx::ModuleType) i);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
@@ -293,4 +294,20 @@ Parameters::Parameters (Layout& l)
     choice (l, "alMode", "Auto Level Aim", { "Fixed level", "Over the backing" }, 0);
     number (l, "alOverBacking", "Auto Level Over Backing", -6.0f, 12.0f, 0.5f, 3.0f, "LU");
     moduleGains (fx::ModuleType::autoLevel);
+
+    // The resonance suppressor (Smooth.h), after those. It runs after the parametric EQ.
+    toggle (l, "smoothOn", "Smooth On");
+    decibels (l, "smoothDepth", "Smooth Depth", 0.0f, fx::ResonanceSuppressor::maxDepthDb, 9.0f);
+    decibels (l, "smoothThreshold", "Smooth Threshold", 0.0f, 18.0f, 6.0f);
+    percent (l, "smoothSharpness", "Smooth Sharpness", 50.0f);
+    number (l, "smoothFocus", "Smooth Focus", -100.0f, 100.0f, 1.0f, 0.0f, "%");
+    hertz (l, "smoothLowHz", "Smooth From", 20.0f, 20000.0f, 20.0f, 1000.0f);
+    hertz (l, "smoothHighHz", "Smooth To", 20.0f, 20000.0f, 20000.0f, 1000.0f);
+    number (l, "smoothAttack", "Smooth Attack", 0.5f, 100.0f, 0.1f, 5.0f, "ms", 10.0f);
+    number (l, "smoothRelease", "Smooth Release", 10.0f, 1000.0f, 1.0f, 100.0f, "ms", 120.0f);
+    percent (l, "smoothMix", "Smooth Mix", 100.0f);
+    toggle (l, "smoothDelta", "Smooth Delta");
+    choice (l, "smoothStereo", "Smooth Stereo", { "Linked", "Mid/Side" }, 0);
+    choice (l, "smoothResolution", "Smooth Resolution", { "Fast (5 ms)", "Balanced (11 ms)", "Quality (21 ms)" }, 1);
+    moduleGains (fx::ModuleType::smooth);
 }

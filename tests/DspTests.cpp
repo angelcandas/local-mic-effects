@@ -8484,6 +8484,434 @@ namespace
         }
     }
 
+    //==========================================================================
+    // Pink noise (-3 dB/octave, Paul Kellet's filter on white noise) at roughly `levelDb` RMS.
+    std::vector<float> makePinkNoise (double seconds, float targetDb, int seed = 1)
+    {
+        juce::Random random (seed);
+        std::vector<float> samples ((size_t) (seconds * sampleRate));
+        float b0 = 0, b1 = 0, b2 = 0, b3 = 0, b4 = 0, b5 = 0, b6 = 0;
+
+        for (auto& sample : samples)
+        {
+            const auto white = 2.0f * random.nextFloat() - 1.0f;
+            b0 = 0.99886f * b0 + white * 0.0555179f;
+            b1 = 0.99332f * b1 + white * 0.0750759f;
+            b2 = 0.96900f * b2 + white * 0.1538520f;
+            b3 = 0.86650f * b3 + white * 0.3104856f;
+            b4 = 0.55000f * b4 - white * 0.5329522f;
+            b5 = -0.7616f * b5 - white * 0.0168980f;
+            sample = b0 + b1 + b2 + b3 + b4 + b5 + b6 + white * 0.5362f;
+            b6 = white * 0.115926f;
+        }
+
+        const auto scale = juce::Decibels::decibelsToGain (targetDb - levelDb (samples, 0, samples.size()));
+        for (auto& sample : samples)
+            sample *= scale;
+        return samples;
+    }
+
+    // Average power spectrum (Hann, 4096 points, half overlap) of signal[from, to), per bin.
+    std::vector<double> powerSpectrum (const std::vector<float>& signal, size_t from, size_t to)
+    {
+        constexpr int order = 12, size = 1 << order;
+        juce::dsp::FFT fft (order);
+        std::vector<float> work ((size_t) size * 2);
+        std::vector<double> result ((size_t) size / 2 + 1, 0.0);
+        int frames = 0;
+
+        for (auto start = from; start + (size_t) size <= to; start += (size_t) size / 2, ++frames)
+        {
+            std::fill (work.begin(), work.end(), 0.0f);
+            for (int i = 0; i < size; ++i)
+                work[(size_t) i] = signal[start + (size_t) i] * (0.5f - 0.5f * std::cos (juce::MathConstants<float>::twoPi * (float) i / (float) size));
+            fft.performFrequencyOnlyForwardTransform (work.data(), true);
+            for (size_t k = 0; k < result.size(); ++k)
+                result[k] += (double) work[k] * work[k];
+        }
+
+        for (auto& value : result)
+            value /= juce::jmax (1, frames);
+        return result;
+    }
+
+    // Level (dB) of a spectrum between two frequencies.
+    double bandDb (const std::vector<double>& spectrum, double lowHz, double highHz)
+    {
+        const auto binHz = sampleRate / 4096.0;
+        double sum = 0.0;
+        for (auto k = (size_t) std::ceil (lowHz / binHz); k <= (size_t) std::floor (highHz / binHz) && k < spectrum.size(); ++k)
+            sum += spectrum[k];
+        return 10.0 * std::log10 (sum + 1.0e-30);
+    }
+
+    struct SmoothSettings
+    {
+        float depth = 9.0f, threshold = 6.0f, sharpness = 50.0f, focus = 0.0f, lowHz = 20.0f, highHz = 20000.0f, mix = 100.0f;
+        bool delta = false;
+        int stereo = 0, resolution = 1;
+    };
+
+    void applySmoothSettings (fx::modules::Smooth& module, const SmoothSettings& s)
+    {
+        module.on.store (1.0f);
+        module.depth.store (s.depth);
+        module.threshold.store (s.threshold);
+        module.sharpness.store (s.sharpness);
+        module.tilt.store (s.focus);
+        module.lowHz.store (s.lowHz);
+        module.highHz.store (s.highHz);
+        module.mix.store (s.mix);
+        module.delta.store (s.delta ? 1.0f : 0.0f);
+        module.stereo.store ((float) s.stereo);
+        module.resolution.store ((float) s.resolution);
+    }
+
+    // Runs a stereo signal through a Smooth module in 256-sample blocks (switched on).
+    std::array<std::vector<float>, 2> runSmooth (fx::modules::Smooth& module, const std::vector<float>& left, const std::vector<float>& right,
+                                                 const SmoothSettings& settings, double rate = sampleRate)
+    {
+        applySmoothSettings (module, settings);
+        module.prepare ({ rate, (juce::uint32) blockSize, 2 });
+
+        std::array<std::vector<float>, 2> output { left, right };
+        for (size_t start = 0; start < left.size(); start += blockSize)
+        {
+            const auto length = std::min ((size_t) blockSize, left.size() - start);
+            float* channels[] = { output[0].data() + start, output[1].data() + start };
+            juce::dsp::AudioBlock<float> block (channels, 2, length);
+            module.process (fx::Module::Context (block));
+        }
+
+        return output;
+    }
+
+    void testResonanceSuppressor()
+    {
+        std::cout << "\nSmooth (resonance suppressor)\n";
+
+        {
+            fx::modules::Smooth probe;
+            probe.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            check (probe.getLatencySamples() == 0, "no delay while it's off");
+            probe.on.store (1.0f);
+            const auto balanced = probe.getLatencySamples();
+            probe.resolution.store (0.0f);
+            const auto fast = probe.getLatencySamples();
+            probe.resolution.store (2.0f);
+            const auto quality = probe.getLatencySamples();
+            check (fast == 256 && balanced == 512 && quality == 1024,
+                   "one frame of delay: fast " + juce::String (fast) + ", balanced " + juce::String (balanced) + ", quality " + juce::String (quality) + " samples");
+
+            fx::modules::Smooth high;
+            high.prepare ({ 96000.0, (juce::uint32) blockSize, 2 });
+            high.on.store (1.0f);
+            check (high.getLatencySamples() == 1024, "at 96 kHz the frame doubles so it stays ~11 ms");
+        }
+
+        const auto seconds = 4.0;
+        const auto length = (size_t) (seconds * sampleRate);
+        const auto tail = (size_t) (1.0 * sampleRate);
+
+        // With no depth (or no mix) the STFT gives the input back exactly, delayed by the
+        // reported latency, at every resolution and in both stereo modes.
+        {
+            const auto left = mixSignals (makePhrase (1.5, 0.1), makePinkNoise (1.5, -40.0f, 3));
+            const auto right = mixSignals (makePhrase (1.5, 0.2), makePinkNoise (1.5, -40.0f, 4));
+            auto worst = -300.0f;
+
+            for (int resolution = 0; resolution < 3; ++resolution)
+                for (int stereo = 0; stereo < 2; ++stereo)
+                    for (auto mixOnly : { false, true })
+                    {
+                        fx::modules::Smooth module;
+                        SmoothSettings s;
+                        s.resolution = resolution;
+                        s.stereo = stereo;
+                        (mixOnly ? s.mix : s.depth) = 0.0f;
+                        const auto out = runSmooth (module, left, right, s);
+                        const auto latency = module.getLatencySamples();
+                        worst = std::max ({ worst, differenceDb (out[0], left, latency, (size_t) latency * 2),
+                                            differenceDb (out[1], right, latency, (size_t) latency * 2) });
+                    }
+
+            check (worst < -80.0f, "no depth or no mix is a clean delay of exactly the reported latency (worst difference " + juce::String (worst, 1) + " dB)");
+        }
+
+        // Flat pink noise: nothing sticks out, so it's left alone.
+        const auto pink = makePinkNoise (seconds, -20.0f, 7);
+        {
+            fx::modules::Smooth module;
+            const auto out = runSmooth (module, pink, pink, {})[0];
+            const auto latency = (size_t) module.getLatencySamples();
+            const auto before = powerSpectrum (pink, tail, length - latency), after = powerSpectrum (out, tail + latency, length);
+            auto worst = 0.0;
+            for (double hz = 62.5; hz < 16000.0; hz *= 2.0)
+            {
+                const auto change = bandDb (after, hz, hz * 2.0) - bandDb (before, hz, hz * 2.0);
+                worst = std::max (worst, std::abs (change));
+            }
+            const auto overall = levelDb (out, tail + latency, length) - levelDb (pink, tail, length - latency);
+            check (worst < 0.5 && std::abs (overall) < 0.5f,
+                   "pink noise stays within 0.5 dB (worst octave " + juce::String (worst, 2) + " dB, overall " + juce::String (overall, 2) + " dB)");
+        }
+
+        // A 3 kHz tone 12 dB over the pink noise (in the effect's own frequency bins) is
+        // pulled down towards the noise; the rest of the spectrum is left alone.
+        std::vector<float> tone (length, 0.0f);
+        {
+            const auto spectrum = powerSpectrum (pink, 0, length);
+            const auto binHz = sampleRate / 4096.0;
+            // Mean noise power per 4096-bin around 3 kHz; a 512-point frame's bin holds 8x the
+            // noise power of a 4096-point one but the same sine power scaled by (512/4096)^2.
+            double noise = 0.0;
+            int count = 0;
+            for (auto k = (size_t) (2500.0 / binHz); k <= (size_t) (3500.0 / binHz); ++k, ++count)
+                noise += spectrum[k];
+            noise /= count;
+            const auto noise512 = noise * (512.0 / 4096.0);       // window sums scale with length; power with its square
+            const auto sinePeak512 = std::pow (10.0, 1.2) * noise512;
+            const auto amplitude = 2.0 * std::sqrt (sinePeak512) / (0.5 * 512.0); // Hann sum = N/2
+
+            for (size_t i = 0; i < length; ++i)
+                tone[i] = (float) (amplitude * std::sin (juce::MathConstants<double>::twoPi * 3000.0 * (double) i / sampleRate));
+        }
+
+        const auto input = mixSignals (pink, tone);
+        const auto toneDb = [&] (const std::vector<double>& spectrum) { return bandDb (spectrum, 2970.0, 3030.0); };
+
+        {
+            const auto measure = [&] (const SmoothSettings& s, double& cut, double& rest)
+            {
+                fx::modules::Smooth module;
+                const auto out = runSmooth (module, input, input, s)[0];
+                const auto latency = (size_t) module.getLatencySamples();
+                const auto before = powerSpectrum (input, tail, length - latency), after = powerSpectrum (out, tail + latency, length);
+                cut = toneDb (before) - toneDb (after);
+                rest = 0.0;
+                for (const auto [low, high] : { std::pair { 100.0, 1000.0 }, std::pair { 1000.0, 2500.0 }, std::pair { 4000.0, 8000.0 }, std::pair { 8000.0, 16000.0 } })
+                    rest = std::max (rest, std::abs (bandDb (after, low, high) - bandDb (before, low, high)));
+            };
+
+            double cut = 0.0, rest = 0.0;
+            measure ({}, cut, rest);
+            check (cut > 3.5 && rest < 0.5, "default settings: the tone comes down " + juce::String (cut, 1) + " dB, the rest moves " + juce::String (rest, 2) + " dB at most");
+
+            SmoothSettings deep;
+            deep.depth = 18.0f;
+            deep.threshold = 4.0f;
+            measure (deep, cut, rest);
+            // (A lower threshold starts to catch the noise's own ripples, a little.)
+            check (cut > 9.0 && rest < 1.0, "deeper, lower threshold: the tone comes down " + juce::String (cut, 1) + " dB, the rest " + juce::String (rest, 2) + " dB");
+
+            SmoothSettings elsewhere;
+            elsewhere.lowHz = 100.0f;
+            elsewhere.highHz = 1000.0f;
+            measure (elsewhere, cut, rest);
+            check (std::abs (cut) < 0.5, "focus range 100-1000 Hz leaves a 3 kHz tone alone (" + juce::String (cut, 2) + " dB)");
+
+            SmoothSettings tilted;
+            tilted.focus = -100.0f;
+            double tiltCut = 0.0;
+            measure (tilted, tiltCut, rest);
+            SmoothSettings highs;
+            highs.focus = 100.0f;
+            double highCut = 0.0;
+            measure (highs, highCut, rest);
+            check (highCut > tiltCut + 1.0, "focus towards the highs cuts a 3 kHz tone more (" + juce::String (highCut, 1) + " dB) than towards the lows ("
+                                               + juce::String (tiltCut, 1) + " dB)");
+
+            fx::modules::Smooth module;
+            SmoothSettings mono;
+            const auto out = runSmooth (module, input, input, mono);
+            const auto readings = std::make_unique<juce::DynamicObject>();
+            module.addReadings (*readings);
+            const auto* bands = readings->getProperty ("reduction").getArray();
+            auto most = 0.0f;
+            int at = -1;
+            for (int b = 0; bands != nullptr && b < bands->size(); ++b)
+                if ((float) (*bands)[b] > most)
+                    most = (float) (*bands)[b], at = b;
+            const auto bandHz = fx::ResonanceSuppressor::bandLowHz * std::pow (fx::ResonanceSuppressor::bandHighHz / fx::ResonanceSuppressor::bandLowHz, (at + 0.5) / fx::ResonanceSuppressor::numBands);
+            check (bands != nullptr && bands->size() == fx::ResonanceSuppressor::numBands && most > 3.0f && bandHz > 2400.0 && bandHz < 3800.0
+                       && (float) readings->getProperty ("deepest") >= most,
+                   "the card gets the cut per band: deepest " + juce::String (most, 1) + " dB near " + juce::String (bandHz, 0) + " Hz");
+        }
+
+        // A bright sung note (harmonics of 220 Hz up to 9 kHz, with vibrato) is mostly left
+        // alone at every resolution, even where the frame resolves the harmonics; one
+        // harmonic 10 dB louder than its neighbours (a resonance) comes down.
+        {
+            const auto makeBright = [&] (int loudHarmonic)
+            {
+                std::vector<float> voice (length, 0.0f);
+                double phase = 0.0;
+                for (size_t i = 0; i < length; ++i)
+                {
+                    const auto t = (double) i / sampleRate;
+                    phase += juce::MathConstants<double>::twoPi * 220.0 * std::exp2 (0.3 / 12.0 * std::sin (juce::MathConstants<double>::twoPi * 5.5 * t)) / sampleRate;
+                    double value = 0.0;
+                    for (int h = 1; h <= 40; ++h)
+                        value += std::sin (phase * h) / std::sqrt ((double) h) * (h == loudHarmonic ? 3.16 : 1.0);
+                    voice[i] = (float) (value * 0.03);
+                }
+                return mixSignals (voice, makePinkNoise (seconds, -60.0f, 5));
+            };
+
+            const auto plain = makeBright (0), ringing = makeBright (14); // 3080 Hz
+            juce::String report;
+            auto worstPlain = 0.0, leastCut = 100.0;
+
+            for (int resolution = 0; resolution < 3; ++resolution)
+            {
+                SmoothSettings s;
+                s.resolution = resolution;
+                fx::modules::Smooth a, b;
+                const auto outPlain = runSmooth (a, plain, plain, s)[0];
+                const auto outRinging = runSmooth (b, ringing, ringing, s)[0];
+                const auto latency = (size_t) a.getLatencySamples();
+                const auto spectrumIn = powerSpectrum (plain, tail, length - latency), spectrumOut = powerSpectrum (outPlain, tail + latency, length);
+                const auto change = bandDb (spectrumOut, 1000.0, 9000.0) - bandDb (spectrumIn, 1000.0, 9000.0);
+                const auto ringIn = powerSpectrum (ringing, tail, length - latency), ringOut = powerSpectrum (outRinging, tail + latency, length);
+                const auto cut = bandDb (ringIn, 2950.0, 3200.0) - bandDb (ringOut, 2950.0, 3200.0);
+                worstPlain = std::max (worstPlain, std::abs (change));
+                leastCut = std::min (leastCut, cut);
+                report << " " << juce::String (change, 2) << "/" << juce::String (cut, 1);
+            }
+
+            check (worstPlain < 1.0 && leastCut > 3.0,
+                   "a bright sung note keeps its harmonics, a ringing one comes down (fast, balanced, quality: plain change / ring cut, dB:" + report + ")");
+        }
+
+        // Only while it sticks out: a tone for the first 2 s, then the noise alone is back
+        // to its own level once the release is over.
+        {
+            auto burst = tone;
+            std::fill (burst.begin() + (long) (2.0 * sampleRate), burst.end(), 0.0f);
+            const auto in = mixSignals (pink, burst);
+            fx::modules::Smooth module;
+            const auto out = runSmooth (module, in, in, {})[0];
+            const auto latency = (size_t) module.getLatencySamples();
+            const auto from = (size_t) (2.5 * sampleRate);
+            const auto before = powerSpectrum (in, from, length - latency), after = powerSpectrum (out, from + latency, length);
+            const auto change = bandDb (after, 2500.0, 3500.0) - bandDb (before, 2500.0, 3500.0);
+            check (std::abs (change) < 0.5, "after the tone stops the band around it is back within " + juce::String (std::abs (change), 2) + " dB");
+        }
+
+        // Delta plays what's removed: normal + delta = the input.
+        {
+            fx::modules::Smooth a, b;
+            SmoothSettings deep;
+            deep.depth = 18.0f;
+            deep.threshold = 2.0f;
+            const auto wet = runSmooth (a, input, input, deep)[0];
+            deep.delta = true;
+            const auto removed = runSmooth (b, input, input, deep)[0];
+            const auto latency = a.getLatencySamples();
+            auto sum = wet;
+            for (size_t i = 0; i < sum.size(); ++i)
+                sum[i] += removed[i];
+            const auto error = differenceDb (sum, input, latency, (size_t) latency * 2);
+            const auto removedDb = levelDb (removed, tail, length) - levelDb (input, tail, length);
+            check (error < -80.0f && removedDb < -6.0f,
+                   "delta is exactly what was taken out (sum vs input " + juce::String (error, 1) + " dB; delta " + juce::String (removedDb, 1) + " dB under the input)");
+        }
+
+        // Stereo: linked cuts both sides alike; mid/side leaves a tone in the sides to the
+        // side cuts and a centred one to the mid cuts.
+        {
+            const auto noiseL = makePinkNoise (seconds, -20.0f, 11), noiseR = makePinkNoise (seconds, -20.0f, 12);
+            const auto left = mixSignals (noiseL, tone), right = noiseR; // tone only on the left
+
+            fx::modules::Smooth linked;
+            const auto out = runSmooth (linked, left, right, {});
+            const auto latency = (size_t) linked.getLatencySamples();
+            const auto band = [&] (const std::vector<float>& x, size_t offset) { return bandDb (powerSpectrum (x, tail + offset, length - latency + offset), 2900.0, 3100.0); };
+            const auto rightChange = band (out[1], latency) - band (right, 0);
+            check (rightChange < -0.5, "linked: the right side is cut too where the left rings (" + juce::String (rightChange, 1) + " dB)");
+
+            // A centred tone over independent noise on each side: in mid/side mode only the
+            // mid has the tone, so the sides (L - R) keep their noise.
+            const auto centreL = mixSignals (noiseL, tone), centreR = mixSignals (noiseR, tone);
+            fx::modules::Smooth ms;
+            SmoothSettings s;
+            s.stereo = 1;
+            const auto msOut = runSmooth (ms, centreL, centreR, s);
+            std::vector<float> sideIn (length), sideOut (length);
+            for (size_t i = 0; i < length; ++i)
+            {
+                sideIn[i] = 0.5f * (centreL[i] - centreR[i]);
+                sideOut[i] = 0.5f * (msOut[0][i] - msOut[1][i]);
+            }
+            const auto sideChange = band (sideOut, latency) - band (sideIn, 0);
+            const auto midCut = band (centreL, 0) - band (msOut[0], latency);
+            check (std::abs (sideChange) < 0.5 && midCut > 3.0,
+                   "mid/side: a centred tone comes down " + juce::String (midCut, 1) + " dB, the sides move " + juce::String (sideChange, 2) + " dB");
+        }
+
+        // Resolution can change while it runs, and the reported delay follows.
+        {
+            fx::modules::Smooth module;
+            SmoothSettings s;
+            applySmoothSettings (module, s);
+            module.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            auto finite = true;
+            std::vector<int> latencies;
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            size_t offset = 0;
+
+            for (int step = 0; step < 6; ++step)
+            {
+                module.resolution.store ((float) (step % 3));
+                for (int n = 0; n < 40; ++n, offset += blockSize)
+                {
+                    for (int ch = 0; ch < 2; ++ch)
+                        buffer.copyFrom (ch, 0, input.data() + (offset % (length - blockSize)), blockSize);
+                    juce::dsp::AudioBlock<float> block (buffer);
+                    module.process (fx::Module::Context (block));
+                    for (int i = 0; i < blockSize; ++i)
+                        finite = finite && std::isfinite (buffer.getSample (0, i)) && std::abs (buffer.getSample (0, i)) < 4.0f;
+                }
+                latencies.push_back (module.getLatencySamples());
+            }
+
+            check (finite && latencies[0] == 256 && latencies[1] == 512 && latencies[2] == 1024,
+                   "switching resolution while running stays clean and the delay follows (256, 512, 1024)");
+        }
+
+        // CPU: stereo at the quality resolution.
+        {
+            fx::modules::Smooth module;
+            SmoothSettings s;
+            s.resolution = 2;
+            const auto started = juce::Time::getMillisecondCounterHiRes();
+            runSmooth (module, input, input, s);
+            const auto factor = (juce::Time::getMillisecondCounterHiRes() - started) / 1000.0 / seconds;
+#if JUCE_DEBUG
+            const auto budget = 0.5; // Debug builds are ~8x slower (and CI machines vary)
+#else
+            const auto budget = 0.06;
+#endif
+            check (factor < budget, "stereo, quality: " + juce::String (factor * 100.0, 2) + "% of one core (budget " + juce::String (budget * 100.0, 0) + "%)");
+        }
+
+        // The plugin reports the delay to the host while Smooth is on.
+        {
+            PluginProcessor processor;
+            processor.prepareToPlay (sampleRate, blockSize);
+            const auto off = processor.getLatencySamples();
+            processor.getState().getParameter ("smoothOn")->setValueNotifyingHost (1.0f);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            buffer.clear();
+            juce::MidiBuffer midi;
+            processor.processBlock (buffer, midi);
+            processor.updateLatency();
+            check (off == 0 && processor.getLatencySamples() == 512,
+                   "plugin latency: " + juce::String (off) + " samples off, " + juce::String (processor.getLatencySamples()) + " on");
+            processor.getState().getParameter ("smoothOn")->setValueNotifyingHost (0.0f);
+        }
+    }
+
     void testSmoothing()
     {
         std::cout << "\nSmooth knob changes\n";
@@ -10626,6 +11054,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=smooth: just the resonance suppressor.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "smooth")
+    {
+        testResonanceSuppressor();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=soundcheck: just the Live sound check and auto level.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "soundcheck")
     {
@@ -10753,6 +11189,7 @@ int main()
     testAnalysisSpeed();
     testLatency();
     testDenoise();
+    testResonanceSuppressor();
     testSmoothing();
     testStems();
 #if MICFX_HAS_DEMUCS

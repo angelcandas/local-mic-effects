@@ -29,6 +29,7 @@ namespace
             case T::gate:       return "Gate";
             case T::eq:         return "EQ";
             case T::paraEq:     return "Parametric EQ";
+            case T::smooth:     return "Smooth";
             case T::compressor: return "Compressor";
             case T::deEsser:    return "De-esser";
             case T::dynamicEq:  return "Dynamic EQ";
