@@ -67,6 +67,13 @@ export const MODULES = [
                knob("peqHighFreq", "High freq"), bipolar("peqHighGain", "High"),
                toggle("peqHighCutOn", "High cut"), knob("peqHighCutFreq", "High cut")] },
 
+  { id: "smooth", name: "Smooth", category: "cleanup", power: "smoothOn", wide: true,
+    description: "Finds the narrow frequencies that stick out (harsh notes, boxy tones, whistly s, ringing cymbals) and turns them down only while they do. Adds 5-21 ms",
+    controls: [knob("smoothDepth", "Depth"), knob("smoothThreshold", "Threshold"), knob("smoothSharpness", "Sharpness"),
+               bipolar("smoothFocus", "Focus"), knob("smoothLowHz", "From"), knob("smoothHighHz", "To"),
+               knob("smoothAttack", "Attack"), knob("smoothRelease", "Release"), knob("smoothMix", "Mix"),
+               choice("smoothStereo", "Stereo"), choice("smoothResolution", "Resolution"), toggle("smoothDelta", "Delta")] },
+
   { id: "comp", name: "Compressor", category: "cleanup", power: "compOn",
     description: "Evens out loud and quiet moments",
     controls: [knob("compThreshold", "Threshold"), knob("compRatio", "Ratio"), knob("compAttack", "Attack"),
@@ -181,7 +188,7 @@ export const MODULES = [
 // effect pictures (fxviews.js). The pitch module holds three entries (autotune, pitch shift,
 // harmonizer).
 export const MODULE_KEYS = {
-  hpf: "highPass", denoise: "denoise", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq", peq: "paraEq",
+  hpf: "highPass", denoise: "denoise", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq", peq: "paraEq", smooth: "smooth",
   comp: "compressor", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
   crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", tremolo: "tremolo",
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",

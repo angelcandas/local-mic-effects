@@ -208,9 +208,10 @@ Parameters::Parameters (Layout& l)
         decibels (l, key + "OutGain", name + " Out Gain", -fx::Module::maxGainDb, fx::Module::maxGainDb, 0.0f);
     };
 
-    // (The denoiser came later: its gains are at the end with its other parameters.)
+    // (The denoiser and the resonance suppressor came later: their gains are at the end
+    // with their other parameters.)
     for (int i = 0; i < fx::numModuleTypes; ++i)
-        if ((fx::ModuleType) i != fx::ModuleType::denoise)
+        if ((fx::ModuleType) i != fx::ModuleType::denoise && (fx::ModuleType) i != fx::ModuleType::smooth)
             moduleGains ((fx::ModuleType) i);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
@@ -283,4 +284,20 @@ Parameters::Parameters (Layout& l)
     percent (l, "harmonyHumanize", "Harmony Humanize", 35.0f);
     percent (l, "harmonySpread", "Harmony Spread", 50.0f);
     semitones (l, "harmonyFormant", "Harmony Formant", 12.0f, 0.1f, 0.0f);
+
+    // The resonance suppressor (Smooth.h), after those. It runs after the parametric EQ.
+    toggle (l, "smoothOn", "Smooth On");
+    decibels (l, "smoothDepth", "Smooth Depth", 0.0f, fx::ResonanceSuppressor::maxDepthDb, 9.0f);
+    decibels (l, "smoothThreshold", "Smooth Threshold", 0.0f, 18.0f, 6.0f);
+    percent (l, "smoothSharpness", "Smooth Sharpness", 50.0f);
+    number (l, "smoothFocus", "Smooth Focus", -100.0f, 100.0f, 1.0f, 0.0f, "%");
+    hertz (l, "smoothLowHz", "Smooth From", 20.0f, 20000.0f, 20.0f, 1000.0f);
+    hertz (l, "smoothHighHz", "Smooth To", 20.0f, 20000.0f, 20000.0f, 1000.0f);
+    number (l, "smoothAttack", "Smooth Attack", 0.5f, 100.0f, 0.1f, 5.0f, "ms", 10.0f);
+    number (l, "smoothRelease", "Smooth Release", 10.0f, 1000.0f, 1.0f, 100.0f, "ms", 120.0f);
+    percent (l, "smoothMix", "Smooth Mix", 100.0f);
+    toggle (l, "smoothDelta", "Smooth Delta");
+    choice (l, "smoothStereo", "Smooth Stereo", { "Linked", "Mid/Side" }, 0);
+    choice (l, "smoothResolution", "Smooth Resolution", { "Fast (5 ms)", "Balanced (11 ms)", "Quality (21 ms)" }, 1);
+    moduleGains (fx::ModuleType::smooth);
 }

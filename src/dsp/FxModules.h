@@ -7,6 +7,7 @@
 #include "Mastering.h"
 #include "PitchEngine.h"
 #include "SpectralDenoiser.h"
+#include "Smooth.h"
 
 #include <memory>
 
@@ -727,6 +728,88 @@ private:
 
     StereoWidth width;
 };
+// Resonance suppressor (Smooth.h): narrow peaks that stick out of the sound from moment
+// to moment are turned down while they stick out. Delta, stereo and resolution are
+// choices: they don't switch the module on.
+class Smooth final : public Module
+{
+public:
+    Smooth() : Module (ModuleType::smooth) {}
+
+    Value& on         = addSwitch ("smoothOn");
+    Value& depth      = addValue ("smoothDepth", 9.0f);        // dB
+    Value& threshold  = addValue ("smoothThreshold", 6.0f);    // dB over the envelope
+    Value& sharpness  = addValue ("smoothSharpness", 50.0f);   // %
+    Value& tilt       = addValue ("smoothFocus", 0.0f);        // %, -100 lows .. +100 highs
+    Value& lowHz      = addValue ("smoothLowHz", 20.0f);
+    Value& highHz     = addValue ("smoothHighHz", 20000.0f);
+    Value& attack     = addValue ("smoothAttack", 5.0f);       // ms
+    Value& release    = addValue ("smoothRelease", 100.0f);    // ms
+    Value& mix        = addValue ("smoothMix", 100.0f);        // %
+    Value& delta      = addChoice ("smoothDelta", 0.0f);
+    Value& stereo     = addChoice ("smoothStereo", 0.0f);      // ResonanceSuppressor::Stereo
+    Value& resolution = addChoice ("smoothResolution", 1.0f);  // ResonanceSuppressor::Resolution
+
+    // One FFT frame while it's on (5, 11 or 21 ms, by Resolution).
+    int getLatencySamples() const noexcept override
+    {
+        if (! flag (on))
+            return 0;
+
+        const auto r = (ResonanceSuppressor::Resolution) juce::jlimit (0, 2, index (resolution));
+        return ResonanceSuppressor::getFrameSize (r, rate.load (std::memory_order_relaxed));
+    }
+
+    const ResonanceSuppressor& getSuppressor() const noexcept { return suppressor; }
+
+    // reduction: the cut per band right now (dB, deepest bin, 40 Hz..18 kHz log-spaced),
+    // deepest: the deepest cut since the last reading.
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        juce::Array<juce::var> cut;
+        for (auto& band : suppressor.reductionBandsDb)
+            cut.add (std::round (band.load (std::memory_order_relaxed) * 10.0f) / 10.0f);
+
+        readings.setProperty ("reduction", cut);
+        readings.setProperty ("deepest", std::round (suppressor.takeDeepestCut() * 10.0f) / 10.0f);
+    }
+
+private:
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override
+    {
+        rate.store (spec.sampleRate, std::memory_order_relaxed);
+        suppressor.setSettings (makeSettings());
+        suppressor.prepare (spec);
+    }
+
+    void resetModule() override { suppressor.reset(); }
+
+    void update() noexcept override { suppressor.setSettings (makeSettings()); }
+
+    ResonanceSuppressor::Settings makeSettings() const noexcept
+    {
+        ResonanceSuppressor::Settings s;
+        s.depthDb = get (depth);
+        s.thresholdDb = get (threshold);
+        s.sharpness = fraction (sharpness);
+        s.tilt = juce::jlimit (-1.0f, 1.0f, fraction (tilt));
+        s.lowHz = get (lowHz);
+        s.highHz = get (highHz);
+        s.attackMs = get (attack);
+        s.releaseMs = get (release);
+        s.mix = fraction (mix);
+        s.delta = flag (delta);
+        s.stereo = index (stereo) == 1 ? ResonanceSuppressor::Stereo::midSide : ResonanceSuppressor::Stereo::linked;
+        s.resolution = (ResonanceSuppressor::Resolution) juce::jlimit (0, 2, index (resolution));
+        return s;
+    }
+
+    void render (const Context& c) noexcept override { suppressor.process (c); }
+
+    ResonanceSuppressor suppressor;
+    std::atomic<double> rate { 48000.0 };
+};
+
 }
 
 namespace fx
@@ -741,6 +824,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::pitch:      return std::make_unique<modules::Pitch>();
         case ModuleType::eq:         return std::make_unique<modules::Eq>();
         case ModuleType::paraEq:     return std::make_unique<modules::ParaEq>();
+        case ModuleType::smooth:     return std::make_unique<modules::Smooth>();
         case ModuleType::compressor: return std::make_unique<modules::Compressor>();
         case ModuleType::deEsser:    return std::make_unique<modules::DeEsser>();
         case ModuleType::exciter:    return std::make_unique<modules::Exciter>();

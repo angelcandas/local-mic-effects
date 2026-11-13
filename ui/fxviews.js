@@ -402,6 +402,54 @@ const views = {
     };
   },
 
+  // Resonance suppressor: the live spectrum behind, the Focus range shaded, and the cut
+  // right now hanging from the top (deepest bin per band, so a narrow cut shows at its
+  // full depth). The dashed line is Depth, the most any frequency comes down.
+  smooth({ get }) {
+    const BANDS = 32, LOW = 40, HIGH = 18000;      // ResonanceSuppressor::numBands, bandLowHz, bandHighHz
+    const MAX_CUT = 24;                            // ResonanceSuppressor::maxDepthDb
+    const element = frame("is-filter");
+    frequencyGrid(element);
+    const spectrum = spectrumLayer(element);
+    const range = svg("rect", { class: "fx-band", y: 0, height: H, opacity: 0.35 });
+    element.insertBefore(range, element.firstChild);
+    const fill = path(element, "fx-reduction"), curve = path(element, "fx-curve");
+    const depth = svg("line", { class: "fx-threshold", x1: 0, x2: W });
+    element.append(depth);
+    label(element, 3, 11, "Cut");
+    const centres = Array.from({ length: BANDS }, (_, b) => xOfF(LOW * Math.pow(HIGH / LOW, (b + 0.5) / BANDS)));
+    const yOfCut = (db) => clamp(db / MAX_CUT) * H * 0.7;
+    let shown = new Array(BANDS).fill(0);
+
+    return {
+      element,
+      update() {
+        const x0 = xOfF(get("smoothLowHz")), x1 = xOfF(get("smoothHighHz"));
+        range.setAttribute("x", Math.min(x0, x1));
+        range.setAttribute("width", Math.max(1, Math.abs(x1 - x0)));
+        const y = yOfCut(get("smoothDepth"));
+        depth.setAttribute("y1", y);
+        depth.setAttribute("y2", y);
+      },
+      live(reading) {
+        spectrum(reading);
+        const cut = reading?.reduction ?? [];
+        shown = shown.map((v, b) => Math.max(cut[b] ?? 0, v - 0.6)); // falls back gently
+        if (!reading || shown.every((v) => v < 0.05)) {
+          fill.setAttribute("d", "");
+          curve.setAttribute("d", "");
+        } else {
+          const points = shown.map((db, b) => `${centres[b].toFixed(1)},${yOfCut(db).toFixed(1)}`);
+          const d = `M${points.join(" L")}`;
+          curve.setAttribute("d", d);
+          fill.setAttribute("d", `M${centres[0].toFixed(1)},0 L${points.join(" L")} L${centres[BANDS - 1].toFixed(1)},0 Z`);
+        }
+        const deepest = Math.max(reading?.deepest ?? 0, ...cut);
+        return reading && deepest >= 0.5 ? `−${deepest.toFixed(1)} dB` : "";
+      },
+    };
+  },
+
   // Input level (x) against output level (y), -60..0 dB.
   // Mastering (src/dsp/Mastering.h).
   masterEq({ get, set, range }) {

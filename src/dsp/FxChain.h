@@ -157,7 +157,7 @@ inline bool hasSpectrumView (ModuleType type) noexcept
 {
     return type == ModuleType::highPass || type == ModuleType::eq || type == ModuleType::paraEq
         || type == ModuleType::deEsser || type == ModuleType::radio || type == ModuleType::filter
-        || type == ModuleType::masterEq;
+        || type == ModuleType::masterEq || type == ModuleType::smooth;
 }
 
 // One module's live readings for the UI: { in, out } peak dB since the last call, plus
