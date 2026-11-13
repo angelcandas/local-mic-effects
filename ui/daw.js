@@ -5381,6 +5381,18 @@ class DawScreen {
       item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
       if (track.kind !== "midi")
         item("Split into stems…", () => this.toggleStems(true, firstClip), { disabled: !firstClip });
+      if (track.kind !== "midi") {
+        rule();
+        const partners = tracks.filter((t) => t.id !== track.id && t.kind !== "midi" && t.clips?.length);
+        item("Align to…", () => this.openAlignMenu(track, partners, x, y), {
+          disabled: !firstClip || !partners.length,
+          hint: "Line its phase up with a track that recorded the same sound (two mics on one drum or amp, a DI and its amp): flips the polarity and nudges it a few ms",
+        });
+        item("Invert polarity", () => daw("setTrack", { id: track.id, polarity: !track.polarity }), { checked: Boolean(track.polarity), hint: "Play its audio upside down" });
+        if (track.polarity || track.nudge)
+          item(`Reset alignment${track.nudge ? ` (${track.nudge > 0 ? "+" : ""}${track.nudge.toFixed(2)} ms)` : ""}`,
+               () => daw("setTrack", { id: track.id, polarity: false, nudge: 0 }), { hint: "Polarity and timing back as recorded" });
+      }
       rule();
       const colours = html("div", "colour-row track-menu-colours");
       TRACK_COLOURS.forEach((colour) => {
@@ -5392,6 +5404,18 @@ class DawScreen {
         colours.append(swatch);
       });
       menu.append(colours);
+    });
+  }
+
+  // Which track to line this one up with (the phase of two mics on one sound).
+  openAlignMenu(track, partners, x, y) {
+    popMenu(x, y, ({ item, heading }) => {
+      heading(`Line up "${track.name}" with`);
+      for (const other of partners)
+        item(other.name, async () => {
+          const result = await daw("alignTrack", { track: track.id, to: other.id });
+          if (result?.message) toast(result.message);
+        }, { indent: true });
     });
   }
 

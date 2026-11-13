@@ -270,6 +270,29 @@ juce::ValueTree Edit::getChannel (int id) const
 // Tracks and returns (not the master: it has no mute or solo).
 void Edit::setTrackVolume (int trackId, float decibels) { getChannel (trackId).setProperty (ids::volume, decibels, undoTarget); }
 void Edit::setTrackPan (int trackId, float pan)         { getChannel (trackId).setProperty (ids::pan, juce::jlimit (-1.0f, 1.0f, pan), undoTarget); }
+
+void Edit::setTrackPolarity (int trackId, bool inverted)
+{
+    if (auto track = getTrack (trackId); track.isValid())
+    {
+        if (inverted)
+            track.setProperty (ids::polarity, true, undoTarget);
+        else
+            track.removeProperty (ids::polarity, undoTarget);
+    }
+}
+
+void Edit::setTrackNudge (int trackId, float milliseconds)
+{
+    if (auto track = getTrack (trackId); track.isValid())
+    {
+        milliseconds = juce::jlimit (-maxNudgeMs, maxNudgeMs, milliseconds);
+        if (std::abs (milliseconds) < 1.0e-4f)
+            track.removeProperty (ids::nudge, undoTarget);
+        else
+            track.setProperty (ids::nudge, milliseconds, undoTarget);
+    }
+}
 void Edit::setTrackMute (int trackId, bool mute)        { if (trackId != masterId) getChannel (trackId).setProperty (ids::mute, mute, undoTarget); }
 void Edit::setTrackSolo (int trackId, bool solo)        { if (trackId != masterId) getChannel (trackId).setProperty (ids::solo, solo, undoTarget); }
 void Edit::setMasterVolume (float decibels)             { getMaster().setProperty (ids::volume, decibels, undoTarget); }

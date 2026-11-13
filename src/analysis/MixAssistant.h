@@ -1,6 +1,7 @@
 #pragma once
 
 #include "Analysis.h"
+#include "Alignment.h"
 #include "dsp/FxModule.h"
 
 #include <map>
@@ -109,6 +110,15 @@ struct MixTargets
 //          target. Needs the mix measured (SessionAnalyser with includeMix), not the tracks.
 enum class MixMode { mix, fit, clean, master };
 
+// Two tracks that recorded the same sound together (see measureAlignments): b against a,
+// as recorded (before either track's polarity or nudge).
+struct TrackPairAlignment
+{
+    int a = 0, b = 0;    // track ids, a before b in the session
+    bool linked = false; // linked tracks (Edit::linkTracks)
+    Alignment alignment;
+};
+
 const char* getModeKey (MixMode);              // "mix", "fit", "clean", "master"
 MixMode getModeFromKey (const juce::String&);  // mix when unknown
 
@@ -172,6 +182,16 @@ struct MixOptions
     std::set<int> stereoTracks;      // by id: their audio has a real stereo image
     std::map<int, float> currentPans; // by id, -1..1 (missing: centre)
 
+    // Phase, before anything else (the EQ hears the tracks summed): tracks that recorded
+    // the same sound together (linked tracks, or tracks of one role whose recordings start
+    // together: two mics on a kick, a snare top and bottom, an amp's close and room mic, a
+    // DI and its amp) are lined up: polarity flipped and/or nudged a few ms, each to the
+    // track before it that shares the most sound with it. Halves of a stereo pair (named
+    // L and R) keep their timing, it's their image.
+    bool phase = true;
+    std::vector<TrackPairAlignment> alignments;            // measured (measureAlignments)
+    std::map<int, std::pair<bool, float>> currentPhase;    // by id: polarity, nudge (ms) as the tracks are now
+
     // Insert types each track already has (by track id). A voice that already has a
     // reverb or an echo keeps its own space: Auto Mix doesn't add or change one.
     std::map<int, std::vector<fx::ModuleType>> existingInserts;
@@ -185,6 +205,25 @@ MixTargets getTargets (MixStyle);
 // True when a recording has a stereo image worth keeping: two channels that differ
 // (a dual-mono file, the same signal on both sides, is a mono part).
 bool hasStereoImage (const juce::AudioBuffer<float>&);
+
+// The side a track's name says it is ("OH L", "Piano Right", "Guitarra Izq"): -1 left,
+// 1 right, 0 none.
+int getNamedSide (const juce::String& trackName);
+
+// A track's audio clips as they sit on the timeline from `from` for `seconds` (mono sum,
+// plain: no warp, transpose or fades), at the first clip's file rate (`sampleRate` is set;
+// clips at another rate are left out). Reads the files: any thread, on a copy of the track.
+juce::AudioBuffer<float> readTrackAudio (const juce::ValueTree& track, double from, double seconds, double& sampleRate);
+
+// The track's first audio clip start (seconds), or -1 when it has none.
+double getFirstAudioStart (const juce::ValueTree& track);
+
+// Measures every pair of audio tracks that may have recorded the same sound: linked
+// tracks, and tracks whose recordings start together (same start, same file length),
+// unless their roles (`knownRoles`, from tags or names) differ or are voices or a
+// backing. `session` is a copy (any thread); `shouldContinue` false stops early.
+std::vector<TrackPairAlignment> measureAlignments (const juce::ValueTree& session, const std::map<int, Role>& knownRoles,
+                                                   const std::function<bool()>& shouldContinue = {});
 
 // Mono fold-down of a mono part at `pan` (the mixer's balance law): how much quieter it
 // gets against the centre when the mix plays in mono (a phone, a club's PA), in dB (>= 0).
@@ -219,6 +258,7 @@ struct MixMove
     std::map<juce::String, std::vector<std::pair<double, float>>> automation;
     std::map<juce::String, float> values; // insert values by ID, or "volume" in dB
     // values {"pan": -1..1} with no insert: the track's pan.
+    // values {"polarity": 0 or 1, "nudge": ms} with no insert: the track's phase (Edit::setTrackPolarity, setTrackNudge).
     std::vector<std::pair<double, float>> ride; // volume automation (seconds, dB), when not empty (no insert, no values)
     juce::StringArray reasons;       // one line per change, for the UI
 };

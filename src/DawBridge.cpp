@@ -130,6 +130,12 @@ struct DawBridge::AutoMixJob
     juce::File reference;                     // set for a reference match
     analysis::SessionAnalyser::Result result; // the tracks, or (reference) the mix
     analysis::Profile referenceProfile;
+
+    // Phase: a copy of the session's tracks and the roles known before listening, to
+    // measure which ones recorded the same sound (when phase is on).
+    juce::ValueTree session;
+    std::map<int, analysis::Role> knownRoles;
+    std::vector<analysis::TrackPairAlignment> alignments;
 };
 
 struct DawBridge::TakeCompJob
@@ -242,7 +248,8 @@ namespace
                 { "volume", "Volume" }, { "pan", "Pan" }, { "mute", "Mute" }, { "solo", "Solo" }, { "arm", "Arm" },
                 { "monitor", "Monitor" }, { "monitorMode", "Monitor" }, { "name", "Rename track" }, { "colour", "Track colour" }, { "input", "Track input" },
                 { "inGain", "Input gain" }, { "outGain", "Output gain" }, { "transpose", "Track key" },
-                { "clearRide", "Clear volume ride" }, { "clearAutomation", "Clear effect automation" } };
+                { "clearRide", "Clear volume ride" }, { "clearAutomation", "Clear effect automation" },
+                { "polarity", "Polarity" }, { "nudge", "Nudge track" } };
             for (const auto& [key, name] : keys)
                 if (args.hasProperty (key))
                     return name;
@@ -251,7 +258,7 @@ namespace
 
         static const std::map<juce::String, const char*> names {
             { "addTrack", "Add track" }, { "addMidiTrack", "Add MIDI track" }, { "removeTrack", "Delete track" },
-            { "duplicateTrack", "Duplicate track" }, { "moveTrack", "Move track" }, { "linkTracks", "Link tracks" },
+            { "duplicateTrack", "Duplicate track" }, { "moveTrack", "Move track" }, { "linkTracks", "Link tracks" }, { "alignTrack", "Align" },
             { "unlinkTrack", "Unlink track" }, { "moveClip", "Move clip" }, { "trimStart", "Trim clip" }, { "trimEnd", "Trim clip" },
             { "clipFades", "Fade" }, { "clipGain", "Clip gain" }, { "split", "Split clip" }, { "removeClip", "Delete clip" },
             { "duplicate", "Duplicate clip" }, { "pasteClip", "Paste clip" }, { "setClip", "Clip change" },
@@ -556,6 +563,7 @@ juce::var DawBridge::describeSession()
                               { "monitorMode", daw::Edit::getTrackMonitorMode (track) },
                               { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) }, { "automation", describeAutomation (track) },
                               { "link", daw::Edit::getLink (track) },
+                              { "polarity", daw::Edit::getPolarity (track) }, { "nudge", daw::Edit::getNudge (track) },
                               { "inserts", describeInserts (track) }, { "clips", clips },
                               { "output", daw::Edit::getTrackOutput (track) }, { "sends", describeSends (track) },
                               { "group", daw::Edit::getTrackGroup (track) },
@@ -957,6 +965,7 @@ void DawBridge::tick()
             {
                 // New analysis: the tracks' tags, and a guess from the sound for the rest.
                 autoMixAnalysis = std::move (job->result);
+                autoMixAlignments = std::move (job->alignments);
                 std::map<int, analysis::Role> roles;
                 const auto songSeconds = autoMixAnalysis->tracks.empty() ? 0.0
                                        : autoMixAnalysis->tracks.front().second.getNumFrames() * analysis::Profile::hopSeconds;
@@ -1530,13 +1539,35 @@ void DawBridge::startAutoMix (const juce::File& reference)
                                                                 engine.getSampleRate(), false);
     }
 
+    if (reference == juce::File() && autoMixOptions.phase
+        && (autoMixOptions.mode == analysis::MixMode::mix || autoMixOptions.mode == analysis::MixMode::fit))
+    {
+        job->session = edit.getState().createCopy();
+        for (const auto& track : edit.getTracks())
+        {
+            const auto byName = analysis::guessRoleFromName (track[ids::name].toString());
+            if (track.hasProperty (ids::mixRole))
+                job->knownRoles[(int) track[ids::id]] = analysis::getRoleFromKey (track[ids::mixRole].toString());
+            else if (byName.has_value())
+                job->knownRoles[(int) track[ids::id]] = *byName;
+        }
+    }
+
     autoMixJob = job;
 
     juce::Thread::launch ([analyser, job, cache = profileCache]
     {
         const auto reading = job->reference != juce::File();
-        const auto progress = [job, reading] (double p) { job->progress = reading ? 0.5 * p : p; return ! job->cancel.load(); };
+        const auto measuring = job->session.isValid();
+        const auto progress = [job, reading, measuring] (double p) { job->progress = reading ? 0.5 * p : measuring ? 0.9 * p : p; return ! job->cancel.load(); };
         job->result = analyser->run (progress, cache.get());
+
+        if (measuring && ! job->result.cancelled)
+        {
+            job->alignments = analysis::measureAlignments (job->session, job->knownRoles, [job] { return ! job->cancel.load(); });
+            job->result.cancelled = job->cancel.load();
+            job->progress = 1.0;
+        }
 
         if (reading && ! job->result.cancelled)
         {
@@ -1664,6 +1695,8 @@ void DawBridge::replanAutoMix()
         else if (hasStereoImage (track))
             options.stereoTracks.insert (id);
 
+        options.currentPhase[id] = { daw::Edit::getPolarity (track), daw::Edit::getNudge (track) };
+
         // Pans you set stay; the ones Auto Mix set last time are planned again.
         const auto pan = (float) track.getProperty (ids::pan, 0.0f);
         if (const auto it = autoMixPans.find (id); it == autoMixPans.end() || std::abs (it->second - pan) > 0.01f)
@@ -1674,6 +1707,8 @@ void DawBridge::replanAutoMix()
                 if (insert[ids::type].toString() == fx::getModuleKey ((fx::ModuleType) type))
                     options.existingInserts[id].push_back ((fx::ModuleType) type);
     }
+
+    options.alignments = autoMixAlignments;
 
     // The shared reverb: the first return with a reverb on it.
     for (const auto& ret : edit.getReturns())
@@ -1752,6 +1787,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("transients", autoMixOptions.transients);
     read ("smooth", autoMixOptions.smooth);
     read ("pan", autoMixOptions.pan);
+    read ("phase", autoMixOptions.phase);
     read ("split", autoMixSplit);
 }
 
@@ -1822,7 +1858,8 @@ juce::var DawBridge::describeAutoMix() const
     for (const auto& move : autoMixPlan.moves)
     {
         juce::String effect = ! move.ride.empty() ? "Volume ride" : move.values.count ("inGain") > 0 ? "Input gain"
-                            : move.values.count ("pan") > 0 && ! move.insert.has_value() ? "Pan" : "Volume";
+                            : move.values.count ("pan") > 0 && ! move.insert.has_value() ? "Pan"
+                            : move.values.count ("nudge") > 0 && ! move.insert.has_value() ? "Phase" : "Volume";
         if (move.sendTo != 0)
             effect = "Send to " + edit.getReturn (move.sendTo)[ids::name].toString();
         if (move.insert.has_value())
@@ -1861,7 +1898,7 @@ juce::var DawBridge::describeAutoMix() const
                                    { "exciter", autoMixOptions.exciter }, { "width", autoMixOptions.width },
                                    { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour }, { "sends", autoMixOptions.sends }, { "throws", autoMixOptions.throws },
                                    { "dynamicEq", autoMixOptions.dynamicEq }, { "transients", autoMixOptions.transients },
-                                   { "smooth", autoMixOptions.smooth }, { "pan", autoMixOptions.pan },
+                                   { "smooth", autoMixOptions.smooth }, { "pan", autoMixOptions.pan }, { "phase", autoMixOptions.phase },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
@@ -2619,6 +2656,8 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                 edit.setTrackInput (id, input);
             }
             if (args.hasProperty ("transpose")) edit.setTrackTranspose (id, args["transpose"]);
+            if (args.hasProperty ("polarity")) edit.setTrackPolarity (id, args["polarity"]);
+            if (args.hasProperty ("nudge"))    edit.setTrackNudge (id, args["nudge"]);
             if (arg (args, "clearRide", false)) edit.setVolumeRide (id, {});
             if (arg (args, "clearAutomation", false)) edit.clearTrackAutomation (id);
             if (args.hasProperty ("inGain"))  edit.setChainGain (id, false, args["inGain"]);
@@ -3158,6 +3197,51 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
     if (command == "unlinkTrack") { edit.unlinkTrack (arg (args, "track", -1)); ok(); return; }
+
+    // Phase: line a track up with another that recorded the same sound (args.track, args.to):
+    // its polarity and nudge, as one undo step. Answers {aligned, message}.
+    if (command == "alignTrack")
+    {
+        const auto track = edit.getTrack (arg (args, "track", -1)), to = edit.getTrack (arg (args, "to", -1));
+        if (! track.isValid() || ! to.isValid() || track == to || daw::Edit::isMidiTrack (track) || daw::Edit::isMidiTrack (to))
+        {
+            complete (error ("Pick two audio tracks."));
+            return;
+        }
+        const auto from = juce::jmax (analysis::getFirstAudioStart (track), analysis::getFirstAudioStart (to));
+        double rateA = 0.0, rateB = 0.0;
+        const auto a = analysis::readTrackAudio (to, from, 30.0, rateA);
+        const auto b = analysis::readTrackAudio (track, from, 30.0, rateB);
+        if (rateA <= 0.0 || ! juce::approximatelyEqual (rateA, rateB))
+        {
+            complete (error ("Both tracks need audio at the same sample rate to line up."));
+            return;
+        }
+
+        const auto alignment = analysis::measureAlignment (a, b, rateA);
+        const auto toName = to[ids::name].toString().quoted();
+        if (! alignment.related)
+        {
+            complete (object ({ { "aligned", false },
+                                { "message", "These two don't share enough of the same sound to line up (" + juce::String (juce::roundToInt (alignment.confidence * 100.0f))
+                                                 + "% in common)." } }));
+            return;
+        }
+
+        const auto polarity = daw::Edit::getPolarity (to) != alignment.inverted;
+        const auto nudge = (float) (daw::Edit::getNudge (to) - alignment.delaySeconds * 1000.0);
+        const auto id = (int) track[ids::id];
+        edit.setTrackPolarity (id, polarity);
+        edit.setTrackNudge (id, nudge);
+
+        juce::String message = "Lined up with " + toName + ": ";
+        message << (std::abs (nudge) < 0.005f ? juce::String ("timing as recorded")
+                                              : "nudged " + juce::String (std::abs (nudge), 2) + " ms " + (nudge < 0 ? "earlier" : "later"))
+                << (polarity ? ", polarity flipped" : "")
+                << (alignment.sumGainDb >= 0.1f ? " (together " + juce::String (alignment.sumGainDb, 1) + " dB fuller)." : ".");
+        complete (object ({ { "aligned", true }, { "message", message }, { "nudge", nudge }, { "polarity", polarity } }));
+        return;
+    }
 
     // Back to the audio as recorded (time only; transposes stay).
     if (command == "clearWarp")

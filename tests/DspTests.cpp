@@ -9061,6 +9061,201 @@ namespace
         folder.deleteRecursively();
     }
 
+    // Phase: two mics on one sound lined up (delay by GCC-PHAT, polarity from its sign),
+    // the track's polarity and nudge in the engine, and Auto Mix doing it first.
+    void testAutoMixPhase()
+    {
+        std::cout << "\nAuto Mix: phase and polarity\n";
+        using analysis::Role;
+
+        const double seconds = 8.0;
+        auto source = makeDrumLoop (seconds);
+        source.addFrom (0, 0, makePlucks (seconds), 0, 0, source.getNumSamples());
+        source.copyFrom (1, 0, source, 0, 0, source.getNumSamples());
+        source.applyGain (0.3f); // two of it summed stay well under full scale
+
+        // A second mic: 2.3 ms further away, facing the other way, a little of its own noise.
+        const auto delayed = [&] (const juce::AudioBuffer<float>& in, int samples, float gain, int seed, float noise)
+        {
+            juce::AudioBuffer<float> out (2, in.getNumSamples());
+            out.clear();
+            juce::Random random (seed);
+            for (int i = 0; i < out.getNumSamples(); ++i)
+            {
+                const auto j = i - samples;
+                const auto value = (j >= 0 && j < in.getNumSamples() ? gain * in.getSample (0, j) : 0.0f) + noise * (random.nextFloat() * 2.0f - 1.0f);
+                out.setSample (0, i, value);
+                out.setSample (1, i, value);
+            }
+            return out;
+        };
+        const auto lag = (int) std::lround (0.0023 * sampleRate);
+        const auto second = delayed (source, lag, -0.9f, 3, 0.005f);
+
+        const auto found = analysis::measureAlignment (source, second, sampleRate);
+        check (found.related && found.inverted && std::abs (found.delaySeconds * sampleRate - lag) <= 1.0 && found.sumGainDb > 2.0f,
+               "a 2.3 ms late, upside-down copy: " + juce::String (found.delaySeconds * 1000.0, 2) + " ms late, "
+                   + (found.inverted ? "inverted" : "not inverted") + ", " + juce::String (juce::roundToInt (found.confidence * 100.0f))
+                   + "% in common, " + juce::String (found.sumGainDb, 1) + " dB fuller lined up");
+
+        const auto early = analysis::measureAlignment (second, source, sampleRate);
+        check (early.inverted && std::abs (early.delaySeconds * sampleRate + lag) <= 1.0, "the other way round: early by as much");
+
+        juce::Random random (7);
+        juce::AudioBuffer<float> other (2, source.getNumSamples());
+        for (int i = 0; i < other.getNumSamples(); ++i)
+            other.setSample (0, i, 0.3f * (random.nextFloat() * 2.0f - 1.0f));
+        other.copyFrom (1, 0, other, 0, 0, other.getNumSamples());
+        const auto unrelated = analysis::measureAlignment (source, other, sampleRate);
+        check (! unrelated.related, "two different sounds aren't lined up (" + juce::String (juce::roundToInt (unrelated.confidence * 100.0f)) + "% in common)");
+
+        // A mic that picks up the source as bleed, under its own sound: still found.
+        auto bleed = delayed (source, 240, 0.3f, 4, 0.0f);
+        bleed.addFrom (0, 0, other, 0, 0, other.getNumSamples());
+        const auto bled = analysis::measureAlignment (source, bleed, sampleRate);
+        check (bled.related && std::abs (bled.delaySeconds * sampleRate - 240.0) <= 1.0,
+               "bleed under another sound: 5 ms found (" + juce::String (juce::roundToInt (bled.confidence * 100.0f)) + "% in common)");
+
+        // The engine: a delayed, inverted copy lined up by polarity and nudge sums back to double.
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-phase", {});
+        folder.createDirectory();
+        const auto file = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto f = folder.getChildFile (name + ".wav");
+            writeWav (f, audio, sampleRate);
+            return f;
+        };
+        const auto loudness = [&] (daw::Edit& e)
+        {
+            const auto mixFile = folder.getNonexistentChildFile ("mix", ".wav");
+            daw::Exporter::Settings settings;
+            settings.tail = 0.0;
+            const auto result = daw::Exporter (e, settings).exportMix (mixFile);
+            double rate = 0.0;
+            const auto mix = readWav (mixFile, rate);
+            if (rate <= 0.0)
+            {
+                check (false, "export: " + result.error);
+                return -200.0f;
+            }
+            return analysis::analyse (mix, rate).integratedLufs;
+        };
+
+        const auto exact = delayed (source, lag, -1.0f, 3, 0.0f);
+        daw::Edit edit;
+        const auto inId = (int) edit.addTrack ("Kick In")[daw::ids::id];
+        const auto outId = (int) edit.addTrack ("Kick Out")[daw::ids::id];
+        edit.addClip (inId, file ("in", source), 0.0, seconds);
+        edit.addClip (outId, file ("out", exact), 0.0, seconds);
+        const auto oneMic = [&]
+        {
+            daw::Edit single;
+            single.addClip ((int) single.addTrack ("x")[daw::ids::id], folder.getChildFile ("in.wav"), 0.0, seconds);
+            return loudness (single);
+        }();
+        const auto thin = loudness (edit);
+
+        // Auto Mix measures it and lines it up before anything else.
+        std::map<int, Role> roles { { inId, Role::drums }, { outId, Role::drums } };
+        const auto pairs = analysis::measureAlignments (edit.getState(), roles);
+        check (pairs.size() == 1 && pairs.front().a == inId && pairs.front().b == outId && pairs.front().alignment.related,
+               "two drum tracks recorded together are measured as a pair");
+
+        const auto analysed = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        std::map<int, float> volumes { { inId, 0.0f }, { outId, 0.0f } };
+        analysis::MixOptions options;
+        options.alignments = pairs;
+        options.trackNames = { { inId, "Kick In" }, { outId, "Kick Out" } };
+        // No voice: the plan stops after the phase (and says so).
+        const auto plan = analysis::planMix (analysed, roles, volumes, 0.0f, analysis::MixStyle::pop, options);
+        const auto* phase = plan.moves.empty() ? nullptr : &plan.moves.front();
+        check (phase != nullptr && phase->trackId == outId && phase->values.count ("polarity") > 0
+                   && juce::exactlyEqual (phase->values.at ("polarity"), 1.0f) && std::abs (phase->values.at ("nudge") + 2.3f) < 0.03f,
+               "Auto Mix: Kick Out flipped and nudged 2.3 ms earlier, first in the plan"
+                   + juce::String (phase != nullptr && ! phase->reasons.isEmpty() ? " (" + phase->reasons[0] + ")" : juce::String()));
+
+        analysis::applyMix (edit, plan);
+        check (daw::Edit::getPolarity (edit.getTrack (outId)) && std::abs (daw::Edit::getNudge (edit.getTrack (outId)) + 2.3f) < 0.03f,
+               "applied: the track's polarity and nudge are set");
+        const auto full = loudness (edit);
+        check (std::abs (full - (oneMic + 6.02f)) < 0.5f && full > thin + 2.0f,
+               "rendered: the two together " + juce::String (full - oneMic, 2) + " dB over one mic (double is 6.02), was "
+                   + juce::String (thin - oneMic, 1) + " dB before");
+
+        // Already lined up: nothing more to do.
+        {
+            auto again = options;
+            again.currentPhase[outId] = { true, phase != nullptr ? phase->values.at ("nudge") : 0.0f };
+            const auto replanned = analysis::planMix (analysed, roles, volumes, 0.0f, analysis::MixStyle::pop, again);
+            check (std::none_of (replanned.moves.begin(), replanned.moves.end(), [] (const analysis::MixMove& m) { return m.values.count ("nudge") > 0; }),
+                   "planned again once lined up: no phase move");
+
+            auto off = options;
+            off.phase = false;
+            const auto none = analysis::planMix (analysed, roles, volumes, 0.0f, analysis::MixStyle::pop, off);
+            check (std::none_of (none.moves.begin(), none.moves.end(), [] (const analysis::MixMove& m) { return m.values.count ("nudge") > 0; }),
+                   "Phase off: no phase move");
+
+            auto stereo = options;
+            stereo.trackNames[outId] = "OH R";
+            const auto pair = analysis::planMix (analysed, roles, volumes, 0.0f, analysis::MixStyle::pop, stereo);
+            check (std::none_of (pair.moves.begin(), pair.moves.end(), [] (const analysis::MixMove& m) { return m.values.count ("nudge") > 0; }),
+                   "half of a stereo pair (named R) keeps its timing");
+
+            auto voices = roles;
+            voices[inId] = voices[outId] = Role::voice;
+            const auto sung = analysis::planMix (analysed, voices, volumes, 0.0f, analysis::MixStyle::pop, options);
+            check (std::none_of (sung.moves.begin(), sung.moves.end(), [] (const analysis::MixMove& m) { return m.values.count ("nudge") > 0; }),
+                   "two voices aren't lined up (two singers in one room)");
+        }
+
+        // Undo, and a later track nudged later instead (a positive nudge).
+        edit.getUndoManager().undo();
+        check (! daw::Edit::getPolarity (edit.getTrack (outId)) && juce::exactlyEqual (daw::Edit::getNudge (edit.getTrack (outId)), 0.0f),
+               "one undo puts the phase back");
+        edit.setTrackPolarity (inId, true);
+        edit.setTrackNudge (inId, 2.3f);
+        edit.setTrackNudge (outId, 0.0f);
+        const auto later = loudness (edit);
+        check (std::abs (later - (oneMic + 6.02f)) < 0.5f, "or the first one flipped and nudged later: " + juce::String (later - oneMic, 2) + " dB");
+
+        // The track menu's "Align to...": one command, one undo step.
+        {
+            juce::PropertiesFile::Options o;
+            o.applicationName = "MicFXTests";
+            o.filenameSuffix = ".settings";
+            juce::PropertiesFile settings (folder.getChildFile ("phase.settings"), o);
+            PluginProcessor processor;
+            processor.prepareToPlay (sampleRate, blockSize);
+            DawBridge::availableForTesting = true;
+            DawBridge bridge (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+            const auto run = [&] (const juce::String& command, std::initializer_list<std::pair<const char*, juce::var>> properties)
+            {
+                auto* object = new juce::DynamicObject();
+                for (const auto& [name, value] : properties)
+                    object->setProperty (name, value);
+                juce::var result;
+                bridge.handle (command, juce::var (object), [&] (juce::var r) { result = r; });
+                return result;
+            };
+            run ("mode", { { "daw", true } });
+            auto& e = processor.getDawEdit();
+            const auto a = (int) e.addTrack ("Amp close")[daw::ids::id];
+            const auto b = (int) e.addTrack ("Amp room")[daw::ids::id];
+            e.addClip (a, folder.getChildFile ("in.wav"), 0.0, seconds);
+            e.addClip (b, folder.getChildFile ("out.wav"), 0.0, seconds);
+
+            const auto result = run ("alignTrack", { { "track", b }, { "to", a } });
+            check ((bool) result["aligned"] && daw::Edit::getPolarity (e.getTrack (b)) && std::abs (daw::Edit::getNudge (e.getTrack (b)) + 2.29f) < 0.03f
+                       && e.getUndoManager().getUndoDescription() == "Align",
+                   "Align to...: " + result["message"].toString());
+            const auto none = run ("alignTrack", { { "track", b }, { "to", b } });
+            check (none["ok"].isBool() && ! (bool) none["ok"], "Align to itself: refused");
+        }
+
+        folder.deleteRecursively();
+    }
+
     void testSmoothAutoMix()
     {
         std::cout << "\nAuto Mix: Smooth where it rings\n";
@@ -11644,6 +11839,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=phase: just Auto Mix's phase and polarity.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "phase")
+    {
+        testAutoMixPhase();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=smooth: just the resonance suppressor.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "smooth")
     {
@@ -11779,6 +11982,7 @@ int main()
     testAutoMixEffects();
     testAutoMixRoles();
     testAutoMixPlacement();
+    testAutoMixPhase();
     testAutoMixRides();
     testAutoMixModes();
     testAutoMixSynths();
