@@ -123,7 +123,8 @@ juce::String AudioPool::getPiecePrefix (const juce::String& files) const
 // pool), each cached as soon as it's done, then the whole copy from them. Empty when stopped.
 juce::AudioBuffer<float> AudioPool::renderNow (const std::shared_ptr<const juce::AudioBuffer<float>>& source, double rate, const warp::Settings& settings,
                                                const juce::String& prefix, const std::function<bool()>& keepGoing, const CancelFlag& job,
-                                               int helpers)
+                                               int helpers, double focus, Audio previous,
+                                               std::function<void (juce::AudioBuffer<float>&&)> interim)
 {
     const auto render = std::make_shared<const warp::Render> (source, rate, settings);
     if (! keepGoing())
@@ -137,6 +138,27 @@ juce::AudioBuffer<float> AudioPool::renderNow (const std::shared_ptr<const juce:
     for (size_t i = 0; i < list.size(); ++i)
         if ((parts[i] = pieces->find (prefix + list[i].key)) == nullptr)
             missing.push_back (i);
+
+    // Playhead first: the pieces ahead of it in order, then the ones behind it, nearest first.
+    if (focus >= 0.0)
+        std::stable_sort (missing.begin(), missing.end(), [&list, focus] (size_t a, size_t b)
+        {
+            const auto aheadA = list[a].to > focus, aheadB = list[b].to > focus;
+            if (aheadA != aheadB)
+                return aheadA;
+            return aheadA ? list[a].from < list[b].from : list[a].from > list[b].from;
+        });
+
+    // An interim copy (see AudioPool::Hint) needs the previous copy to stand in, the same
+    // length, and enough left to render once the stretch ahead of the focus is done.
+    if (previous == nullptr || ! interim || previous->getNumSamples() != render->getLength() || (int) missing.size() < interimMinimumLeft)
+        previous = nullptr;
+    const auto inWindow = [render, focus] (size_t i)
+    {
+        const auto& piece = render->getPieces()[i];
+        const auto from = juce::jmax (0.0, focus);
+        return piece.to > from && piece.from < from + interimAhead;
+    };
 
     const auto publish = [job, render] (const std::vector<size_t>& left)
     {
@@ -156,19 +178,64 @@ juce::AudioBuffer<float> AudioPool::renderNow (const std::shared_ptr<const juce:
         std::vector<size_t> missing;
         std::vector<Audio> results;
         std::vector<bool> finished;
+        std::vector<Audio> found; // the pieces that were cached already
         std::atomic<size_t> next { 0 };
         size_t done = 0;
+        bool interimSent = false;
         std::mutex lock;
         std::condition_variable allDone;
     };
     auto work = std::make_shared<Work>();
     work->missing = missing;
+    work->found = parts;
     work->results.resize (missing.size());
     work->finished.assign (missing.size(), false);
 
+    // Once nothing in the window is still to come (and enough is left elsewhere): the
+    // interim copy, the previous copy's audio wherever a piece isn't done. Under work->lock.
+    const auto interimDue = [work, inWindow, hasPrevious = previous != nullptr]
+    {
+        if (! hasPrevious || work->interimSent)
+            return false;
+        auto left = 0;
+        for (size_t n = 0; n < work->missing.size(); ++n)
+            if (! work->finished[n])
+            {
+                if (inWindow (work->missing[n]))
+                    return false;
+                ++left;
+            }
+        return left >= interimMinimumLeft;
+    };
+    const auto sendInterim = [work, render, previous, interim, keepGoing] (std::vector<Audio> parts)
+    {
+        for (size_t i = 0; i < parts.size(); ++i)
+            if (parts[i] == nullptr)
+                parts[i] = std::make_shared<const juce::AudioBuffer<float>> (render->cutPiece (i, *previous));
+        if (keepGoing())
+            interim (render->assemble (parts));
+    };
+    const auto snapshot = [work] // under work->lock
+    {
+        auto parts = work->found;
+        for (size_t n = 0; n < work->missing.size(); ++n)
+            if (work->finished[n] && work->results[n] != nullptr)
+                parts[work->missing[n]] = work->results[n];
+        return parts;
+    };
+
+    {
+        const std::lock_guard<std::mutex> guard (work->lock);
+        if (interimDue())
+        {
+            work->interimSent = true;
+            sendInterim (snapshot());
+        }
+    }
+
     // Each thread takes the next piece nobody has taken until none are left, so the job
     // only ever waits for pieces being rendered right now (never for queued helpers).
-    const auto worker = [work, render, cache = pieces, prefix, keepGoing, publish]
+    const auto worker = [work, render, cache = pieces, prefix, keepGoing, publish, interimDue, sendInterim, snapshot]
     {
         for (;;)
         {
@@ -192,14 +259,27 @@ juce::AudioBuffer<float> AudioPool::renderNow (const std::shared_ptr<const juce:
             }
 
             std::vector<size_t> left;
+            std::vector<Audio> interimParts;
             {
                 const std::lock_guard<std::mutex> guard (work->lock);
                 work->results[n] = piece;
                 work->finished[n] = true;
-                ++work->done;
                 for (size_t i = 0; i < work->missing.size(); ++i)
                     if (! work->finished[i])
                         left.push_back (work->missing[i]);
+                if (piece != nullptr && interimDue())
+                {
+                    work->interimSent = true;
+                    interimParts = snapshot();
+                }
+            }
+            // Before this piece counts as done, so the interim copy always goes out before
+            // the finished one.
+            if (! interimParts.empty())
+                sendInterim (std::move (interimParts));
+            {
+                const std::lock_guard<std::mutex> guard (work->lock);
+                ++work->done;
             }
             publish (left);
             work->allDone.notify_all();
@@ -312,6 +392,7 @@ void AudioPool::setSampleRate (double newRate)
     pending.clear();
     warps.clear();
     warpOrder.clear();
+    interims.clear();
     warpsPending.clear(); // decodes still running are discarded when they finish (rate mismatch)
     for (auto& [key, flag] : warpJobs)
         flag->cancel.store (true);
@@ -365,6 +446,26 @@ juce::String AudioPool::getWarpKey (const juce::File& file, const warp::Settings
 
 AudioPool::Audio AudioPool::get (const juce::File& file, const warp::Settings& settings)
 {
+    return request (file, settings, {});
+}
+
+AudioPool::Audio AudioPool::getForPlayback (const juce::File& file, const warp::Settings& settings, const Hint& hint)
+{
+    if (auto audio = request (file, settings, hint))
+        return audio;
+    const auto it = interims.find (getWarpKey (file, settings));
+    return it != interims.end() ? it->second : Audio();
+}
+
+bool AudioPool::isReady (const juce::File& file, const warp::Settings& settings) const
+{
+    if (settings.isNeutral())
+        return cache.count (file.getFullPathName()) > 0;
+    return warps.count (getWarpKey (file, settings)) > 0;
+}
+
+AudioPool::Audio AudioPool::request (const juce::File& file, const warp::Settings& settings, const Hint& hint)
+{
     if (settings.isNeutral())
         return get (file);
 
@@ -373,7 +474,7 @@ AudioPool::Audio AudioPool::get (const juce::File& file, const warp::Settings& s
         return it->second;
 
     if (settings.linked.size() > 1)
-        return getLinked (file, settings);
+        return getLinked (file, settings, hint.focus);
 
     const auto source = get (file);
     if (source == nullptr || warpsPending.count (key) > 0)
@@ -386,14 +487,33 @@ AudioPool::Audio AudioPool::get (const juce::File& file, const warp::Settings& s
     const auto rate = sampleRate;
     const auto prefix = getPiecePrefix (file.getFullPathName());
 
-    warpPool.addJob ([this, source, settings, key, rate, prefix, cancel, weak = std::weak_ptr<bool> (alive)]
+    // The interim copy (see Hint): installed while this job is still the one wanted.
+    const auto interim = [this, key, rate, cancel, weak = std::weak_ptr<bool> (alive)] (juce::AudioBuffer<float>&& audio)
+    {
+        auto shared = std::make_shared<const juce::AudioBuffer<float>> (std::move (audio));
+        juce::MessageManager::callAsync ([this, key, rate, cancel, weak, shared]
+        {
+            if (auto flag = weak.lock(); flag == nullptr || ! *flag)
+                return;
+            const auto job = warpJobs.find (key);
+            if (cancel->cancel.load() || job == warpJobs.end() || job->second != cancel || warps.count (key) > 0 || ! juce::exactlyEqual (rate, sampleRate))
+                return;
+            interims[key] = shared;
+            ++interimsPublished;
+            if (onLoaded)
+                onLoaded();
+        });
+    };
+
+    warpPool.addJob ([this, source, settings, key, rate, prefix, cancel, focus = hint.focus, previous = hint.previous, interim, weak = std::weak_ptr<bool> (alive)]
     {
         const auto keepGoing = [weak, cancel]
         {
             auto flag = weak.lock();
             return flag != nullptr && *flag && ! cancel->cancel.load();
         };
-        auto rendered = std::make_shared<juce::AudioBuffer<float>> (keepGoing() ? renderNow (source, rate, settings, prefix, keepGoing, cancel, getWarpThreads() - 1)
+        auto rendered = std::make_shared<juce::AudioBuffer<float>> (keepGoing() ? renderNow (source, rate, settings, prefix, keepGoing, cancel, getWarpThreads() - 1,
+                                                                                             focus, previous, interim)
                                                                                 : juce::AudioBuffer<float>());
 
         juce::MessageManager::callAsync ([this, key, rate, rendered, cancel, weak]
@@ -405,6 +525,7 @@ AudioPool::Audio AudioPool::get (const juce::File& file, const warp::Settings& s
 
             warpsPending.erase (key);
             warpJobs.erase (key);
+            interims.erase (key);
             if (! juce::exactlyEqual (rate, sampleRate))
                 return;
 
@@ -466,7 +587,7 @@ void AudioPool::installWarp (const juce::String& key, juce::AudioBuffer<float>&&
     warps[key] = std::make_shared<const juce::AudioBuffer<float>> (std::move (audio));
 }
 
-AudioPool::Audio AudioPool::getLinked (const juce::File& file, const warp::Settings& settings)
+AudioPool::Audio AudioPool::getLinked (const juce::File& file, const warp::Settings& settings, double focus)
 {
     // Every file decoded first; each decode's onLoaded brings us back here.
     std::vector<Audio> sources;
@@ -496,7 +617,7 @@ AudioPool::Audio AudioPool::getLinked (const juce::File& file, const warp::Setti
 
     const auto rate = sampleRate;
     const auto prefix = getPiecePrefix (settings.linked.joinIntoString ("|"));
-    warpPool.addJob ([this, sources, settings, keys, rate, prefix, cancel, weak = std::weak_ptr<bool> (alive)]
+    warpPool.addJob ([this, sources, settings, keys, rate, prefix, cancel, focus, weak = std::weak_ptr<bool> (alive)]
     {
         const auto keepGoing = [weak, cancel]
         {
@@ -511,7 +632,7 @@ AudioPool::Audio AudioPool::getLinked (const juce::File& file, const warp::Setti
         if (keepGoing())
         {
             const auto together = std::make_shared<const juce::AudioBuffer<float>> (warp::combineLinked (pointers));
-            const auto rendered = renderNow (together, rate, settings, prefix, keepGoing, cancel, getWarpThreads() - 1);
+            const auto rendered = renderNow (together, rate, settings, prefix, keepGoing, cancel, getWarpThreads() - 1, focus);
             if (rendered.getNumSamples() > 0)
                 *parts = warp::splitLinked (rendered, pointers, rate, settings);
         }
@@ -563,6 +684,7 @@ void AudioPool::releaseUnusedWarps (const std::set<juce::String>& keysInUse)
         {
             it->second->cancel.store (true);
             warpsPending.erase (it->first);
+            interims.erase (it->first);
             it = warpJobs.erase (it);
         }
         else

@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <bitset>
 #include <map>
+#include <optional>
 #include <set>
 
 namespace daw
@@ -67,6 +68,20 @@ public:
     void loadAllNow();
 
     AudioPool& getAudioPool() noexcept { return pool; }
+
+    // Message thread. While a clip's warp markers or notes are being dragged, the engine
+    // can play them before they're stored: a preview overrides the clip's map (the
+    // effective one, as setEffectiveWarp takes it; linked partners follow) or its notes
+    // until it's cancelled or the clip's own warp or notes change (the real edit landing,
+    // an undo). Not an undo step and never saved. Each new preview makes the previous one's
+    // render stale, so it's cancelled (see AudioPool::releaseUnusedWarps).
+    void setPreviewWarp (int clipId, const warp::Map&);
+    void setPreviewNotes (int clipId, const std::vector<analysis::pitch::Note>&);
+    void cancelPreview (int clipId); // -1: every clip
+    bool hasPreview (int clipId) const { return previews.count (clipId) > 0; }
+
+    // The settings the clip plays with: Edit::getWarpSettings with any preview on top.
+    warp::Settings getPlaybackSettings (const juce::ValueTree& clip) const;
 
     //==============================================================================
     // Transport, in samples at the session rate. Any thread.
@@ -332,9 +347,9 @@ private:
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
     // Markers don't change what plays, so they don't need a new graph.
     void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree& child) override        { if (! child.hasType (ids::MARKER)) triggerAsyncUpdate(); }
-    void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree& child, int) override { if (! child.hasType (ids::MARKER)) triggerAsyncUpdate(); }
+    void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree& child, int) override { if (child.hasType (ids::CLIP)) previews.erase ((int) child[ids::id]); if (! child.hasType (ids::MARKER)) triggerAsyncUpdate(); }
     void valueTreeChildOrderChanged (juce::ValueTree&, int, int) override         { triggerAsyncUpdate(); }
-    void valueTreeRedirected (juce::ValueTree&) override                          { triggerAsyncUpdate(); }
+    void valueTreeRedirected (juce::ValueTree&) override                          { previews.clear(); triggerAsyncUpdate(); }
 
     void handleAsyncUpdate() override { rebuild(); }
     void timerCallback() override     { collectGarbage(); collectPreviews(); drainRecordedMidi(); }
@@ -374,6 +389,14 @@ private:
 
     std::map<int, std::shared_ptr<Strip>> strips; // message thread: the current strip per id
     std::map<int, AudioPool::Audio> lastClipAudio;
+    std::map<int, warp::Map> lastClipMap; // the map of what each clip played in the last graph
+
+    struct Preview
+    {
+        std::optional<warp::Map> map;
+        std::optional<std::vector<analysis::pitch::Note>> notes;
+    };
+    std::map<int, Preview> previews; // by clip id
     std::map<std::pair<int, int>, std::shared_ptr<SendLevel>> sendLevels; // message thread: by (track id, return id) // message thread: what each clip played in the last graph
 
     std::atomic<Graph*> incoming { nullptr }; // built, not yet picked up by the audio thread

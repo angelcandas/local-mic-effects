@@ -160,6 +160,11 @@ public:
     // Empty when `shouldContinue` stopped it.
     juce::AudioBuffer<float> renderPiece (size_t index, const std::function<bool()>& shouldContinue = {}) const;
 
+    // A piece's stretch (with its crossfade tail) cut out of a finished copy made with the
+    // same map, so it can stand in for a piece not rendered yet (an interim copy). Silence
+    // past the copy's end.
+    juce::AudioBuffer<float> cutPiece (size_t index, const juce::AudioBuffer<float>& copy) const;
+
     // The finished copy from every piece (in order), joined with crossfades at the seams.
     juce::AudioBuffer<float> assemble (const std::vector<std::shared_ptr<const juce::AudioBuffer<float>>>&) const;
 

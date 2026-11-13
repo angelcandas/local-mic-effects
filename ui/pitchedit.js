@@ -9,7 +9,7 @@
 // C++ side renders the take again in the background (see src/analysis/Pitch.h and Warp.h).
 import { NOTE_NAMES, SCALES } from "./modules.js";
 import { clamp, html } from "./widgets.js";
-import { toSource } from "./rhythm.js";
+import { livePreview, toSource } from "./rhythm.js";
 
 const KEYS = 40;     // the keyboard's width
 const RULER = 16;    // bar and beat numbers on top
@@ -637,6 +637,7 @@ export function createNoteEditor(host) {
     const startX = event.clientX, startY = event.clientY;
     const rh = rowHeight();
     let changed = false, heard = null;
+    const live = livePreview(daw, screen, "previewPitchNotes", clip().id);
 
     drag(event, (e) => {
       const dy = (startY - e.clientY), dx = e.clientX - startX;
@@ -651,15 +652,19 @@ export function createNoteEditor(host) {
         preview = { offsets: new Map(chosen.map((i) => [i, delta])) };
         paint();
         const landed = Math.round((shown(grabbed) + delta) * 100);
+        const moved = before.map((n, i) => (preview.offsets.has(i) ? { ...n, shift: clamp(n.shift + preview.offsets.get(i), -24, 24) } : n));
         if (landed !== heard && Math.abs(delta) > 1e-3) {
           heard = landed;
-          audition(before.map((n, i) => (preview.offsets.has(i) ? { ...n, shift: clamp(n.shift + preview.offsets.get(i), -24, 24) } : n)), index);
+          audition(moved, index);
         }
+        live.send({ notes: payload(moved) });
         return;
       }
       notes = before.map((n, i) => (picked.has(i) ? adjust(n, dx, dy, e) : n));
+      live.send({ notes: payload(notes) });
       paint();
     }, (e) => {
+      live.end(changed);
       if (!changed) { preview = null; paint(); return; }
       if (tool === "select") {
         const offsets = preview?.offsets ?? new Map();
@@ -732,16 +737,19 @@ export function createNoteEditor(host) {
     const high = at < markers.length - 1 ? markers[at + 1][1] - 0.01 : Infinity;
     const startX = event.clientX;
     let target = grabbed;
+    const live = livePreview(daw, screen, "previewWarp", c.id);
     drag(event, (e) => {
       const free = grabbed + (e.clientX - startX) * perPx;
       const snapped = screen.snapTime ? screen.snapTime(c.start + (free - c.offset), e) - c.start + c.offset : free;
       target = clamp(snapped, low, high);
       preview = { shiftTime: [index, target - grabbed] };
+      live.send({ markers: markers.map((m, i) => (i === at ? [m[0], target] : m)) });
       host.setStatus?.(`Moving ${noteName(shown(notes[index]))} ${signed((target - grabbed) * 1000)} ms`);
       paint();
     }, () => {
       preview = null;
       host.setStatus?.("");
+      live.end(Math.abs(target - grabbed) > 1e-4);
       if (Math.abs(target - grabbed) > 1e-4) {
         markers[at][1] = target;
         daw("setWarp", { id: c.id, markers });
@@ -790,10 +798,12 @@ export function createNoteEditor(host) {
     if (!picked.has(index)) picked = new Set([index]);
     const box = lane.getBoundingClientRect();
     const before = notes.map((n) => ({ ...n }));
+    const live = livePreview(daw, screen, "previewPitchNotes", clip().id);
     const set = (e) => {
       const gain = Math.round(gainAtY(e.clientY - box.top, box.height) * 10) / 10;
       const delta = gain - before[index].gain;
       notes = before.map((n, i) => (picked.has(i) ? { ...n, gain: clamp(Math.round((n.gain + delta) * 10) / 10, -24, 12) } : n));
+      live.send({ notes: payload(notes) });
       paint();
     };
     set(event);
@@ -804,6 +814,7 @@ export function createNoteEditor(host) {
       lane.removeEventListener("pointerup", up);
       lane.removeEventListener("pointercancel", up);
       dragging = false;
+      live.end(true);
       store(notes);
     };
     lane.addEventListener("pointermove", set);
