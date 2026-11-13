@@ -156,6 +156,15 @@ void Multitrack::addTake (const juce::File& file, juce::int64 startSample)
     startLoad (file, true, startSample, nextId++);
 }
 
+int Multitrack::addAudio (const juce::String& name, juce::AudioBuffer<float>&& audio, juce::int64 startSample)
+{
+    const auto id = nextId++;
+    auto track = makeTrack ({}, false, startSample, id, std::move (audio));
+    track->name = name;
+    install (std::move (track));
+    return id;
+}
+
 int Multitrack::loadNow (const juce::File& file, bool isTake, juce::int64 startSample)
 {
     auto decoded = decode (file, sampleRate);
@@ -252,37 +261,58 @@ juce::int64 Multitrack::process (juce::AudioBuffer<float>& buffer, int numChanne
     if (! playing.load())
         return blockStart;
 
-    const auto blockEnd = blockStart + numSamples;
+    auto blockEnd = blockStart + numSamples;
+    const auto start = loopStart.load(), end = loopEnd.load();
 
+    if (end > start && blockStart < end && blockEnd > end)
     {
-        const juce::SpinLock::ScopedTryLockType lock (liveLock);
-
-        if (lock.isLocked())
+        // The loop closes inside this block: play to its end, then on from its start.
+        const auto first = (int) (end - blockStart);
+        mix (buffer, numChannels, 0, blockStart, first);
+        for (int done = first; done < numSamples;)
         {
-            for (auto* track : live)
-            {
-                if (track->muted.load())
-                    continue;
-
-                const auto from = juce::jmax (blockStart, track->start);
-                const auto to   = juce::jmin (blockEnd, track->end());
-
-                if (from >= to)
-                    continue;
-
-                const auto gain = track->gain.load();
-                const auto sourceChannels = track->audio.getNumChannels();
-
-                for (int ch = 0; ch < numChannels; ++ch)
-                    buffer.addFrom (ch, (int) (from - blockStart), track->audio,
-                                    juce::jmin (ch, sourceChannels - 1), (int) (from - track->start),
-                                    (int) (to - from), gain);
-            }
+            const auto count = (int) juce::jmin ((juce::int64) (numSamples - done), end - start);
+            mix (buffer, numChannels, done, start, count);
+            done += count;
+            blockEnd = start + count;
         }
+    }
+    else
+    {
+        mix (buffer, numChannels, 0, blockStart, numSamples);
     }
 
     // A seek from the UI during this block wins over advancing.
     auto expected = blockStart;
     position.compare_exchange_strong (expected, blockEnd);
     return blockStart;
+}
+
+void Multitrack::mix (juce::AudioBuffer<float>& buffer, int numChannels, int offset, juce::int64 blockStart, int numSamples) noexcept
+{
+    const auto blockEnd = blockStart + numSamples;
+    const juce::SpinLock::ScopedTryLockType lock (liveLock);
+
+    if (! lock.isLocked())
+        return;
+
+    for (auto* track : live)
+    {
+        if (track->muted.load())
+            continue;
+
+        const auto from = juce::jmax (blockStart, track->start);
+        const auto to   = juce::jmin (blockEnd, track->end());
+
+        if (from >= to)
+            continue;
+
+        const auto gain = track->gain.load();
+        const auto sourceChannels = track->audio.getNumChannels();
+
+        for (int ch = 0; ch < numChannels; ++ch)
+            buffer.addFrom (ch, offset + (int) (from - blockStart), track->audio,
+                            juce::jmin (ch, sourceChannels - 1), (int) (from - track->start),
+                            (int) (to - from), gain);
+    }
 }

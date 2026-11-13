@@ -39,6 +39,11 @@
 //       TAKE  id, name                    (take lanes, see "Takes and comping" below)
 //         CLIP ...
 //       (a track in a group also has `group`, the group's RETURN id, and `output` = that id)
+//     PATTERN  id, name, colour, length (beats), step (beats per step), swing (0..1)
+//       PART  track (a TRACK id), drum (a row per note), rows ("36,38,42": rows shown, in order),
+//             stepNote (the note a one-row part's steps play), mute
+//         NOTE  id, pitch, time (BEATS from the pattern's start), length (beats), velocity
+//     PATTERNCLIP  id, pattern (a PATTERN id), start (beats), length (beats), row (0..3), mute
 //     RETURN  id, name, colour, volume, pan, mute, solo, inGain, outGain,
 //             group (true: a group track, see below), folded (a group's tracks are hidden)
 //       INSERTS ...
@@ -71,6 +76,9 @@
 // `tempo` is the tempo at the start; `tempoChanges` the tempo points after it (see
 // TempoMap::changesToString; missing when the tempo is steady).
 //
+// Patterns (the step sequencer, see "Patterns" below) are the one part of the model kept
+// in BEATS, so they follow the tempo map as they are.
+//
 // Times are in seconds, so a project survives a sample-rate change. Insert values use
 // the plugin parameter IDs (see Parameters.cpp) in real units, as presets do.
 //
@@ -101,6 +109,8 @@ namespace ids
     MICFX_DAW_ID (pitchNotes)
     MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight)
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
+    MICFX_DAW_ID (PATTERN) MICFX_DAW_ID (PART) MICFX_DAW_ID (PATTERNCLIP) MICFX_DAW_ID (track) MICFX_DAW_ID (drum)
+    MICFX_DAW_ID (rows) MICFX_DAW_ID (stepNote) MICFX_DAW_ID (step) MICFX_DAW_ID (swing) MICFX_DAW_ID (pattern) MICFX_DAW_ID (row)
 #undef MICFX_DAW_ID
 }
 
@@ -423,6 +433,61 @@ public:
 
     // Loop range: while on, playback wraps from the end back to the start.
     void setLoop (bool on, double startSeconds, double endSeconds);
+
+    //==============================================================================
+    // Patterns: the step sequencer (see Patterns.h for how they play). A pattern is a loop
+    // of notes for any number of MIDI tracks, one PART per track, all in beats from the
+    // pattern's start. Pattern blocks (PATTERNCLIP) place a pattern on the timeline: the
+    // block plays every track the pattern has a part for, repeating the pattern to fill its
+    // length. Every block of a pattern plays the same notes; makePatternUnique gives one
+    // block a copy of its own. Each call is one undoable edit.
+    static constexpr double minPatternBeats = 0.25, maxPatternBeats = 256.0;
+    static constexpr double minStepBeats = 1.0 / 32.0, maxStepBeats = 1.0;
+    static constexpr int maxPatternRows = 4; // block lanes for overlapping blocks
+    static constexpr int defaultStepNote = 60;
+
+    juce::ValueTree addPattern (const juce::String& name = {}, double lengthBeats = 0.0); // 0: a bar
+    int duplicatePattern (int patternId);  // a copy with its parts and notes; returns its id, or -1
+    void removePattern (int patternId);    // and its blocks
+    juce::ValueTree getPattern (int patternId) const;
+    juce::Array<juce::ValueTree> getPatterns() const;
+    void setPatternName (int patternId, const juce::String&);
+    void setPatternColour (int patternId, const juce::String&);
+    void setPatternLength (int patternId, double beats);
+    void setPatternStep (int patternId, double beats);
+    void setPatternSwing (int patternId, double swing);
+
+    static double getPatternLength (const juce::ValueTree& pattern);
+    static double getPatternStep (const juce::ValueTree& pattern);
+
+    // A pattern's part for a track (invalid when it has none); ensurePart makes one (a MIDI
+    // track only).
+    juce::ValueTree getPart (int patternId, int trackId) const;
+    juce::ValueTree ensurePart (int patternId, int trackId);
+    void setPartDrum (int patternId, int trackId, bool drum);
+    void setPartRows (int patternId, int trackId, const juce::Array<int>& notes);
+    void setPartStepNote (int patternId, int trackId, int note);
+    void setPartMute (int patternId, int trackId, bool mute);
+    static juce::Array<int> getPartRows (const juce::ValueTree& part);
+
+    // Notes in a part (times in beats from the pattern's start). setNote and removeNote
+    // above take pattern notes too.
+    juce::ValueTree addPatternNote (int patternId, int trackId, int pitch, double time, double length, int velocity = 100);
+
+    // Step painting: for each (step index, velocity), the note of `pitch` on that step is
+    // removed, then (velocity > 0) a one-step note added. Times are index x the step.
+    void setSteps (int patternId, int trackId, int pitch, const std::vector<std::pair<int, int>>& steps);
+
+    // Pattern blocks. Length <= 0: one pass of the pattern.
+    juce::ValueTree addPatternClip (int patternId, double startBeats, double lengthBeats = 0.0, int row = 0);
+    void setPatternClip (int clipId, double startBeats, double lengthBeats, int row);
+    void setPatternClipMute (int clipId, bool);
+    void removePatternClip (int clipId);
+    juce::ValueTree getPatternClip (int clipId) const;
+    juce::Array<juce::ValueTree> getPatternClips() const;
+
+    // Gives a block its own copy of its pattern. Returns the new pattern's id, or -1.
+    int makePatternUnique (int clipId);
 
     //==============================================================================
     // Inserts on a track, or on the master bus with trackId == masterId. A new insert

@@ -6,6 +6,7 @@
 //   "practice"      a song is being prepared, is ready, or failed
 //   "practicePitch" { time, playing, midi, frames: [t, midi, ...] } about 30 times a second
 //   "practiceScore" { reset, from, notes: [...], phrases: [...], pass } as notes and phrases end
+//   "practiceReport" the pass report, when the song stops after some singing
 // The song plays on the Live tracks, so the transport at the bottom drives it.
 import * as Juce from "./juce/index.js";
 import { clamp, formatDuration, html } from "./widgets.js";
@@ -57,6 +58,7 @@ export class PracticeView {
     backend.addEventListener("practice", (event) => this.onPractice(event));
     backend.addEventListener("practicePitch", (event) => this.onPitch(event));
     backend.addEventListener("practiceScore", (event) => this.onScore(event));
+    backend.addEventListener("practiceReport", (report) => this.showReport(report));
 
     practice("state").then((state) => this.applyState(state)).catch(() => {});
     Juce.getNativeFunction("uiPref")("practiceShown").then((shown) => { if (shown === "1") this.show(true, false); }).catch(() => {});
@@ -106,10 +108,43 @@ export class PracticeView {
       transport("play");
     });
 
+    this.reportButton = Object.assign(html("button", "tool practice-report-button", "Report"),
+                                      { type: "button", title: "How this pass went, and the phrases worth looping" });
+    this.reportButton.addEventListener("click", () => practice("report").then((report) => this.showReport(report, true)));
+
     this.passLabel = html("div", "practice-pass");
     this.passLabel.append(html("span", "practice-pass-value", "–"), html("small", "", "this pass"));
 
-    bar.append(title, this.openButton, this.voiceButton, guide, restart, this.passLabel);
+    bar.append(title, this.openButton, this.voiceButton, guide, restart, this.reportButton, this.passLabel);
+
+    // Looping one phrase: what's looping, how slow, which key, and the way back.
+    this.loopSpeed = 1;
+    this.loopKey = 0;
+    this.weak = [];
+    this.loopBar = html("div", "practice-loop");
+    this.loopBar.hidden = true;
+    this.loopLabel = html("span", "practice-loop-label");
+    const speedLabel = html("label", "", "Speed ");
+    this.speedSelect = select([[1, "100%"], [0.9, "90%"], [0.75, "75%"], [0.6, "60%"], [0.5, "50%"]], 1);
+    speedLabel.append(this.speedSelect);
+    const keyLabel = html("label", "", "Key ");
+    this.keySelect = select([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5].map((k) => [k, k === 0 ? "Original" : `${k > 0 ? "+" : "−"}${Math.abs(k)} st`]), 0);
+    keyLabel.append(this.keySelect);
+    const relooped = () => {
+      this.loopSpeed = Number(this.speedSelect.value);
+      this.loopKey = Number(this.keySelect.value);
+      if (this.song?.loop) this.loopPhrase(this.song.loop.phrase);
+    };
+    this.speedSelect.addEventListener("change", relooped);
+    this.keySelect.addEventListener("change", relooped);
+    this.nextWeak = Object.assign(html("button", "tool", "Next weak phrase"), { type: "button" });
+    this.nextWeak.addEventListener("click", () => {
+      const at = this.weak.indexOf(this.song?.loop?.phrase);
+      this.loopPhrase(this.weak[(at + 1) % this.weak.length]);
+    });
+    const back = Object.assign(html("button", "tool is-accent", "Back to the song"), { type: "button" });
+    back.addEventListener("click", () => practice("unloop"));
+    this.loopBar.append(this.loopLabel, speedLabel, keyLabel, this.nextWeak, back);
 
     // Preparing a song.
     this.progress = html("div", "practice-progress");
@@ -138,7 +173,13 @@ export class PracticeView {
     this.phraseStrip = html("div", "practice-phrases");
 
     this.message = html("div", "practice-message");
-    s.append(bar, this.progress, this.stage, this.phraseStrip, this.message);
+    // The pass report, over the lane.
+    this.report = html("div", "practice-report");
+    this.report.hidden = true;
+    this.stage.append(this.report);
+    this.report.addEventListener("pointerdown", (event) => event.stopPropagation());
+
+    s.append(bar, this.loopBar, this.progress, this.stage, this.phraseStrip, this.message);
   }
 
   show(on, remember = true) {
@@ -181,11 +222,26 @@ export class PracticeView {
     this.pass = 0;
 
     this.songLabel.textContent = this.song ? this.song.name || "Song" : "No song yet";
-    this.songInfo.textContent = this.song
+    if (!this.song?.loop) this.songInfo.textContent = this.song
       ? `${this.song.notes.length} notes in ${this.song.phrases.length} phrases · ${noteName(this.song.lowest)} to ${noteName(this.song.highest)}`
         + (this.song.hasBacking ? "" : " · voice only")
       : "Open a song and sing its melody";
     this.empty.hidden = Boolean(this.song);
+    const loop = this.song?.loop;
+    this.loopBar.hidden = !loop;
+    this.section.classList.toggle("is-looping", Boolean(loop));
+    if (loop) {
+      const parts = [`Looping phrase ${loop.phrase + 1}`];
+      if (loop.speed < 0.999) parts.push(`${Math.round(loop.speed * 100)}% speed`);
+      if (loop.semitones) parts.push(`${loop.semitones > 0 ? "+" : "−"}${Math.abs(loop.semitones)} st`);
+      this.loopLabel.textContent = parts.join(" · ");
+      this.loopSpeed = loop.speed;
+      this.loopKey = loop.semitones;
+      this.speedSelect.value = String([1, 0.9, 0.75, 0.6, 0.5].reduce((a, b) => (Math.abs(b - loop.speed) < Math.abs(a - loop.speed) ? b : a)));
+      this.keySelect.value = String(loop.semitones);
+      this.nextWeak.hidden = this.weak.length < 2;
+      this.report.hidden = true;
+    }
     this.buildPhraseStrip();
     this.updatePass();
     this.draw();
@@ -204,11 +260,18 @@ export class PracticeView {
       this.setMessage("");
       return;
     }
+    if (event.state === "rendering") {
+      this.setMessage("Preparing the loop…");
+      return;
+    }
     this.showProgress(null);
-    if (event.state === "ready") {
+    if (event.state === "loop") {
       this.setSong(event.song);
-      this.setMessage(event.fromCache ? "Ready (prepared before). Press play and sing."
-                                      : `Ready. Press play and sing.${event.note ? ` ${event.note}` : ""}`);
+      this.setMessage("Sing the phrase each time it comes round. Its score is the last time round.");
+    } else if (event.state === "ready") {
+      this.setSong(event.song);
+      this.setMessage(event.quiet ? "" : event.fromCache ? "Ready (prepared before). Press play and sing."
+                                                         : `Ready. Press play and sing.${event.note ? ` ${event.note}` : ""}`);
     } else if (event.state === "error") {
       this.setMessage(event.error, true);
     } else if (event.state === "cancelled") {
@@ -283,6 +346,105 @@ export class PracticeView {
         chip.title = `Phrase ${i + 1}: ${Math.round(score.score)} · ${score.notesInTune}/${score.notesSung} notes in tune${lean}${timing}. Click to sing it again.`;
       }
     });
+  }
+
+  loopPhrase(phrase) {
+    if (phrase == null || phrase < 0) return;
+    practice("loop", { phrase, speed: this.loopSpeed, semitones: this.loopKey });
+  }
+
+  // The pass report: score, its parts, the lean, a heat map over the song and the weak phrases.
+  showReport(report, asked = false) {
+    if (!report || !this.song) return;
+    const r = this.report;
+    r.replaceChildren();
+    this.weak = report.looping ? this.weak : report.weak ?? [];
+
+    const close = Object.assign(html("button", "mini practice-report-close", "×"), { type: "button", title: "Close" });
+    close.addEventListener("click", () => { r.hidden = true; });
+    const head = html("div", "practice-report-head");
+    head.append(html("strong", "", report.looping ? "This time round" : "This pass"), close);
+    r.append(head);
+
+    if (!report.scored) {
+      r.append(html("p", "practice-report-note", "Nothing scored yet: play the song and sing along."));
+      r.hidden = !asked;
+      return;
+    }
+
+    const big = html("div", `practice-report-score ${scoreClass(report.score)}`, String(Math.round(report.score)));
+    const covered = html("small", "", report.looping ? "" : `${report.scored} of ${report.total} phrases`);
+    const scoreRow = html("div", "practice-report-row");
+    scoreRow.append(big, covered);
+    r.append(scoreRow);
+
+    for (const [label, value, hint] of [["Pitch", report.pitch, "how close to the notes"],
+                                        ["Timing", report.timing, "coming in with the music"],
+                                        ["Steadiness", report.steady, "holding notes without drifting"]]) {
+      const row = html("div", "practice-meter");
+      row.title = hint;
+      const track = html("div", "practice-meter-track");
+      const fill = html("div", `practice-meter-fill ${scoreClass(value * 100)}`);
+      fill.style.width = `${Math.round(clamp(value) * 100)}%`;
+      track.append(fill);
+      row.append(html("span", "", label), track, html("span", "practice-meter-value", String(Math.round(value * 100))));
+      r.append(row);
+    }
+
+    const tips = [];
+    if (Math.abs(report.lean) >= 12) tips.push(`You leaned ${Math.round(Math.abs(report.lean))} cents ${report.lean > 0 ? "sharp" : "flat"} on average.`);
+    else tips.push("No lean: you sat in the middle of the notes.");
+    if (Math.abs(report.timingSeconds) >= 0.06) tips.push(`You came in ${Math.round(Math.abs(report.timingSeconds) * 1000)} ms ${report.timingSeconds > 0 ? "late" : "early"} on average.`);
+    r.append(html("p", "practice-report-note", tips.join(" ")));
+
+    // Heat map: every phrase where it is in the song, coloured by its score.
+    if (!report.looping) {
+      const heat = html("div", "practice-heat");
+      const length = Math.max(1, ...this.song.phrases.map((p) => p.end));
+      const byIndex = new Map((report.phrases ?? []).map((p) => [p.i, p]));
+      this.song.phrases.forEach((phrase, i) => {
+        const score = byIndex.get(i);
+        const cell = Object.assign(html("button", `practice-heat-cell ${score ? scoreClass(score.score) : ""}`), { type: "button" });
+        cell.style.left = `${(phrase.start / length) * 100}%`;
+        cell.style.width = `${Math.max(0.6, ((phrase.end - phrase.start) / length) * 100)}%`;
+        cell.title = `Phrase ${i + 1}${score ? `: ${Math.round(score.score)}` : ": not sung"}`;
+        cell.addEventListener("click", () => this.goTo(Math.max(0, phrase.start - 1.5)));
+        heat.append(cell);
+      });
+      r.append(heat);
+    }
+
+    if (!report.looping && this.weak.length) {
+      r.append(html("div", "practice-report-sub", "Worth another go"));
+      for (const i of this.weak) {
+        const p = byPhrase(report, i);
+        const row = html("div", "practice-weak");
+        const what = [];
+        if (p && Math.abs(p.lean) >= 15) what.push(`${p.lean > 0 ? "sharp" : "flat"} ${Math.round(Math.abs(p.lean))}¢`);
+        if (p && Math.abs(p.timing) >= 0.08) what.push(`${p.timing > 0 ? "late" : "early"} ${Math.round(Math.abs(p.timing) * 1000)} ms`);
+        if (p && p.coverage < 0.6) what.push("parts not sung");
+        const loopButton = Object.assign(html("button", "tool is-accent", "Loop it"), { type: "button" });
+        loopButton.addEventListener("click", () => this.loopPhrase(i));
+        row.append(html("span", `practice-weak-score ${scoreClass(p?.score ?? 0)}`, String(Math.round(p?.score ?? 0))),
+                   html("span", "practice-weak-name", `Phrase ${i + 1}${what.length ? ` · ${what.join(", ")}` : ""}`), loopButton);
+        r.append(row);
+      }
+      const options = html("div", "practice-report-options");
+      const speed = html("label", "", "Loop at ");
+      const speedCopy = select([[1, "100%"], [0.9, "90%"], [0.75, "75%"], [0.6, "60%"], [0.5, "50%"]], this.loopSpeed);
+      speedCopy.addEventListener("change", () => { this.loopSpeed = Number(speedCopy.value); this.speedSelect.value = speedCopy.value; });
+      speed.append(speedCopy);
+      const key = html("label", "", "in ");
+      const keyCopy = select([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5].map((k) => [k, k === 0 ? "the original key" : `${k > 0 ? "+" : "−"}${Math.abs(k)} st`]), this.loopKey);
+      keyCopy.addEventListener("change", () => { this.loopKey = Number(keyCopy.value); this.keySelect.value = keyCopy.value; });
+      key.append(keyCopy);
+      options.append(speed, key);
+      r.append(options);
+    } else if (!report.looping) {
+      r.append(html("p", "practice-report-note", "Every phrase scored 75 or more. Try it in another key, or record a take."));
+    }
+
+    r.hidden = false;
   }
 
   goTo(seconds) {
@@ -423,6 +585,15 @@ export class PracticeView {
     }
   }
 }
+
+function select(options, value) {
+  const element = Object.assign(document.createElement("select"), { className: "dropdown" });
+  for (const [v, label] of options) element.append(Object.assign(document.createElement("option"), { value: String(v), textContent: label }));
+  element.value = String(value);
+  return element;
+}
+
+const byPhrase = (report, i) => (report.phrases ?? []).find((p) => p.i === i);
 
 function roundRect(g, x, y, w, h, r) {
   g.beginPath();
