@@ -299,6 +299,8 @@ namespace
             { "normaliseClip", "Normalise clip" }, { "stripSilence", "Strip silence" }, { "addMidiClip", "Add MIDI clip" },
             { "editNotes", "Edit notes" }, { "addInsert", "Add effect" }, { "addPluginInsert", "Add plug-in" }, { "removeInsert", "Remove effect" },
             { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "insertFile", "Load effect file" }, { "pasteInserts", "Paste effects" },
+            { "duplicateInsert", "Duplicate effect" }, { "copyInsert", "Copy effect" }, { "replaceInsert", "Replace effect" },
+            { "renameInsert", "Rename effect" }, { "insertAB", "Effect A/B" },
             { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
             { "groupTracks", "Group tracks" }, { "ungroup", "Ungroup tracks" }, { "setGroup", "Move to group" },
             { "addReturn", "Add return" }, { "removeReturn", "Delete return" }, { "moveReturn", "Move return" },
@@ -472,10 +474,17 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
         auto* values = new juce::DynamicObject();
         for (int i = 0; i < insert.getNumProperties(); ++i)
             if (const auto name = insert.getPropertyName (i); name != ids::id && name != ids::type && name != ids::file
+                && name != ids::label && name != ids::ab && name != ids::abOther
                 && (! isPlugin || name.toString().startsWith ("plugin") && name != ids::plugin))
                 values->setProperty (name, number (insert, name));
 
-        auto entry = object ({ { "id", (int) insert[ids::id] }, { "type", insert[ids::type].toString() }, { "values", juce::var (values) } });
+        // Its own name ("" for the effect's), which value set plays ("a"/"b"; "" while it
+        // has no second set; plug-ins have none) and the delay it adds right now.
+        const auto latency = engine.getInsertLatencySamples ((int) insert[ids::id]);
+        auto entry = object ({ { "id", (int) insert[ids::id] }, { "type", insert[ids::type].toString() }, { "values", juce::var (values) },
+                               { "name", daw::Edit::getInsertName (insert) },
+                               { "ab", daw::Edit::hasAB (insert) ? juce::String (daw::Edit::isShowingB (insert) ? "b" : "a") : juce::String() },
+                               { "latencyMs", std::round (latency * 1000.0 / juce::jmax (1.0, engine.getSampleRate()) * 100.0) / 100.0 } });
 
         // An effect plugin: which one, whether it's running (or why not), and its window.
         if (isPlugin)
@@ -3367,7 +3376,35 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
     // (Plugins' current settings into the tree first, so the copies get them.)
     if (command == "duplicateTrack") { engine.captureInstrumentStates(); complete (edit.duplicateTrack (id)); return; }
-    if (command == "pasteInserts")   { engine.captureInstrumentStates(); edit.copyInserts (arg (args, "from", -1), arg (args, "to", -1)); ok(); return; }
+    // { from, to }: replaces `to`'s chain with a copy of `from`'s. With `index` (-1: the
+    // end) or `ids` (inserts from anywhere; default: all of `from`'s), the copies go in at
+    // that slot and what's there stays. -> the copies' ids.
+    if (command == "pasteInserts")
+    {
+        engine.captureInstrumentStates();
+        const auto to = arg (args, "to", -1);
+
+        if (! args.hasProperty ("index") && ! args.hasProperty ("ids"))
+        {
+            edit.copyInserts (arg (args, "from", -1), to);
+            ok();
+            return;
+        }
+
+        juce::Array<int> insertIds;
+        if (const auto* list = args["ids"].getArray())
+            for (const auto& insertId : *list)
+                insertIds.add ((int) insertId);
+        else
+            for (const auto& insert : daw::Edit::getInserts (edit.getChannel (arg (args, "from", -1))))
+                insertIds.add ((int) insert[ids::id]);
+
+        juce::Array<juce::var> copies;
+        for (const auto& copy : edit.pasteInserts (insertIds, to, arg (args, "index", -1)))
+            copies.add ((int) copy[ids::id]);
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "inserts", copies } }));
+        return;
+    }
     if (command == "soloExclusive")  { edit.soloExclusive (id); ok(); return; }
     if (command == "clearMuteSolo")  { edit.clearMuteAndSolo(); ok(); return; }
     if (command == "removeTrack") { edit.removeTrack (id); ok(); return; }
@@ -3477,10 +3514,17 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             return;
         }
 
-        const auto insert = edit.addInsert (arg (args, "track", -1), *type, arg (args, "index", -1));
+        // `values` (optional, { valueId: number }): the settings it starts from, e.g. a preset.
+        std::map<juce::String, float> values;
+        if (const auto* given = args["values"].getDynamicObject())
+            for (const auto& [name, value] : given->getProperties())
+                if (value.isDouble() || value.isInt() || value.isInt64() || value.isBool())
+                    values[name.toString()] = (float) value;
+
+        const auto insert = edit.addInsert (arg (args, "track", -1), *type, arg (args, "index", -1), values);
 
         // A new autotune starts in the song's key, when the session knows it.
-        if (insert.isValid() && *type == fx::ModuleType::pitch && edit.getKey() >= 0)
+        if (insert.isValid() && *type == fx::ModuleType::pitch && edit.getKey() >= 0 && ! values.count ("tuneKey"))
         {
             edit.setInsertValue (insert[ids::id], "tuneKey", (float) edit.getKey());
             edit.setInsertValue (insert[ids::id], "tuneScale", edit.isKeyMinor() ? 2.0f : 1.0f);
@@ -3491,7 +3535,81 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     }
 
     if (command == "removeInsert") { edit.removeInsert (id); ok(); return; }
-    if (command == "moveInsert")   { edit.moveInsert (id, arg (args, "index", 0)); ok(); return; }
+
+    // { id, index, track? }: within its chain, or (track: a track, return, group or the
+    // master, 0) into another one at that index (-1: the end). It keeps running.
+    if (command == "moveInsert")
+    {
+        if (args.hasProperty ("track"))
+            complete (error (edit.moveInsertTo (id, arg (args, "track", -1), arg (args, "index", -1)) ? juce::String() : juce::String ("No such effect or track")));
+        else
+        {
+            edit.moveInsert (id, arg (args, "index", 0));
+            ok();
+        }
+        return;
+    }
+
+    // Copies of one effect -> { ok, insert } (the copy's id). duplicateInsert puts it right
+    // after; copyInsert { id, track, index } anywhere (index -1: the end).
+    if (command == "duplicateInsert" || command == "copyInsert")
+    {
+        engine.captureInstrumentStates(); // a plug-in's current settings go into the copy
+        const auto copy = command == "duplicateInsert" ? edit.duplicateInsert (id)
+                                                       : edit.copyInsertTo (id, arg (args, "track", -1), arg (args, "index", -1));
+        if (! copy.isValid())
+            complete (error ("No such effect or track"));
+        else
+            complete (object ({ { "ok", true }, { "error", juce::String() }, { "insert", (int) copy[ids::id] } }));
+        return;
+    }
+
+    // { id, type } or { id, plugin }: another effect (from its defaults) or plug-in in the
+    // same place -> { ok, insert }.
+    if (command == "replaceInsert")
+    {
+        juce::ValueTree replacement;
+        if (args.hasProperty ("plugin"))
+        {
+            const auto info = processor.getPluginHost().findEffect (args["plugin"].toString());
+            if (! info.has_value())
+            {
+                complete (error ("That plug-in isn't available. Rescan plug-ins and try again."));
+                return;
+            }
+            replacement = edit.replaceInsertWithPlugin (id, *info);
+        }
+        else if (const auto type = daw::Edit::moduleTypeFromKey (args["type"].toString()))
+        {
+            replacement = edit.replaceInsert (id, *type);
+        }
+
+        if (! replacement.isValid())
+            complete (error ("No such effect"));
+        else
+            complete (object ({ { "ok", true }, { "error", juce::String() }, { "insert", (int) replacement[ids::id] } }));
+        return;
+    }
+
+    if (command == "renameInsert") { edit.setInsertName (id, args["name"].toString()); ok(); return; }
+
+    // { id, action: "switch" | "copy" }: play the other value set (the first switch makes
+    // B a copy of A), or write the playing set over the other.
+    if (command == "insertAB")
+    {
+        if (daw::Edit::isPluginInsert (edit.getInsert (id)))
+        {
+            complete (error ("Plug-ins keep their own A/B"));
+            return;
+        }
+        if (args["action"].toString() == "copy")
+            edit.copyInsertAB (id);
+        else
+            edit.switchInsertAB (id);
+        ok();
+        return;
+    }
+
     if (command == "setInsert")    { edit.setInsertValue (id, args["param"].toString(), args["value"]); ok(); return; }
 
     // { id, path? } -> { ok, file, error?, cancelled? }: the impulse response a cab or IR

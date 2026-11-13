@@ -3468,6 +3468,313 @@ namespace
         return out;
     }
 
+    // Ableton-style chain edits: adding, removing or moving an effect doesn't restart the
+    // others (a reverb tail rings on), and the single-effect commands.
+    void testDeviceEdits()
+    {
+        std::cout << "\nEffect chain edits (seamless, duplicate, move, replace, rename, A/B)\n";
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-devices", {});
+        folder.createDirectory();
+
+        // A short burst, then silence: whatever plays after 0.1 s is the effects' tail.
+        juce::AudioBuffer<float> burst (2, (int) sampleRate);
+        burst.clear();
+        for (int i = 0; i < (int) (0.1 * sampleRate); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                burst.setSample (ch, i, 0.5f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * i / sampleRate));
+        const auto burstFile = folder.getChildFile ("burst.wav");
+        writeWav (burstFile, burst, sampleRate);
+
+        // Two identical sessions: one is edited mid-tail, the other is left alone.
+        struct Session
+        {
+            daw::Edit edit;
+            daw::DawEngine engine { edit };
+            int track = 0, reverb = 0, compressor = 0;
+        };
+        const auto makeSession = [&] (Session& session)
+        {
+            session.engine.prepare (sampleRate, blockSize);
+            session.track = (int) session.edit.addTrack ("Voice")[daw::ids::id];
+            session.edit.addClip (session.track, burstFile, 0.0, 1.0);
+            session.engine.getAudioPool().loadNow (burstFile);
+            session.compressor = (int) session.edit.addInsert (session.track, fx::ModuleType::compressor)[daw::ids::id];
+            session.reverb = (int) session.edit.addInsert (session.track, fx::ModuleType::reverb, -1,
+                                                            { { "reverbMix", 60.0f }, { "reverbSize", 90.0f } })[daw::ids::id];
+            session.engine.rebuildNow();
+            session.engine.play();
+        };
+
+        Session edited, untouched;
+        makeSession (edited);
+        makeSession (untouched);
+
+        check (juce::approximatelyEqual ((float) edited.edit.getInsert (edited.reverb)[juce::Identifier ("reverbMix")], 60.0f)
+                   && juce::approximatelyEqual ((float) edited.edit.getInsert (edited.reverb)[juce::Identifier ("reverbSize")], 90.0f),
+               "an effect can be added with its starting values");
+
+        const auto maxDifference = [] (const std::array<std::vector<float>, 2>& a, const std::array<std::vector<float>, 2>& b)
+        {
+            float worst = 0.0f;
+            for (size_t ch = 0; ch < 2; ++ch)
+                for (size_t i = 0; i < std::min (a[ch].size(), b[ch].size()); ++i)
+                    worst = std::max (worst, std::abs (a[ch][i] - b[ch][i]));
+            return worst;
+        };
+        const auto tailRms = [] (const std::array<std::vector<float>, 2>& out, size_t from, size_t to)
+        {
+            return rms (out[0], from, std::min (to, out[0].size()));
+        };
+
+        // Into the tail.
+        render (edited.engine, 0.3);
+        render (untouched.engine, 0.3);
+
+        // Add an effect (switched off, so the sound shouldn't change at all), then remove it.
+        const auto chorusModule = fx::createModule (fx::ModuleType::chorus);
+        std::map<juce::String, float> off;
+        for (int v = 0; v < chorusModule->getNumValues(); ++v)
+            if (chorusModule->isSwitch (v))
+                off[chorusModule->getValueId (v)] = 0.0f;
+        const auto chorus = (int) edited.edit.addInsert (edited.track, fx::ModuleType::chorus, -1, off)[daw::ids::id];
+        edited.engine.rebuildNow();
+        auto a = render (edited.engine, 0.1), b = render (untouched.engine, 0.1);
+        const auto afterAdd = maxDifference (a, b);
+        check (afterAdd < 1.0e-5f && tailRms (b, 0, a[0].size()) > 1.0e-3f,
+               "adding an effect leaves the running reverb and compressor alone (differs by " + juce::String (afterAdd, 7) + ")");
+
+        edited.edit.removeInsert (chorus);
+        edited.engine.rebuildNow();
+        a = render (edited.engine, 0.1);
+        b = render (untouched.engine, 0.1);
+        const auto afterRemove = maxDifference (a, b);
+        check (afterRemove < 1.0e-5f, "removing an effect leaves the others running (differs by " + juce::String (afterRemove, 7) + ")");
+
+        // Reorder: the sound changes, but the reverb goes on ringing rather than starting again.
+        const auto before = render (edited.engine, 0.05);
+        edited.edit.moveInsert (edited.reverb, 0);
+        edited.engine.rebuildNow();
+        const auto after = render (edited.engine, 0.05);
+        const auto beforeLevel = tailRms (before, before[0].size() - 960, before[0].size());
+        const auto afterLevel = tailRms (after, 0, 960);
+        check (beforeLevel > 1.0e-3f && afterLevel > 0.5f * beforeLevel,
+               "reordering keeps the reverb tail (" + juce::String (juce::Decibels::gainToDecibels (afterLevel / beforeLevel), 1) + " dB across the edit)");
+
+        // Moving the reverb to another track keeps it running there too, with its values.
+        auto& edit = edited.edit;
+        auto& undo = edit.getUndoManager();
+        const auto other = (int) edit.addTrack ("Other")[daw::ids::id];
+        edit.setInsertAutomation (edited.reverb, "reverbMix", { { 0.0, 10.0f }, { 1.0, 50.0f } });
+        edited.engine.rebuildNow();
+        const auto beforeMove = render (edited.engine, 0.05);
+        undo.beginNewTransaction();
+        check (edit.moveInsertTo (edited.reverb, other, -1), "moves an effect to another track");
+        edited.engine.rebuildNow();
+        const auto afterMove = render (edited.engine, 0.05);
+        const auto moved = edit.getInsert (edited.reverb);
+        check (moved.getParent().getParent() == edit.getTrack (other)
+                   && juce::approximatelyEqual ((float) moved[juce::Identifier ("reverbSize")], 90.0f)
+                   && daw::Edit::getInsertAutomation (moved).count ("reverbMix") == 1
+                   && daw::Edit::getInserts (edit.getTrack (edited.track)).getNumChildren() == 1,
+               "the moved effect keeps its id, values and automation");
+        const auto moveBefore = tailRms (beforeMove, beforeMove[0].size() - 960, beforeMove[0].size());
+        const auto moveAfter = tailRms (afterMove, 0, 960);
+        check (moveAfter > 0.5f * moveBefore, "the moved reverb rings on, on its new track ("
+                   + juce::String (juce::Decibels::gainToDecibels (moveAfter / juce::jmax (1.0e-9f, moveBefore)), 1) + " dB)");
+        undo.undo();
+        check (edit.getInsert (edited.reverb).getParent().getParent() == edit.getTrack (edited.track)
+                   && daw::Edit::getInserts (edit.getTrack (edited.track)).indexOf (edit.getInsert (edited.reverb)) == 0,
+               "undo puts it back where it was");
+        undo.beginNewTransaction();
+        check (edit.moveInsertTo (edited.compressor, edited.track, 0)
+                   && daw::Edit::getInserts (edit.getTrack (edited.track)).indexOf (edit.getInsert (edited.compressor)) == 0,
+               "moving within its own chain");
+        check (! edit.moveInsertTo (edited.compressor, 9999, 0) && ! edit.moveInsertTo (9999, edited.track, 0), "nowhere to move: refused");
+
+        // Duplicate: a copy right after, with the name, values and automation, a new id.
+        undo.beginNewTransaction();
+        edit.setInsertName (edited.reverb, "  Big room  ");
+        check (daw::Edit::getInsertName (edit.getInsert (edited.reverb)) == "Big room", "renames an effect (trimmed)");
+        undo.beginNewTransaction();
+        const auto duplicate = edit.duplicateInsert (edited.reverb);
+        const auto chain = daw::Edit::getInserts (edit.getTrack (edited.track));
+        check (duplicate.isValid() && (int) duplicate[daw::ids::id] != edited.reverb
+                   && chain.indexOf (duplicate) == chain.indexOf (edit.getInsert (edited.reverb)) + 1
+                   && daw::Edit::getInsertName (duplicate) == "Big room"
+                   && juce::approximatelyEqual ((float) duplicate[juce::Identifier ("reverbSize")], 90.0f)
+                   && daw::Edit::getInsertAutomation (duplicate).count ("reverbMix") == 1,
+               "duplicate: a copy right after it, with name, values and automation");
+        undo.undo();
+        check (! duplicate.getParent().isValid() && chain.getNumChildren() == 2, "undo removes the copy");
+        undo.beginNewTransaction();
+        edit.setInsertName (edited.reverb, "");
+        check (! edit.getInsert (edited.reverb).hasProperty (daw::ids::label), "an empty name goes back to the effect's own");
+        undo.undo();
+
+        // Copy to another chain (the master) at a slot.
+        edit.addInsert (daw::Edit::masterId, fx::ModuleType::limiter);
+        undo.beginNewTransaction();
+        const auto copy = edit.copyInsertTo (edited.compressor, daw::Edit::masterId, 0);
+        check (copy.isValid() && daw::Edit::getInserts (edit.getMaster()).indexOf (copy) == 0
+                   && edit.getInsert (edited.compressor).getParent() == chain,
+               "copy to another chain at a slot, the original stays");
+        undo.undo();
+        check (daw::Edit::getInserts (edit.getMaster()).getNumChildren() == 1, "undo removes that copy");
+
+        // Paste at a slot, leaving what's there.
+        undo.beginNewTransaction();
+        const auto pasted = edit.pasteInserts ({ edited.compressor, edited.reverb }, other, 0);
+        const auto otherChain = daw::Edit::getInserts (edit.getTrack (other));
+        check (pasted.size() == 2 && otherChain.getNumChildren() == 2 && otherChain.getChild (0)[daw::ids::type].toString() == "compressor"
+                   && otherChain.getChild (1)[daw::ids::type].toString() == "reverb" && chain.getNumChildren() == 2,
+               "paste copies at a slot, in order");
+        undo.beginNewTransaction();
+        edit.pasteInserts ({ (int) otherChain.getChild (0)[daw::ids::id] }, other, 1);
+        check (otherChain.getNumChildren() == 3 && otherChain.getChild (1)[daw::ids::type].toString() == "compressor",
+               "pasting into its own chain");
+        undo.undo();
+        undo.undo();
+        check (otherChain.getNumChildren() == 0, "undo removes the pasted effects");
+
+        // Replace in place.
+        undo.beginNewTransaction();
+        const auto replacement = edit.replaceInsert (edited.compressor, fx::ModuleType::eq);
+        check (replacement.isValid() && replacement[daw::ids::type].toString() == "eq" && chain.indexOf (replacement) == 0
+                   && ! edit.getInsert (edited.compressor).isValid() && chain.getNumChildren() == 2,
+               "replace: another effect in the same place");
+        undo.undo();
+        check (edit.getInsert (edited.compressor).isValid() && chain.indexOf (edit.getInsert (edited.compressor)) == 0
+                   && chain.getNumChildren() == 2, "undo brings the replaced effect back");
+
+        // A/B.
+        auto reverbTree = edit.getInsert (edited.reverb);
+        check (! daw::Edit::hasAB (reverbTree) && ! daw::Edit::isShowingB (reverbTree), "no second value set to start with");
+        undo.beginNewTransaction();
+        edit.switchInsertAB (edited.reverb);
+        check (daw::Edit::hasAB (reverbTree) && daw::Edit::isShowingB (reverbTree)
+                   && juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 90.0f),
+               "the first switch to B starts B as a copy of A");
+        edit.setInsertValue (edited.reverb, "reverbSize", 20.0f);
+        undo.beginNewTransaction();
+        edit.switchInsertAB (edited.reverb);
+        check (! daw::Edit::isShowingB (reverbTree) && juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 90.0f),
+               "switching back plays A again");
+        edited.engine.rebuildNow();
+        auto* reverbModule = static_cast<fx::Module*> (nullptr);
+        edited.engine.forEachInsert (edited.track, [&] (int insertId, fx::Module& module) { if (insertId == edited.reverb) reverbModule = &module; });
+        check (reverbModule != nullptr && juce::approximatelyEqual (reverbModule->findValue ("reverbSize")->load(), 90.0f),
+               "the running effect plays the set that's switched in");
+        undo.beginNewTransaction();
+        edit.switchInsertAB (edited.reverb);
+        check (daw::Edit::isShowingB (reverbTree) && juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 20.0f),
+               "B kept its own change");
+        undo.beginNewTransaction();
+        edit.copyInsertAB (edited.reverb);
+        edit.switchInsertAB (edited.reverb);
+        check (juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 20.0f), "copy writes the playing set over the other");
+        undo.undo();
+        check (daw::Edit::isShowingB (reverbTree) && juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 20.0f),
+               "A/B steps undo (back to B before the copy)");
+        undo.undo();
+        check (! daw::Edit::isShowingB (reverbTree) && juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 90.0f),
+               "and the switch before it");
+
+        // The commands, through the DAW screen's bridge.
+        {
+            juce::PropertiesFile::Options options;
+            options.applicationName = "MicFXTests";
+            options.filenameSuffix = ".settings";
+            juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+
+            PluginProcessor processor;
+            processor.prepareToPlay (sampleRate, blockSize);
+            auto& dawEdit = processor.getDawEdit();
+
+            std::vector<std::pair<juce::String, juce::var>> events;
+            DawBridge::availableForTesting = true;
+            DawBridge bridge (processor, settings,
+                              [&] (const juce::Identifier& event, const juce::var& payload) { events.emplace_back (event.toString(), payload); },
+                              [] { return (juce::int64) 0; });
+            const auto run = [&] (const juce::String& command, std::initializer_list<std::pair<const char*, juce::var>> properties)
+            {
+                auto* object = new juce::DynamicObject();
+                for (const auto& [name, value] : properties)
+                    object->setProperty (name, value);
+                juce::var result;
+                bridge.handle (command, juce::var (object), [&] (juce::var r) { result = r; });
+                return result;
+            };
+            const auto lastSession = [&]
+            {
+                events.clear();
+                bridge.tick();
+                for (const auto& [name, payload] : events)
+                    if (name == "dawSession")
+                        return juce::JSON::parse (juce::JSON::toString (payload, true));
+                return juce::var();
+            };
+
+            run ("mode", { { "daw", true } });
+            const auto first = (int) lastSession()["tracks"][0]["id"];
+            const auto second = (int) run ("addTrack", {});
+
+            auto* presetValues = new juce::DynamicObject();
+            presetValues->setProperty ("delayTime", 300.0);
+            presetValues->setProperty ("nonsense", 1.0);
+            const auto echo = (int) run ("addInsert", { { "track", first }, { "type", "echo" }, { "values", juce::var (presetValues) } });
+            const auto pitch = (int) run ("addInsert", { { "track", first }, { "type", "pitch" } });
+            check (echo > 0 && juce::approximatelyEqual ((float) dawEdit.getInsert (echo)[juce::Identifier ("delayTime")], 300.0f)
+                       && ! dawEdit.getInsert (echo).hasProperty ("nonsense"),
+                   "addInsert { values }: starts from them, ignores unknown ones");
+
+            run ("renameInsert", { { "id", echo }, { "name", "Slap" } });
+            run ("insertAB", { { "id", echo }, { "action", "switch" } });
+            run ("setInsert", { { "id", pitch }, { "param", "pitchOn" }, { "value", 1.0f } });
+            processor.getDawEngine().rebuildNow();
+            auto inserts = lastSession()["tracks"][0]["inserts"];
+            check (inserts.size() == 2 && inserts[0]["name"].toString() == "Slap" && inserts[0]["ab"].toString() == "b"
+                       && inserts[1]["ab"].toString().isEmpty() && inserts[1]["name"].toString().isEmpty()
+                       && inserts[0]["latencyMs"].isDouble() && ! inserts[0]["values"].hasProperty ("label")
+                       && ! inserts[0]["values"].hasProperty ("abOther") && ! inserts[0]["values"].hasProperty ("ab"),
+                   "the session lists each effect's name, A/B and latency (typed), not as values");
+            check ((double) inserts[1]["latencyMs"] > 0.0, "an effect that adds delay says how much ("
+                       + juce::String ((double) inserts[1]["latencyMs"]) + " ms)");
+
+            const auto duplicated = run ("duplicateInsert", { { "id", echo } });
+            check ((bool) duplicated["ok"] && dawEdit.getInsert ((int) duplicated["insert"]).isValid()
+                       && lastSession()["tracks"][0]["inserts"][1]["name"].toString() == "Slap"
+                       && dawEdit.getUndoManager().getUndoDescription() == "Duplicate effect",
+                   "duplicateInsert, named for undo");
+
+            const auto copied = run ("copyInsert", { { "id", echo }, { "track", second }, { "index", -1 } });
+            check ((bool) copied["ok"] && lastSession()["tracks"][1]["inserts"].size() == 1, "copyInsert to another track");
+
+            check ((bool) run ("moveInsert", { { "id", pitch }, { "track", second }, { "index", 0 } })["ok"]
+                       && lastSession()["tracks"][1]["inserts"][0]["id"] == juce::var (pitch),
+                   "moveInsert { track }: to another track at a slot");
+            check (! (bool) run ("moveInsert", { { "id", pitch }, { "track", 9999 }, { "index", 0 } })["ok"], "moveInsert to nowhere fails");
+
+            const auto replaced = run ("replaceInsert", { { "id", (int) copied["insert"] }, { "type", "reverb" } });
+            check ((bool) replaced["ok"] && lastSession()["tracks"][1]["inserts"][1]["type"].toString() == "reverb",
+                   "replaceInsert keeps the slot");
+            check (! (bool) run ("replaceInsert", { { "id", echo }, { "plugin", "no-such-plugin" } })["ok"],
+                   "replacing with a plug-in that isn't there fails");
+
+            const auto pastedIds = run ("pasteInserts", { { "from", first }, { "to", second }, { "index", 0 } });
+            const auto secondInserts = lastSession()["tracks"][1]["inserts"];
+            check ((bool) pastedIds["ok"] && pastedIds["inserts"].size() == 2 && secondInserts.size() == 4
+                       && secondInserts[0]["type"].toString() == "echo" && secondInserts[2]["id"] == juce::var (pitch),
+                   "pasteInserts { index }: copies in at the slot, keeps what's there");
+            run ("pasteInserts", { { "from", first }, { "to", second } });
+            check (lastSession()["tracks"][1]["inserts"].size() == 2, "pasteInserts without an index still replaces the chain");
+
+            check (! (bool) run ("insertAB", { { "id", 9999 }, { "action", "copy" } }).isVoid(), "insertAB completes for a missing effect");
+        }
+
+        folder.deleteRecursively();
+    }
+
     // The library preview plays on top of the output, once, and stops on request.
     void testPreview()
     {
@@ -13771,6 +14078,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=devices: just the effect chain edits.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "devices")
+    {
+        testDeviceEdits();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=songmap: just the song map.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "songmap")
     {
@@ -13802,6 +14117,7 @@ int main()
     testAutoLevel();
     testSetlist();
     testDawEngine();
+    testDeviceEdits();
     testReturns();
     testPreview();
     testGroups();

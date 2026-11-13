@@ -175,6 +175,14 @@ InstrumentPtr DawEngine::getInsertPlugin (int insertId) const
     return nullptr;
 }
 
+int DawEngine::getInsertLatencySamples (int insertId) const
+{
+    for (const auto& [id, strip] : strips)
+        if (const auto it = strip->modulesByInsertId.find (insertId); it != strip->modulesByInsertId.end())
+            return it->second->getLatencySamples();
+    return 0;
+}
+
 juce::String DawEngine::getInsertPluginError (int insertId) const
 {
     for (const auto& [id, strip] : strips)
@@ -326,7 +334,8 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
     {
         // An effect plugin's saved settings and names are kept for saving, not played; a
         // different plugin needs a new one (its layout changes).
-        if (property == ids::state || property == ids::name || property == ids::vendor || property == ids::description)
+        if (property == ids::state || property == ids::name || property == ids::vendor || property == ids::description
+            || property == ids::label || property == ids::ab || property == ids::abOther)
             return;
         if (property == ids::plugin)
         {
@@ -594,6 +603,17 @@ void DawEngine::loadInsertFile (fx::Module& module, const juce::ValueTree& inser
         juce::Logger::writeToLog ("[MicFX DAW] " + error);
 }
 
+std::shared_ptr<fx::Module> DawEngine::takeRunningInsert (const juce::ValueTree& insert)
+{
+    const auto it = runningInserts.find ((int) insert[ids::id]);
+    if (it == runningInserts.end() || it->second.tree != insert)
+        return nullptr;
+
+    auto module = std::move (it->second.module);
+    runningInserts.erase (it);
+    return module;
+}
+
 std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& trackOrMaster)
 {
     const auto id = (int) trackOrMaster[ids::id];
@@ -622,7 +642,9 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
     strip->id = id;
     strip->insertLayout = layout;
 
-    // The chain this one replaces, if any: inserts that stay hand over what they've learnt.
+    // The chain this one replaces, if any: an insert that's the same INSERT takes over its
+    // running module (above); one only like it (same id and type, e.g. the project was
+    // opened again) hands over what it has learnt.
     const auto previous = strips.find (id);
     const auto* previousModules = previous != strips.end() ? &previous->second->modulesByInsertId : nullptr;
 
@@ -637,6 +659,18 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
             // that can't load is left out of the chain and the signal goes on past it.
             auto& slot = strip->plugins[insertId];
             slot.tree = insert;
+
+            // The very module running for this insert (on this track or, moved, on another),
+            // so even its bypass delay goes on; else another module on the same plugin.
+            if (auto running = std::dynamic_pointer_cast<PluginInsert> (takeRunningInsert (insert)); running != nullptr)
+            {
+                auto& added = strip->chain.add (std::move (running), true);
+                slot.module = static_cast<PluginInsert*> (&added);
+                strip->modulesByInsertId[insertId] = &added;
+                strip->insertTrees[insertId] = insert;
+                continue;
+            }
+
             std::unique_ptr<PluginInsert> module;
 
             if (previous != strips.end())
@@ -659,12 +693,25 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
 
             slot.module = static_cast<PluginInsert*> (&added);
             strip->modulesByInsertId[insertId] = &added;
+            strip->insertTrees[insertId] = insert;
             continue;
         }
 
         const auto type = Edit::moduleTypeFromKey (insert[ids::type].toString());
         if (! type.has_value())
             continue; // a module from a newer version: skipped rather than refusing the project
+
+        // Still there from the last graph: the same module carries on, mid-tail, with its
+        // values already in (they're written straight into running modules).
+        if (auto running = takeRunningInsert (insert); running != nullptr && running->getType() == *type)
+        {
+            auto& module = strip->chain.add (std::move (running), true);
+            strip->modulesByInsertId[insertId] = &module;
+            strip->insertTrees[insertId] = insert;
+            if (auto* pitch = dynamic_cast<fx::modules::Pitch*> (&module))
+                strip->pitches.push_back (pitch);
+            continue;
+        }
 
         auto& module = strip->chain.add (fx::createModule (*type));
 
@@ -679,7 +726,8 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
         if (module.usesFile())
             loadInsertFile (module, insert); // before prepare, so it plays from the first block
 
-        strip->modulesByInsertId[(int) insert[ids::id]] = &module;
+        strip->modulesByInsertId[insertId] = &module;
+        strip->insertTrees[insertId] = insert;
         if (auto* pitch = dynamic_cast<fx::modules::Pitch*> (&module))
             strip->pitches.push_back (pitch);
     }
@@ -727,6 +775,14 @@ void DawEngine::rebuild()
     graph->keyMask = analysis::getKeyMask (edit.getKey(), edit.isKeyMinor());
     std::map<int, std::shared_ptr<Strip>> previous;
     std::swap (previous, strips);
+
+    // Every running insert module, for the new chains to take over (see getStrip).
+    runningInserts.clear();
+    for (const auto& [stripId, strip] : previous)
+        for (const auto& [insertId, module] : strip->modulesByInsertId)
+            if (const auto tree = strip->insertTrees.find (insertId); tree != strip->insertTrees.end())
+                if (auto shared = strip->chain.share (*module); shared != nullptr)
+                    runningInserts[insertId] = { std::move (shared), tree->second };
 
     // Keep the strips that still match (moved back from `previous` as they're found).
     const auto reuse = [&] (const juce::ValueTree& tree)
@@ -1025,6 +1081,7 @@ void DawEngine::rebuild()
         level->gain.setCurrentAndTargetValue (level->target.load());
     }
 
+    runningInserts.clear(); // removed inserts: their modules go with the old graph
     publish (std::move (graph));
 }
 
