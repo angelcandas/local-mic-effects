@@ -2358,7 +2358,8 @@ namespace
         const auto& backingRms = after.tracks[1].second.rmsDb;
         const auto singingLevel = backingRms[36], breathLevel = backingRms[52]; // 3.6 s (singing), 5.2 s (breath)
         const auto dip = breathLevel - singingLevel;
-        const auto target = analysis::getTargets (analysis::MixStyle::pop).duckDb;
+        // A full backing dips at least 2 dB (it is the whole band at once).
+        const auto target = juce::jmax (analysis::getTargets (analysis::MixStyle::pop).duckDb, 2.0f);
         check (std::abs (dip - target) < 0.4f, "the backing dips " + juce::String (dip, 1) + " dB while the voice sings (target "
                                                   + juce::String (target, 1) + ")");
 
@@ -14102,6 +14103,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "karaoke")
     {
         testAutoMixBackingTrack();
+        testAutoMixRides();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
