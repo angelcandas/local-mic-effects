@@ -56,6 +56,22 @@ struct Profile
     std::vector<float> pitchHz;       // YIN pitch at the end of the hop, 0 when unpitched
     std::vector<Chroma> chroma;       // notes sounding over the last ~170 ms (see Key.h), all zero when nothing tonal
 
+    // Stereo and level checks for Mix Check (see MixCheck.h). Stereo bands: low < 120 Hz, mid
+    // 120 Hz - 4 kHz, high above (powers are mean squares per hop of the mid (L+R)/2 and side
+    // (L-R)/2 signals; correlation is the L/R correlation coefficient over the hop).
+    static constexpr int stereoBands = 3;
+    struct StereoHop
+    {
+        std::array<float, stereoBands> mid {}, side {};
+        float correlation = 1.0f;
+    };
+    bool stereo = false;              // two channels were measured (the fields below are then filled)
+    std::vector<StereoHop> stereoHops;
+    float truePeakDb = -200.0f;       // inter-sample peak (4x oversampled), dBTP
+    float dcOffset = 0.0f;            // the larger of the two channels' mean, linear (0.01 = 1 % of full scale)
+    int clippedRuns = 0;              // runs of 3 or more samples at full scale
+    std::vector<float> clipTimes;     // where the first (up to 64) of them start, seconds
+
     float integratedLufs = -200.0f;   // gated, over the whole signal (-200 = silence)
     float shortTermMaxLufs = -200.0f; // loudest 3 s
     float peakDb = -200.0f;           // sample peak, dBFS
@@ -128,6 +144,23 @@ private:
     std::vector<double> hopPowers; // K-weighted mean square of each 100 ms hop (channels summed)
 
     fx::PitchDetector pitch;
+
+    // Mix Check measurements.
+    struct Biquad
+    {
+        void setup (double sampleRate, double frequency, bool highPass);
+        double process (double x) noexcept;
+        double b0 = 0, b1 = 0, b2 = 0, a1 = 0, a2 = 0, z1 = 0, z2 = 0;
+    };
+    Biquad msLow[2], msHigh[2]; // [0] mid, [1] side: low-pass at 120 Hz, high-pass at 4 kHz
+    double hopMid[Profile::stereoBands] {}, hopSide[Profile::stereoBands] {};
+    double hopLL = 0.0, hopRR = 0.0, hopLR = 0.0;
+    double sumL = 0.0, sumR = 0.0;
+    juce::int64 samplesSeen = 0;
+    float history4[2][12] {};  // the last 12 samples per channel, for the true peak
+    float truePeak = 0.0f;
+    int clipRun[2] {};
+    bool clipCounted[2] {};
 
     static constexpr int fftOrder = 13, fftSize = 1 << fftOrder;
     juce::dsp::FFT fft { fftOrder };

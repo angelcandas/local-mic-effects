@@ -18,6 +18,7 @@
 #include "dsp/Biquad.h"
 #include "analysis/Key.h"
 #include "analysis/MixAssistant.h"
+#include "analysis/MixCheck.h"
 #include "analysis/TakeComp.h"
 #include "Presets.h"
 #include "daw/DawEngine.h"
@@ -1232,6 +1233,322 @@ namespace
 
     // Volume automation: the Edit's ride, the engine playing it, and Auto Mix writing
     // a vocal ride and a dip on the backing while the voice sings.
+    //==========================================================================
+    // A finished-sounding mix: one tone per third-octave band following the typical balance, the
+    // loudness swinging 6 dB every 5 s, centred, normalised to `lufs`.
+    juce::AudioBuffer<float> makeCheckMix (double seconds, double lufs, double bassBoostDb = 0.0, bool wideLows = false)
+    {
+        static constexpr std::pair<double, double> points[] = { { 20.0, -10.0 }, { 50.0, -1.0 }, { 250.0, 0.0 }, { 1000.0, -9.0 },
+                                                                { 4000.0, -18.0 }, { 10000.0, -25.0 }, { 20000.0, -36.0 } };
+        const auto typical = [] (double hz)
+        {
+            for (size_t i = 1; i < std::size (points); ++i)
+                if (hz <= points[i].first)
+                    return points[i - 1].second + std::log (hz / points[i - 1].first) / std::log (points[i].first / points[i - 1].first)
+                                                      * (points[i].second - points[i - 1].second);
+            return points[std::size (points) - 1].second;
+        };
+
+        const auto n = (int) std::lround (seconds * sampleRate);
+        juce::AudioBuffer<float> buffer (2, n);
+        buffer.clear();
+        juce::Random random (11);
+        for (int b = 0; b < analysis::numBands; ++b)
+        {
+            const auto hz = analysis::getBandCentre (b);
+            if (hz < 40.0 || hz > 16000.0)
+                continue;
+            const auto boost = hz < 200.0 ? bassBoostDb : 0.0;
+            const auto amplitude = std::pow (10.0, (typical (hz) + boost) / 20.0);
+            const auto phase = random.nextDouble() * juce::MathConstants<double>::twoPi;
+            const auto sidePhase = wideLows && hz < 120.0 ? phase + juce::MathConstants<double>::halfPi : phase;
+            for (int i = 0; i < n; ++i)
+            {
+                const auto t = i / sampleRate;
+                const auto w = juce::MathConstants<double>::twoPi * hz * t;
+                buffer.addSample (0, i, (float) (amplitude * std::sin (w + phase)));
+                buffer.addSample (1, i, (float) (amplitude * std::sin (w + sidePhase)));
+            }
+        }
+
+        for (int i = 0; i < n; ++i)
+        {
+            const auto swing = (int) (i / sampleRate / 5.0) % 2 == 0 ? 1.0f : 0.5f;
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.setSample (ch, i, buffer.getSample (ch, i) * swing);
+        }
+
+        const auto gain = (float) std::pow (10.0, (lufs - analysis::analyse (buffer, sampleRate).integratedLufs) / 20.0);
+        buffer.applyGain (gain);
+        return buffer;
+    }
+
+    juce::AudioBuffer<float> makeSilence (double seconds)
+    {
+        juce::AudioBuffer<float> buffer (2, (int) std::lround (seconds * sampleRate));
+        buffer.clear();
+        return buffer;
+    }
+
+    void testMixCheck()
+    {
+        std::cout << "\nMix Check (measurements, findings, fixes)\n";
+        using analysis::Finding;
+        const auto find = [] (const analysis::Report& report, const juce::String& key) -> const Finding*
+        {
+            for (const auto& f : report.findings)
+                if (f.key == key)
+                    return &f;
+            return nullptr;
+        };
+        const auto describe = [] (const analysis::Report& report)
+        {
+            juce::String s;
+            for (const auto& f : report.findings)
+                s << f.key << "(" << f.severity << ", " << juce::String (f.value, 1) << ") ";
+            return s.trim();
+        };
+
+        // The new measurements.
+        {
+            // A tone at a quarter of the sample rate, 45 degrees in: every sample is 0.636, the wave reaches 0.9.
+            juce::AudioBuffer<float> buffer (2, (int) sampleRate * 2);
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+                for (int ch = 0; ch < 2; ++ch)
+                    buffer.setSample (ch, i, (float) (0.9 * std::sin (juce::MathConstants<double>::halfPi * i + juce::MathConstants<double>::pi / 4.0)));
+            const auto profile = analysis::analyse (buffer, sampleRate);
+            check (std::abs (profile.peakDb - juce::Decibels::gainToDecibels (0.6364f)) < 0.2f
+                       && std::abs (profile.truePeakDb - juce::Decibels::gainToDecibels (0.9f)) < 0.4f,
+                   "true peak finds the wave between the samples (sample " + juce::String (profile.peakDb, 1) + ", true "
+                       + juce::String (profile.truePeakDb, 1) + " dB)");
+            check (profile.clippedRuns == 0 && profile.stereo, "a clean stereo tone isn't clipped");
+
+            juce::AudioBuffer<float> hot (2, (int) sampleRate * 2);
+            for (int i = 0; i < hot.getNumSamples(); ++i)
+                for (int ch = 0; ch < 2; ++ch)
+                    hot.setSample (ch, i, juce::jlimit (-1.0f, 1.0f, 1.6f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * i / sampleRate)));
+            const auto clipped = analysis::analyse (hot, sampleRate);
+            check (clipped.clippedRuns >= 400 && ! clipped.clipTimes.empty() && clipped.clipTimes.size() <= 64 && clipped.clipTimes.front() < 0.01f,
+                   "a clipped sine: runs counted (" + juce::String (clipped.clippedRuns) + "), the first found at the start");
+
+            juce::AudioBuffer<float> offset (2, (int) sampleRate);
+            for (int i = 0; i < offset.getNumSamples(); ++i)
+                for (int ch = 0; ch < 2; ++ch)
+                    offset.setSample (ch, i, 0.05f + 0.2f * (float) std::sin (0.1 * i));
+            check (std::abs (analysis::analyse (offset, sampleRate).dcOffset - 0.05f) < 0.005f, "DC offset measured");
+
+            // Stereo: the same in both (mono), and one channel against the other.
+            auto tone = makeTones ({ { 4.0, 80.0, 0.4f, 0.4f } });
+            auto mono = analysis::analyse (tone, sampleRate);
+            auto flipped = makeTones ({ { 4.0, 80.0, 0.4f, -0.4f } });
+            auto opposite = analysis::analyse (flipped, sampleRate);
+            const auto hop = mono.stereoHops.size() / 2;
+            check (mono.stereoHops[hop].side[0] < 1.0e-8f && mono.stereoHops[hop].mid[0] > 1.0e-3f && mono.stereoHops[hop].correlation > 0.99f,
+                   "a centred bass is all mid, correlation 1");
+            check (opposite.stereoHops[hop].mid[0] < 1.0e-8f && opposite.stereoHops[hop].side[0] > 1.0e-3f && opposite.stereoHops[hop].correlation < -0.99f,
+                   "a bass in opposite phase is all side, correlation -1");
+        }
+
+        analysis::CheckContext context;
+        context.style = analysis::MixStyle::pop;
+        context.targetLufs = -14.0f;
+        const analysis::SessionAnalyser::Result noTracks;
+
+        // A clean mix gets a clean report.
+        {
+            const auto mix = analysis::analyse (makeCheckMix (30.0, -14.0), sampleRate);
+            const auto report = analysis::checkMix (noTracks, mix, context);
+            check (std::abs (report.lufs + 14.0f) < 0.3f && report.truePeakDb < -1.0f && ! report.empty, "the clean mix: -14 LUFS, true peak "
+                       + juce::String (report.truePeakDb, 1) + ", range " + juce::String (report.loudnessRange, 1));
+            check (report.findings.empty() && report.score == 100, "a clean mix triggers nothing (" + describe (report) + ")");
+        }
+
+        // Each finding.
+        {
+            const auto loud = analysis::checkMix (noTracks, analysis::analyse (makeCheckMix (30.0, -8.0), sampleRate), context);
+            const auto* f = find (loud, "loudness");
+            check (f != nullptr && f->severity == 2 && f->fix == analysis::FixKind::master && f->value > -9.0f, "too loud: flagged with the master fix (" + describe (loud) + ")");
+
+            const auto quiet = analysis::checkMix (noTracks, analysis::analyse (makeCheckMix (30.0, -20.0), sampleRate), context);
+            f = find (quiet, "loudness");
+            check (f != nullptr && f->title.startsWith ("Quieter"), "too quiet: flagged");
+
+            const auto peaky = analysis::checkMix (noTracks, analysis::analyse (makeCheckMix (30.0, -14.0), sampleRate), context);
+            check (find (peaky, "truePeak") == nullptr, "-14 LUFS with peaks under -1 dBTP: no true peak finding");
+
+            auto hot = makeCheckMix (30.0, -14.0);
+            hot.applyGain (3.0f); // louder and over the ceiling; the loudness check follows
+            const auto over = analysis::checkMix (noTracks, analysis::analyse (hot, sampleRate), context);
+            check (find (over, "truePeak") != nullptr || over.truePeakDb < -1.0f, "peaks over -1 dBTP are reported when they happen");
+
+            // Squashed: a flat, limited mix.
+            auto squashed = makeCheckMix (30.0, -14.0);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < squashed.getNumSamples(); ++i)
+                    squashed.setSample (ch, i, std::tanh (6.0f * squashed.getSample (ch, i)));
+            auto squashedProfile = analysis::analyse (squashed, sampleRate);
+            const auto flat = analysis::checkMix (noTracks, squashedProfile, context);
+            check (find (flat, "overCompressed") != nullptr, "a squashed mix is flagged (PLR " + juce::String (flat.plr, 1) + ", range "
+                       + juce::String (flat.loudnessRange, 1) + "; " + describe (flat) + ")");
+
+            // Tonal balance: 9 dB too much low end.
+            const auto boomy = analysis::checkMix (noTracks, analysis::analyse (makeCheckMix (30.0, -14.0, 9.0), sampleRate), context);
+            f = find (boomy, "tonalBalance");
+            check (f != nullptr && f->band == 0 && f->value > 4.0f && f->fix == analysis::FixKind::tonal, "boomy low end: flagged as too strong (" + describe (boomy) + ")");
+
+            // Stereo: wide lows.
+            const auto wide = analysis::checkMix (noTracks, analysis::analyse (makeCheckMix (30.0, -14.0, 0.0, true), sampleRate), context);
+            f = find (wide, "lowEndStereo");
+            check (f != nullptr && f->fix == analysis::FixKind::monoLows, "wide lows: flagged (" + describe (wide) + ")");
+
+            // Phase: the left channel against the right.
+            {
+                auto cancel = makeCheckMix (20.0, -14.0);
+                cancel.applyGain (1, 0, cancel.getNumSamples(), -1.0f);
+                const auto cancelProfile = analysis::analyse (cancel, sampleRate);
+                const auto report = analysis::checkMix (noTracks, cancelProfile, context);
+                f = find (report, "phase");
+                check (f != nullptr && f->to - f->from >= 1.0 && find (report, "monoLoss") != nullptr,
+                       "an inverted channel: out of phase for over a second, and it vanishes in mono (" + describe (report) + ")");
+            }
+
+            // Silence at the start and the end.
+            {
+                juce::AudioBuffer<float> padded (2, (int) (sampleRate * 40.0));
+                padded.clear();
+                const auto body = makeCheckMix (20.0, -14.0);
+                for (int ch = 0; ch < 2; ++ch)
+                    padded.copyFrom (ch, (int) (sampleRate * 6.0), body, ch, 0, body.getNumSamples());
+                const auto report = analysis::checkMix (noTracks, analysis::analyse (padded, sampleRate), context);
+                const auto* head = find (report, "silenceHead");
+                const auto* tail = find (report, "silenceTail");
+                check (head != nullptr && std::abs (head->to - 6.0) < 0.3 && tail != nullptr && std::abs (tail->to - tail->from - 14.0) < 0.3,
+                       "6 s of silence before and 14 s after (" + describe (report) + ")");
+            }
+
+            const auto silent = analysis::checkMix (noTracks, analysis::analyse (makeSilence (3.0), sampleRate), context);
+            check (silent.empty && silent.score == 0 && find (silent, "silent") != nullptr, "a silent mix says so");
+        }
+
+        // The tracks.
+        {
+            const auto mixProfile = analysis::analyse (makeCheckMix (15.0, -14.0), sampleRate);
+            const auto sung = makeSungLine (15.0, 3.0, 1.5);
+            auto humming = sung;
+            {
+                juce::Random random (7);
+                for (int i = 0; i < humming.getNumSamples(); ++i)
+                {
+                    const auto t = i / sampleRate;
+                    const auto noise = 0.002 * std::sin (juce::MathConstants<double>::twoPi * 50.0 * t) + 0.0015 * std::sin (juce::MathConstants<double>::twoPi * 100.0 * t)
+                                     + 0.001 * std::sin (juce::MathConstants<double>::twoPi * 150.0 * t) + 0.002 * (random.nextFloat() * 2.0 - 1.0);
+                    for (int ch = 0; ch < 2; ++ch)
+                        humming.addSample (ch, i, (float) noise);
+                }
+            }
+            auto clippedVoice = sung;
+            clippedVoice.applyGain (6.0f);
+            for (int ch = 0; ch < 2; ++ch)
+                for (int i = 0; i < clippedVoice.getNumSamples(); ++i)
+                    clippedVoice.setSample (ch, i, juce::jlimit (-1.0f, 1.0f, clippedVoice.getSample (ch, i)));
+
+            analysis::SessionAnalyser::Result result;
+            result.tracks.push_back ({ 1, analysis::analyse (humming, sampleRate) });
+            result.tracks.push_back ({ 2, analysis::analyse (makeBacking (15.0), sampleRate) });
+            result.tracks.push_back ({ 3, analysis::analyse (clippedVoice, sampleRate) });
+            result.tracks.push_back ({ 4, analysis::analyse (makeSilence (15.0), sampleRate) });
+            context.roles = { { 1, analysis::Role::voice }, { 2, analysis::Role::backing }, { 3, analysis::Role::guitar }, { 4, analysis::Role::other } };
+            context.names = { { 1, "Vocal" }, { 2, "Backing" }, { 3, "Guitar" }, { 4, "Empty" } };
+
+            const auto report = analysis::checkMix (result, mixProfile, context);
+            const auto* hum = find (report, "hum");
+            check (hum != nullptr && hum->trackId == 1 && juce::exactlyEqual (hum->value, 50.0f) && hum->fix == analysis::FixKind::hum, "hum found on the voice (" + describe (report) + ")");
+            const auto* clip = find (report, "clipping");
+            check (clip != nullptr && clip->trackId == 3 && clip->severity == 2, "the clipped track is named");
+            const auto* never = find (report, "neverHeard");
+            check (never != nullptr && never->trackId == 4, "the silent track is named");
+            check (find (report, "hum") != nullptr && find (report, "hum")->trackId == 1 && report.score < 100, "the score drops");
+
+            // Muted tracks are left out.
+            auto mutedContext = context;
+            mutedContext.muted = { 3, 4 };
+            const auto muted = analysis::checkMix (result, mixProfile, mutedContext);
+            check (find (muted, "clipping") == nullptr && find (muted, "neverHeard") == nullptr, "muted tracks aren't checked");
+
+            // The fixes.
+            auto plan = analysis::planFix (*clip, result, mixProfile, context);
+            check (plan.moves.size() == 1 && ! plan.moves[0].insert.has_value() && plan.moves[0].trackId == 3
+                       && plan.moves[0].values.count ("inGain") == 1 && plan.moves[0].values.at ("inGain") < 0.0f,
+                   "clipping: the track's input gain goes down");
+            plan = analysis::planFix (*hum, result, mixProfile, context);
+            check (plan.moves.size() == 1 && plan.moves[0].insert == fx::ModuleType::paraEq && plan.moves[0].instance == 0
+                       && std::abs (plan.moves[0].values.at ("peqBell1Freq") - 50.0f) < 1.0f && plan.moves[0].values.at ("peqBell1Gain") < -5.0f,
+                   "hum: a narrow cut on 50 Hz");
+            auto withEq = context;
+            withEq.inserts[1] = { fx::ModuleType::paraEq };
+            plan = analysis::planFix (*hum, result, mixProfile, withEq);
+            check (plan.moves.size() == 1 && plan.moves[0].instance == 1, "hum on a track with its own EQ: a second EQ");
+
+            // Master: no limiter yet (the whole mastering chain), one there (its drive moves).
+            const auto louder = analysis::analyse (makeCheckMix (30.0, -9.0), sampleRate);
+            const auto loudReport = analysis::checkMix (noTracks, louder, context);
+            const auto* loud = find (loudReport, "loudness");
+            check (loud != nullptr, "the loud mix is flagged");
+            if (loud != nullptr)
+            {
+                plan = analysis::planFix (*loud, noTracks, louder, context);
+                bool hasLimiter = false;
+                for (const auto& move : plan.moves)
+                    hasLimiter = hasLimiter || move.insert == fx::ModuleType::limiter;
+                check (hasLimiter, "no limiter on the master: the mastering chain comes");
+
+                auto limited = context;
+                limited.inserts[daw::Edit::masterId] = { fx::ModuleType::limiter };
+                limited.masterValues["limDrive"] = 6.0f;
+                plan = analysis::planFix (*loud, noTracks, louder, limited);
+                check (plan.moves.size() == 1 && plan.moves[0].insert == fx::ModuleType::limiter && plan.moves[0].values.at ("limDrive") < 6.0f,
+                       "a limiter there already: its drive goes down (" + juce::String (plan.moves.empty() ? -1.0f : plan.moves[0].values.at ("limDrive"), 1) + ")");
+            }
+
+            const auto boomyProfile = analysis::analyse (makeCheckMix (30.0, -14.0, 9.0), sampleRate);
+            const auto boomyReport = analysis::checkMix (noTracks, boomyProfile, context);
+            if (const auto* tonal = find (boomyReport, "tonalBalance"))
+            {
+                plan = analysis::planFix (*tonal, noTracks, boomyProfile, context);
+                check (plan.moves.size() == 1 && plan.moves[0].insert == fx::ModuleType::masterEq && plan.moves[0].values.at ("meqLowGain") < -1.0f
+                           && plan.moves[0].values.at ("meqLowGain") >= -3.0f,
+                       "tonal: the low shelf comes down, by at most 3 dB");
+            }
+
+            const auto wideProfile = analysis::analyse (makeCheckMix (30.0, -14.0, 0.0, true), sampleRate);
+            if (const auto* lows = find (analysis::checkMix (noTracks, wideProfile, context), "lowEndStereo"))
+            {
+                plan = analysis::planFix (*lows, noTracks, wideProfile, context);
+                check (plan.moves.size() == 1 && plan.moves[0].insert == fx::ModuleType::imager && plan.moves[0].values.at ("imgMonoBelow") == 120.0f,
+                       "low end: the imager goes mono under 120 Hz");
+            }
+
+            const auto text = analysis::reportToText (report, context.names);
+            check (text.contains ("MIX CHECK") && text.contains ("Vocal hums") && text.contains ("Why it matters"), "the report is plain text");
+        }
+
+        // Fixes written into a session are one undo step.
+        {
+            daw::Edit edit;
+            const auto track = (int) edit.addTrack ("Guitar")[daw::ids::id];
+            analysis::MixPlan plan;
+            analysis::MixMove move;
+            move.trackId = track;
+            move.values = { { "inGain", -4.0f } };
+            plan.moves.push_back (move);
+            analysis::applyMix (edit, plan, 1.0f, "Mix Check");
+            check (std::abs ((float) edit.getTrack (track).getProperty (daw::ids::inGain, 0.0f) + 4.0f) < 1.0e-4f && edit.getUndoManager().getUndoDescription() == "Mix Check",
+                   "applied as one undo step named Mix Check");
+            edit.getUndoManager().undo();
+            check (std::abs ((float) edit.getTrack (track).getProperty (daw::ids::inGain, 0.0f)) < 1.0e-4f, "and undone");
+        }
+    }
+
     void testAutoMixModes()
     {
         std::cout << "\nAuto Mix modes (fit into backing, clean & polish)\n";
@@ -11261,6 +11578,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=mixcheck: just Mix Check.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "mixcheck")
+    {
+        testMixCheck();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=tomidi: just audio to MIDI.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "tomidi")
     {
@@ -11326,6 +11651,7 @@ int main()
     testLiveControls();
     testAnalysis();
     testMixAssistant();
+    testMixCheck();
     testKeyDetection();
     testHarmonies();
     testDawKey();
