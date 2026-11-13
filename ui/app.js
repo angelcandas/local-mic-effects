@@ -13,6 +13,7 @@ import { SCENE_KEYS, SceneBar } from "./scenes.js";
 import { SETLIST_KEYS, SetlistPanel } from "./setlist.js";
 import { CapturePanel } from "./capture.js";
 import { SoundCheckPanel } from "./soundcheck.js";
+import { initSetup } from "./setup.js";
 
 // Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
 // builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
@@ -1491,7 +1492,7 @@ new SoundCheckPanel(document.querySelector(".sound-check"));
 const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["Ctrl+← / →", "Previous / next preset"],
                    ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"],
                    ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo any change to the sound (presets, knobs, scenes, resets)"], ["M", "Mute output (panic)"],
-                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["F1", "The user manual"], ["Esc", "Close"]];
+                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["F1", "The user manual"], ["Ctrl+,", "Settings"], ["Esc", "Close"]];
 function toggleLiveKeys(show) {
   let overlay = document.querySelector(".live-keys");
   if (!overlay) {
@@ -1543,3 +1544,4 @@ Juce.getNativeFunction("getParameterDefaults")().then((defaults) => {
 });
 
 initDaw();
+initSetup(); // after initDaw: the status strip goes into both hint lines

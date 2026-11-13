@@ -4983,7 +4983,7 @@ class DawScreen {
     ["View", [["Tab / X", "Tracks / mixer"], ["E / Shift+Tab", "Show / hide the effects panel"], ["Shift+B / Ctrl+Alt+B", "Show / hide the library"],
               ["Ctrl+F", "Search the library"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"],
               ["Z / Shift+Z", "Zoom to the selected clip / the whole song"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
-              ["?", "This list"], ["F1", "The user manual (Help menu)"], [IS_MAC ? "Ctrl+Cmd+F" : "F11", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
+              ["?", "This list"], ["F1", "The user manual (Help menu)"], ["Ctrl+,", "Settings"], [IS_MAC ? "Ctrl+Cmd+F" : "F11", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
   ];
 
   toggleShortcuts(show) {
@@ -5881,6 +5881,7 @@ export function initDaw() {
   window.__JUCE__.backend.addEventListener("appMenu", (action) => {
     if (action === "mode:live" || action === "mode:daw") requestMode(action === "mode:daw");
     else if (action === "shortcuts" && !screen.active) document.dispatchEvent(new CustomEvent("micfx:liveKeys"));
+    else if (action === "settings") document.dispatchEvent(new CustomEvent("micfx:settings"));
     else screen.run(action);
   });
 

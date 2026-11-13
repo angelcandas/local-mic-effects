@@ -351,6 +351,42 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                        });
                        })
 
+                       // (action) -> the audio setup, for the status strip and the first-run card (standalone app):
+                       // { available, device, rate, buffer, latencyMs, cpu, xruns, inputMuted }. "settings" opens the
+                       // audio settings, "headphones" unmutes the input (JUCE mutes it until you say you wear headphones).
+                       .withNativeFunction ("audioSetup", [] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           auto* result = new juce::DynamicObject();
+                           result->setProperty ("available", false);
+                          #if JucePlugin_Build_Standalone
+                           if (auto* holder = juce::JUCEApplicationBase::isStandaloneApp() ? juce::StandalonePluginHolder::getInstance() : nullptr)
+                           {
+                               if (action == "settings")   holder->showAudioSettingsDialog();
+                               if (action == "headphones") holder->getMuteInputValue().setValue (false);
+
+                               result->setProperty ("available", true);
+                               result->setProperty ("inputMuted", (bool) holder->getMuteInputValue().getValue());
+                               result->setProperty ("cpu", holder->deviceManager.getCpuUsage() * 100.0);
+                               if (auto* device = holder->deviceManager.getCurrentAudioDevice())
+                               {
+                                   const auto rate = device->getCurrentSampleRate();
+                                   const auto buffer = device->getCurrentBufferSizeSamples();
+                                   result->setProperty ("device", device->getName());
+                                   result->setProperty ("rate", rate);
+                                   result->setProperty ("buffer", buffer);
+                                   // Round trip: the interface's own latency both ways plus a buffer each way.
+                                   const auto samples = device->getInputLatencyInSamples() + device->getOutputLatencyInSamples() + 2 * buffer;
+                                   result->setProperty ("latencyMs", rate > 0.0 ? 1000.0 * samples / rate : 0.0);
+                                   result->setProperty ("xruns", device->getXRunCount());
+                               }
+                           }
+                          #else
+                           juce::ignoreUnused (action);
+                          #endif
+                           complete (juce::var (result));
+                       })
+
                        // (action, name?) -> { undo, redo, preset }: undo for Live mode (LiveHistory).
                        // "undo", "redo", "label" (names the next step), "hold" / "release" (join every change
                        // in between into one named step), "state".
