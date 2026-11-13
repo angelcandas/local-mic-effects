@@ -148,6 +148,36 @@ you sing.
 - The loop is part of what **Record** captures, so a take holds your voice and your loops.
 - Tempo, Free/Bars and loop volume are remembered; the loop itself isn't saved when you quit.
 
+### Scenes (Live mode)
+
+The bar above the effects keeps **scenes**: the sound of each part of a song (verse, chorus,
+bridge), up to eight. A scene holds every setting except the input gain.
+
+- **+ Scene** saves the current sound. Click a scene (or **[** / **]**) to go there: knobs glide over
+  the **Glide** time, effects that come on switch on at the start, effects that go off switch off at
+  the end, and choices change at once.
+- When you change the sound, the active scene shows a dot: **Save to …** puts the changes into it.
+  Double-click a scene to rename it; right-click to save into it or delete it.
+- Scenes are saved with the plug-in state (the DAW session, or the app's last state). With MIDI learn,
+  a pedal or pad can step through scenes or jump to one.
+
+### Setlists (standalone app)
+
+**Setlist** in the top bar opens the show's songs, in order. Each song keeps its sound (every
+setting but the input gain), its scenes, the looper's tempo, a key, a backing track, lyrics and notes.
+
+- Set up a song (sound, scenes, tempo, backing track), then **+ Add the current sound as a song**.
+  **Save the sound to this song** updates it later. Name, key and mode, BPM, backing track, lyrics
+  (type them or load a .txt / .lrc file) and notes are edited below the list.
+- Click a song to load it: its sound changes at once, its scenes replace the scene bar, the looper
+  takes its tempo, the autotune takes its key (and major or minor, when the scale is major or minor),
+  and its backing track replaces the tracks in the player.
+- **Page Down / Page Up** (what most page-turner pedals send) go to the next and previous song, with
+  no wrap at the ends. With MIDI learn, a pedal can do the same.
+- **Stage view** shows the song's name, key, tempo and notes and its lyrics in large type. Lyrics in
+  .lrc form (`[01:02.50] words`) follow the backing track line by line.
+- Setlists are saved as `.micfxset` files; the last few are under **Recent**.
+
 ### MIDI learn (Live mode)
 
 Pedals, knobs, pads and keys on any MIDI controller can drive the Live screen. In the app every
@@ -163,7 +193,8 @@ effects).
   on screen, so the sound never jumps. On a choice, its position picks the option.
 - A **pedal, pad, key or program change** flips a switch, steps through a choice, or flips a knob
   between its two ends. A pedal acts when pressed, not when released.
-- **Buttons**: the looper's (Loop, stop, undo, redo, clear), previous/next preset, Mute and Record.
+- **Buttons**: the looper's (Loop, stop, undo, redo, clear), previous/next preset, the scenes (each
+  one, and previous/next), the setlist's previous/next song, Mute and Record.
   Looper pedals act in the audio block they arrive in, so a footswitch closes a loop on time.
 - Mappings belong to the app (`MIDI mappings.json` next to its settings), not to the presets, and
   work while the window is closed.
@@ -451,6 +482,8 @@ src/Recorder.*          WAV recording of the output (and dry mic) on a backgroun
 src/Multitrack.*        backing track + takes: loading, resampling, timeline playback
 src/Looper.*            the Live looper: four layers, overdub, undo/redo, bar-locked length
 src/MidiMap.*           MIDI learn: CC / note / program change -> parameters and actions
+src/Scenes.*            Live scenes: snapshots of the sound, recalled with a glide
+src/Setlist.*           the setlist: songs with sound, scenes, tempo, key, backing track, lyrics
 src/daw/                DAW mode: Edit (the session as an undoable ValueTree), AudioPool (decoded
                         clip audio), DawEngine (tracks + inserts + master bus, lock-free graph swap,
                         dry recording, metronome), Project (.micfx folders, autosave, recovery),
@@ -477,6 +510,8 @@ ui/modules.js           the effect catalog the UI is built from
 ui/app.js, styles.css   the interface (Live mode)
 ui/looper.js            the Live looper panel
 ui/midilearn.js         MIDI learn mode on the Live screen
+ui/scenes.js            the Live scene bar
+ui/setlist.js           the setlist drawer and stage view (standalone)
 ui/daw.js, daw.css      the DAW screen: tracks, clips, inserts, mixer, transport
 ui/browser.js           the DAW screen's library sidebar (files, effects, instruments, presets)
 ui/widgets.js           helpers shared by both screens

@@ -14,6 +14,7 @@
 //   getRecorderSettings, startRecording, stopRecording, chooseRecordingFolder,
 //   setRecordDry (bool), revealRecording, getTracks, loadBackingTrack, setTrack (id, { gain, muted }),
 //   removeTrack (id), transport (action, seconds), getParameterInfo, looper (action, args), midi (action, args),
+//   scenes (action, args), setlist (action, args),
 //   daw (command, args) for the DAW screen (see DawBridge),
 //   window (action): "fullScreen" toggles full screen; returns { available, fullScreen }.
 // Pushed events: "meters" { input, output, note, target, preset, recording, transport, looper } at 30 Hz
@@ -57,6 +58,9 @@ private:
     juce::var describeTracks();
     juce::var describeLooper (bool withOverview);
     juce::var describeMidi();
+    juce::var describeSetlist (const juce::String& warning, const juce::String& error);
+    void handleSetlist (const juce::String& action, const juce::var& options, std::function<void (juce::var)> complete);
+    void rememberSetlist (const juce::File&);
     void saveLooperSettings();
     int looperTicks = 0;
     juce::var describeWindow() const;
