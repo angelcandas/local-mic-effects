@@ -11,6 +11,11 @@
 
 #include <set>
 #include <thread>
+#include <csignal>
+#include <unistd.h>
+#if JUCE_LINUX || JUCE_MAC
+ #include <execinfo.h>
+#endif
 
 #include "DawBridge.h"
 #include "PluginProcessor.h"
@@ -12269,7 +12274,7 @@ namespace
         {
             std::vector<double> downbeats;
             for (int k = 0; k <= 16; ++k)
-                downbeats.push_back (1.0 + k * 2.0 + (k > 8 ? (k - 8) * 0.05 : 0.0)); // 120 BPM, then slowing a little
+                downbeats.push_back (1.6 + k * 2.0 + (k > 8 ? (k - 8) * 0.05 : 0.0)); // 120 BPM, then slowing a little
             int lead = -1;
             const auto map = daw::TempoMap::fromDownbeats (downbeats, 4, &lead);
             auto worst = 0.0;
@@ -12277,6 +12282,19 @@ namespace
                 worst = juce::jmax (worst, std::abs (map.toSeconds ((lead + (double) k) * 4.0) - downbeats[k]));
             check (lead == 1 && worst < 1.0e-4, "bar lines land on the downbeats (one lead-in bar, worst "
                                                 + juce::String (worst * 1000.0, 3) + " ms)");
+
+            // Music starting 0.4 s in: a whole lead-in bar would need 600 BPM, so the first
+            // bar joins the lead-in at a sensible tempo, and the bar lines follow from the second.
+            std::vector<double> early;
+            for (int k = 0; k <= 8; ++k)
+                early.push_back (0.4 + k * 2.0);
+            const auto soon = daw::TempoMap::fromDownbeats (early, 4, &lead);
+            auto worstLater = 0.0;
+            for (size_t k = 1; k < early.size(); ++k)
+                worstLater = juce::jmax (worstLater, std::abs (soon.toSeconds ((lead + (double) k - 1.0) * 4.0) - early[k]));
+            check (soon.getPoints().front().bpm < 180.0 && worstLater < 1.0e-4,
+                   "music right at the start: a sensible lead-in tempo (" + juce::String (soon.getPoints().front().bpm, 1)
+                       + " BPM), bar lines from the second downbeat on");
             check (map.getPoints().size() <= 10, "a steady stretch needs no extra points (" + juce::String ((int) map.getPoints().size()) + ")");
 
             auto moved = downbeats;
@@ -12291,7 +12309,7 @@ namespace
             daw::Edit edit;
             std::vector<double> beats;
             for (int b = 0; b < 40; ++b)
-                beats.push_back (0.5 + b * 0.55 + b * b * 0.0008);
+                beats.push_back (1.6 + b * 0.55 + b * b * 0.0008);
             edit.getUndoManager().beginNewTransaction();
             const auto lead = edit.setTempoMapFromBeats (beats, 1);
             const auto map = edit.getTempoMap();
@@ -12375,6 +12393,9 @@ namespace
             std::vector<int> starts;
             const auto song = playSong ({ { 'I', 4 }, { 'A', 8 }, { 'B', 8 }, { 'A', 8 }, { 'B', 8 }, { 'C', 8 }, { 'B', 8 } },
                                         [] (double b) { return 0.4 + b * 0.5; }, length, downbeats, starts);
+            // MICFX_SONGMAP_WAV=<file> keeps this song, to try the Song map in the app.
+            if (const auto keep = juce::SystemStats::getEnvironmentVariable ("MICFX_SONGMAP_WAV", {}); keep.isNotEmpty())
+                writeWav (juce::File (keep), song, sampleRate);
             const auto map = structure::analyse (song, sampleRate);
             const juce::StringArray expected { "intro", "verse", "chorus", "verse", "chorus", "bridge", "chorus" };
             juce::StringArray kinds;
@@ -12463,6 +12484,116 @@ namespace
             const auto stopped = structure::analyse (silence, sampleRate, {}, [&] { asked = true; return false; });
             check (asked && stopped.cancelled, "cancelling stops the analysis");
         }
+    }
+
+    // The DAW screen's song map: detect over the mix, then sections on the ruler and the
+    // tempo map following the take, as one undo step.
+    void testDawSongMap()
+    {
+        std::cout << "\nSong map in DAW mode\n";
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-songmap", {});
+        folder.createDirectory();
+        juce::PropertiesFile::Options options;
+        options.applicationName = "MicFXTests";
+        options.filenameSuffix = ".settings";
+        juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+
+        std::vector<std::pair<juce::String, juce::var>> events;
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, settings,
+                          [&] (const juce::Identifier& event, const juce::var& payload) { events.emplace_back (event.toString(), payload); },
+                          [] { return (juce::int64) 0; });
+        const auto run = [&] (const juce::String& command, std::initializer_list<std::pair<const char*, juce::var>> properties = {})
+        {
+            auto* object = new juce::DynamicObject();
+            for (const auto& [name, value] : properties)
+                object->setProperty (name, value);
+            juce::var result;
+            bridge.handle (command, juce::var (object), [&] (juce::var r) { result = r; });
+            return result;
+        };
+        const auto waitForMap = [&]
+        {
+            juce::var result;
+            for (int i = 0; i < 30000 && ! result.isObject(); ++i)
+            {
+                events.clear();
+                bridge.tick();
+                for (const auto& [name, payload] : events)
+                    if (name == "dawSongMap" && payload["state"].toString() != "analysing")
+                        result = payload;
+                if (! result.isObject())
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (10); // the audio pool posts its loads
+            }
+            return result;
+        };
+
+        run ("mode", { { "daw", true } });
+        check (! (bool) run ("songMap", { { "action", "detect" } })["ok"], "an empty session has nothing to map");
+        check (! (bool) run ("songMap", { { "action", "apply" } })["ok"], "nothing to apply before a map");
+
+        // A take played without a click (96 -> 108 BPM), verse and chorus twice.
+        const auto beatTime = [] (double b) { const auto k = 12.0 / 128.0; return 0.8 + 60.0 / k * std::log ((96.0 + k * b) / 96.0); };
+        double length = 0.0;
+        std::vector<double> downbeats;
+        std::vector<int> starts;
+        const auto song = playSong ({ { 'A', 8 }, { 'B', 8 }, { 'A', 8 }, { 'B', 8 } }, beatTime, length, downbeats, starts);
+        const auto file = folder.getChildFile ("take.wav");
+        writeWav (file, song, sampleRate);
+        bridge.importAudio (file, (int) edit.getTracks()[0][daw::ids::id]);
+        edit.addMarker (0.2, "Count-in"); // a plain marker stays
+
+        check ((bool) run ("songMap", { { "action", "detect" } })["ok"], "detect starts over the mix");
+        check (! (bool) run ("songMap", { { "action", "detect" } })["ok"], "and doesn't start twice");
+        const auto result = waitForMap();
+        check (result["state"].toString() == "ready" && result["sections"].size() == 4 && result["source"].toString() == "mix",
+               "the map comes back with four sections (" + juce::JSON::toString (result["sections"], true).substring (0, 300) + ")");
+        check ((double) result["drift"] > 0.02 && (bool) result["hasBeats"], "and shows the tempo drifting ("
+                                                                                + juce::String ((double) result["drift"] * 100.0, 1) + " %)");
+
+        // Musical clips would move under a new tempo map: refused.
+        const auto clipId = (int) edit.getTracks()[0].getChildWithName (daw::ids::CLIP)[daw::ids::id];
+        edit.setClipMusical (clipId, true, 100.0);
+        check (! (bool) run ("songMap", { { "action", "apply" }, { "markers", true }, { "follow", true } })["ok"],
+               "following the performance is refused while the take is in musical mode");
+        edit.setClipMusical (clipId, false);
+
+        const auto applied = run ("songMap", { { "action", "apply" }, { "markers", true }, { "follow", true } });
+        check ((bool) applied["ok"] && (int) applied["sections"] == 4, "apply: sections and tempo");
+
+        const auto session = juce::JSON::parse (juce::JSON::toString (bridge.describeSession()));
+        int sections = 0, plain = 0;
+        for (const auto& m : *session["markers"].getArray())
+            (m.hasProperty ("section") && (double) m["length"] > 1.0 && m["colour"].toString().startsWith ("#") ? sections : plain) += 1;
+        check (sections == 4 && plain == 1, "the ruler shows 4 sections with lengths and colours, the plain marker stays");
+
+        const auto tempo = edit.getTempoMap();
+        int onLine = 0;
+        for (auto d : downbeats)
+            onLine += std::abs (tempo.toSeconds (std::round (tempo.toBeats (d) / 4.0) * 4.0) - d) < 0.03 ? 1 : 0;
+        check (! tempo.isSteady() && onLine >= (int) downbeats.size() - 2, "the tempo map follows the take (" + juce::String (onLine)
+                                                                              + " of " + juce::String ((int) downbeats.size()) + " bar lines on its downbeats)");
+
+        edit.getUndoManager().undo();
+        check (edit.getTempoMap().isSteady() && edit.getSongSections().isEmpty() && edit.getMarkers().size() == 1,
+               "one undo puts the steady tempo back and removes the sections");
+        edit.getUndoManager().redo();
+
+        // Again from the clip alone: the sections replace the old ones.
+        check ((bool) run ("songMap", { { "action", "detect" }, { "clip", clipId } })["ok"], "detect from one clip");
+        const auto again = waitForMap();
+        check (again["source"].toString() == "clip" && again["sections"].size() == 4, "the clip gives the same four sections");
+        run ("songMap", { { "action", "apply" }, { "markers", true } });
+        check (edit.getSongSections().size() == 4, "applying again replaces the sections (still 4)");
+        run ("songMap", { { "action", "clear" } });
+        check (edit.getSongSections().isEmpty() && edit.getMarkers().size() == 1, "clear removes only the sections");
+
+        folder.deleteRecursively();
     }
 }
 
@@ -13749,8 +13880,27 @@ namespace
     }
 }
 
+// A crash prints where it happened (CI keeps no core dumps), and stdout goes out line by
+// line so the last PASS before it is the last one shown.
+static void printCrash (int signal)
+{
+   #if JUCE_LINUX || JUCE_MAC
+    void* frames[64];
+    const auto count = backtrace (frames, 64);
+    const char header[] = "\n*** crashed, backtrace:\n";
+    [[maybe_unused]] const auto written = write (STDERR_FILENO, header, sizeof (header) - 1);
+    backtrace_symbols_fd (frames, count, STDERR_FILENO);
+   #endif
+    std::signal (signal, SIG_DFL);
+    std::raise (signal);
+}
+
 int main()
 {
+    std::cout << std::unitbuf;
+    std::signal (SIGSEGV, printCrash);
+    std::signal (SIGBUS, printCrash);
+    std::signal (SIGABRT, printCrash);
     juce::ScopedJuceInitialiser_GUI juce;
 
     // MICFX_TEST_ONLY=instruments runs just those (quicker while working on them).
@@ -13892,6 +14042,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "songmap")
     {
         testSongMap();
+        testDawSongMap();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -13949,6 +14100,7 @@ int main()
     testRhythm();
     testToMidi();
     testSongMap();
+    testDawSongMap();
     testBackingVocals();
     testTrackTools();
     testDawBridge();

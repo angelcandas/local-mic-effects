@@ -44,6 +44,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/fxpresets.js
         ui/daw.js
         ui/mixcheck.js
+        ui/songmap.js
         ui/rhythm.js
         ui/tempo.js
         ui/patterns.js
@@ -385,5 +386,9 @@ if(MICFX_BUILD_TESTS)
     # JUCE_PLUGINHOST_AU=1 pulls in AUGenericView, which lives in CoreAudioKit.
     if(APPLE)
         target_link_libraries(MicFXTests PRIVATE "-framework CoreAudioKit")
+    endif()
+    # Function names in the backtrace a crashing test prints.
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        target_link_options(MicFXTests PRIVATE -rdynamic)
     endif()
 endif()
