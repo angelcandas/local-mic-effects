@@ -51,6 +51,7 @@ jobs:
       - name: Publish the release asset
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ inputs.tag }}
         run: |
           cd "$RUNNER_TEMP/model"
