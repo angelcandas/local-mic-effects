@@ -354,11 +354,14 @@ up with the clip (same start, trim, gain and fades), and mutes the song's clip. 
 **On the Mac's GPU (automatic).** On a Mac, the first split also downloads the network converted to
 Core ML (about 70 MB, checked against its SHA-256) next to the CPU model, and runs it on the GPU.
 The panel says "on the GPU"; if the download or the model fails, the CPU does the split and the
-finished message says why. Nothing to install.
+finished message says why. Nothing to install. The first time, it also separates a short test
+signal on the GPU and on the CPU and compares them; if they disagree the CPU is used (and the
+message says so), because a converted model that loads can still compute nonsense.
 
 The converted model is a release asset (`stem-model-v1`) made by the **Core ML stem model**
 workflow (Actions tab, Run workflow): it runs `scripts/export_htdemucs_coreml.py` on a GitHub Mac
-and prints the zip's SHA-256, which goes into `GpuModel::sha256` in `src/stems/StemSplitter.h`.
+and prints the zip's SHA-256, which is pinned in `GpuModel::sha256` in `src/stems/StemSplitter.h`
+(run it again and update that line to ship a new model).
 To convert by hand instead, use Python 3.12 (PyTorch 2.7.0 has no build for newer):
 `/opt/homebrew/bin/python3.12 -m venv ~/micfx-export && source ~/micfx-export/bin/activate`, then
 `pip install torch==2.7.0 torchaudio==2.7.0 coremltools==9.0 einops "numpy<2.3" demucs==4.0.1` and

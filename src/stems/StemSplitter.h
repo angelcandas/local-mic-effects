@@ -72,7 +72,7 @@ struct GpuModel
     // The converted network, zipped, published by the "Core ML stem model" workflow
     // (.github/workflows/coreml-model.yml) as a release asset.
     static constexpr const char* downloadUrl = "https://github.com/angelcandas/local-mic-effects/releases/download/stem-model-v1/htdemucs-core.mlpackage.zip";
-    static constexpr const char* sha256 = "0000000000000000000000000000000000000000000000000000000000000000";
+    static constexpr const char* sha256 = "00593052d106894aef3a8b59e894379509ab600c886b44c3625db7f6252bbbb9";
     static constexpr int approxMegabytes = 70;
 
     // True when this build can run Core ML (macOS builds with the stem splitter).
