@@ -3720,6 +3720,17 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             return;
         }
 
+        // clipboard: what copyDevices kept.
+        if ((bool) args.getProperty ("clipboard", false))
+        {
+            juce::Array<juce::var> copies;
+            for (const auto& copy : edit.pasteInsertTrees (deviceClipboard, to, arg (args, "index", -1)))
+                copies.add ((int) copy[ids::id]);
+            complete (object ({ { "ok", ! copies.isEmpty() }, { "error", copies.isEmpty() ? juce::String ("Copy an effect first") : juce::String() },
+                                { "inserts", copies } }));
+            return;
+        }
+
         juce::Array<int> insertIds;
         if (const auto* list = args["ids"].getArray())
             for (const auto& insertId : *list)
@@ -3917,6 +3928,20 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             complete (error ("No such effect"));
         else
             complete (object ({ { "ok", true }, { "error", juce::String() }, { "insert", (int) replacement[ids::id] } }));
+        return;
+    }
+
+    // { ids }: keeps copies of those effects (with a plug-in's current settings) for
+    // pasteInserts { clipboard: true }, even after they're deleted (cut). Not an edit.
+    if (command == "copyDevices")
+    {
+        engine.captureInstrumentStates();
+        deviceClipboard.clear();
+        if (const auto* list = args["ids"].getArray())
+            for (const auto& insertId : *list)
+                if (const auto insert = edit.getInsert ((int) insertId); insert.isValid())
+                    deviceClipboard.add (insert.createCopy());
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "count", deviceClipboard.size() } }));
         return;
     }
 

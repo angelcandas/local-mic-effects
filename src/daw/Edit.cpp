@@ -1999,16 +1999,25 @@ bool Edit::moveInsertTo (int insertId, int channelId, int index)
 
 juce::Array<juce::ValueTree> Edit::pasteInserts (const juce::Array<int>& insertIds, int channelId, int index)
 {
+    // Copy them all first, so pasting a chain into itself copies what was there.
+    juce::Array<juce::ValueTree> sources;
+    for (const auto insertId : insertIds)
+        if (const auto insert = getInsert (insertId); insert.isValid())
+            sources.add (insert);
+    return pasteInsertTrees (sources, channelId, index);
+}
+
+juce::Array<juce::ValueTree> Edit::pasteInsertTrees (const juce::Array<juce::ValueTree>& trees, int channelId, int index)
+{
     juce::Array<juce::ValueTree> copies;
     auto inserts = getInserts (getChannel (channelId));
     if (! inserts.isValid())
         return copies;
 
-    // Copy them all first, so pasting a chain into itself copies what was there.
     juce::Array<juce::ValueTree> sources;
-    for (const auto insertId : insertIds)
-        if (const auto insert = getInsert (insertId); insert.isValid())
-            sources.add (insert.createCopy());
+    for (const auto& tree : trees)
+        if (tree.hasType (ids::INSERT))
+            sources.add (tree.createCopy());
 
     auto at = index < 0 ? inserts.getNumChildren() : juce::jmin (index, inserts.getNumChildren());
     for (auto copy : sources)

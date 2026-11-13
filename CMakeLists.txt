@@ -63,6 +63,8 @@ juce_add_binary_data(MicFX_WebUI
         ui/soundcheck.js
         ui/setlist.js
         ui/daw.css
+        ui/devices.js
+        ui/devices.css
         ui/aiviews.css
         ui/aiviews.js
         ui/practice.js

@@ -3776,6 +3776,18 @@ namespace
             check (lastSession()["tracks"][1]["inserts"].size() == 2, "pasteInserts without an index still replaces the chain");
 
             check (! (bool) run ("insertAB", { { "id", 9999 }, { "action", "copy" } }).isVoid(), "insertAB completes for a missing effect");
+
+            // The effect clipboard: copies kept aside, so a cut can be pasted after its effect is gone.
+            const auto kept = run ("copyDevices", { { "ids", juce::var (juce::Array<juce::var> { juce::var (echo) }) } });
+            run ("removeInsert", { { "id", echo } });
+            const auto fromClipboard = run ("pasteInserts", { { "to", second }, { "index", 0 }, { "clipboard", true } });
+            const auto afterPaste = lastSession()["tracks"][1]["inserts"];
+            check ((int) kept["count"] == 1 && (bool) fromClipboard["ok"] && fromClipboard["inserts"].size() == 1
+                       && afterPaste[0]["type"].toString() == "echo" && afterPaste[0]["name"].toString() == "Slap"
+                       && (int) afterPaste[0]["id"] != echo,
+                   "copyDevices + pasteInserts { clipboard }: a cut effect pastes into another chain");
+            run ("copyDevices", { { "ids", juce::Array<juce::var>() } });
+            check (! (bool) run ("pasteInserts", { { "to", second }, { "index", 0 }, { "clipboard", true } })["ok"], "an empty clipboard pastes nothing");
         }
 
         folder.deleteRecursively();
