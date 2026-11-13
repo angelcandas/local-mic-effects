@@ -4458,6 +4458,19 @@ namespace
             restored.setStateInformation (saved.getData(), (int) saved.getSize());
             check (restored.getChainOrder() == order, "the order is saved with the plug-in state");
 
+            // An order saved before the opto and the plate existed puts them after their
+            // neighbours (compressor, reverb), not at the end.
+            {
+                auto older = standard;
+                older.removeString ("opto");
+                older.removeString ("plate");
+                older.move (older.indexOf ("reverb"), 0); // a reordered chain
+                processor.setChainOrder (older);
+                const auto now = processor.getChainOrder();
+                check (now.indexOf ("opto") == now.indexOf ("compressor") + 1 && now.indexOf ("plate") == now.indexOf ("reverb") + 1,
+                       "effects added since an order was saved go after their neighbours");
+            }
+
             // A state saved before the order existed loads in the standard order.
             processor.setChainOrder (standard);
             juce::MemoryBlock old;
@@ -15988,6 +16001,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "vocal")
     {
         testFxChain();
+        testChainOrder();
         testVocalDynamics();
     testSpace();
     testColour();

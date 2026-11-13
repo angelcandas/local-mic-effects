@@ -460,9 +460,30 @@ void PluginProcessor::setChainOrder (const juce::StringArray& keys)
                 placed[(size_t) i] = true;
             }
 
+    // A saved order names every effect there was when it was saved. An effect added
+    // since (the opto, the plate...) goes right after the effect before it in the standard
+    // order, so it lands where it belongs instead of at the end. A short list (a few keys
+    // to put first) keeps the rest after it in the standard order.
+    const auto savedWhole = (int) order.size() >= chain.size() - 4;
+
     for (int i = 0; i < chain.size(); ++i)
-        if (! placed[(size_t) i])
-            order.push_back (i);
+    {
+        if (placed[(size_t) i])
+            continue;
+
+        auto at = order.end();
+        if (savedWhole)
+            at = order.begin();
+        for (int before = i - 1; before >= 0 && savedWhole; --before)
+            if (const auto found = std::find (order.begin(), order.end(), before); found != order.end())
+            {
+                at = found + 1;
+                break;
+            }
+
+        order.insert (at, i);
+        placed[(size_t) i] = true;
+    }
 
     chain.setOrder (order);
 }
