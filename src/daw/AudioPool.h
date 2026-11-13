@@ -9,6 +9,7 @@
 #include <atomic>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <set>
 
 namespace daw
@@ -46,6 +47,20 @@ public:
     static juce::String getWarpKey (const juce::File&, const warp::Settings&);
     void releaseUnusedWarps (const std::set<juce::String>& keysInUse);
 
+    // Renders are cut into pieces (see warp::Render) kept in a cache of their own (up to
+    // segmentBytes, the least recently used go first), so an edit renders only the pieces
+    // it changed and a copy is put together from the rest. A copy's missing pieces render
+    // in parallel on the warp threads; pieces that finish stay cached even when their copy
+    // is cancelled. Undo usually finds every piece of the old copy still cached.
+    //
+    // While a copy renders: the stretches of it (seconds into the copy, [from, to] pairs,
+    // joined where they touch) still to come. Empty when it's ready or not asked for.
+    std::vector<std::pair<double, double>> getRenderingRanges (const juce::File&, const warp::Settings&) const;
+    int getPiecesRendered() const noexcept;  // since the pool was made (tests and timings)
+    size_t getPieceBytes() const;            // cached pieces' audio
+    void setPieceCacheBytes (size_t);        // the cache's limit (tests)
+    static int getWarpThreads() noexcept;
+
     bool isLoading() const noexcept { return ! pending.empty() || ! warpsPending.empty(); }
     juce::String getError (const juce::File&) const;
 
@@ -65,11 +80,31 @@ private:
     std::map<juce::String, Audio> warps;       // by getWarpKey()
     std::vector<juce::String> warpOrder;       // oldest first, for releaseUnusedWarps()
     std::set<juce::String> warpsPending;
-    using CancelFlag = std::shared_ptr<std::atomic<bool>>;
-    std::map<juce::String, CancelFlag> warpJobs; // pending key -> its render's cancel flag
-    static constexpr size_t sparedWarps = 6;
+    // A render in flight: its cancel flag and which stretches of the copy are still to come.
+    struct Job
+    {
+        std::atomic<bool> cancel { false };
+        mutable std::mutex lock;
+        bool planned = false;                        // false: the whole copy is to come
+        std::vector<std::pair<double, double>> ranges;
+        double length = 0.0;                         // the copy's, seconds
+    };
+    using CancelFlag = std::shared_ptr<Job>;
+    std::map<juce::String, CancelFlag> warpJobs; // pending key -> its render
+    static constexpr size_t sparedWarps = 2;     // whole copies kept past use (undo re-assembles from pieces anyway)
+
+public:
+    struct Pieces; // the piece cache (thread-safe, shared with the render jobs)
+
+private:
+    std::shared_ptr<Pieces> pieces;
+    juce::String getPiecePrefix (const juce::String& files) const;
+    juce::AudioBuffer<float> renderNow (const std::shared_ptr<const juce::AudioBuffer<float>>& source, double rate, const warp::Settings&,
+                                        const juce::String& prefix, const std::function<bool()>& keepGoing, const CancelFlag&,
+                                        int helpers);
 
     juce::ThreadPool loader { juce::ThreadPoolOptions{}.withThreadName ("MicFX audio pool").withNumberOfThreads (1) };
+    juce::ThreadPool warpPool { juce::ThreadPoolOptions{}.withThreadName ("MicFX warp").withNumberOfThreads (getWarpThreads()) };
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
 
     JUCE_DECLARE_NON_COPYABLE (AudioPool)
