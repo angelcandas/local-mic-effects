@@ -966,6 +966,85 @@ namespace
         return buffer;
     }
 
+    // A finished backing track (karaoke, the song with only the voice missing): heard as one
+    // by its sound, and mixed with a light touch: a wide vocal pocket, a dip under the voice
+    // of at least 2 dB, no compressor, low cut, width or resonance cuts on it.
+    void testAutoMixBackingTrack()
+    {
+        std::cout << "\nAuto Mix backing track (karaoke)\n";
+        using analysis::Role;
+
+        const auto folder = juce::File::createTempFile ("micfx-karaoke");
+        folder.createDirectory();
+        const auto voiceFile = folder.getChildFile ("voice.wav"), backingFile = folder.getChildFile ("backing.wav"),
+                   plucksFile = folder.getChildFile ("plucks.wav");
+        writeWav (voiceFile, makeSungLine (12.0, 3.0, 1.5), sampleRate); // 1.5 s gaps between lines
+        writeWav (backingFile, makeBacking (12.0), sampleRate);
+        writeWav (plucksFile, makePlucks (12.0), sampleRate);
+
+        daw::Edit edit;
+        const auto voice = (int) edit.addTrack ("Track 1")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Track 2")[daw::ids::id];
+        const auto plucks = (int) edit.addTrack ("Track 3")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 12.0);
+        edit.addClip (backing, backingFile, 0.0, 12.0);
+        edit.addClip (plucks, plucksFile, 0.0, 12.0);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const analysis::Profile* profiles[3] {};
+        for (const auto& [id, profile] : source.tracks)
+            profiles[id == voice ? 0 : id == backing ? 1 : 2] = &profile;
+
+        const auto guessedBacking = analysis::guessRole ("Track 2", *profiles[1], 12.0);
+        const auto guessedPlucks = analysis::guessRole ("Track 3", *profiles[2], 12.0);
+        check (guessedBacking == Role::backing, "hears a full-range track that plays all song as a backing track ("
+                                                    + analysis::getRoleName (guessedBacking) + ")");
+        check (guessedPlucks != Role::backing, "a single instrument that plays all song isn't one ("
+                                                   + analysis::getRoleName (guessedPlucks) + ")");
+        check (analysis::getRoleName (Role::backing).containsIgnoreCase ("karaoke"), "the role says karaoke in its name");
+
+        analysis::MixOptions options;
+        const std::map<int, Role> roles { { voice, Role::voice }, { backing, Role::backing }, { plucks, Role::other } };
+        const auto plan = analysis::planMix (source, roles, { { voice, 0.0f }, { backing, 0.0f }, { plucks, 0.0f } }, 0.0f,
+                                             analysis::MixStyle::pop, options);
+        for (const auto& move : plan.moves)
+            if (move.trackId == backing)
+                for (const auto& reason : move.reasons)
+                    std::cout << "        backing: " << reason << "\n";
+
+        const analysis::MixMove* eq = nullptr;
+        const analysis::MixMove* duck = nullptr;
+        bool heavy = false;
+        for (const auto& move : plan.moves)
+        {
+            if (move.trackId != backing)
+                continue;
+            if (move.insert == fx::ModuleType::paraEq)
+                eq = &move;
+            else if (! move.insert.has_value() && ! move.ride.empty())
+                duck = &move;
+            else if (move.insert == fx::ModuleType::compressor || move.insert == fx::ModuleType::width || move.insert == fx::ModuleType::smooth
+                     || move.insert == fx::ModuleType::saturation)
+                heavy = true;
+        }
+
+        const auto inVoiceRange = [] (float hz) { return hz >= 900.0f && hz <= 4500.0f; };
+        const auto pocket = eq != nullptr && eq->values.count ("peqBell3Freq") > 0 && eq->values.at ("peqBell3Gain") <= -1.0f
+                            && eq->values.at ("peqBell3Q") <= 1.0f && inVoiceRange (eq->values.at ("peqBell3Freq"));
+        const auto dip = eq != nullptr && eq->values.at ("peqBell2Gain") <= -1.0f && inVoiceRange (eq->values.at ("peqBell2Freq"));
+        check (pocket || dip, "makes room where the voice is clearest (1-4 kHz)");
+        check (eq != nullptr && juce::exactlyEqual (eq->values.at ("peqLowCutOn"), 0.0f), "no low cut on a finished mix");
+        check (! heavy, "no compressor, width, saturation or resonance cuts on it");
+
+        float deepest = 0.0f;
+        if (duck != nullptr)
+            for (const auto& point : duck->ride)
+                deepest = juce::jmin (deepest, point.second);
+        check (deepest <= -2.0f + 0.01f, "dips at least 2 dB while the voice sings (" + juce::String (deepest, 1) + " dB)");
+
+        folder.deleteRecursively();
+    }
+
     // Auto Mix with every track tagged: the names, a guess from the sound for drums and
     // bass, and what each role gets (background vocals under the lead, bass and drums
     // only a rumble cut).
@@ -980,6 +1059,8 @@ namespace
             { "Kick", Role::drums }, { "My song - Drums", Role::drums }, { "Overheads", Role::drums }, { "Bajo", Role::bass },
             { "Bass DI", Role::bass }, { "Lead guitar", Role::guitar }, { "Acoustic", Role::guitar }, { "Rhodes", Role::piano },
             { "Piano", Role::piano }, { "Karaoke", Role::backing }, { "Backing track", Role::backing }, { "Instrumental", Role::backing },
+            { "My song (no vocals)", Role::backing }, { "Pista sin voz", Role::backing }, { "Song - Karaoke vocals off", Role::backing },
+            { "Minus one", Role::backing }, { "Acompañamiento", Role::backing }, { "Inst", Role::backing },
             { "My song - Other", Role::instrument }, { "Strings", Role::pad }, { "Synth lead", Role::synth },
             { "Track 3", std::nullopt }, { "Audio 1", std::nullopt }
         };
@@ -2278,7 +2359,8 @@ namespace
         const auto& backingRms = after.tracks[1].second.rmsDb;
         const auto singingLevel = backingRms[36], breathLevel = backingRms[52]; // 3.6 s (singing), 5.2 s (breath)
         const auto dip = breathLevel - singingLevel;
-        const auto target = analysis::getTargets (analysis::MixStyle::pop).duckDb;
+        // A full backing dips at least 2 dB (it is the whole band at once).
+        const auto target = juce::jmax (analysis::getTargets (analysis::MixStyle::pop).duckDb, 2.0f);
         check (std::abs (dip - target) < 0.4f, "the backing dips " + juce::String (dip, 1) + " dB while the voice sings (target "
                                                   + juce::String (target, 1) + ")");
 
@@ -3475,6 +3557,313 @@ namespace
         return out;
     }
 
+    // Ableton-style chain edits: adding, removing or moving an effect doesn't restart the
+    // others (a reverb tail rings on), and the single-effect commands.
+    void testDeviceEdits()
+    {
+        std::cout << "\nEffect chain edits (seamless, duplicate, move, replace, rename, A/B)\n";
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-devices", {});
+        folder.createDirectory();
+
+        // A short burst, then silence: whatever plays after 0.1 s is the effects' tail.
+        juce::AudioBuffer<float> burst (2, (int) sampleRate);
+        burst.clear();
+        for (int i = 0; i < (int) (0.1 * sampleRate); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                burst.setSample (ch, i, 0.5f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * i / sampleRate));
+        const auto burstFile = folder.getChildFile ("burst.wav");
+        writeWav (burstFile, burst, sampleRate);
+
+        // Two identical sessions: one is edited mid-tail, the other is left alone.
+        struct Session
+        {
+            daw::Edit edit;
+            daw::DawEngine engine { edit };
+            int track = 0, reverb = 0, compressor = 0;
+        };
+        const auto makeSession = [&] (Session& session)
+        {
+            session.engine.prepare (sampleRate, blockSize);
+            session.track = (int) session.edit.addTrack ("Voice")[daw::ids::id];
+            session.edit.addClip (session.track, burstFile, 0.0, 1.0);
+            session.engine.getAudioPool().loadNow (burstFile);
+            session.compressor = (int) session.edit.addInsert (session.track, fx::ModuleType::compressor)[daw::ids::id];
+            session.reverb = (int) session.edit.addInsert (session.track, fx::ModuleType::reverb, -1,
+                                                            { { "reverbMix", 60.0f }, { "reverbSize", 90.0f } })[daw::ids::id];
+            session.engine.rebuildNow();
+            session.engine.play();
+        };
+
+        Session edited, untouched;
+        makeSession (edited);
+        makeSession (untouched);
+
+        check (juce::approximatelyEqual ((float) edited.edit.getInsert (edited.reverb)[juce::Identifier ("reverbMix")], 60.0f)
+                   && juce::approximatelyEqual ((float) edited.edit.getInsert (edited.reverb)[juce::Identifier ("reverbSize")], 90.0f),
+               "an effect can be added with its starting values");
+
+        const auto maxDifference = [] (const std::array<std::vector<float>, 2>& a, const std::array<std::vector<float>, 2>& b)
+        {
+            float worst = 0.0f;
+            for (size_t ch = 0; ch < 2; ++ch)
+                for (size_t i = 0; i < std::min (a[ch].size(), b[ch].size()); ++i)
+                    worst = std::max (worst, std::abs (a[ch][i] - b[ch][i]));
+            return worst;
+        };
+        const auto tailRms = [] (const std::array<std::vector<float>, 2>& out, size_t from, size_t to)
+        {
+            return rms (out[0], from, std::min (to, out[0].size()));
+        };
+
+        // Into the tail.
+        render (edited.engine, 0.3);
+        render (untouched.engine, 0.3);
+
+        // Add an effect (switched off, so the sound shouldn't change at all), then remove it.
+        const auto chorusModule = fx::createModule (fx::ModuleType::chorus);
+        std::map<juce::String, float> off;
+        for (int v = 0; v < chorusModule->getNumValues(); ++v)
+            if (chorusModule->isSwitch (v))
+                off[chorusModule->getValueId (v)] = 0.0f;
+        const auto chorus = (int) edited.edit.addInsert (edited.track, fx::ModuleType::chorus, -1, off)[daw::ids::id];
+        edited.engine.rebuildNow();
+        auto a = render (edited.engine, 0.1), b = render (untouched.engine, 0.1);
+        const auto afterAdd = maxDifference (a, b);
+        check (afterAdd < 1.0e-5f && tailRms (b, 0, a[0].size()) > 1.0e-3f,
+               "adding an effect leaves the running reverb and compressor alone (differs by " + juce::String (afterAdd, 7) + ")");
+
+        edited.edit.removeInsert (chorus);
+        edited.engine.rebuildNow();
+        a = render (edited.engine, 0.1);
+        b = render (untouched.engine, 0.1);
+        const auto afterRemove = maxDifference (a, b);
+        check (afterRemove < 1.0e-5f, "removing an effect leaves the others running (differs by " + juce::String (afterRemove, 7) + ")");
+
+        // Reorder: the sound changes, but the reverb goes on ringing rather than starting again.
+        const auto before = render (edited.engine, 0.05);
+        edited.edit.moveInsert (edited.reverb, 0);
+        edited.engine.rebuildNow();
+        const auto after = render (edited.engine, 0.05);
+        const auto beforeLevel = tailRms (before, before[0].size() - 960, before[0].size());
+        const auto afterLevel = tailRms (after, 0, 960);
+        check (beforeLevel > 1.0e-3f && afterLevel > 0.5f * beforeLevel,
+               "reordering keeps the reverb tail (" + juce::String (juce::Decibels::gainToDecibels (afterLevel / beforeLevel), 1) + " dB across the edit)");
+
+        // Moving the reverb to another track keeps it running there too, with its values.
+        auto& edit = edited.edit;
+        auto& undo = edit.getUndoManager();
+        const auto other = (int) edit.addTrack ("Other")[daw::ids::id];
+        edit.setInsertAutomation (edited.reverb, "reverbMix", { { 0.0, 10.0f }, { 1.0, 50.0f } });
+        edited.engine.rebuildNow();
+        const auto beforeMove = render (edited.engine, 0.05);
+        undo.beginNewTransaction();
+        check (edit.moveInsertTo (edited.reverb, other, -1), "moves an effect to another track");
+        edited.engine.rebuildNow();
+        const auto afterMove = render (edited.engine, 0.05);
+        const auto moved = edit.getInsert (edited.reverb);
+        check (moved.getParent().getParent() == edit.getTrack (other)
+                   && juce::approximatelyEqual ((float) moved[juce::Identifier ("reverbSize")], 90.0f)
+                   && daw::Edit::getInsertAutomation (moved).count ("reverbMix") == 1
+                   && daw::Edit::getInserts (edit.getTrack (edited.track)).getNumChildren() == 1,
+               "the moved effect keeps its id, values and automation");
+        const auto moveBefore = tailRms (beforeMove, beforeMove[0].size() - 960, beforeMove[0].size());
+        const auto moveAfter = tailRms (afterMove, 0, 960);
+        check (moveAfter > 0.5f * moveBefore, "the moved reverb rings on, on its new track ("
+                   + juce::String (juce::Decibels::gainToDecibels (moveAfter / juce::jmax (1.0e-9f, moveBefore)), 1) + " dB)");
+        undo.undo();
+        check (edit.getInsert (edited.reverb).getParent().getParent() == edit.getTrack (edited.track)
+                   && daw::Edit::getInserts (edit.getTrack (edited.track)).indexOf (edit.getInsert (edited.reverb)) == 0,
+               "undo puts it back where it was");
+        undo.beginNewTransaction();
+        check (edit.moveInsertTo (edited.compressor, edited.track, 0)
+                   && daw::Edit::getInserts (edit.getTrack (edited.track)).indexOf (edit.getInsert (edited.compressor)) == 0,
+               "moving within its own chain");
+        check (! edit.moveInsertTo (edited.compressor, 9999, 0) && ! edit.moveInsertTo (9999, edited.track, 0), "nowhere to move: refused");
+
+        // Duplicate: a copy right after, with the name, values and automation, a new id.
+        undo.beginNewTransaction();
+        edit.setInsertName (edited.reverb, "  Big room  ");
+        check (daw::Edit::getInsertName (edit.getInsert (edited.reverb)) == "Big room", "renames an effect (trimmed)");
+        undo.beginNewTransaction();
+        const auto duplicate = edit.duplicateInsert (edited.reverb);
+        const auto chain = daw::Edit::getInserts (edit.getTrack (edited.track));
+        check (duplicate.isValid() && (int) duplicate[daw::ids::id] != edited.reverb
+                   && chain.indexOf (duplicate) == chain.indexOf (edit.getInsert (edited.reverb)) + 1
+                   && daw::Edit::getInsertName (duplicate) == "Big room"
+                   && juce::approximatelyEqual ((float) duplicate[juce::Identifier ("reverbSize")], 90.0f)
+                   && daw::Edit::getInsertAutomation (duplicate).count ("reverbMix") == 1,
+               "duplicate: a copy right after it, with name, values and automation");
+        undo.undo();
+        check (! duplicate.getParent().isValid() && chain.getNumChildren() == 2, "undo removes the copy");
+        undo.beginNewTransaction();
+        edit.setInsertName (edited.reverb, "");
+        check (! edit.getInsert (edited.reverb).hasProperty (daw::ids::label), "an empty name goes back to the effect's own");
+        undo.undo();
+
+        // Copy to another chain (the master) at a slot.
+        edit.addInsert (daw::Edit::masterId, fx::ModuleType::limiter);
+        undo.beginNewTransaction();
+        const auto copy = edit.copyInsertTo (edited.compressor, daw::Edit::masterId, 0);
+        check (copy.isValid() && daw::Edit::getInserts (edit.getMaster()).indexOf (copy) == 0
+                   && edit.getInsert (edited.compressor).getParent() == chain,
+               "copy to another chain at a slot, the original stays");
+        undo.undo();
+        check (daw::Edit::getInserts (edit.getMaster()).getNumChildren() == 1, "undo removes that copy");
+
+        // Paste at a slot, leaving what's there.
+        undo.beginNewTransaction();
+        const auto pasted = edit.pasteInserts ({ edited.compressor, edited.reverb }, other, 0);
+        const auto otherChain = daw::Edit::getInserts (edit.getTrack (other));
+        check (pasted.size() == 2 && otherChain.getNumChildren() == 2 && otherChain.getChild (0)[daw::ids::type].toString() == "compressor"
+                   && otherChain.getChild (1)[daw::ids::type].toString() == "reverb" && chain.getNumChildren() == 2,
+               "paste copies at a slot, in order");
+        undo.beginNewTransaction();
+        edit.pasteInserts ({ (int) otherChain.getChild (0)[daw::ids::id] }, other, 1);
+        check (otherChain.getNumChildren() == 3 && otherChain.getChild (1)[daw::ids::type].toString() == "compressor",
+               "pasting into its own chain");
+        undo.undo();
+        undo.undo();
+        check (otherChain.getNumChildren() == 0, "undo removes the pasted effects");
+
+        // Replace in place.
+        undo.beginNewTransaction();
+        const auto replacement = edit.replaceInsert (edited.compressor, fx::ModuleType::eq);
+        check (replacement.isValid() && replacement[daw::ids::type].toString() == "eq" && chain.indexOf (replacement) == 0
+                   && ! edit.getInsert (edited.compressor).isValid() && chain.getNumChildren() == 2,
+               "replace: another effect in the same place");
+        undo.undo();
+        check (edit.getInsert (edited.compressor).isValid() && chain.indexOf (edit.getInsert (edited.compressor)) == 0
+                   && chain.getNumChildren() == 2, "undo brings the replaced effect back");
+
+        // A/B.
+        auto reverbTree = edit.getInsert (edited.reverb);
+        check (! daw::Edit::hasAB (reverbTree) && ! daw::Edit::isShowingB (reverbTree), "no second value set to start with");
+        undo.beginNewTransaction();
+        edit.switchInsertAB (edited.reverb);
+        check (daw::Edit::hasAB (reverbTree) && daw::Edit::isShowingB (reverbTree)
+                   && juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 90.0f),
+               "the first switch to B starts B as a copy of A");
+        edit.setInsertValue (edited.reverb, "reverbSize", 20.0f);
+        undo.beginNewTransaction();
+        edit.switchInsertAB (edited.reverb);
+        check (! daw::Edit::isShowingB (reverbTree) && juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 90.0f),
+               "switching back plays A again");
+        edited.engine.rebuildNow();
+        auto* reverbModule = static_cast<fx::Module*> (nullptr);
+        edited.engine.forEachInsert (edited.track, [&] (int insertId, fx::Module& module) { if (insertId == edited.reverb) reverbModule = &module; });
+        check (reverbModule != nullptr && juce::approximatelyEqual (reverbModule->findValue ("reverbSize")->load(), 90.0f),
+               "the running effect plays the set that's switched in");
+        undo.beginNewTransaction();
+        edit.switchInsertAB (edited.reverb);
+        check (daw::Edit::isShowingB (reverbTree) && juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 20.0f),
+               "B kept its own change");
+        undo.beginNewTransaction();
+        edit.copyInsertAB (edited.reverb);
+        edit.switchInsertAB (edited.reverb);
+        check (juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 20.0f), "copy writes the playing set over the other");
+        undo.undo();
+        check (daw::Edit::isShowingB (reverbTree) && juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 20.0f),
+               "A/B steps undo (back to B before the copy)");
+        undo.undo();
+        check (! daw::Edit::isShowingB (reverbTree) && juce::approximatelyEqual ((float) reverbTree[juce::Identifier ("reverbSize")], 90.0f),
+               "and the switch before it");
+
+        // The commands, through the DAW screen's bridge.
+        {
+            juce::PropertiesFile::Options options;
+            options.applicationName = "MicFXTests";
+            options.filenameSuffix = ".settings";
+            juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+
+            PluginProcessor processor;
+            processor.prepareToPlay (sampleRate, blockSize);
+            auto& dawEdit = processor.getDawEdit();
+
+            std::vector<std::pair<juce::String, juce::var>> events;
+            DawBridge::availableForTesting = true;
+            DawBridge bridge (processor, settings,
+                              [&] (const juce::Identifier& event, const juce::var& payload) { events.emplace_back (event.toString(), payload); },
+                              [] { return (juce::int64) 0; });
+            const auto run = [&] (const juce::String& command, std::initializer_list<std::pair<const char*, juce::var>> properties)
+            {
+                auto* object = new juce::DynamicObject();
+                for (const auto& [name, value] : properties)
+                    object->setProperty (name, value);
+                juce::var result;
+                bridge.handle (command, juce::var (object), [&] (juce::var r) { result = r; });
+                return result;
+            };
+            const auto lastSession = [&]
+            {
+                events.clear();
+                bridge.tick();
+                for (const auto& [name, payload] : events)
+                    if (name == "dawSession")
+                        return juce::JSON::parse (juce::JSON::toString (payload, true));
+                return juce::var();
+            };
+
+            run ("mode", { { "daw", true } });
+            const auto first = (int) lastSession()["tracks"][0]["id"];
+            const auto second = (int) run ("addTrack", {});
+
+            auto* presetValues = new juce::DynamicObject();
+            presetValues->setProperty ("delayTime", 300.0);
+            presetValues->setProperty ("nonsense", 1.0);
+            const auto echo = (int) run ("addInsert", { { "track", first }, { "type", "echo" }, { "values", juce::var (presetValues) } });
+            const auto pitch = (int) run ("addInsert", { { "track", first }, { "type", "pitch" } });
+            check (echo > 0 && juce::approximatelyEqual ((float) dawEdit.getInsert (echo)[juce::Identifier ("delayTime")], 300.0f)
+                       && ! dawEdit.getInsert (echo).hasProperty ("nonsense"),
+                   "addInsert { values }: starts from them, ignores unknown ones");
+
+            run ("renameInsert", { { "id", echo }, { "name", "Slap" } });
+            run ("insertAB", { { "id", echo }, { "action", "switch" } });
+            run ("setInsert", { { "id", pitch }, { "param", "pitchOn" }, { "value", 1.0f } });
+            processor.getDawEngine().rebuildNow();
+            auto inserts = lastSession()["tracks"][0]["inserts"];
+            check (inserts.size() == 2 && inserts[0]["name"].toString() == "Slap" && inserts[0]["ab"].toString() == "b"
+                       && inserts[1]["ab"].toString().isEmpty() && inserts[1]["name"].toString().isEmpty()
+                       && inserts[0]["latencyMs"].isDouble() && ! inserts[0]["values"].hasProperty ("label")
+                       && ! inserts[0]["values"].hasProperty ("abOther") && ! inserts[0]["values"].hasProperty ("ab"),
+                   "the session lists each effect's name, A/B and latency (typed), not as values");
+            check ((double) inserts[1]["latencyMs"] > 0.0, "an effect that adds delay says how much ("
+                       + juce::String ((double) inserts[1]["latencyMs"]) + " ms)");
+
+            const auto duplicated = run ("duplicateInsert", { { "id", echo } });
+            check ((bool) duplicated["ok"] && dawEdit.getInsert ((int) duplicated["insert"]).isValid()
+                       && lastSession()["tracks"][0]["inserts"][1]["name"].toString() == "Slap"
+                       && dawEdit.getUndoManager().getUndoDescription() == "Duplicate effect",
+                   "duplicateInsert, named for undo");
+
+            const auto copied = run ("copyInsert", { { "id", echo }, { "track", second }, { "index", -1 } });
+            check ((bool) copied["ok"] && lastSession()["tracks"][1]["inserts"].size() == 1, "copyInsert to another track");
+
+            check ((bool) run ("moveInsert", { { "id", pitch }, { "track", second }, { "index", 0 } })["ok"]
+                       && lastSession()["tracks"][1]["inserts"][0]["id"] == juce::var (pitch),
+                   "moveInsert { track }: to another track at a slot");
+            check (! (bool) run ("moveInsert", { { "id", pitch }, { "track", 9999 }, { "index", 0 } })["ok"], "moveInsert to nowhere fails");
+
+            const auto replaced = run ("replaceInsert", { { "id", (int) copied["insert"] }, { "type", "reverb" } });
+            check ((bool) replaced["ok"] && lastSession()["tracks"][1]["inserts"][1]["type"].toString() == "reverb",
+                   "replaceInsert keeps the slot");
+            check (! (bool) run ("replaceInsert", { { "id", echo }, { "plugin", "no-such-plugin" } })["ok"],
+                   "replacing with a plug-in that isn't there fails");
+
+            const auto pastedIds = run ("pasteInserts", { { "from", first }, { "to", second }, { "index", 0 } });
+            const auto secondInserts = lastSession()["tracks"][1]["inserts"];
+            check ((bool) pastedIds["ok"] && pastedIds["inserts"].size() == 2 && secondInserts.size() == 4
+                       && secondInserts[0]["type"].toString() == "echo" && secondInserts[2]["id"] == juce::var (pitch),
+                   "pasteInserts { index }: copies in at the slot, keeps what's there");
+            run ("pasteInserts", { { "from", first }, { "to", second } });
+            check (lastSession()["tracks"][1]["inserts"].size() == 2, "pasteInserts without an index still replaces the chain");
+
+            check (! (bool) run ("insertAB", { { "id", 9999 }, { "action", "copy" } }).isVoid(), "insertAB completes for a missing effect");
+        }
+
+        folder.deleteRecursively();
+    }
+
     // The library preview plays on top of the output, once, and stops on request.
     void testPreview()
     {
@@ -4310,6 +4699,21 @@ namespace
             check (near (clips[0][ids::fadeOut], daw::Edit::compFadeSeconds) && near (clips[2][ids::fadeIn], daw::Edit::compFadeSeconds),
                    "the old take fades out and back in under the new one");
 
+            // Two clips on the track, recording over only the first: both go into Take 1.
+            {
+                daw::Edit two;
+                const auto track2 = (int) two.addTrack ("Vocal")[ids::id];
+                two.addClip (track2, first, 0.0, 2.0, 0.0);
+                two.addClip (track2, first, 3.0, 2.0, 0.0);
+                two.addRecording (track2, second, { { 0.0, 0.0, 1.0 } });
+                const auto t = two.getTakes (track2);
+                int inFirst = 0;
+                for (const auto& c : t[0])
+                    if (c.hasType (ids::CLIP))
+                        ++inFirst;
+                check (t.size() == 2 && inFirst == 2, "every clip already on the track becomes part of Take 1, not only the first");
+            }
+
             // Comping by hand.
             undo.beginNewTransaction();
             edit.compTake (take1, 1.5, 2.5);
@@ -4895,6 +5299,45 @@ namespace
                 for (int i = 0; i < bareMix.getNumSamples(); ++i)
                     sumError = std::max (sumError, std::abs (stem1.getSample (ch, i) + stem2.getSample (ch, i) - bareMix.getSample (ch, i)));
             check (stem1.getNumSamples() == bareMix.getNumSamples() && sumError < 1.0e-5f, "the stems sum to the mix before the master bus");
+        }
+
+        // Other formats: the same audio, read back through JUCE's readers.
+        {
+            settings.tail = 0.0;
+            settings.start = 0.0;
+            settings.end = 1.0;
+            const auto reference = readWav (mixFile, fileRate);
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+
+            for (const juce::String format : { "aiff", "flac", "ogg" })
+            {
+                settings.format = format;
+                settings.bitDepth = 24;
+                const auto file = folder.getChildFile ("fmt/mix." + daw::Exporter::formatExtension (format));
+                const auto result = daw::Exporter (edit, settings).exportMix (file);
+                std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+                const auto ok = result.error.isEmpty() && reader != nullptr && reader->numChannels == 2
+                                && reader->lengthInSamples == (juce::int64) sampleRate && juce::exactlyEqual (reader->sampleRate, sampleRate);
+                check (ok, "exports " + format.toUpperCase() + " (" + (result.error.isEmpty() ? "ok" : result.error) + ")");
+
+                if (ok && format != "ogg")
+                {
+                    juce::AudioBuffer<float> back (2, (int) sampleRate);
+                    reader->read (&back, 0, (int) sampleRate, 0, true, true);
+                    check (maxDifference (back.getReadPointer (0), reference.getReadPointer (0), (int) sampleRate) < 1.0e-4f,
+                           format.toUpperCase() + " holds the same audio as the WAV");
+                }
+            }
+
+            check (daw::Exporter::formatExtension ("mp3") == "wav" && daw::Exporter::oggQualityNames().size() > 4,
+                   "unknown formats fall back to WAV; ogg offers quality steps");
+
+            auto stemSettings = settings;
+            stemSettings.format = "flac";
+            const auto flacStems = daw::Exporter (edit, stemSettings).exportStems (folder.getChildFile ("FlacStems"));
+            check (flacStems.files.size() == 2 && flacStems.files[0].getFileName() == "01 Lead.flac", "stems use the chosen format");
+            settings.format = "wav";
         }
 
         // A range, and cancelling.
@@ -7458,6 +7901,40 @@ namespace
         practice.handle ("unloop", {});
         check (! practice.isLooping() && ! multitrack.isLooping() && practice.getSong().notes.size() == song.notes.size(),
                "and back to the whole song");
+
+        // Looping a section of the song (from the song map): every phrase that starts in it.
+        {
+            namespace structure = analysis::structure;
+            structure::Section verse, all;
+            verse.name = "Verse 1"; verse.kind = "verse"; verse.start = 0.0; verse.end = song.phrases[1].start - 0.4; verse.bars = 2;
+            all.name = "Chorus"; all.kind = "chorus"; all.letter = 1; all.start = 0.0; all.end = song.phrases[1].end + 0.5; all.bars = 4;
+            const auto text = Practice::sectionsToText ({ verse, all });
+            const auto back = Practice::sectionsFromText (text);
+            check (back.size() == 2 && back[1].name == "Chorus" && back[1].kind == "chorus" && back[1].letter == 1
+                       && std::abs (back[1].end - all.end) < 1e-3,
+                   "sections go to the cache file and back");
+            check (Practice::getPhrasesIn (song, verse.start, verse.end) == std::make_pair (0, 0)
+                       && Practice::getPhrasesIn (song, all.start, all.end) == std::make_pair (0, 1)
+                       && Practice::getPhrasesIn (song, all.end + 1.0, all.end + 5.0).first == -1,
+                   "a section holds the phrases that start in it");
+            const auto both = Practice::cutSong (song, 0, 1, 0.5, 1.0, 0.0);
+            check (both.phrases.size() == 2 && both.notes.size() == song.notes.size() && both.phrases[1].firstNote == song.phrases[1].firstNote
+                       && std::abs (both.notes[0].start - (song.notes[0].start - 0.5)) < 1e-9,
+                   "two phrases cut together stay two phrases");
+
+            practice.setSections ({ verse, all });
+            options = new juce::DynamicObject();
+            options->setProperty ("section", 1);
+            options->setProperty ("speed", 1.0);
+            practice.handle ("loop", juce::var (options));
+            const auto described = juce::JSON::parse (juce::JSON::toString (practice.describe()));
+            check (practice.isLooping() && multitrack.isLooping() && multitrack.getLoopStart() == 0
+                       && practice.getSong().phrases.size() == 2 && practice.getSong().notes.size() == song.notes.size()
+                       && (int) described["song"]["loop"]["section"] == 1 && described["song"]["sections"].size() == 2,
+                   "looping the chorus section: both its phrases to sing, the section in the loop");
+            practice.handle ("unloop", {});
+            check (! practice.isLooping(), "and back from the section");
+        }
 
         // Slower and higher: rendered in the background, played in place of the song's tracks.
         options = new juce::DynamicObject();
@@ -14309,6 +14786,15 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=karaoke: just Auto Mix with a finished backing track.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "karaoke")
+    {
+        testAutoMixBackingTrack();
+        testAutoMixRides();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=placement: just Auto Mix's pans.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "placement")
     {
@@ -14440,6 +14926,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=devices: just the effect chain edits.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "devices")
+    {
+        testDeviceEdits();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=songmap: just the song map.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "songmap")
     {
@@ -14472,6 +14966,7 @@ int main()
     testAutoLevel();
     testSetlist();
     testDawEngine();
+    testDeviceEdits();
     testReturns();
     testPreview();
     testGroups();
@@ -14520,6 +15015,7 @@ int main()
     testDawKey();
     testAutoMixEffects();
     testAutoMixRoles();
+    testAutoMixBackingTrack();
     testAutoMixPlacement();
     testAutoMixPhase();
     testAutoMixRides();

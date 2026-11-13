@@ -8,8 +8,8 @@ namespace
 {
     constexpr int renderBlockSize = 1024;
 
-    std::unique_ptr<juce::AudioFormatWriter> createWriter (const juce::File& file, double sampleRate, int bitDepth,
-                                                           juce::String& error)
+    std::unique_ptr<juce::AudioFormatWriter> createWriter (const juce::File& file, double sampleRate, const juce::String& format,
+                                                           int bitDepth, int oggQuality, juce::String& error)
     {
         file.getParentDirectory().createDirectory();
         file.deleteFile();
@@ -22,20 +22,52 @@ namespace
             return {};
         }
 
-        auto writer = juce::WavAudioFormat().createWriterFor (stream, juce::AudioFormatWriterOptions{}
-                                                                          .withSampleRate (sampleRate)
-                                                                          .withNumChannels (2)
-                                                                          .withBitsPerSample (bitDepth));
+        const auto options = juce::AudioFormatWriterOptions{}
+                                 .withSampleRate (sampleRate)
+                                 .withNumChannels (2)
+                                 .withBitsPerSample (bitDepth)
+                                 .withQualityOptionIndex (format == "ogg" ? oggQuality : format == "flac" ? 5 : 0); // flac: compression level, size only
+        std::unique_ptr<juce::AudioFormatWriter> writer;
+
+        if (format == "aiff")      writer = juce::AiffAudioFormat().createWriterFor (stream, options);
+        else if (format == "flac") writer = juce::FlacAudioFormat().createWriterFor (stream, options);
+        else if (format == "ogg")  writer = juce::OggVorbisAudioFormat().createWriterFor (stream, options);
+        else                       writer = juce::WavAudioFormat().createWriterFor (stream, options);
+
         if (writer == nullptr)
-            error = "Couldn't create a " + juce::String (bitDepth) + "-bit WAV writer.";
+        {
+            error = "Couldn't create a " + format.toUpperCase() + " writer" + (format == "ogg" ? juce::String() : " for " + juce::String (bitDepth) + "-bit") + ".";
+            file.deleteFile();
+        }
 
         return writer;
     }
 }
 
+juce::String Exporter::formatExtension (const juce::String& format)
+{
+    return format == "aiff" ? "aiff" : format == "flac" ? "flac" : format == "ogg" ? "ogg" : "wav";
+}
+
+juce::Array<int> Exporter::formatBitDepths (const juce::String& format)
+{
+    return format == "aiff" || format == "flac" ? juce::Array<int> { 16, 24 }
+         : format == "ogg"                       ? juce::Array<int> { 16 }
+                                                 : juce::Array<int> { 16, 24, 32 };
+}
+
+juce::StringArray Exporter::oggQualityNames()
+{
+    return juce::OggVorbisAudioFormat().getQualityOptions();
+}
+
 Exporter::Exporter (Edit& edit, Settings s) : snapshot (edit.getState().createCopy()), settings (s)
 {
-    settings.bitDepth = settings.bitDepth == 16 || settings.bitDepth == 32 ? settings.bitDepth : 24;
+    settings.format = formatExtension (settings.format);
+    const auto depths = formatBitDepths (settings.format);
+    if (! depths.contains (settings.bitDepth))
+        settings.bitDepth = depths.contains (24) ? 24 : depths.getFirst();
+    settings.oggQuality = juce::jlimit (0, juce::jmax (0, oggQualityNames().size() - 1), settings.oggQuality);
     settings.sampleRate = settings.sampleRate > 0.0 ? settings.sampleRate : 48000.0;
 }
 
@@ -81,7 +113,7 @@ Exporter::Result Exporter::render (const juce::ValueTree& session, const juce::F
 
             if (writer != nullptr)
             {
-                if (settings.bitDepth == 16) // triangular dither, one LSB
+                if (settings.bitDepth == 16 && settings.format != "ogg") // triangular dither, one LSB
                     for (int ch = 0; ch < 2; ++ch)
                         for (int i = 0; i < numSamples; ++i)
                             buffer.addSample (ch, i, (dither.nextFloat() - dither.nextFloat()) * ditherStep);
@@ -116,7 +148,7 @@ Exporter::Result Exporter::render (const juce::ValueTree& session, const juce::F
             gain = juce::Decibels::decibelsToGain (settings.normaliseTo) / measured;
     }
 
-    auto writer = createWriter (file, settings.sampleRate, settings.bitDepth, result.error);
+    auto writer = createWriter (file, settings.sampleRate, settings.format, settings.bitDepth, settings.oggQuality, result.error);
     if (writer == nullptr)
         return result;
 
@@ -177,7 +209,7 @@ Exporter::Result Exporter::exportStems (const juce::File& folder, Progress progr
 
         // Stems are the full length of the song, so they line up when imported elsewhere.
         const auto name = juce::File::createLegalFileName (juce::String (t + 1).paddedLeft ('0', 2) + " " + tracks[t][ids::name].toString());
-        auto result = render (session, folder.getChildFile (name + ".wav"), progress,
+        auto result = render (session, folder.getChildFile (name + "." + settings.format), progress,
                               (double) t / tracks.size(), (double) (t + 1) / tracks.size());
 
         if (result.error.isNotEmpty() || result.cancelled)

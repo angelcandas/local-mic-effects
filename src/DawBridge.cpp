@@ -312,6 +312,8 @@ namespace
             { "normaliseClip", "Normalise clip" }, { "stripSilence", "Strip silence" }, { "addMidiClip", "Add MIDI clip" },
             { "editNotes", "Edit notes" }, { "addInsert", "Add effect" }, { "addPluginInsert", "Add plug-in" }, { "removeInsert", "Remove effect" },
             { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "insertFile", "Load effect file" }, { "pasteInserts", "Paste effects" },
+            { "duplicateInsert", "Duplicate effect" }, { "copyInsert", "Copy effect" }, { "replaceInsert", "Replace effect" },
+            { "renameInsert", "Rename effect" }, { "insertAB", "Effect A/B" },
             { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
             { "groupTracks", "Group tracks" }, { "ungroup", "Ungroup tracks" }, { "setGroup", "Move to group" },
             { "addReturn", "Add return" }, { "removeReturn", "Delete return" }, { "moveReturn", "Move return" },
@@ -488,10 +490,17 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
         auto* values = new juce::DynamicObject();
         for (int i = 0; i < insert.getNumProperties(); ++i)
             if (const auto name = insert.getPropertyName (i); name != ids::id && name != ids::type && name != ids::file
+                && name != ids::label && name != ids::ab && name != ids::abOther
                 && (! isPlugin || name.toString().startsWith ("plugin") && name != ids::plugin))
                 values->setProperty (name, number (insert, name));
 
-        auto entry = object ({ { "id", (int) insert[ids::id] }, { "type", insert[ids::type].toString() }, { "values", juce::var (values) } });
+        // Its own name ("" for the effect's), which value set plays ("a"/"b"; "" while it
+        // has no second set; plug-ins have none) and the delay it adds right now.
+        const auto latency = engine.getInsertLatencySamples ((int) insert[ids::id]);
+        auto entry = object ({ { "id", (int) insert[ids::id] }, { "type", insert[ids::type].toString() }, { "values", juce::var (values) },
+                               { "name", daw::Edit::getInsertName (insert) },
+                               { "ab", daw::Edit::hasAB (insert) ? juce::String (daw::Edit::isShowingB (insert) ? "b" : "a") : juce::String() },
+                               { "latencyMs", std::round (latency * 1000.0 / juce::jmax (1.0, engine.getSampleRate()) * 100.0) / 100.0 } });
 
         // An effect plugin: which one, whether it's running (or why not), and its window.
         if (isPlugin)
@@ -1891,6 +1900,10 @@ void DawBridge::startExport (const juce::var& args, const juce::File& destinatio
     daw::Exporter::Settings exportSettings;
     exportSettings.sampleRate = engine.getSampleRate();
     exportSettings.bitDepth = arg (args, "bitDepth", 24);
+    exportSettings.format = args["format"].toString();
+    exportSettings.oggQuality = arg (args, "quality", 8);
+    if (const int rate = arg (args, "sampleRate", 0); rate >= 8000 && rate <= 192000)
+        exportSettings.sampleRate = rate;
     exportSettings.normalise = arg (args, "normalise", false);
     exportSettings.tail = arg (args, "tail", 2.0);
 
@@ -2041,7 +2054,7 @@ bool DawBridge::startAutoMixSplit()
 
     if (! song.isValid())
     {
-        autoMixSplitNote = "Nothing to split: tag a track holding the whole song (one clip) as Instrumental.";
+        autoMixSplitNote = "Nothing to split: tag a track holding the whole song (one clip) as Backing track (karaoke).";
         return false;
     }
     if (! stems::Model::isBuiltIn())
@@ -3005,19 +3018,6 @@ juce::var DawBridge::handleKey (const juce::var& args)
 //                       the tempo map follows the played beats, bar lines on the downbeats
 //                       -> { ok, sections, leadInBars }
 //   clear               remove the section markers
-namespace
-{
-    juce::String getSectionColour (const analysis::structure::Section& s)
-    {
-        if (s.kind == "intro" || s.kind == "outro") return "#7d8799";
-        if (s.kind == "verse")  return "#4f8cff";
-        if (s.kind == "chorus") return "#ff7a45";
-        if (s.kind == "bridge") return "#b26bff";
-        static const char* letters[] = { "#2bb5a0", "#e0b23a", "#e05a8a", "#6fbf4a", "#5aa6e0", "#c07a4a" };
-        return letters[juce::jlimit (0, 5, s.letter % 6)];
-    }
-}
-
 juce::var DawBridge::handleSongMap (const juce::var& args)
 {
     const auto action = args["action"].toString();
@@ -3183,7 +3183,7 @@ juce::var DawBridge::handleSongMap (const juce::var& args)
         {
             std::vector<daw::Edit::SectionMarker> sections;
             for (const auto& s : map.sections)
-                sections.push_back ({ s.name, s.kind, getSectionColour (s), s.letter, s.start + lastSongMapOffset, s.end - s.start });
+                sections.push_back ({ s.name, s.kind, s.getColour(), s.letter, s.start + lastSongMapOffset, s.end - s.start });
             edit.setSongSections (sections);
         }
         edit.getUndoManager().beginNewTransaction();
@@ -3220,7 +3220,7 @@ juce::var DawBridge::describeSongMap() const
     for (const auto& s : map.sections)
         sections.add (object ({ { "name", s.name }, { "kind", s.kind }, { "letter", s.getLetterName() }, { "bars", s.bars },
                                 { "firstBar", s.firstBar }, { "start", s.start + lastSongMapOffset }, { "end", s.end + lastSongMapOffset },
-                                { "level", s.loudnessDb }, { "colour", getSectionColour (s) } }));
+                                { "level", s.loudnessDb }, { "colour", s.getColour() } }));
 
     juce::Array<juce::var> barTempos;
     for (auto t : map.getBarTempos())
@@ -3706,7 +3706,35 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
     // (Plugins' current settings into the tree first, so the copies get them.)
     if (command == "duplicateTrack") { engine.captureInstrumentStates(); complete (edit.duplicateTrack (id)); return; }
-    if (command == "pasteInserts")   { engine.captureInstrumentStates(); edit.copyInserts (arg (args, "from", -1), arg (args, "to", -1)); ok(); return; }
+    // { from, to }: replaces `to`'s chain with a copy of `from`'s. With `index` (-1: the
+    // end) or `ids` (inserts from anywhere; default: all of `from`'s), the copies go in at
+    // that slot and what's there stays. -> the copies' ids.
+    if (command == "pasteInserts")
+    {
+        engine.captureInstrumentStates();
+        const auto to = arg (args, "to", -1);
+
+        if (! args.hasProperty ("index") && ! args.hasProperty ("ids"))
+        {
+            edit.copyInserts (arg (args, "from", -1), to);
+            ok();
+            return;
+        }
+
+        juce::Array<int> insertIds;
+        if (const auto* list = args["ids"].getArray())
+            for (const auto& insertId : *list)
+                insertIds.add ((int) insertId);
+        else
+            for (const auto& insert : daw::Edit::getInserts (edit.getChannel (arg (args, "from", -1))))
+                insertIds.add ((int) insert[ids::id]);
+
+        juce::Array<juce::var> copies;
+        for (const auto& copy : edit.pasteInserts (insertIds, to, arg (args, "index", -1)))
+            copies.add ((int) copy[ids::id]);
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "inserts", copies } }));
+        return;
+    }
     if (command == "soloExclusive")  { edit.soloExclusive (id); ok(); return; }
     if (command == "clearMuteSolo")  { edit.clearMuteAndSolo(); ok(); return; }
     if (command == "removeTrack") { edit.removeTrack (id); ok(); return; }
@@ -3816,10 +3844,17 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             return;
         }
 
-        const auto insert = edit.addInsert (arg (args, "track", -1), *type, arg (args, "index", -1));
+        // `values` (optional, { valueId: number }): the settings it starts from, e.g. a preset.
+        std::map<juce::String, float> values;
+        if (const auto* given = args["values"].getDynamicObject())
+            for (const auto& [name, value] : given->getProperties())
+                if (value.isDouble() || value.isInt() || value.isInt64() || value.isBool())
+                    values[name.toString()] = (float) value;
+
+        const auto insert = edit.addInsert (arg (args, "track", -1), *type, arg (args, "index", -1), values);
 
         // A new autotune starts in the song's key, when the session knows it.
-        if (insert.isValid() && *type == fx::ModuleType::pitch && edit.getKey() >= 0)
+        if (insert.isValid() && *type == fx::ModuleType::pitch && edit.getKey() >= 0 && ! values.count ("tuneKey"))
         {
             edit.setInsertValue (insert[ids::id], "tuneKey", (float) edit.getKey());
             edit.setInsertValue (insert[ids::id], "tuneScale", edit.isKeyMinor() ? 2.0f : 1.0f);
@@ -3830,7 +3865,81 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     }
 
     if (command == "removeInsert") { edit.removeInsert (id); ok(); return; }
-    if (command == "moveInsert")   { edit.moveInsert (id, arg (args, "index", 0)); ok(); return; }
+
+    // { id, index, track? }: within its chain, or (track: a track, return, group or the
+    // master, 0) into another one at that index (-1: the end). It keeps running.
+    if (command == "moveInsert")
+    {
+        if (args.hasProperty ("track"))
+            complete (error (edit.moveInsertTo (id, arg (args, "track", -1), arg (args, "index", -1)) ? juce::String() : juce::String ("No such effect or track")));
+        else
+        {
+            edit.moveInsert (id, arg (args, "index", 0));
+            ok();
+        }
+        return;
+    }
+
+    // Copies of one effect -> { ok, insert } (the copy's id). duplicateInsert puts it right
+    // after; copyInsert { id, track, index } anywhere (index -1: the end).
+    if (command == "duplicateInsert" || command == "copyInsert")
+    {
+        engine.captureInstrumentStates(); // a plug-in's current settings go into the copy
+        const auto copy = command == "duplicateInsert" ? edit.duplicateInsert (id)
+                                                       : edit.copyInsertTo (id, arg (args, "track", -1), arg (args, "index", -1));
+        if (! copy.isValid())
+            complete (error ("No such effect or track"));
+        else
+            complete (object ({ { "ok", true }, { "error", juce::String() }, { "insert", (int) copy[ids::id] } }));
+        return;
+    }
+
+    // { id, type } or { id, plugin }: another effect (from its defaults) or plug-in in the
+    // same place -> { ok, insert }.
+    if (command == "replaceInsert")
+    {
+        juce::ValueTree replacement;
+        if (args.hasProperty ("plugin"))
+        {
+            const auto info = processor.getPluginHost().findEffect (args["plugin"].toString());
+            if (! info.has_value())
+            {
+                complete (error ("That plug-in isn't available. Rescan plug-ins and try again."));
+                return;
+            }
+            replacement = edit.replaceInsertWithPlugin (id, *info);
+        }
+        else if (const auto type = daw::Edit::moduleTypeFromKey (args["type"].toString()))
+        {
+            replacement = edit.replaceInsert (id, *type);
+        }
+
+        if (! replacement.isValid())
+            complete (error ("No such effect"));
+        else
+            complete (object ({ { "ok", true }, { "error", juce::String() }, { "insert", (int) replacement[ids::id] } }));
+        return;
+    }
+
+    if (command == "renameInsert") { edit.setInsertName (id, args["name"].toString()); ok(); return; }
+
+    // { id, action: "switch" | "copy" }: play the other value set (the first switch makes
+    // B a copy of A), or write the playing set over the other.
+    if (command == "insertAB")
+    {
+        if (daw::Edit::isPluginInsert (edit.getInsert (id)))
+        {
+            complete (error ("Plug-ins keep their own A/B"));
+            return;
+        }
+        if (args["action"].toString() == "copy")
+            edit.copyInsertAB (id);
+        else
+            edit.switchInsertAB (id);
+        ok();
+        return;
+    }
+
     if (command == "setInsert")    { edit.setInsertValue (id, args["param"].toString(), args["value"]); ok(); return; }
 
     // { id, path? } -> { ok, file, error?, cancelled? }: the impulse response a cab or IR
@@ -4980,6 +5089,41 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    if (command == "exportSetup")
+    {
+        // What the Export panel starts from: the last choices, and where files go by default.
+        const auto exports = project.isOpen() ? project.getExportsFolder() : documents;
+        auto saved = juce::JSON::parse (settings.getValue ("dawExportOptions"));
+        if (! saved.getDynamicObject())
+            saved = new juce::DynamicObject();
+
+        const auto folder = juce::File (saved["folder"].toString());
+        saved.getDynamicObject()->setProperty ("folder", folder.isDirectory() ? folder.getFullPathName() : exports.getFullPathName());
+        if (saved["name"].toString().isEmpty())
+            saved.getDynamicObject()->setProperty ("name", project.isOpen() ? project.getName() : juce::String ("Mix"));
+
+        juce::Array<juce::var> quality;
+        for (const auto& q : daw::Exporter::oggQualityNames())
+            quality.add (q);
+
+        complete (object ({ { "ok", true }, { "options", saved }, { "oggQualities", quality },
+                            { "sampleRate", engine.getSampleRate() }, { "defaultName", project.isOpen() ? project.getName() : juce::String ("Mix") } }));
+        return;
+    }
+
+    if (command == "pickExportFolder")
+    {
+        withChooser ("Export to which folder?", juce::File (args["folder"].toString()), {},
+                     Flags::openMode | Flags::canSelectDirectories,
+                     [] (const juce::File& folder)
+                     {
+                         return folder.isDirectory() ? object ({ { "ok", true }, { "folder", folder.getFullPathName() } })
+                                                     : error (folder.getFileName() + " isn't a folder.");
+                     },
+                     complete);
+        return;
+    }
+
     if (command == "export")
     {
         if (exportJob != nullptr)
@@ -4989,18 +5133,38 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         }
 
         const auto stems = args["kind"].toString() == "stems";
-        const auto exports = project.isOpen() ? project.getExportsFolder() : documents;
-        const auto name = project.isOpen() ? project.getName() : juce::String ("Mix");
+        const auto format = daw::Exporter::formatExtension (args["format"].toString());
+        const juce::File folder (args["folder"].toString());
+        auto name = juce::File::createLegalFileName (args["name"].toString().trim());
+        if (name.isEmpty())
+            name = project.isOpen() ? project.getName() : juce::String ("Mix");
+        if (stems)
+            name += " stems";
 
-        withChooser (stems ? "Export stems to a folder" : "Export the mix",
-                     stems ? exports.getChildFile (name + " stems") : exports.getChildFile (name + ".wav"),
-                     stems ? juce::String() : "*.wav", saveFlags,
-                     [this, args, stems] (const juce::File& file)
-                     {
-                         startExport (args, stems ? file : file.withFileExtension ("wav"));
-                         return error ({});
-                     },
-                     complete);
+        if (folder == juce::File() || (! folder.isDirectory() && ! folder.createDirectory().wasOk()))
+        {
+            complete (error ("Pick a folder to export to."));
+            return;
+        }
+
+        const auto destination = stems ? folder.getChildFile (name) : folder.getChildFile (name + "." + format);
+
+        // Replacing a file or a stems folder with files in it needs a second click.
+        if (! (bool) arg (args, "overwrite", false)
+            && (stems ? destination.getNumberOfChildFiles (juce::File::findFiles, "*." + format) > 0 : destination.existsAsFile()))
+        {
+            complete (object ({ { "ok", false }, { "exists", true }, { "error", destination.getFileName() + " already exists." } }));
+            return;
+        }
+
+        auto saved = new juce::DynamicObject();
+        for (const char* key : { "kind", "format", "bitDepth", "quality", "sampleRate", "tail", "normalise", "name" })
+            saved->setProperty (key, args[key]);
+        saved->setProperty ("folder", folder.getFullPathName());
+        settings.setValue ("dawExportOptions", juce::JSON::toString (juce::var (saved), true));
+
+        startExport (args, destination);
+        complete (error ({}));
         return;
     }
 

@@ -150,8 +150,13 @@
         <button class="mini export-close" title="Close" aria-label="Close">×</button>
       </div>
       <div class="export-options">
-        <label>What <select class="dropdown" name="kind"><option value="mix">The mix (one stereo WAV)</option><option value="stems">Stems (one WAV per track)</option></select></label>
-        <label>Format <select class="dropdown" name="bitDepth"><option value="16">16-bit (dithered)</option><option value="24" selected>24-bit</option><option value="32">32-bit float</option></select></label>
+        <label>What <select class="dropdown" name="kind"><option value="mix">The mix (one stereo file)</option><option value="stems">Stems (one file per track)</option></select></label>
+        <label>Format <select class="dropdown" name="format"><option value="wav">WAV (lossless)</option><option value="aiff">AIFF (lossless)</option><option value="flac">FLAC (lossless, smaller)</option><option value="ogg">OGG Vorbis (small)</option></select></label>
+        <label class="export-depth">Bit depth <select class="dropdown" name="bitDepth"><option value="16">16-bit (dithered)</option><option value="24" selected>24-bit</option><option value="32">32-bit float</option></select></label>
+        <label class="export-quality" hidden>Quality <select class="dropdown" name="quality"></select></label>
+        <label>Sample rate <select class="dropdown" name="sampleRate"><option value="0" selected>Same as the project</option><option value="44100">44.1 kHz</option><option value="48000">48 kHz</option><option value="88200">88.2 kHz</option><option value="96000">96 kHz</option></select></label>
+        <label>File name <input class="text-input" type="text" name="name" spellcheck="false" placeholder="Mix"></label>
+        <label>Folder <span class="export-folder"><input class="text-input" type="text" name="folder" spellcheck="false" readonly><button class="tool export-pick" type="button">Choose…</button></span></label>
         <label>Tail <select class="dropdown" name="tail"><option value="0">None</option><option value="2" selected>2 s (let echoes ring out)</option><option value="5">5 s</option></select></label>
         <label class="check"><input type="checkbox" name="normalise"> Normalise to −1 dBFS</label>
         <label class="check"><input type="checkbox" name="loopOnly"> Only the loop range</label>
@@ -160,7 +165,7 @@
       <div class="export-footer">
         <span class="export-result"></span>
         <button class="tool export-cancel">Cancel</button>
-        <button class="tool is-accent export-go">Export…</button>
+        <button class="tool is-accent export-go">Export</button>
       </div>
     </div>
     <div class="stems-panel ai-plugin" hidden data-accent="stems">
@@ -272,7 +277,7 @@
           <label class="check" title="Bring every track to a level that fits its role in the style (with each track's input gain) before mixing"><input type="checkbox" name="normalize"> Normalize levels</label>
           <label class="check" title="Tracks that recorded the same sound together (two mics on a kick or an amp, a DI and its amp): flip the polarity and nudge them a few ms so they don't thin each other out"><input type="checkbox" name="phase" checked> Line up mics (phase)</label>
           <label class="check" title="On tracks with take lanes, build each comp from the best take in every phrase (in tune, whole line, no clipping) before mixing"><input type="checkbox" name="comp" checked> Pick the best takes</label>
-          <label class="check" title="Split the track tagged Instrumental into vocals, drums, bass and other, and mix those instead (takes a few minutes)"><input type="checkbox" name="split"> Split the song into stems</label>
+          <label class="check" title="Split the track tagged Backing track (karaoke) into vocals, drums, bass and other, and mix those instead (takes a few minutes)"><input type="checkbox" name="split"> Split the song into stems</label>
         </div>
       </div>
       <div class="automix-roles"></div>

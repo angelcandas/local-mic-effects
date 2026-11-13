@@ -108,3 +108,17 @@ body.is-daw .practice-toggle, body.is-daw .practice { display: none; }
 .practice-weak .tool { padding: 3px 9px; font-size: 11px; }
 .practice-report-options { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); font-size: 11.5px; }
 .practice-report-options label { display: flex; align-items: center; gap: 6px; }
+
+/* The song's sections (song map), above the phrases: click one to loop it. */
+.practice-sections { display: flex; align-items: center; gap: 3px; min-height: 26px; }
+.practice-sections[hidden] { display: none; }
+.practice-sections-label { flex: none; margin-right: 6px; color: var(--muted); font-size: 11px; text-transform: uppercase; letter-spacing: 0.05em; }
+.practice-section {
+  display: flex; align-items: center; gap: 5px; min-width: 0; flex-basis: 0; height: 24px; padding: 0 6px; overflow: hidden;
+  border: 1px solid transparent; border-top: 3px solid var(--section); border-radius: 5px;
+  background: color-mix(in srgb, var(--section) 20%, var(--panel)); color: var(--muted); font-size: 11px; cursor: pointer;
+}
+.practice-section:hover { color: var(--text); background: color-mix(in srgb, var(--section) 34%, var(--panel)); }
+.practice-section.is-looping { border-color: var(--section); color: var(--text); background: color-mix(in srgb, var(--section) 40%, var(--panel)); }
+.practice-section-letter { flex: none; color: var(--section); font-weight: 700; }
+.practice-section-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
