@@ -98,7 +98,7 @@ namespace ids
     MICFX_DAW_ID (monitorAuto) // monitor mode Auto: hear the input while armed
     MICFX_DAW_ID (viewState) // the page's view of the project (zoom, scroll...), JSON; not an edit
     MICFX_DAW_ID (beatsPerBar) MICFX_DAW_ID (MARKER) MICFX_DAW_ID (time)
-    MICFX_DAW_ID (transpose) MICFX_DAW_ID (warp)
+    MICFX_DAW_ID (transpose) MICFX_DAW_ID (warp) MICFX_DAW_ID (warpBypass)
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)

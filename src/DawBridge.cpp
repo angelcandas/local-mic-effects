@@ -452,6 +452,28 @@ juce::var DawBridge::describeRanges (const std::vector<std::pair<double, double>
     return list;
 }
 
+// The note edits a page sends ({ start, end, pitch, shift, ... } each), in range.
+static std::vector<analysis::pitch::Note> parsePitchNotes (const juce::var& list)
+{
+    std::vector<analysis::pitch::Note> notes;
+    if (const auto* array = list.getArray())
+        for (const auto& n : *array)
+        {
+            analysis::pitch::Note note;
+            note.start = arg (n, "start", 0.0);
+            note.end = arg (n, "end", 0.0);
+            note.pitch = arg (n, "pitch", 0.0f);
+            note.shift = arg (n, "shift", 0.0f);
+            note.straighten = arg (n, "straighten", 0.0f);
+            note.vibrato = arg (n, "vibrato", 1.0f);
+            note.formant = arg (n, "formant", 0.0f);
+            note.gain = arg (n, "gain", 0.0f);
+            note.transition = arg (n, "transition", analysis::pitch::Note::defaultTransition);
+            notes.push_back (note);
+        }
+    return notes;
+}
+
 juce::var DawBridge::describeSession()
 {
     const auto& state = edit.getState();
@@ -474,10 +496,10 @@ juce::var DawBridge::describeSession()
                            { "length", number (clip, ids::length) }, { "gain", number (clip, ids::gain) },
                            { "fadeIn", number (clip, ids::fadeIn) }, { "fadeOut", number (clip, ids::fadeOut) },
                            { "mute", (bool) clip.getProperty (ids::mute, false) },
-                           { "transpose", number (clip, ids::transpose) }, { "warp", markers },
+                           { "transpose", number (clip, ids::transpose) }, { "warp", markers }, { "warpBypass", (bool) clip.getProperty (ids::warpBypass, false) },
                            { "stretch", daw::warp::getAlgorithmKey (warpSettings.algorithm) }, { "formant", warpSettings.formant },
                            { "musical", daw::Edit::isMusical (clip) }, { "clipTempo", daw::Edit::getClipTempo (clip) },
-                           { "pitchEdited", ! warpSettings.notes.empty() },
+                           { "pitchEdited", ! warpSettings.notes.empty() || ((bool) clip.getProperty (ids::warpBypass, false) && ! daw::Edit::getClipNotes (clip).empty()) },
                            // The audio the clip plays (its file, or a rendered copy): the page keys waveforms on it.
                            { "audioKey", warpSettings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, warpSettings) },
                            { "fileLength", audio != nullptr ? (double) audio->getNumSamples() / engine.getSampleRate() : -1.0 },
@@ -2732,6 +2754,48 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     // Stores a clip's notes with their edits (args.notes: [{ start, end, pitch, shift,
     // straighten, vibrato, formant, gain, transition }], file seconds). Nothing edited (or no
     // notes) takes the edits off.
+    // The compare switch: the clip plays without its pitch changes (see getWarpSettings).
+    // Not an undo step, and the page shows it while it's on.
+    if (command == "setWarpBypass")
+    {
+        if (auto clip = edit.getClip (id); clip.isValid() && ! daw::Edit::isMidiClip (clip))
+        {
+            clip.setProperty (daw::ids::warpBypass, (bool) args.getProperty ("bypass", false), nullptr);
+            ok();
+        }
+        else
+            complete (error ("No such audio clip"));
+        return;
+    }
+
+    // Hear a stretch of a clip ({ id, from, to } in its rendered copy's time, at most 1.5 s)
+    // with note edits that aren't stored yet ({ notes }, as setPitchNotes): only the pieces
+    // it touches render. Plays through the library preview. Answers at once ({ ok }).
+    if (command == "auditionNote")
+    {
+        auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+        {
+            complete (error ("No such audio clip"));
+            return;
+        }
+        auto settings = daw::Edit::getWarpSettings (clip);
+        if (settings.linked.size() > 1)
+        {
+            complete (error ("Linked tracks can't be heard one note at a time."));
+            return;
+        }
+        if (args.hasProperty ("notes") && ! (bool) clip.getProperty (daw::ids::warpBypass, false))
+            settings.notes = parsePitchNotes (args["notes"]);
+
+        const auto gain = juce::Decibels::decibelsToGain ((float) number (clip, daw::ids::gain), -60.0f);
+        auto& e = engine;
+        e.getAudioPool().renderRange (juce::File (clip[daw::ids::file].toString()), settings, arg (args, "from", 0.0), arg (args, "to", 0.0),
+                                      [&e, gain] (juce::AudioBuffer<float>&& audio) { e.startPreview (std::move (audio), gain); });
+        ok();
+        return;
+    }
+
     if (command == "setPitchNotes")
     {
         const auto clip = edit.getClip (id);
@@ -2740,22 +2804,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             complete (error ("Notes on linked tracks can't be edited one by one: unlink the track first."));
             return;
         }
-        std::vector<analysis::pitch::Note> notes;
-        if (const auto* list = args["notes"].getArray())
-            for (const auto& n : *list)
-            {
-                analysis::pitch::Note note;
-                note.start = arg (n, "start", 0.0);
-                note.end = arg (n, "end", 0.0);
-                note.pitch = arg (n, "pitch", 0.0f);
-                note.shift = arg (n, "shift", 0.0f);
-                note.straighten = arg (n, "straighten", 0.0f);
-                note.vibrato = arg (n, "vibrato", 1.0f);
-                note.formant = arg (n, "formant", 0.0f);
-                note.gain = arg (n, "gain", 0.0f);
-                note.transition = arg (n, "transition", analysis::pitch::Note::defaultTransition);
-                notes.push_back (note);
-            }
+        const auto notes = parsePitchNotes (args["notes"]);
         // Through the text form, which keeps every value in range.
         edit.setClipNotes (id, analysis::pitch::fromString (analysis::pitch::toString (notes)));
         ok();

@@ -61,6 +61,13 @@ public:
     void setPieceCacheBytes (size_t);        // the cache's limit (tests)
     static int getWarpThreads() noexcept;
 
+    // Just a stretch of a copy ([from, to] seconds into it, at most maxAudition long), for
+    // hearing an edit at once: renders (or finds) only the pieces it touches on the warp
+    // threads, then calls `done` on the message thread with that stretch's audio. A newer
+    // call drops the older one (its `done` never comes). Not for linked settings.
+    static constexpr double maxAudition = 1.5;
+    void renderRange (const juce::File&, const warp::Settings&, double from, double to, std::function<void (juce::AudioBuffer<float>&&)> done);
+
     bool isLoading() const noexcept { return ! pending.empty() || ! warpsPending.empty(); }
     juce::String getError (const juce::File&) const;
 
@@ -106,6 +113,7 @@ private:
     juce::ThreadPool loader { juce::ThreadPoolOptions{}.withThreadName ("MicFX audio pool").withNumberOfThreads (1) };
     juce::ThreadPool warpPool { juce::ThreadPoolOptions{}.withThreadName ("MicFX warp").withNumberOfThreads (getWarpThreads()) };
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
+    std::shared_ptr<std::atomic<int>> auditionId = std::make_shared<std::atomic<int>> (0);
 
     JUCE_DECLARE_NON_COPYABLE (AudioPool)
 };

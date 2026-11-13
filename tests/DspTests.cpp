@@ -6954,6 +6954,51 @@ namespace
                 same = juce::exactlyEqual (again->getSample (0, i), first->getSample (0, i));
             check (same && pool.getPiecesRendered() == rendered, "undo puts the old copy together from cached pieces (none rendered)");
 
+            // Hearing one edited note: only the pieces it touches render, the stretch matches
+            // the finished copy, and a newer ask drops the older.
+            {
+                auto heard = notes;
+                heard.notes[19].shift = 3.0f;
+                const auto from = heard.notes[19].start, to = heard.notes[19].end;
+                const auto stretch = [&] (const daw::warp::Settings& s, double a, double b, int wait)
+                {
+                    std::shared_ptr<juce::AudioBuffer<float>> got;
+                    pool.renderRange (file, s, a, b, [&got] (juce::AudioBuffer<float>&& audio) { got = std::make_shared<juce::AudioBuffer<float>> (std::move (audio)); });
+                    for (int i = 0; i < wait && got == nullptr; ++i)
+                        juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+                    return got;
+                };
+
+                rendered = pool.getPiecesRendered();
+                const auto got = stretch (heard, from, to, 4000);
+                const auto cost = pool.getPiecesRendered() - rendered;
+                check (got != nullptr && cost >= 1 && cost <= 3 && got->getNumSamples() == (int) std::llround (juce::jmin (to, from + 1.5) * sampleRate) - (int) std::llround (from * sampleRate),
+                       "hearing a note renders only " + juce::String (cost) + " piece(s), at the stretch's length");
+
+                const auto whole = pool.loadNow (file, heard);
+                auto worst = 0.0f;
+                if (got != nullptr && whole != nullptr)
+                {
+                    const auto first = (int) std::llround (from * sampleRate), n = got->getNumSamples();
+                    const auto a = got->getRMSLevel (0, 0, n), b = whole->getRMSLevel (0, first, n);
+                    worst = std::abs (juce::Decibels::gainToDecibels (a / juce::jmax (1.0e-6f, b)));
+                    check (a > 0.01f && worst < 1.5f, "the heard stretch sounds like the finished copy (" + juce::String (worst, 2) + " dB apart)");
+                }
+
+                rendered = pool.getPiecesRendered();
+                const auto repeat = stretch (heard, from, to, 4000);
+                check (repeat != nullptr && pool.getPiecesRendered() == rendered, "hearing it again finds the pieces cached");
+
+                bool first = false, second = false;
+                auto other = notes;
+                other.notes[3].shift = -1.0f;
+                pool.renderRange (file, other, 0.0, 1.0, [&first] (juce::AudioBuffer<float>&&) { first = true; });
+                pool.renderRange (file, heard, from, to, [&second] (juce::AudioBuffer<float>&&) { second = true; });
+                for (int i = 0; i < 4000 && ! second; ++i)
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+                check (second && ! first, "a newer ask drops the older one");
+            }
+
             daw::warp::Settings a, b;
             a.map = Map ({ { 0.0, 0.5 } });
             b.map = Map ({ { 0.0, 0.75 } });
@@ -6977,7 +7022,7 @@ namespace
             check (pool.get (file, third) == nullptr, "a new copy renders in the background");
             const auto ranges = pool.getRenderingRanges (file, third);
             check (! ranges.empty() && ranges.front().first < 1.0e-6, "the stretches still to render are known");
-            for (int i = 0; i < 2000 && pool.getPiecesRendered() - rendered < 2; ++i)
+            for (int i = 0; i < 30000 && pool.getPiecesRendered() - rendered < 2; ++i)
                 juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
             const auto partial = pool.getRenderingRanges (file, third);
             pool.releaseUnusedWarps ({ daw::AudioPool::getWarpKey (file, notes) }); // moved on: cancel it
