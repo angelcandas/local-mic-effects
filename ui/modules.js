@@ -117,6 +117,11 @@ export const MODULES = [
     description: "A filter that follows your voice",
     controls: [knob("wahSensitivity", "Sensitivity"), knob("wahFreq", "Freq"), knob("wahMix", "Mix")] },
 
+  { id: "cab", name: "Cabinet", category: "character", power: "cabOn", wide: true,
+    description: "A guitar or bass speaker cabinet and its mic, built in or from your own impulse response file",
+    controls: [{ type: "file", module: "cab", label: "IR file" }, choice("cabModel", "Cabinet"), choice("cabMic", "Mic"),
+               knob("cabLowCut", "Low cut"), knob("cabHighCut", "High cut"), knob("cabMix", "Mix")] },
+
   { id: "tremolo", name: "Tremolo", category: "modulation", power: "tremoloOn",
     description: "Pulsing volume",
     controls: [knob("tremoloRate", "Rate"), knob("tremoloDepth", "Depth")] },
@@ -149,6 +154,11 @@ export const MODULES = [
     description: "Puts your voice in a room",
     controls: [{ type: "reverb-graphic" }, knob("reverbMix", "Mix"), knob("reverbSize", "Size"),
                knob("reverbDamping", "Damping"), knob("reverbWidth", "Width")] },
+
+  { id: "irverb", name: "IR Reverb", category: "space", power: "irvOn", wide: true,
+    description: "A real-sounding room from an impulse response: a built-in space or your own file",
+    controls: [{ type: "file", module: "irReverb", label: "IR file" }, choice("irvSpace", "Space"), knob("irvMix", "Mix"),
+               knob("irvPreDelay", "Pre-delay"), knob("irvLowCut", "Low cut"), knob("irvHighCut", "High cut")] },
 
   { id: "width", name: "Stereo Width", category: "space", power: "widthOn",
     description: "Spreads stereo effects wider",
@@ -196,9 +206,9 @@ export const MODULES = [
 export const MODULE_KEYS = {
   hpf: "highPass", denoise: "denoise", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq", peq: "paraEq", smooth: "smooth",
   comp: "compressor", autolevel: "autoLevel", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
-  crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", tremolo: "tremolo",
+  crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", cab: "cab", tremolo: "tremolo",
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
-  echo: "echo", reverb: "reverb", width: "width",
+  echo: "echo", reverb: "reverb", irverb: "irReverb", width: "width",
   meq: "masterEq", mb: "multiband", imager: "imager", limiter: "limiter", loudness: "loudness",
   transient: "transient", deq: "dynamicEq",
 };

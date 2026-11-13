@@ -42,6 +42,7 @@
 #include "daw/Patterns.h"
 #include "analysis/Beats.h"
 #include "analysis/ToMidi.h"
+#include "analysis/Structure.h"
 #include "analysis/Harmony.h"
 #include "daw/BackingVocals.h"
 #include "DeviceFavourites.h"
@@ -12113,6 +12114,339 @@ namespace
 }
 
 //==============================================================================
+// The song map: beats, bars and sections of synthetic songs played on the instruments.
+namespace
+{
+    struct SongPart { char letter; int bars; };
+
+    // A song in 4/4: `beatTime (b)` is when beat b sounds (so the tempo can drift). Parts:
+    // 'I' intro (soft piano, no drums), 'A' verse (C Am F G, light drums), 'B' chorus
+    // (F G Em Am, loud, full drums), 'C' bridge (Dm Bb Gm A, toms and ride).
+    juce::AudioBuffer<float> playSong (const std::vector<SongPart>& parts, const std::function<double (double)>& beatTime,
+                                       double& lengthSeconds, std::vector<double>& trueDownbeats, std::vector<int>& partStartBars,
+                                       int countInBeats = 0)
+    {
+        std::vector<juce::MidiMessage> piano, bass, drums;
+        const auto note = [] (std::vector<juce::MidiMessage>& into, int channel, int pitch, float velocity, double from, double to)
+        {
+            into.push_back (at (juce::MidiMessage::noteOn (channel, pitch, velocity), from));
+            into.push_back (at (juce::MidiMessage::noteOff (channel, pitch), to - 0.01));
+        };
+
+        // A count-in on the hi-hat (a pickup before the first bar): bar 0 starts after it.
+        const auto countIn = (double) countInBeats;
+        const auto shifted = [&] (double b) { return beatTime (b + countIn); };
+        for (int k = 0; k < countInBeats; ++k)
+        {
+            drums.push_back (at (juce::MidiMessage::noteOn (10, 42, 0.7f), beatTime (k)));
+            drums.push_back (at (juce::MidiMessage::noteOff (10, 42), beatTime (k) + 0.1));
+        }
+
+        int bar = 0;
+        for (const auto& part : parts)
+        {
+            partStartBars.push_back (bar);
+            for (int b = 0; b < part.bars; ++b, ++bar)
+            {
+                const auto beat0 = bar * 4.0;
+                const auto t = [&] (double beatInBar) { return shifted (beat0 + beatInBar); };
+                trueDownbeats.push_back (t (0));
+
+                static const std::map<char, std::vector<std::vector<int>>> progressions {
+                    { 'I', { { 60, 64, 67 } } },
+                    { 'A', { { 60, 64, 67 }, { 57, 60, 64 }, { 53, 57, 60 }, { 55, 59, 62 } } },
+                    { 'B', { { 65, 69, 72 }, { 67, 71, 74 }, { 64, 67, 71 }, { 69, 72, 76 } } },
+                    { 'C', { { 62, 65, 69 }, { 58, 62, 65 }, { 55, 58, 62 }, { 57, 61, 64 } } },
+                    { 'D', { { 60, 64, 67 }, { 57, 60, 64 }, { 53, 57, 60 }, { 55, 59, 62 } } } };
+                const auto& progression = progressions.at (part.letter);
+                const auto& chord = progression[(size_t) (b % (int) progression.size())];
+                const auto root = chord.front() - 24;
+
+                switch (part.letter)
+                {
+                    case 'I':
+                        for (int k = 0; k < 4; ++k)
+                            for (auto p : chord) note (piano, 1, p, 0.35f, t (k), t (k + 1));
+                        break;
+                    case 'A':
+                        for (int k = 0; k < 4; ++k)
+                            for (auto p : chord) note (piano, 1, p, k == 0 ? 0.55f : 0.4f, t (k), t (k + 1));
+                        note (bass, 1, root, 0.7f, t (0), t (2));
+                        note (bass, 1, root, 0.6f, t (2), t (4));
+                        for (int e = 0; e < 8; ++e)
+                            note (drums, 10, 42, 0.4f, t (e * 0.5), t (e * 0.5 + 0.25));
+                        note (drums, 10, 36, 0.8f, t (0), t (0.5)); note (drums, 10, 36, 0.7f, t (2), t (2.5));
+                        note (drums, 10, 38, 0.6f, t (1), t (1.5)); note (drums, 10, 38, 0.6f, t (3), t (3.5));
+                        break;
+                    case 'B': case 'D':
+                        for (int k = 0; k < 4; ++k)
+                            for (auto p : chord) { note (piano, 1, p, 0.9f, t (k), t (k + 1)); note (piano, 1, p + 12, 0.8f, t (k), t (k + 1)); }
+                        for (int e = 0; e < 8; ++e)
+                            note (bass, 1, root, 0.9f, t (e * 0.5), t (e * 0.5 + 0.45));
+                        for (int e = 0; e < 8; ++e)
+                            note (drums, 10, e % 2 == 0 ? 46 : 42, 0.8f, t (e * 0.5), t (e * 0.5 + 0.25));
+                        if (b == 0) note (drums, 10, 49, 1.0f, t (0), t (1));
+                        note (drums, 10, 36, 1.0f, t (0), t (0.5)); note (drums, 10, 36, 0.9f, t (1.5), t (2)); note (drums, 10, 36, 1.0f, t (2), t (2.5));
+                        note (drums, 10, 38, 1.0f, t (1), t (1.5)); note (drums, 10, 38, 1.0f, t (3), t (3.5));
+                        break;
+                    default: // 'C'
+                        for (int k = 0; k < 4; k += 2)
+                            for (auto p : chord) note (piano, 1, p - 12, 0.6f, t (k), t (k + 2));
+                        note (bass, 1, root, 0.7f, t (0), t (4));
+                        for (int k = 0; k < 4; ++k)
+                            note (drums, 10, 51, 0.6f, t (k), t (k + 0.5));
+                        note (drums, 10, 36, 0.8f, t (0), t (0.5));
+                        note (drums, 10, 45, 0.7f, t (2), t (2.5)); note (drums, 10, 48, 0.7f, t (3), t (3.5));
+                        break;
+                }
+            }
+        }
+        trueDownbeats.push_back (shifted (bar * 4.0));
+        lengthSeconds = shifted (bar * 4.0) + 1.5;
+
+        const auto play = [&] (const juce::String& key, const juce::String& program, std::vector<juce::MidiMessage> events)
+        {
+            auto created = micfx::inst::createInstrument (key);
+            auto& instrument = *created;
+            instrument.setRateAndBufferSizeDetails (sampleRate, blockSize);
+            instrument.prepareToPlay (sampleRate, blockSize);
+            for (int i = 0; i < instrument.getNumPrograms(); ++i)
+                if (instrument.getProgramName (i) == program)
+                    instrument.setCurrentProgram (i);
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+            instrument.reset();
+            std::stable_sort (events.begin(), events.end(), [] (const auto& a, const auto& b) { return a.getTimeStamp() < b.getTimeStamp(); });
+            return playInstrument (instrument, events, lengthSeconds);
+        };
+
+        const auto pianoOut = play ("grand", "Concert Grand", piano);
+        const auto bassOut = play ("nova", "Synth Bass", bass);
+        const auto drumsOut = play ("beat", {}, drums);
+
+        juce::AudioBuffer<float> song (2, (int) pianoOut[0].size());
+        for (int ch = 0; ch < 2; ++ch)
+            for (int i = 0; i < song.getNumSamples(); ++i)
+                song.setSample (ch, i, 0.5f * pianoOut[(size_t) ch][(size_t) i] + 0.6f * bassOut[(size_t) ch][(size_t) i]
+                                       + 0.5f * drumsOut[(size_t) ch][(size_t) i]);
+        return song;
+    }
+
+    juce::String describeSections (const analysis::structure::SongMap& map)
+    {
+        juce::String text;
+        for (const auto& s : map.sections)
+            text << s.name << " (" << s.getLetterName() << ", bar " << s.firstBar << ", " << s.bars << " bars, "
+                 << juce::String (s.loudnessDb, 1) << " dB) ";
+        return text;
+    }
+
+    void testSongMap()
+    {
+        std::cout << "\nSong map (beats, bars, sections, tempo from the performance)\n";
+        namespace structure = analysis::structure;
+
+        // The lead-in bars and bar lines from downbeats alone.
+        {
+            std::vector<double> downbeats;
+            for (int k = 0; k <= 16; ++k)
+                downbeats.push_back (1.0 + k * 2.0 + (k > 8 ? (k - 8) * 0.05 : 0.0)); // 120 BPM, then slowing a little
+            int lead = -1;
+            const auto map = daw::TempoMap::fromDownbeats (downbeats, 4, &lead);
+            auto worst = 0.0;
+            for (size_t k = 0; k < downbeats.size(); ++k)
+                worst = juce::jmax (worst, std::abs (map.toSeconds ((lead + (double) k) * 4.0) - downbeats[k]));
+            check (lead == 1 && worst < 1.0e-4, "bar lines land on the downbeats (one lead-in bar, worst "
+                                                + juce::String (worst * 1000.0, 3) + " ms)");
+            check (map.getPoints().size() <= 10, "a steady stretch needs no extra points (" + juce::String ((int) map.getPoints().size()) + ")");
+
+            auto moved = downbeats;
+            moved[5] += 0.35; // a bar line found a beat late
+            const auto fixed = daw::TempoMap::fromDownbeats (moved, 4, &lead);
+            check (std::abs (fixed.toSeconds ((lead + 5.0) * 4.0) - downbeats[5]) < 0.01, "a misplaced bar line is put back in the middle");
+            check (daw::TempoMap::fromDownbeats ({ 3.0 }, 4).isSteady(), "one downbeat: a steady tempo");
+        }
+
+        // Edit::setTempoMapFromBeats: one undo step, musical clips keep their bars.
+        {
+            daw::Edit edit;
+            std::vector<double> beats;
+            for (int b = 0; b < 40; ++b)
+                beats.push_back (0.5 + b * 0.55 + b * b * 0.0008);
+            edit.getUndoManager().beginNewTransaction();
+            const auto lead = edit.setTempoMapFromBeats (beats, 1);
+            const auto map = edit.getTempoMap();
+            auto worst = 0.0;
+            for (int k = 0; 1 + k * 4 < (int) beats.size(); ++k)
+                worst = juce::jmax (worst, std::abs (map.toSeconds ((lead + k) * 4.0) - beats[(size_t) (1 + k * 4)]));
+            check (lead >= 1 && worst < 1.0e-3, "Follow the performance: every bar line on a played downbeat (worst "
+                                                 + juce::String (worst * 1000.0, 2) + " ms)");
+            edit.getUndoManager().undo();
+            check (edit.getTempoMap().isSteady(), "undo puts the steady tempo back");
+            check (edit.setTempoMapFromBeats ({ 0.5, 1.0, 1.5 }, 0) == -1, "too few beats change nothing");
+        }
+
+        // The pieces: hand-made bar features in an A A B A form.
+        {
+            structure::BarFeatures bars;
+            bars.beatsPerBar = 4;
+            const auto addBar = [&] (int letter, int position)
+            {
+                std::vector<float> sequence (48, 0.0f);
+                for (int k = 0; k < 4; ++k)
+                    sequence[(size_t) (k * 12 + (letter * 5 + position * 3 + k) % 12)] = 1.0f;
+                std::array<float, 12> chroma {}, timbre {};
+                for (int k = 0; k < 4; ++k)
+                    chroma[(size_t) ((letter * 5 + position * 3 + k) % 12)] = 1.0f;
+                for (int c = 0; c < 12; ++c)
+                    timbre[(size_t) c] = letter == 1 ? (float) c - 5.5f : 5.5f - (float) c;
+                bars.chromaSequence.push_back (sequence);
+                bars.chroma.push_back (chroma);
+                bars.timbre.push_back (timbre);
+                bars.levelDb.push_back (letter == 1 ? -14.0f : -20.0f);
+            };
+            for (int letter : { 0, 0, 1, 0 })
+                for (int b = 0; b < 8; ++b)
+                    addBar (letter, b % 4);
+            const auto sections = structure::findSections (bars);
+            juce::String text;
+            for (const auto& s : sections)
+                text << s.name << "@" << s.firstBar << " ";
+            check (sections.size() == 4 && sections[0].firstBar == 0 && sections[1].firstBar == 8 && sections[2].firstBar == 16
+                       && sections[3].firstBar == 24 && sections[0].letter == sections[1].letter && sections[1].letter == sections[3].letter
+                       && sections[2].letter != sections[0].letter,
+                   "bar features in A A B A come back as four sections, the same letter for the A's: " + text);
+        }
+
+        // An A A B A song at a steady 110 BPM.
+        {
+            const auto beat = 60.0 / 110.0;
+            double length = 0.0;
+            std::vector<double> downbeats;
+            std::vector<int> starts;
+            const auto song = playSong ({ { 'A', 8 }, { 'A', 8 }, { 'C', 8 }, { 'A', 8 } }, [&] (double b) { return 0.6 + b * beat; },
+                                        length, downbeats, starts);
+            const auto started = juce::Time::getMillisecondCounterHiRes();
+            const auto map = structure::analyse (song, sampleRate);
+            const auto took = (juce::Time::getMillisecondCounterHiRes() - started) / 1000.0;
+
+            check (std::abs (map.bpm - 110.0) < 2.0, "AABA: the tempo is 110 BPM (" + juce::String (map.bpm, 2) + ", "
+                                                       + juce::String (took, 1) + " s for " + juce::String (length, 0) + " s of song)");
+            int onLine = 0;
+            for (auto d : downbeats)
+                for (auto found : map.downbeats)
+                    if (std::abs (found - d) < 0.05) { ++onLine; break; }
+            check (onLine >= (int) downbeats.size() - 2, "AABA: the bars start on the real downbeats (" + juce::String (onLine) + " of "
+                                                         + juce::String ((int) downbeats.size()) + ")");
+            auto starts4 = map.sections.size() == 4;
+            for (size_t i = 0; starts4 && i < 4; ++i)
+                starts4 = std::abs (map.sections[i].start - downbeats[(size_t) starts[i]]) < 0.1;
+            check (starts4, "AABA: four sections starting where the parts start: " + describeSections (map));
+            check (map.sections.size() == 4 && map.sections[0].letter == map.sections[1].letter && map.sections[0].letter == map.sections[3].letter
+                       && map.sections[2].letter != map.sections[0].letter && map.sections[2].kind == "bridge"
+                       && map.sections[0].kind == "verse",
+                   "AABA: the A's share a letter and are verses, the B is the bridge");
+            check (map.getTempoDrift() < 0.01, "AABA: a steady performance shows no drift (" + juce::String (map.getTempoDrift() * 100.0, 2) + " %)");
+        }
+
+        // A pop song: intro, verse, chorus, verse, chorus, bridge, chorus at 120 BPM.
+        {
+            double length = 0.0;
+            std::vector<double> downbeats;
+            std::vector<int> starts;
+            const auto song = playSong ({ { 'I', 4 }, { 'A', 8 }, { 'B', 8 }, { 'A', 8 }, { 'B', 8 }, { 'C', 8 }, { 'B', 8 } },
+                                        [] (double b) { return 0.4 + b * 0.5; }, length, downbeats, starts);
+            const auto map = structure::analyse (song, sampleRate);
+            const juce::StringArray expected { "intro", "verse", "chorus", "verse", "chorus", "bridge", "chorus" };
+            juce::StringArray kinds;
+            for (const auto& s : map.sections)
+                kinds.add (s.kind);
+            check (kinds == expected, "pop form: intro, verse, chorus, verse, chorus, bridge, chorus: " + describeSections (map));
+            auto onStarts = map.sections.size() == starts.size();
+            for (size_t i = 0; onStarts && i < starts.size(); ++i)
+                onStarts = std::abs (map.sections[i].start - downbeats[(size_t) starts[i]]) < 0.1;
+            check (onStarts, "pop form: each section starts on its part's first downbeat");
+            check (map.sections.size() == 7 && map.sections[2].name == "Chorus 1" && map.sections[6].name == "Chorus 3"
+                       && map.sections[0].name == "Intro",
+                   "pop form: named Intro, Verse 1, Chorus 1... Chorus 3");
+        }
+
+        // Verse and chorus on the same chords (only the arrangement changes), after a
+        // two-beat count-in, so the bars don't start on the first beat heard.
+        {
+            double length = 0.0;
+            std::vector<double> downbeats;
+            std::vector<int> starts;
+            const auto song = playSong ({ { 'A', 8 }, { 'D', 8 }, { 'A', 8 }, { 'D', 8 } }, [] (double b) { return 0.5 + b * 60.0 / 128.0; },
+                                        length, downbeats, starts, 2);
+            const auto map = structure::analyse (song, sampleRate);
+            int onLine = 0;
+            for (auto d : downbeats)
+                for (auto found : map.downbeats)
+                    if (std::abs (found - d) < 0.05) { ++onLine; break; }
+            check (onLine >= (int) downbeats.size() - 2, "after a count-in, the bars still start on the downbeats (" + juce::String (onLine)
+                                                         + " of " + juce::String ((int) downbeats.size()) + ")");
+            check (map.sections.size() == 4 && map.sections[0].letter == map.sections[2].letter && map.sections[1].letter == map.sections[3].letter
+                       && map.sections[0].letter != map.sections[1].letter && map.sections[1].kind == "chorus",
+                   "same chords, bigger arrangement: still A B A B, the louder one the chorus: " + describeSections (map));
+        }
+
+        // A take played without a click: the tempo drifts from 96 to 108 BPM.
+        {
+            // Tempo rising linearly per beat: T(b) = 96 + 12 b / B over B beats.
+            const auto totalBeats = 32.0 * 4.0;
+            const auto beatTime = [totalBeats] (double b)
+            {
+                const auto k = 12.0 / totalBeats;
+                return 0.8 + 60.0 / k * std::log ((96.0 + k * b) / 96.0);
+            };
+            double length = 0.0;
+            std::vector<double> downbeats;
+            std::vector<int> starts;
+            const auto song = playSong ({ { 'A', 8 }, { 'B', 8 }, { 'A', 8 }, { 'B', 8 } }, beatTime, length, downbeats, starts);
+            const auto map = structure::analyse (song, sampleRate);
+
+            check (map.getTempoDrift() > 0.02, "drifting take: the drift shows (" + juce::String (map.getTempoDrift() * 100.0, 1) + " %)");
+
+            daw::Edit edit;
+            const auto lead = edit.setTempoMapFromBeats (map.beats, map.firstDownbeat);
+            const auto tempo = edit.getTempoMap();
+            int onLine = 0;
+            auto worst = 0.0;
+            for (auto d : downbeats)
+            {
+                const auto barLine = tempo.toSeconds (std::round (tempo.toBeats (d) / 4.0) * 4.0);
+                worst = juce::jmax (worst, std::abs (barLine - d));
+                onLine += std::abs (barLine - d) < 0.03 ? 1 : 0;
+            }
+            check (lead >= 0 && onLine >= (int) downbeats.size() - 2,
+                   "drifting take: the tempo map puts a bar line on every played downbeat (" + juce::String (onLine) + " of "
+                       + juce::String ((int) downbeats.size()) + " within 30 ms)");
+            check (std::abs (tempo.getBpmAt (downbeats[2]) - 97.0) < 3.0 && std::abs (tempo.getBpmAt (downbeats[29]) - 107.0) < 3.0,
+                   "drifting take: the map speeds up from about 97 to 107 BPM (" + juce::String (tempo.getBpmAt (downbeats[2]), 1) + " -> "
+                       + juce::String (tempo.getBpmAt (downbeats[29]), 1) + ")");
+            check (map.sections.size() == 4 && map.sections[0].letter == map.sections[2].letter && map.sections[1].letter == map.sections[3].letter
+                       && map.sections[0].letter != map.sections[1].letter,
+                   "drifting take: A B A B: " + describeSections (map));
+        }
+
+        // Silence and very short audio: no beats, no crash.
+        {
+            juce::AudioBuffer<float> silence (2, (int) (sampleRate * 10.0));
+            silence.clear();
+            const auto map = structure::analyse (silence, sampleRate);
+            check (! map.hasBeats() && map.downbeats.empty(), "silence: no beats or bars");
+            juce::AudioBuffer<float> blip (1, 1000);
+            blip.clear();
+            check (structure::analyse (blip, sampleRate).sections.size() <= 1, "a blip: nothing to map");
+
+            bool asked = false;
+            const auto stopped = structure::analyse (silence, sampleRate, {}, [&] { asked = true; return false; });
+            check (asked && stopped.cancelled, "cancelling stops the analysis");
+        }
+    }
+}
+
+//==============================================================================
 // The step sequencer: patterns, parts, steps, pattern blocks and pattern mode.
 static void testPatterns()
 {
@@ -12854,6 +13188,305 @@ static void testAutoLevel()
         processor.processBlock (buffer, midi);
         check (juce::approximatelyEqual (chainModule->getEffectiveTarget(), -18.0f), "stopped: back to the fixed target");
     }
+
+}
+
+namespace
+{
+    //==============================================================================
+    // Runs a module on a mono signal fed to both channels; returns the left channel.
+    std::vector<float> runModuleMono (fx::Module& module, const std::vector<float>& input, bool prepare = true)
+    {
+        if (prepare)
+            module.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+
+        std::vector<float> out (input.size());
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        for (size_t start = 0; start < input.size(); start += (size_t) blockSize)
+        {
+            const auto n = (int) std::min ((size_t) blockSize, input.size() - start);
+            buffer.clear();
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.copyFrom (ch, 0, input.data() + start, n);
+            juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 2, (size_t) n);
+            module.process (juce::dsp::ProcessContextReplacing<float> (block));
+            std::copy_n (buffer.getReadPointer (0), n, out.begin() + (std::ptrdiff_t) start);
+        }
+        return out;
+    }
+
+    // Writes a mono 48 kHz WAV for the impulse response tests.
+    juce::File writeTestWav (const juce::File& file, const std::vector<float>& samples)
+    {
+        file.deleteFile();
+        std::unique_ptr<juce::OutputStream> stream = std::make_unique<juce::FileOutputStream> (file);
+        juce::WavAudioFormat wav;
+        juce::AudioBuffer<float> buffer (1, (int) samples.size());
+        std::copy (samples.begin(), samples.end(), buffer.getWritePointer (0));
+        if (auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions {}.withSampleRate (sampleRate).withNumChannels (1).withBitsPerSample (24)))
+            writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples());
+        return file;
+    }
+
+    void testCabAndIrReverb()
+    {
+        std::cout << "\nCabinet and IR reverb\n";
+
+        const auto seconds = 3.0;
+        const auto length = (size_t) (seconds * sampleRate);
+        const auto settle = (size_t) (0.5 * sampleRate);
+        const auto pink = makePinkNoise (seconds, -20.0f, 11);
+        const auto inSpectrum = powerSpectrum (pink, settle, length);
+
+        // Built-in cabinets: level kept in the guitar's range, highs rolled off like a
+        // speaker, the very lows cut by the box.
+        {
+            auto worstLevel = 0.0, leastRollOff = 100.0, leastLowCut = 100.0;
+            for (int model = 0; model < fx::Cabinet::numModels; ++model)
+            {
+                fx::modules::Cab cab;
+                cab.on.store (1.0f);
+                cab.model.store ((float) model);
+                const auto out = runModuleMono (cab, pink);
+                const auto outSpectrum = powerSpectrum (out, settle, length);
+                const auto inBand = bandDb (outSpectrum, 100.0, 4000.0) - bandDb (inSpectrum, 100.0, 4000.0);
+                const auto rollOff = (bandDb (inSpectrum, 9000.0, 16000.0) - bandDb (outSpectrum, 9000.0, 16000.0))
+                                     - (bandDb (inSpectrum, 300.0, 3000.0) - bandDb (outSpectrum, 300.0, 3000.0));
+                const auto lowCut = (bandDb (inSpectrum, 20.0, 30.0) - bandDb (outSpectrum, 20.0, 30.0))
+                                    - (bandDb (inSpectrum, 300.0, 3000.0) - bandDb (outSpectrum, 300.0, 3000.0));
+                worstLevel = std::max (worstLevel, std::abs (inBand));
+                leastRollOff = std::min (leastRollOff, rollOff);
+                leastLowCut = std::min (leastLowCut, lowCut);
+            }
+            check (worstLevel < 3.0, "every built-in cabinet keeps the 100 Hz - 4 kHz level within 3 dB (worst " + juce::String (worstLevel, 1) + " dB)");
+            check (leastRollOff > 20.0, "every cabinet rolls off 9-16 kHz like a speaker (at least " + juce::String (leastRollOff, 1) + " dB down)");
+            check (leastLowCut > 6.0, "every cabinet cuts below 30 Hz (at least " + juce::String (leastLowCut, 1) + " dB)");
+        }
+
+        // The mic on the cone's centre is brighter than at its edge.
+        {
+            const auto presence = [&] (int mic)
+            {
+                fx::modules::Cab cab;
+                cab.on.store (1.0f);
+                cab.mic.store ((float) mic);
+                const auto spectrum = powerSpectrum (runModuleMono (cab, pink), settle, length);
+                return bandDb (spectrum, 2500.0, 6000.0) - bandDb (spectrum, 200.0, 1000.0);
+            };
+            const auto centre = presence (0), edge = presence (2);
+            check (centre - edge > 4.0, "centre mic is brighter than the edge (" + juce::String (centre - edge, 1) + " dB more 2.5-6 kHz)");
+        }
+
+        // Mix 0 is the dry sound untouched; the picture has a response with a shape.
+        {
+            fx::modules::Cab cab;
+            cab.on.store (1.0f);
+            cab.mix.store (0.0f);
+            const auto out = runModuleMono (cab, pink);
+            check (differenceDb (out, pink, 0, 0) < -100.0f, "mix 0 passes the dry sound untouched");
+
+            juce::DynamicObject readings;
+            cab.addReadings (readings);
+            const auto* response = readings.getProperty ("response").getArray();
+            auto lowest = 100.0, highest = -100.0;
+            for (const auto& db : *response)
+            {
+                lowest = std::min (lowest, (double) db);
+                highest = std::max (highest, (double) db);
+            }
+            check (response->size() == fx::modules::Cab::pictureBands && highest - lowest > 15.0,
+                   "the card gets the cabinet's response (" + juce::String (highest - lowest, 1) + " dB from top to bottom)");
+        }
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-ir", {});
+        folder.createDirectory();
+
+        // An impulse response file: two taps 10 samples apart, the second half as loud.
+        std::vector<float> taps (2000, 0.0f);
+        taps[0] = 0.5f;
+        taps[10] = 0.25f;
+        const auto irFile = writeTestWav (folder.getChildFile ("two taps.wav"), taps);
+        const auto notAudio = folder.getChildFile ("notes.wav");
+        notAudio.replaceWithText ("not audio");
+        std::vector<float> impulse ((size_t) sampleRate / 2, 0.0f);
+        impulse[1000] = 1.0f;
+
+        {
+            fx::modules::Cab cab;
+            check (cab.loadFile (notAudio).isNotEmpty() && cab.loadFile (folder.getChildFile ("missing.wav")).isNotEmpty() && cab.getFile() == juce::File(),
+                   "a file that isn't audio, or is missing, is refused with a reason");
+
+            // No file loaded yet: "your IR file" passes the sound through.
+            cab.on.store (1.0f);
+            cab.model.store ((float) fx::modules::Cab::fileModel);
+            const auto through = runModuleMono (cab, pink);
+            check (differenceDb (through, pink, 0, 0) < -100.0f, "with no file loaded, the file model passes the sound through");
+
+            // Loaded before prepare: plays from the first block, with no delay.
+            check (cab.loadFile (irFile).isEmpty() && cab.getFile() == irFile, "a WAV impulse response loads");
+            const auto out = runModuleMono (cab, impulse);
+            const auto first = out[1000], second = out[1010];
+            auto rest = 0.0f;
+            for (size_t i = 1011; i < out.size(); ++i)
+                rest = std::max (rest, std::abs (out[i]));
+            for (size_t i = 0; i < 1000; ++i)
+                rest = std::max (rest, std::abs (out[i]));
+            check (first > 0.1f && std::abs (second / first - 0.5f) < 0.02f && rest < 0.001f,
+                   "the file's taps come out in place, no delay (" + juce::String (first, 3) + ", " + juce::String (second, 3) + ")");
+
+            // Its energy is made up: white-ish noise comes out at about the same level.
+            const auto noise = runModuleMono (cab, pink);
+            const auto change = levelDb (noise, settle, length) - levelDb (pink, settle, length);
+            check (std::abs (change) < 4.0f, "an impulse response file keeps the level (" + juce::String (change, 1) + " dB)");
+        }
+
+        // Switching to a file while playing: JUCE loads it in the background, then plays it.
+        {
+            fx::modules::Cab cab;
+            cab.on.store (1.0f);
+            cab.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            cab.model.store ((float) fx::modules::Cab::fileModel);
+            cab.loadFile (irFile);
+
+            auto matched = false;
+            for (int attempt = 0; attempt < 200 && ! matched; ++attempt)
+            {
+                const auto out = runModuleMono (cab, impulse, false);
+                matched = out[1000] > 0.1f && std::abs (out[1010] / out[1000] - 0.5f) < 0.02f;
+                juce::Thread::sleep (10);
+            }
+            check (matched, "a file loaded while playing takes over within a couple of seconds");
+        }
+
+        // The IR reverb's built-in rooms: decays in order of size, each close to its design.
+        {
+            std::vector<double> measured;
+            juce::String list;
+            auto worstError = 0.0;
+            for (size_t space = 0; space < fx::spaces::getSpaces().size(); ++space)
+            {
+                fx::modules::IrReverb reverb;
+                reverb.on.store (1.0f);
+                reverb.space.store ((float) space);
+                reverb.mix.store (100.0f);
+                reverb.lowCut.store (20.0f);
+                reverb.highCut.store (20000.0f);
+                std::vector<float> click ((size_t) (7.0 * sampleRate), 0.0f);
+                click[100] = 1.0f;
+                const auto out = runModuleMono (reverb, click);
+
+                // T20 (-5 to -25 dB on the backwards-integrated energy), times 3.
+                std::vector<double> energy (out.size());
+                double sum = 0.0;
+                for (size_t i = out.size(); i-- > 0;)
+                    energy[i] = (sum += (double) out[i] * out[i]);
+                const auto timeAt = [&] (double db)
+                {
+                    for (size_t i = 0; i < energy.size(); ++i)
+                        if (10.0 * std::log10 (energy[i] / energy[0] + 1.0e-30) <= db)
+                            return (double) i / sampleRate;
+                    return (double) energy.size() / sampleRate;
+                };
+                const auto rt60 = (timeAt (-25.0) - timeAt (-5.0)) * 3.0;
+                measured.push_back (rt60);
+                const auto design = fx::spaces::getSpaces()[space].decaySeconds;
+                worstError = std::max (worstError, std::abs (rt60 / design - 1.0));
+                list << fx::spaces::getSpaces()[space].name << " " << juce::String (rt60, 2) << " s  ";
+            }
+
+            // Small room < studio < hall < church (the plate sits between, by design).
+            check (measured[0] < measured[1] && measured[1] < measured[3] && measured[3] < measured[4],
+                   "built-in rooms decay in order of size: " + list);
+            check (worstError < 0.4, "each room's decay is within 40% of its design (worst " + juce::String (juce::roundToInt (worstError * 100.0)) + "%)");
+        }
+
+        // Mix, level and pre-delay.
+        {
+            fx::modules::IrReverb dry;
+            dry.on.store (1.0f);
+            dry.mix.store (0.0f);
+            check (differenceDb (runModuleMono (dry, pink), pink, 0, 0) < -100.0f, "IR reverb at mix 0 is the dry sound");
+
+            fx::modules::IrReverb wet;
+            wet.on.store (1.0f);
+            wet.mix.store (100.0f);
+            wet.lowCut.store (20.0f);
+            wet.highCut.store (20000.0f);
+            const auto out = runModuleMono (wet, pink);
+            const auto change = levelDb (out, (size_t) (1.5 * sampleRate), length) - levelDb (pink, (size_t) (1.5 * sampleRate), length);
+            check (std::abs (change) < 6.0f, "fully wet, a built-in room is about as loud as the dry sound (" + juce::String (change, 1) + " dB)");
+
+            fx::modules::IrReverb late;
+            late.on.store (1.0f);
+            late.mix.store (100.0f);
+            late.space.store (0.0f);
+            late.preDelay.store (50.0f);
+            std::vector<float> click ((size_t) sampleRate, 0.0f);
+            click[0] = 1.0f;
+            const auto delayed = runModuleMono (late, click);
+            const auto early = levelDb (delayed, 0, (size_t) (0.045 * sampleRate)), after = levelDb (delayed, (size_t) (0.05 * sampleRate), (size_t) (0.3 * sampleRate));
+            check (after - early > 50.0f, "pre-delay holds the reverb back 50 ms (" + juce::String (after - early, 0) + " dB quieter before)");
+        }
+
+        // A room file, loaded and used in the reverb.
+        {
+            fx::modules::IrReverb reverb;
+            check (reverb.loadFile (irFile).isEmpty(), "the IR reverb loads a file too");
+            reverb.on.store (1.0f);
+            reverb.mix.store (100.0f);
+            reverb.space.store ((float) fx::modules::IrReverb::getFileSpace());
+            reverb.lowCut.store (20.0f);
+            reverb.highCut.store (20000.0f);
+            const auto out = runModuleMono (reverb, impulse);
+            check (out[1000] > 0.1f && std::abs (out[1010] / out[1000] - 0.5f) < 0.05f, "the reverb plays through the loaded file");
+        }
+
+        // Live: the file is kept in the plugin state and the choice turns to "your file".
+        {
+            juce::MemoryBlock saved;
+            {
+                PluginProcessor processor;
+                check (processor.setModuleFile (fx::ModuleType::cab, notAudio).isNotEmpty(), "Live refuses a file that isn't audio");
+                check (processor.setModuleFile (fx::ModuleType::cab, irFile).isEmpty()
+                           && juce::roundToInt (processor.getState().getParameter ("cabModel")->convertFrom0to1 (processor.getState().getParameter ("cabModel")->getValue())) == fx::modules::Cab::fileModel,
+                       "Live loads a cabinet file and selects \"Your IR file\"");
+                processor.getStateInformation (saved);
+            }
+            PluginProcessor restored;
+            restored.setStateInformation (saved.getData(), (int) saved.getSize());
+            check (restored.getModuleFile (fx::ModuleType::cab) == irFile && restored.getModuleFile (fx::ModuleType::irReverb) == juce::File(),
+                   "the Live cabinet file comes back with the plugin state");
+        }
+
+        // DAW: the insert keeps the file, the engine's module plays it, a rebuild keeps it.
+        {
+            daw::Edit edit;
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+            const auto trackId = (int) edit.getTracks()[0][daw::ids::id];
+            const auto insert = edit.addInsert (trackId, fx::ModuleType::cab);
+            const auto insertId = (int) insert[daw::ids::id];
+            edit.setInsertFile (insertId, irFile);
+            engine.rebuildNow();
+
+            const auto fileOnEngine = [&]
+            {
+                juce::File found;
+                engine.forEachInsert (trackId, [&] (int id, fx::Module& module) { if (id == insertId) found = module.getFile(); });
+                return found;
+            };
+            check (fileOnEngine() == irFile, "a DAW cab insert's file loads in the engine");
+
+            edit.addInsert (trackId, fx::ModuleType::irReverb); // a new chain for the track
+            engine.rebuildNow();
+            check (fileOnEngine() == irFile, "the file stays when the track's chain is rebuilt");
+
+            edit.setInsertFile (insertId, {});
+            check (fileOnEngine() == juce::File() && ! edit.getInsert (insertId).hasProperty (daw::ids::file), "clearing it removes the file");
+        }
+
+        folder.deleteRecursively();
+    }
 }
 
 int main()
@@ -12894,6 +13527,14 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "phase")
     {
         testAutoMixPhase();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=cab: just the cabinet and the IR reverb.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "cab")
+    {
+        testCabAndIrReverb();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -12986,6 +13627,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=songmap: just the song map.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "songmap")
+    {
+        testSongMap();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=notes: just the note pitch editor.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "notes")
     {
@@ -13038,6 +13687,7 @@ int main()
     testPracticeLoops();
     testRhythm();
     testToMidi();
+    testSongMap();
     testBackingVocals();
     testTrackTools();
     testDawBridge();
@@ -13065,6 +13715,7 @@ int main()
     testDenoise();
     testResonanceSuppressor();
     testSmoothAutoMix();
+    testCabAndIrReverb();
     testSmoothing();
     testStems();
 #if MICFX_HAS_DEMUCS

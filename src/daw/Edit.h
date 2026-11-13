@@ -17,7 +17,8 @@
 //     MARKER  id, name, time
 //     MASTER  volume (dB)
 //       INSERTS
-//         INSERT  type ("eq", "echo", ...), id, plus one property per module value
+//         INSERT  type ("eq", "echo", ...), id, plus one property per module value,
+//                 file (the impulse response a cab or IR reverb plays through; missing = none)
 //         INSERT  type "plugin", id, pluginOn, pluginInGain, pluginOutGain, plugin, name, format,
 //                 vendor, description, state   (a VST3/AU effect, see PluginInsert.h)
 //     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor, transpose,
@@ -239,6 +240,13 @@ public:
     // replaces the start tempo and every change, as one undoable edit.
     TempoMap getTempoMap() const;
     void setTempoMap (const TempoMap&);
+
+    // "Follow the performance": a tempo map from played beats (seconds, e.g. from
+    // analysis::rhythm::detectTempo or the song map), thinned to one tempo point per bar so
+    // the bar lines land on the beats at firstDownbeat, firstDownbeat + beatsPerBar...
+    // (see TempoMap::fromDownbeats). One undoable edit. Returns the whole bars put before the
+    // first downbeat, or -1 (and changes nothing) with fewer than two bars of beats.
+    int setTempoMapFromBeats (const std::vector<double>& beats, int firstDownbeat);
 
     // Sets the tempo of the point in force at a time (the start tempo while it's steady).
     void setTempoAt (double seconds, double bpm);
@@ -546,6 +554,9 @@ public:
     void removeInsert (int insertId);
     void moveInsert (int insertId, int newIndex);
     void setInsertValue (int insertId, const juce::String& valueId, float value);
+    // The file an insert plays through (a cabinet or room impulse response), stored as
+    // its "file" property; an empty File removes it.
+    void setInsertFile (int insertId, const juce::File&);
     juce::ValueTree getInsert (int insertId) const;
 
     static juce::ValueTree getInserts (const juce::ValueTree& trackOrMaster);

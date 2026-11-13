@@ -415,6 +415,7 @@ private:
 
     void rebuild();
     std::shared_ptr<Strip> getStrip (const juce::ValueTree& trackOrMaster);
+    static void loadInsertFile (fx::Module&, const juce::ValueTree& insert);
     void updateMix();
     void setStripTargets (Strip&, const juce::ValueTree&, bool audible, bool jump);
 

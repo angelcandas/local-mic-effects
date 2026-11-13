@@ -421,10 +421,41 @@ void PluginProcessor::setCaptureSeconds (double seconds)
         liveCapture.configure (getSampleRate(), 3, captureSeconds.load());
 }
 
+juce::String PluginProcessor::setModuleFile (fx::ModuleType type, const juce::File& file)
+{
+    auto* module = chain.find (type);
+    if (module == nullptr || ! module->usesFile())
+        return "This effect doesn't use files.";
+
+    if (const auto error = module->loadFile (file); error.isNotEmpty())
+        return error;
+
+    if (file != juce::File())
+        if (const auto choice = module->getFileChoice(); choice.valueId.isNotEmpty())
+            if (auto* parameter = state.getParameter (choice.valueId))
+                parameter->setValueNotifyingHost (parameter->convertTo0to1 (choice.index));
+
+    return {};
+}
+
+juce::File PluginProcessor::getModuleFile (fx::ModuleType type) const
+{
+    const auto* module = const_cast<fx::FxChain&> (chain).find (type);
+    return module != nullptr ? module->getFile() : juce::File();
+}
+
 void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto tree = state.copyState();
     tree.setProperty ("preset", currentPreset.load(), nullptr);
+
+    // The effects' files, by module key.
+    juce::ValueTree files ("MODULE_FILES");
+    for (int i = 0; i < chain.size(); ++i)
+        if (const auto& module = chain[i]; module.usesFile() && module.getFile() != juce::File())
+            files.setProperty (fx::getModuleKey (module.getType()), module.getFile().getFullPathName(), nullptr);
+    if (files.getNumProperties() > 0)
+        tree.appendChild (files, nullptr);
     if (juce::JUCEApplicationBase::isStandaloneApp() && (setlist.size() > 0 || setlist.getFile() != juce::File()))
         tree.appendChild (setlist.getSnapshot(), nullptr); // the app's setlist survives a restart
 
@@ -446,6 +477,18 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                     setlist.restore (saved);
                 tree.removeChild (saved, nullptr);
             }
+
+            const auto files = tree.getChildWithName ("MODULE_FILES");
+            tree.removeChild (files, nullptr);
+            for (int i = 0; i < chain.size(); ++i)
+                if (auto& module = chain[i]; module.usesFile())
+                {
+                    const auto path = files.getProperty (fx::getModuleKey (module.getType())).toString();
+                    const auto error = module.loadFile (juce::File::isAbsolutePath (path) ? juce::File (path) : juce::File());
+                    if (error.isNotEmpty())
+                        juce::Logger::writeToLog ("[MicFX] " + error);
+                }
+
             state.replaceState (tree);
         }
     }
