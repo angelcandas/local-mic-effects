@@ -64,6 +64,7 @@ public:
     // Message thread. Applies any pending change now instead of on the next message
     // loop pass (for tests, and before an offline render).
     void rebuildNow();
+    int getRebuildCount() const noexcept { return rebuildCount; } // graphs built so far (for tests)
 
     // Message thread (or the offline engine's thread). Decodes every clip's audio now
     // and rebuilds, so playback is complete from the first block.
@@ -412,15 +413,16 @@ private:
     // ValueTree::Listener
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
     // Markers don't change what plays, so they don't need a new graph.
-    void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree& child) override        { if (! child.hasType (ids::MARKER)) triggerAsyncUpdate(); }
-    void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree& child, int) override { if (child.hasType (ids::CLIP)) previews.erase ((int) child[ids::id]); if (! child.hasType (ids::MARKER)) triggerAsyncUpdate(); }
-    void valueTreeChildOrderChanged (juce::ValueTree&, int, int) override         { triggerAsyncUpdate(); }
-    void valueTreeRedirected (juce::ValueTree&) override                          { previews.clear(); triggerAsyncUpdate(); }
+    void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree& child) override        { if (! child.hasType (ids::MARKER)) requestRebuild(); }
+    void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree& child, int) override { if (child.hasType (ids::CLIP)) previews.erase ((int) child[ids::id]); if (! child.hasType (ids::MARKER)) requestRebuild(); }
+    void valueTreeChildOrderChanged (juce::ValueTree&, int, int) override         { requestRebuild(); }
+    void valueTreeRedirected (juce::ValueTree&) override                          { previews.clear(); requestRebuild(); }
 
     void handleAsyncUpdate() override { rebuild(); }
     void timerCallback() override     { collectGarbage(); collectPreviews(); drainRecordedMidi(); collectPatternNotes(); syncCapture(); }
 
     void rebuild();
+    void requestRebuild(); // realtime: on the next message loop pass; offline: before the next block
     std::shared_ptr<Strip> getStrip (const juce::ValueTree& trackOrMaster);
     static void loadInsertFile (fx::Module&, const juce::ValueTree& insert);
     void updateMix();
@@ -449,6 +451,8 @@ private:
 
     Edit& edit;
     const bool realtime;
+    bool rebuildPending = false; // offline only (see requestRebuild)
+    std::atomic<int> rebuildCount { 0 };
     AudioPool pool;
 
     double sampleRate = 48000.0;

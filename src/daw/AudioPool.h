@@ -31,6 +31,12 @@ public:
     void setSampleRate (double);
     double getSampleRate() const noexcept { return sampleRate; }
 
+    // Synchronous: get() decodes and renders right away on the calling thread instead,
+    // and nothing is ever posted to the message thread. For offline engines, which live
+    // on the thread that renders them and may be deleted there while a posted callback
+    // (holding `this`) is still on its way.
+    void setSynchronous (bool shouldBe) noexcept { synchronous = shouldBe; }
+
     Audio get (const juce::File&);
     Audio loadNow (const juce::File&); // synchronous, for tests and small files
 
@@ -138,6 +144,7 @@ private:
     juce::ThreadPool loader { juce::ThreadPoolOptions{}.withThreadName ("MicFX audio pool").withNumberOfThreads (1) };
     juce::ThreadPool warpPool { juce::ThreadPoolOptions{}.withThreadName ("MicFX warp").withNumberOfThreads (getWarpThreads()) };
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
+    bool synchronous = false;
     std::shared_ptr<std::atomic<int>> auditionId = std::make_shared<std::atomic<int>> (0);
 
     JUCE_DECLARE_NON_COPYABLE (AudioPool)

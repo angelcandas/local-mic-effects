@@ -3,9 +3,9 @@
 // "dawSession" it receives and sends edits back through one native function,
 // daw (command, args). Every edit is one undo step: drags only send on release.
 import * as Juce from "./juce/index.js";
-import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, isControlShown } from "./modules.js";
-import { createActivity, createFxView } from "./fxviews.js";
-import { FX_PRESETS, createPresetPicker, presetParams } from "./fxpresets.js";
+import { MODULE_KEYS, MODULES, NOTE_NAMES } from "./modules.js";
+import { FX_PRESETS, presetParams } from "./fxpresets.js";
+import { DeviceChain } from "./devices.js";
 import { LibraryBrowser, loopText } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
@@ -18,7 +18,7 @@ import { createPatternsPanel } from "./patterns.js";
 import { createPatternLane, drawGhosts } from "./patternlane.js";
 import { createDrawTool } from "./drawtool.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs } from "./rhythm.js";
-import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, IS_MAC, keyText, polar, releaseFocus, svg } from "./widgets.js";
+import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, releaseFocus, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
 
@@ -51,7 +51,6 @@ const MIXER_HEIGHT = 400; // px: the bottom panel opens at least this tall for t
 const TRACK_COLOURS = ["#8c7bff", "#3fd9c6", "#ffb547", "#ff6fb1", "#5aafff", "#9be15d", "#ff8a5c", "#c78bff"];
 
 
-const PITCH_PARTS = ["tune", "pitch", "harmony"].map((id) => MODULES.find((m) => m.id === id));
 
 let parameterInfo = {};
 let toast = () => {};
@@ -812,482 +811,10 @@ class SendBox {
 const panText = (v) => (Math.abs(v) < 0.01 ? "C" : `${Math.round(Math.abs(v) * 100)}${v < 0 ? "L" : "R"}`);
 
 //==============================================================================
-// The effect inserts of one track (or the master): a card per insert, plus "add".
-class InsertRack {
-  constructor(element, owner, screen) {
-    this.element = element;
-    this.owner = owner; // { id, inserts }, id 0 = master
-    this.screen = screen;
-    this.cards = new Map();
-    this.signature = null; // built on the first update, even for an empty chain
-  }
-
-  update(owner) {
-    this.owner = owner;
-    const signature = owner.inserts.map((insert) => `${insert.id}:${insert.type}`).join(",");
-
-    if (signature !== this.signature) {
-      const grew = this.signature !== null && owner.inserts.length > this.cards.size;
-      this.signature = signature;
-      this.build();
-      if (grew) {
-        // Bring the new effect into view without scrolling the rest of the page.
-        const card = this.element.lastElementChild, dock = this.element.closest(".inspector");
-        if (card && dock) {
-          const right = card.offsetLeft + card.offsetWidth - dock.offsetLeft;
-          if (right > dock.scrollLeft + dock.clientWidth) dock.scrollLeft = right - dock.clientWidth + 10;
-        }
-      }
-    }
-
-    for (const insert of owner.inserts) this.cards.get(insert.id)?.update(insert);
-  }
-
-  // From "dawStatus": live readings by insert id ({ in, out, spectrum? }, null when off).
-  live(readings) {
-    // With reduced motion asked for, the effect pictures move a few times a second, not 30.
-    if (REDUCED_MOTION.matches) {
-      const now = performance.now();
-      if (now - (this.lastLive ?? 0) < 250) return;
-      this.lastLive = now;
-    }
-    for (const [id, card] of this.cards) card.live(readings?.[id] ?? null);
-  }
-
-  build() {
-    this.element.replaceChildren();
-    this.cards.clear();
-    const folded = this.screen.foldedInserts;
-
-    this.owner.inserts.forEach((insert, index) => {
-      const card = new InsertCard(insert, index, this.owner.inserts.length);
-      this.cards.set(insert.id, card);
-      card.element.classList.toggle("is-folded", folded.has(insert.id));
-      // A thin "+" between two cards adds an effect right there.
-      if (index > 0) this.element.append(this.createGap(index));
-      this.element.append(card.element);
-      this.enableDrag(card, insert.id);
-      const head = card.element.querySelector(".insert-head");
-      const toggleFold = () => {
-        if (folded.has(insert.id)) folded.delete(insert.id); else folded.add(insert.id);
-        card.element.classList.toggle("is-folded", folded.has(insert.id));
-        this.screen.rememberView();
-      };
-      card.toggleFold = toggleFold;
-      head.addEventListener("dblclick", (event) => { if (!event.target.closest("button")) toggleFold(); });
-      card.element.querySelector(".insert-folded-name").addEventListener("click", toggleFold);
-      // Click its title, then Delete: removes it.
-      card.element.tabIndex = -1;
-      card.element.addEventListener("keydown", (event) => {
-        if (event.target !== card.element || (event.key !== "Delete" && event.key !== "Backspace")) return;
-        event.preventDefault();
-        event.stopPropagation();
-        daw("removeInsert", { id: insert.id });
-      });
-      card.element.addEventListener("contextmenu", (event) => {
-        if (event.target.closest("input, select")) return;
-        event.preventDefault();
-        this.openCardMenu(card, index, event.clientX, event.clientY);
-      });
-    });
-
-    // The end of the chain: add an effect (the library's effects can also be dropped here).
-    const add = button("insert-add", "+", "Add an effect at the end of the chain", (event) => this.openAddMenu(this.owner.inserts.length, event.currentTarget));
-    if (!this.owner.inserts.length) add.append(html("span", "insert-add-text", this.owner.id === 0 ? "Add an effect to the mix" : "Add an effect"));
-    add.classList.toggle("is-empty", !this.owner.inserts.length);
-    this.addButton = add;
-    this.element.append(add);
-  }
-
-  createGap(index) {
-    const gap = html("div", "insert-gap");
-    gap.append(button("insert-gap-add", "+", "Add an effect here", (event) => this.openAddMenu(index, event.currentTarget)));
-    return gap;
-  }
-
-  // The effects, by category, to add at `index` in the chain.
-  openAddMenu(index, anchor) {
-    const box = anchor.getBoundingClientRect();
-    popMenu(box.left, box.bottom + 4, ({ item, heading, menu }) => {
-      menu.classList.add("is-columns");
-      for (const [categoryId, category] of Object.entries(CATEGORIES)) {
-        const modules = MODULES.filter((m) => m.category === categoryId);
-        if (!modules.length) continue;
-        heading(category.name);
-        for (const module of modules) item(module.name, () => this.screen.addEffect(this.owner.id, module.id, index), { indent: true, hint: module.description ?? "" });
-      }
-      // Effect plug-ins (VST3, AU on a Mac) found by a scan.
-      heading("Plug-ins");
-      const plugins = this.screen.library?.effectPlugins ?? [];
-      // (A long list stays short here; the library lists them all, with a search.)
-      for (const plugin of plugins.slice(0, 24))
-        item(plugin.name, () => this.screen.addPluginEffect(this.owner.id, plugin.id, index), { indent: true, hint: [plugin.vendor, plugin.format].filter(Boolean).join(" · ") });
-      if (plugins.length > 24) item(`${plugins.length - 24} more in the library…`, () => { this.screen.library?.setSection("effects"); this.screen.library?.setCollapsed(false); }, { indent: true, hint: "Effects, under Plug-ins" });
-      if (!plugins.length) item("Look for plug-ins…", () => { daw("scanPlugins"); toast("Looking for plug-ins…"); }, { indent: true, hint: "Scans the usual VST3 (and AU) folders" });
-    }, anchor);
-  }
-
-  openCardMenu(card, index, x, y) {
-    const count = this.owner.inserts.length, id = card.insert.id;
-    popMenu(x, y, ({ item, rule }) => {
-      item(card.isOn ? "Switch off" : "Switch on", () => card.setOn(!card.isOn));
-      item(this.screen.foldedInserts.has(id) ? "Unfold" : "Fold", () => card.toggleFold(), { hint: "Or double-click its title" });
-      item("Show trims", () => card.setTrimsShown(!card.trimsShown), { checked: !card.gains.hidden });
-      rule();
-      item("Move earlier", () => daw("moveInsert", { id, index: index - 1 }), { disabled: index === 0 });
-      item("Move later", () => daw("moveInsert", { id, index: index + 1 }), { disabled: index >= count - 1 });
-      item("Add an effect before…", () => this.openAddMenu(index, card.element));
-      item("Add an effect after…", () => this.openAddMenu(index + 1, card.element));
-      rule();
-      item("Copy the chain", () => this.screen.copyEffects(this.owner.id));
-      item("Remove", () => daw("removeInsert", { id }), { danger: true, shortcut: "Delete" });
-    });
-  }
-
-  // Drag a card by its header to reorder the chain (pointer events, so it works in the WebView).
-  enableDrag(card, id) {
-    const head = card.element.querySelector(".insert-head");
-    head.classList.add("is-draggable");
-    head.title = head.title || "Drag to reorder";
-
-    head.addEventListener("pointerdown", (event) => {
-      if (event.button !== 0 || event.detail > 1 || event.target.closest("button, input, .switch, [role=switch]")) return;
-      const startX = event.clientX;
-      const cards = [...this.element.querySelectorAll(":scope > .insert")];
-      const from = cards.indexOf(card.element);
-      const rects = cards.map((c) => c.getBoundingClientRect());
-      let dragging = false, to = from;
-      head.setPointerCapture(event.pointerId);
-
-      const place = () => {
-        // Cards between the old and new slot slide aside to open the gap.
-        const width = rects[from].width + 14;
-        cards.forEach((c, i) => {
-          if (i === from) return;
-          const shift = from < to && i > from && i <= to ? -width : from > to && i < from && i >= to ? width : 0;
-          c.style.transform = shift ? `translateX(${shift}px)` : "";
-        });
-      };
-      const move = (e) => {
-        const dx = e.clientX - startX;
-        if (!dragging) {
-          if (Math.abs(dx) < 5) return;
-          dragging = true;
-          this.element.classList.add("is-reordering");
-          card.element.classList.add("is-dragging");
-        }
-        card.element.style.transform = `translateX(${dx}px)`;
-        const centre = rects[from].left + rects[from].width / 2 + dx;
-        let target = from;
-        rects.forEach((r, i) => { if (i !== from && (i < from ? centre < r.left + r.width / 2 : centre > r.left + r.width / 2)) target = i < from ? Math.min(target, i) : Math.max(target, i); });
-        if (target !== to) { to = target; place(); }
-      };
-      const finish = (e) => {
-        head.removeEventListener("pointermove", move);
-        head.removeEventListener("pointerup", finish);
-        head.removeEventListener("pointercancel", finish);
-        try { head.releasePointerCapture(event.pointerId); } catch {}
-        if (!dragging) return;
-        this.element.classList.remove("is-reordering");
-        card.element.classList.remove("is-dragging");
-        cards.forEach((c) => { c.style.transform = ""; });
-        if (e.type === "pointerup" && to !== from) daw("moveInsert", { id, index: to });
-      };
-      head.addEventListener("pointermove", move);
-      head.addEventListener("pointerup", finish);
-      head.addEventListener("pointercancel", finish);
-    });
-  }
-}
-
-class InsertCard {
-  constructor(insert, index, count) {
-    this.insert = insert;
-    this.controls = []; // [{ param, widget }]
-    this.switches = []; // [{ param, element }]
-    if (insert.type === "plugin") { this.buildPlugin(insert); return; }
-
-    const parts = insert.type === "pitch" ? PITCH_PARTS : MODULES.filter((m) => MODULE_KEYS[m.id] === insert.type).slice(0, 1);
-    const main = parts[0];
-    const category = CATEGORIES[main?.category] ?? CATEGORIES.cleanup;
-
-    this.element = html("section", ["pitch", "paraEq", "multiband", "masterEq"].includes(insert.type) ? "insert is-wide" : "insert");
-    this.element.style.setProperty("--cat", category.color);
-
-    const head = html("header", "insert-head");
-    this.name = insert.type === "pitch" ? "Pitch" : main?.name ?? insert.type;
-    const title = html("span", "insert-name", this.name);
-    this.activity = createActivity();
-    if (insert.type !== "pitch") head.append(this.addSwitch(main.power, `Switch ${main.name} on or off`));
-    // The trims (this effect's own in and out gain) hide behind a switch; they show by
-    // themselves while either is not 0 dB.
-    this.trimSwitch = button("insert-trim-switch", "trim", "Show this effect's input and output gain", () => this.setTrimsShown(!this.trimsShown));
-    head.append(title, this.activity.element, this.trimSwitch,
-      button("mini is-danger insert-remove", "×", "Remove this effect (Delete)", () => daw("removeInsert", { id: insert.id })));
-    head.title = "Drag to move it in the chain · Double-click to fold · Right-click for more";
-    this.trimsShown = false;
-
-    this.body = html("div", "insert-body");
-    this.element.append(head, this.body);
-
-    // A picture of what the effect does; some have handles to drag.
-    this.view = insert.type === "pitch" ? null : createFxView(insert.type, {
-      get: (param) => this.insert.values[param] ?? parameterInfo[param]?.default ?? 0,
-      set: (param, value, first) => {
-        this.insert.values[param] = value;
-        this.update(this.insert);
-        this.send(param, value, first);
-      },
-      range: (param) => parameterInfo[param],
-    });
-    if (this.view) this.body.append(this.view.element);
-
-    this.parts = []; // pitch: [{ power, row }], so parts that are off fold away
-    this.conditional = []; // [control, element]: shown for some values of other controls
-    for (const part of parts) {
-      const row = html("div", "insert-controls");
-
-      if (insert.type === "pitch") {
-        const sub = html("div", "insert-sub");
-        sub.append(this.addSwitch(part.power, `Switch ${part.name} on or off`), html("span", "", part.name));
-        this.body.append(sub);
-        this.parts.push({ power: part.power, row });
-      }
-
-      for (const control of part.controls) {
-        if (control.liveOnly) continue; // the DAW listens to the other tracks for chords
-        const widget = this.createControl(control);
-        if (!widget) continue;
-        row.append(widget);
-        if (control.when) this.conditional.push([control, widget]);
-      }
-      this.body.append(row);
-    }
-
-    this.body.append(this.createFooter(parts));
-    // As wide as its controls need: a one-knob effect is a narrow card.
-    const widest = Math.max(1, ...parts.map((part) => part.controls.filter((c) => ["knob", "choice", "toggle", "keys"].includes(c.type)).length));
-    if (!this.element.classList.contains("is-wide")) this.element.style.setProperty("--card", `${clamp(widest * 62 + 28, 190, 290)}px`);
-    this.element.append(html("span", "insert-folded-name", this.name));
-    this.update(insert);
-  }
-
-  // An effect plug-in (VST3/AU): its name and maker, a button for its own window, its
-  // switch and trims. One that isn't installed here says so; its settings are kept.
-  buildPlugin(insert) {
-    this.element = html("section", "insert is-plugin");
-    this.name = insert.plugin?.name || "Plug-in";
-    const head = html("header", "insert-head");
-    this.activity = createActivity();
-    this.trimSwitch = button("insert-trim-switch", "trim", "Show this effect's input and output gain", () => this.setTrimsShown(!this.trimsShown));
-    head.append(this.addSwitch("pluginOn", `Switch ${this.name} on or off`), html("span", "insert-name", this.name), this.activity.element, this.trimSwitch,
-      button("mini is-danger insert-remove", "×", "Remove this effect (Delete)", () => daw("removeInsert", { id: insert.id })));
-    head.title = "Drag to move it in the chain · Double-click to fold · Right-click for more";
-    this.trimsShown = false;
-    this.parts = [];
-    this.conditional = [];
-    this.view = null;
-
-    this.body = html("div", "insert-body");
-    this.element.append(head, this.body);
-    const face = html("div", "plugin-face");
-    this.pluginBadge = html("span", "plugin-badge");
-    this.pluginMaker = html("div", "plugin-maker");
-    this.pluginStatus = html("div", "plugin-status");
-    this.pluginButton = button("text-button plugin-open", "Open plug-in", "", () => {
-      if (this.insert.plugin?.error) { daw("scanPlugins"); toast("Looking for plug-ins…"); }
-      else daw("showPluginInsert", { id: this.insert.id });
-    });
-    face.append(this.pluginBadge, this.pluginMaker, this.pluginStatus, this.pluginButton);
-    face.addEventListener("dblclick", (event) => { if (!event.target.closest("button") && !this.insert.plugin?.error) daw("showPluginInsert", { id: this.insert.id }); });
-    this.body.append(face);
-
-    const footer = html("div", "insert-footer");
-    const gains = html("div", "insert-gains");
-    const gainInfo = (suffix) => parameterInfo[`eq${suffix}`] ?? { min: -24, max: 24, skew: 1, step: 0, label: "dB", default: 0 };
-    for (const [suffix, label, title] of [["InGain", "In", "Input gain: the level going into this effect"],
-                                          ["OutGain", "Out", "Output gain: the level coming out of this effect"]]) {
-      const widget = this.createControl({ type: "knob", param: `plugin${suffix}`, label, bipolar: true, info: gainInfo(suffix) });
-      widget.title = `${title}. Drag or scroll · Double-click to reset`;
-      gains.append(widget);
-    }
-    this.gains = gains;
-    footer.append(gains);
-    this.body.append(footer);
-    this.element.style.setProperty("--card", "240px");
-    this.element.append(html("span", "insert-folded-name", this.name));
-    this.update(insert);
-  }
-
-  updatePlugin(insert) {
-    const plugin = insert.plugin ?? {};
-    const missing = Boolean(plugin.error);
-    this.element.classList.toggle("is-missing", missing);
-    this.pluginBadge.textContent = plugin.format || "Plug-in";
-    this.pluginMaker.textContent = plugin.vendor || "";
-    const reason = String(plugin.error ?? "").trim().replace(/([^.!?])$/, "$1.");
-    this.pluginStatus.textContent = missing ? `⚠ ${reason} Its settings are kept: it plays again once it's installed and scanned.`
-                                            : plugin.loaded ? "" : "Loading…";
-    this.pluginStatus.hidden = !this.pluginStatus.textContent;
-    this.pluginButton.textContent = missing ? "Rescan plug-ins" : plugin.windowOpen ? "Show its window" : "Open plug-in";
-    this.pluginButton.disabled = !missing && !plugin.loaded;
-    this.pluginButton.title = missing ? "Look for plug-ins again (after installing it)" : `Open ${plugin.name || "the plug-in"}'s own window`;
-  }
-
-  setTrimsShown(shown) {
-    this.trimsShown = shown;
-    this.renderTrims();
-  }
-
-  renderTrims() {
-    const values = ["InGain", "OutGain"].map((suffix) => this.insert.values[`${this.insert.type}${suffix}`] ?? 0);
-    const set = values.some((v) => Math.abs(v) > 0.05);
-    this.gains.hidden = !(this.trimsShown || set);
-    this.trimSwitch.setAttribute("aria-pressed", String(!this.gains.hidden));
-    this.trimSwitch.classList.toggle("is-set", set);
-    this.trimSwitch.title = set ? `Trim: in ${dbText(values[0])} dB, out ${dbText(values[1])} dB (shown while not 0 dB)`
-                                : "Show this effect's input and output gain";
-  }
-
-  // Presets for this effect, and its own input and output gain.
-  createFooter(parts) {
-    const footer = html("div", "insert-footer");
-    const ids = parts.map((part) => part.id);
-    const isPitch = this.insert.type === "pitch";
-    // The pitch insert's presets also remember which of its parts are on.
-    const params = () => [...ids.flatMap((id) => presetParams(id)), ...(isPitch ? parts.map((part) => part.power) : [])];
-
-    const picker = createPresetPicker({
-      getNativeFunction: Juce.getNativeFunction,
-      ids,
-      read: () => Object.fromEntries(params().map((param) => [param, this.insert.values[param] ?? parameterInfo[param]?.default ?? 0])),
-      apply: (values, fromId) => {
-        // A factory preset for one part of the pitch insert switches that part on.
-        if (isPitch && fromId) values[parts.find((part) => part.id === fromId).power] = 1;
-        Object.entries(values).forEach(([param, value], i) => {
-          this.insert.values[param] = value;
-          this.send(param, value, i === 0);
-        });
-        this.update(this.insert);
-      },
-      defaultOf: (param) => parameterInfo[param]?.default,
-    });
-
-    const gains = html("div", "insert-gains");
-    for (const [suffix, label, title] of [["InGain", "In", "Input gain: the level going into this effect"],
-                                          ["OutGain", "Out", "Output gain: the level coming out of this effect"]]) {
-      const widget = this.createControl({ type: "knob", param: `${this.insert.type}${suffix}`, label, bipolar: true });
-      widget.title = `${title}. Drag or scroll · Double-click to reset`;
-      gains.append(widget);
-    }
-    this.gains = gains;
-    footer.append(picker.element, gains);
-    return footer;
-  }
-
-  // Animates the picture and the level bars from the signal (see fxviews.js).
-  live(reading) {
-    this.view?.live(reading);
-    const level = this.activity.push(reading);
-    this.element.classList.toggle("is-live", Boolean(reading));
-    this.element.style.setProperty("--act", level.toFixed(2));
-  }
-
-  addSwitch(param, title) {
-    const element = button("led-switch", "", title, () => {
-      const on = element.getAttribute("aria-pressed") !== "true";
-      element.setAttribute("aria-pressed", String(on));
-      this.send(param, on ? 1 : 0, true);
-    });
-    this.switches.push({ param, element });
-    return element;
-  }
-
-  send(param, value, first) {
-    daw("setInsert", { id: this.insert.id, param, value, continue: !first });
-  }
-
-  createControl(control) {
-    // The autotune key picker and tuner, and the reverb picture, are Live-screen extras.
-    if (control.type === "keys") control = { type: "choice", param: control.param, label: "Key" };
-    if (control.type === "file") {
-      const picker = createFilePicker({ label: control.label, load: () => daw("insertFile", { id: this.insert.id }),
-                                        clear: () => daw("insertFile", { id: this.insert.id, path: "" }) });
-      this.filePicker = picker;
-      picker.update(this.insert.file);
-      return picker.element;
-    }
-    if (control.type !== "knob" && control.type !== "choice" && control.type !== "toggle") return null;
-
-    const info = control.info ?? parameterInfo[control.param] ?? { min: 0, max: 1, skew: 1, step: 0, label: "" };
-    const value = this.insert.values[control.param] ?? info.default ?? info.min;
-
-    if (control.type === "choice") {
-      const wrapper = html("label", "insert-choice");
-      const select = html("select", "dropdown");
-      (info.choices ?? []).forEach((choice) => select.append(new Option(choice)));
-      select.addEventListener("change", () => this.send(control.param, select.selectedIndex, true));
-      wrapper.append(html("span", "name", control.label), select);
-      this.controls.push({ param: control.param, widget: { update: (v) => { select.selectedIndex = Math.round(v); } } });
-      return wrapper;
-    }
-
-    if (control.type === "toggle") {
-      const pill = html("button", "pill");
-      pill.append(html("span", "switch"), html("span", "", control.label));
-      pill.addEventListener("click", () => {
-        const on = pill.getAttribute("aria-pressed") !== "true";
-        pill.setAttribute("aria-pressed", String(on));
-        this.send(control.param, on ? 1 : 0, true);
-      });
-      this.controls.push({ param: control.param, widget: { update: (v) => pill.setAttribute("aria-pressed", String(v >= 0.5)) } });
-      return pill;
-    }
-
-    const knob = new ValueKnob({
-      label: control.label, min: info.min, max: info.max, skew: info.skew || 1, step: info.step || 0,
-      unit: info.label, value, defaultValue: info.default, bipolar: control.bipolar,
-      onChange: (v, first) => {
-        this.insert.values[control.param] = v;
-        this.view?.update();
-        this.send(control.param, v, first);
-      },
-    });
-    this.controls.push({ param: control.param, widget: knob });
-    return knob.element;
-  }
-
-  update(insert) {
-    this.insert = insert;
-    for (const { param, element } of this.switches)
-      element.setAttribute("aria-pressed", String((insert.values[param] ?? 0) >= 0.5));
-    for (const { param, widget } of this.controls) widget.update(insert.values[param]);
-    this.filePicker?.update(insert.file);
-    this.view?.update();
-    for (const { power, row } of this.parts) row.hidden = (insert.values[power] ?? 0) < 0.5;
-    for (const [control, element] of this.conditional)
-      element.hidden = !isControlShown(control, (param) => insert.values[param] ?? parameterInfo[param]?.default ?? 0);
-    this.element.classList.toggle("is-off", !this.switches.some(({ param }) => (insert.values[param] ?? 0) >= 0.5));
-    this.renderTrims();
-    if (insert.type === "plugin") this.updatePlugin(insert);
-  }
-
-  get isOn() { return this.switches.some(({ param }) => (this.insert.values[param] ?? 0) >= 0.5); }
-
-  // On or off: every part of the pitch insert, or the effect's one switch.
-  setOn(on) {
-    const params = this.insert.type === "pitch" && on ? [this.switches[0].param] : this.switches.map(({ param }) => param);
-    params.forEach((param, i) => { this.insert.values[param] = on ? 1 : 0; this.send(param, on ? 1 : 0, i === 0); });
-    this.update(this.insert);
-  }
-}
-
-
-//==============================================================================
 // Tooltips and the hint line. In the DAW, every "title" becomes one styled tooltip
 // (after 400 ms: the name, its shortcut as a key chip, one line of help), and the hint
 // line under the panels shows the same help at once for whatever the mouse is over.
-const TIP_SHORTCUT = /\s*\(((?:(?:Ctrl|Cmd|Shift|Alt|Option)\+)*(?:[A-Z0-9?+\-]|F\d{1,2}|Space|Delete|Enter|Esc|Home|End|Tab|Up|Down|Left|Right))\)[.:]?\s*/;
+const TIP_SHORTCUT = /\s*\(((?:(?:Ctrl|Cmd|Shift|Alt|Option)\+)*(?:[A-Z0-9?+\-←→↑↓]|F\d{1,2}|Space|Delete|Enter|Esc|Home|End|Tab|Up|Down|Left|Right))\)[.:]?\s*/;
 
 // "Play / pause (Space). Right-click: return on stop" -> name, shortcut chip, the rest as help.
 function parseTip(text) {
@@ -1747,6 +1274,9 @@ class DawScreen {
     this.autoMixButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Auto Mix</span>');
     this.mixCheckButton = iconButton("tool has-label mixcheck-button", "mixcheck", "Mix Check: a report on the mix in plain words, with Fix buttons", () => this.mixCheck.toggle());
     this.mixCheckButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Mix Check</span>');
+    this.assistButton = button("tool has-label assist-button", "Assist ▾", "Assist: every smart tool in one menu, by what it works on (the song, the selected track, the selected clip)",
+                               (event) => this.openAssistMenu(event.currentTarget));
+    this.assistButton.setAttribute("aria-haspopup", "menu");
     this.buildActivity();
 
     // The mixer is a tab of the bottom panel: this shows or hides it.
@@ -1759,7 +1289,7 @@ class DawScreen {
     this.moreButton.hidden = true;
 
     this.drawTool = createDrawTool(this, daw, { toast: (...args) => toast(...args) });
-    const right = zone("zone-work", this.tools, this.drawTool.chip, snap, this.autoMixButton, this.mixCheckButton, this.activity.button,
+    const right = zone("zone-work", this.tools, this.drawTool.chip, snap, this.assistButton, this.autoMixButton, this.mixCheckButton, this.activity.button,
                       html("span", "tb-sep"), this.libraryButton, this.viewTabs, this.dockButton, this.pianoButton, help, this.moreButton);
     bar.append(left, html("span", "tb-spacer"), centre, html("span", "tb-spacer"), right);
 
@@ -1798,6 +1328,7 @@ class DawScreen {
       { level: 4, element: this.libraryButton, label: "Library", run: () => this.library.toggle(), checked: () => !this.library.collapsed },
       { level: 4, element: this.dockButton, label: "Bottom panel", run: () => this.run("toggleDock"), checked: () => !this.root.classList.contains("dock-hidden") },
       { level: 5, element: this.autoMixButton, label: "Auto Mix…", run: () => this.toggleAutoMix() },
+      { level: 6, element: this.assistButton, label: "Assist…", run: () => this.openAssistMenu(this.moreButton) },
       { level: 5, element: this.mixCheckButton, label: "Mix Check…", run: () => this.mixCheck.toggle() },
     ];
     this.foldLevel = 0;
@@ -4198,7 +3729,9 @@ class DawScreen {
     element.append(head);
 
     const list = html("div", "insert-list");
-    this.rack = new InsertRack(list, owner, this);
+    this.rack = new DeviceChain(list, owner, this, {
+      daw, button, popMenu, ValueKnob, toast: (...a) => toast(...a), parameterInfo: () => parameterInfo, dbText, reducedMotion: REDUCED_MOTION,
+    });
 
     // The chain's own input and output gain, with meters, either side of the effects.
     const chainGain = (name, key, caption) => {
@@ -4293,14 +3826,23 @@ class DawScreen {
 
   //============================================================================ tooltips and hint line
   buildHints() {
-    const DEFAULT_HINT = "Right-click anything for its menu · ? lists the keyboard shortcuts";
-    this.hintLine = html("div", "hint-line");
-    this.hintLine.setAttribute("aria-hidden", "true"); // the same text is each control's label or tooltip
-    const hintText = html("span", "hint-text", DEFAULT_HINT);
-    const hintKey = html("kbd", "key-chip hint-key");
-    hintKey.hidden = true;
-    this.hintLine.append(hintText, hintKey);
-    this.root.append(this.hintLine);
+    // One hint line per mode: the DAW's under the tracks, Live's at the foot of the window.
+    // Both describe the control under the pointer and show its key (FL's hint bar).
+    const DEFAULT_HINT = { daw: "Right-click anything for its menu · ? lists the keyboard shortcuts",
+                           live: "Point at anything to see what it does · ? lists the stage keys · F1 opens the manual" };
+    const makeLine = (className, parent, text) => {
+      const line = html("div", className);
+      line.setAttribute("aria-hidden", "true"); // the same text is each control's label or tooltip
+      const lineText = html("span", "hint-text", text);
+      const lineKey = html("kbd", "key-chip hint-key");
+      lineKey.hidden = true;
+      line.append(lineText, lineKey);
+      parent?.append(line);
+      return { line, text: lineText, key: lineKey };
+    };
+    const lines = { daw: makeLine("hint-line", this.root, DEFAULT_HINT.daw),
+                    live: makeLine("hint-line live-hint-line", document.querySelector("footer.recorder"), DEFAULT_HINT.live) };
+    this.hintLine = lines.daw.line;
 
     const tip = html("div", "tip");
     tip.setAttribute("role", "tooltip");
@@ -4310,8 +3852,10 @@ class DawScreen {
 
     const hide = () => { clearTimeout(timer); tip.hidden = true; };
     const showHint = (parsed) => {
+      const mode = this.active ? "daw" : "live";
+      const { text: hintText, key: hintKey } = lines[mode];
       hintText.textContent = parsed ? [parsed.name, parsed.more].filter(Boolean).join(" · ")
-        : target === null && this.hoverLibrary ? (this.library?.hint?.textContent || DEFAULT_HINT) : DEFAULT_HINT;
+        : mode === "daw" && target === null && this.hoverLibrary ? (this.library?.hint?.textContent || DEFAULT_HINT.daw) : DEFAULT_HINT[mode];
       hintKey.hidden = !parsed?.shortcut;
       hintKey.textContent = parsed?.shortcut ? keyText(parsed.shortcut) : "";
     };
@@ -4329,9 +3873,8 @@ class DawScreen {
     };
 
     document.addEventListener("pointerover", (event) => {
-      if (!this.active) return;
       const element = event.target.closest?.("[title], [data-tip]");
-      this.hoverLibrary = Boolean(event.target.closest?.(".library-panel"));
+      this.hoverLibrary = this.active && Boolean(event.target.closest?.(".library-panel"));
       if (element) claimTitle(element);
       const next = element?.dataset.tip ? element : null;
       if (next === target) return;
@@ -5445,12 +4988,15 @@ class DawScreen {
     ["Patterns tab (after clicking in it)", [["- / =", "Previous / next pattern"], ["↑ / ↓", "Select the row above / below"],
                   ["Ctrl+Shift+← / →", "Rotate the selected row's steps"], ["Ctrl+C / V", "Copy / paste the selected row's steps"],
                   ["Right-click a row's light", "Solo the row (again: every row plays)"]]],
+    ["Effects (click an effect's title first)", [["Click / Shift+click a title", "Select an effect / several"], ["← / →", "Select the effect before / after"],
+                 ["Ctrl+D", "Duplicate"], ["Ctrl+X / C / V", "Cut, copy, paste (into any chain, after the selected effect)"],
+                 ["Delete", "Remove"], ["0", "Switch on / off"], ["F2", "Rename"], ["Right-click or ⋯", "A/B, move, add before / after…"]]],
     ["File", [["Ctrl+N", "New project"], ["Ctrl+O", "Open a project"], ["Ctrl+S", "Save (Shift: save as)"],
               ["Ctrl+I", "Import audio"], ["Ctrl+Shift+R", "Export (bounce)"], ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo"]]],
     ["View", [["Tab / X", "Tracks / mixer"], ["E / Shift+Tab", "Show / hide the effects panel"], ["Shift+B / Ctrl+Alt+B", "Show / hide the library"],
               ["Ctrl+F", "Search the library"], ["+ / −", "Zoom in / out (or Ctrl+scroll)"],
               ["Z / Shift+Z", "Zoom to the selected clip / the whole song"], ["Shift+↑ / ↓", "Taller / shorter tracks (or Alt+scroll)"],
-              ["?", "This list"], [IS_MAC ? "Ctrl+Cmd+F" : "F11", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
+              ["?", "This list"], ["F1", "The user manual (Help menu)"], [IS_MAC ? "Ctrl+Cmd+F" : "F11", "Full screen"], ["Esc", "Close, deselect, back to the select tool"]]],
   ];
 
   toggleShortcuts(show) {
@@ -5782,6 +5328,60 @@ class DawScreen {
   }
 
   // Which track to line this one up with (the phase of two mics on one sound).
+  // Every smart tool in one menu, grouped by what it works on. Entries that need a
+  // selection are greyed with the reason in their hint.
+  openAssistMenu(anchor) {
+    const box = anchor.getBoundingClientRect();
+    const tracks = this.session?.tracks ?? [];
+    const track = this.selectedTrackObject();
+    const audioTrack = track && track.kind !== "midi" ? track : null;
+    const found = this.findClip(this.selectedClip);
+    const clip = found && !found.clip.midi ? found.clip : null;
+    const needTrack = "Select an audio track first";
+    const needClip = "Select an audio clip first";
+    const songEmpty = !tracks.some((t) => t.clips?.length);
+    popMenu(box.left, box.bottom + 4, ({ item, heading }) => {
+      heading("The song");
+      item("Auto Mix…", () => this.openAutoMix("mix"), { indent: true, disabled: songEmpty, hint: songEmpty ? "Record or import something first" : "Listen to the tracks and set EQ, compression, space and levels" });
+      item("Mix Check…", () => this.mixCheck.toggle(true), { indent: true, disabled: songEmpty, hint: "A report on the mix in plain words, with Fix buttons" });
+      item("Master the song…", () => this.openAutoMix("master"), { indent: true, disabled: songEmpty, hint: "Mastering EQ, multiband, width and a limiter up to the loudness you pick" });
+      item("Song key…", () => this.toggleKeyPanel(true), { indent: true, hint: "Find or set the song's key" });
+      item("Song map…", () => this.songMap.toggle(true), { indent: true, hint: "Find the intro, verses, choruses and bars" });
+      heading(audioTrack ? `Track “${audioTrack.name}”` : "The selected track");
+      item("Fit into the backing…", () => this.openAutoMix("fit", audioTrack.id), { indent: true, disabled: !audioTrack,
+           hint: audioTrack ? "EQ, compression, space and level for this track; the others only make room" : needTrack });
+      item("Clean and polish…", () => this.openAutoMix("clean", audioTrack.id), { indent: true, disabled: !audioTrack,
+           hint: audioTrack ? "Rumble, hum, noise, mud, harshness, S's and uneven level, on this track only" : needTrack });
+      const takes = audioTrack?.takes?.length ?? 0;
+      item("Pick the best takes", () => this.takes.autoComp(audioTrack.id), { indent: true, disabled: takes < 2 || Boolean(this.takes.busy),
+           hint: !audioTrack ? needTrack : takes < 2 ? "Record two or more takes on this track first" : "Auto Comp: the best take in every phrase. One undo takes it back." });
+      const partners = audioTrack ? tracks.filter((t) => t.id !== audioTrack.id && t.kind !== "midi" && t.clips?.length) : [];
+      item("Align to…", () => this.openAlignMenu(audioTrack, partners, box.left, box.bottom + 4), { indent: true,
+           disabled: !audioTrack?.clips?.length || !partners.length,
+           hint: !audioTrack ? needTrack : "Line its phase up with a track that recorded the same sound" });
+      heading(clip ? `Clip “${clip.name}”` : "The selected clip");
+      const clipItem = (label, run, hint) => item(label, () => run(clip), { indent: true, disabled: !clip, hint: clip ? hint : needClip });
+      clipItem("Split into stems…", (c) => this.toggleStems(true, c), "Vocals, drums, bass and other, each on its own track");
+      clipItem("Rebalance stems…", (c) => this.toggleRebalance(true, c), "Turn the vocals, drums, bass and the rest up or down without making tracks");
+      clipItem("Find song sections…", (c) => this.songMap.toggle(true, { id: c.id, name: c.name }), "Song map of this clip");
+      for (const [label, what, hint] of TO_MIDI_PARTS)
+        clipItem(`Convert to MIDI: ${label.replace("…", "").toLowerCase()}…`, (c) => this.toggleToMidi(true, c, what), hint);
+      clipItem("Build backing vocals…", (c) => this.backing.toggle(true, c), "Harmonies and doubles from this sung lead");
+    });
+  }
+
+  // Opens Auto Mix in one of its modes, on a track for "fit" and "clean".
+  openAutoMix(mode, trackId = null) {
+    const panel = this.autoMixPanel;
+    if (panel.classList.contains("is-running")) return this.toggleAutoMix(true);
+    this.toggleAutoMix(true);
+    const modeSelect = panel.querySelector("[name=mode]");
+    modeSelect.value = mode;
+    this.renderAutoMixMode();
+    if (trackId !== null) panel.querySelector("[name=focus]").value = String(trackId);
+    modeSelect.dispatchEvent(new Event("change"));
+  }
+
   openAlignMenu(track, partners, x, y) {
     popMenu(x, y, ({ item, heading }) => {
       heading(`Line up "${track.name}" with`);
@@ -6290,6 +5890,7 @@ export function initDaw() {
   // The app's menu bar (standalone only) sends the same commands as the buttons and keys.
   window.__JUCE__.backend.addEventListener("appMenu", (action) => {
     if (action === "mode:live" || action === "mode:daw") requestMode(action === "mode:daw");
+    else if (action === "shortcuts" && !screen.active) document.dispatchEvent(new CustomEvent("micfx:liveKeys"));
     else screen.run(action);
   });
 
@@ -6305,6 +5906,11 @@ export function initDaw() {
   const toggleFullScreen = () => nativeWindow("fullScreen").then(applyWindow);
   fullScreen.addEventListener("click", toggleFullScreen);
   window.__JUCE__.backend.addEventListener("window", applyWindow);
+  // F1 opens the user manual, in both modes (Help menu: User manual).
+  const help = Juce.getNativeFunction("help");
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "F1") { event.preventDefault(); help("manual"); }
+  });
   document.addEventListener("keydown", (event) => {
     if (event.key === "F11" || (event.ctrlKey && event.metaKey && event.key.toLowerCase() === "f")) {
       event.preventDefault();

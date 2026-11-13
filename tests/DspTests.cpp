@@ -44,6 +44,7 @@
 #include "instruments/Registry.h"
 #include "instruments/Kit.h"
 #include "daw/Quantize.h"
+#include "daw/Hitpoints.h"
 #include "daw/Patterns.h"
 #include "daw/Loops.h"
 #include "analysis/Beats.h"
@@ -3858,6 +3859,18 @@ namespace
             check (lastSession()["tracks"][1]["inserts"].size() == 2, "pasteInserts without an index still replaces the chain");
 
             check (! (bool) run ("insertAB", { { "id", 9999 }, { "action", "copy" } }).isVoid(), "insertAB completes for a missing effect");
+
+            // The effect clipboard: copies kept aside, so a cut can be pasted after its effect is gone.
+            const auto kept = run ("copyDevices", { { "ids", juce::var (juce::Array<juce::var> { juce::var (echo) }) } });
+            run ("removeInsert", { { "id", echo } });
+            const auto fromClipboard = run ("pasteInserts", { { "to", second }, { "index", 0 }, { "clipboard", true } });
+            const auto afterPaste = lastSession()["tracks"][1]["inserts"];
+            check ((int) kept["count"] == 1 && (bool) fromClipboard["ok"] && fromClipboard["inserts"].size() == 1
+                       && afterPaste[0]["type"].toString() == "echo" && afterPaste[0]["name"].toString() == "Slap"
+                       && (int) afterPaste[0]["id"] != echo,
+                   "copyDevices + pasteInserts { clipboard }: a cut effect pastes into another chain");
+            run ("copyDevices", { { "ids", juce::Array<juce::var>() } });
+            check (! (bool) run ("pasteInserts", { { "to", second }, { "index", 0 }, { "clipboard", true } })["ok"], "an empty clipboard pastes nothing");
         }
 
         folder.deleteRecursively();
@@ -7149,6 +7162,226 @@ namespace
         check (daw::Edit::getWarpSettings (clip).map == daw::Edit::getEffectiveWarp (clip), "compare off: the tabs play again");
     }
 
+    void testHitpoints()
+    {
+        std::cout << "\nHitpoints (stored, filtered, hand-corrected; everything uses them)\n";
+        namespace hp = daw::hitpoints;
+
+        // A take: 12 hits half a second apart, loud and soft by turns, with a ghost hit 30 ms
+        // after the 4th; the 6th (at 2.75 s) is 40 ms late and the 8th (3.75 s) 4 ms late.
+        juce::AudioBuffer<float> take (1, (int) (6.5 * sampleRate));
+        take.clear();
+        std::vector<double> times;
+        const auto hit = [&] (double at, float level)
+        {
+            for (int i = 0; i < (int) (0.08 * sampleRate); ++i)
+                take.addSample (0, (int) (at * sampleRate) + i, level * (float) std::exp (-i / (0.01 * sampleRate)) * (float) std::sin (0.25 * i));
+        };
+        for (int n = 0; n < 12; ++n)
+        {
+            const auto at = 0.25 + n * 0.5 + (n == 5 ? 0.04 : n == 7 ? 0.004 : 0.0);
+            times.push_back (at);
+            hit (at, n % 2 == 0 ? 0.8f : 0.25f);
+        }
+        hit (times[3] + 0.03, 0.15f);
+        hit (6.2, 0.03f); // barely there: only a low threshold finds it
+
+        const auto candidates = analysis::rhythm::findOnsetCandidates (take, sampleRate);
+        const auto cached = analysis::rhythm::findOnsetCandidatesCached (take, sampleRate);
+        check (candidates.size() >= 12 && cached->size() == candidates.size() && analysis::rhythm::findOnsetCandidatesCached (take, sampleRate) == cached,
+               juce::String ((int) candidates.size()) + " candidates found once, remembered per take");
+
+        hp::Filter loose, middle, strict;
+        loose.threshold = 0.0; middle.threshold = 0.5; strict.threshold = 1.0;
+        loose.minLength = middle.minLength = strict.minLength = 0.0;
+        const auto count = [&] (const hp::Filter& f, const std::vector<hp::HandEdit>& edits = {})
+        {
+            return (int) hp::enabledTimes (hp::select (candidates, 0.0, 6.5, f, edits)).size();
+        };
+        check (count (loose) >= count (middle) && count (middle) >= count (strict) && count (loose) > count (strict),
+               "a higher threshold keeps fewer (" + juce::String (count (loose)) + ", " + juce::String (count (middle)) + ", " + juce::String (count (strict)) + ")");
+
+        auto spaced = loose;
+        spaced.minLength = 0.1;
+        const auto kept = hp::enabledTimes (hp::select (candidates, 0.0, 6.5, spaced, {}));
+        auto apart = true;
+        for (size_t i = 1; i < kept.size(); ++i)
+            apart = apart && kept[i] - kept[i - 1] >= 0.1 - 1e-9;
+        const auto hasNear = [] (const std::vector<double>& list, double t) { return std::any_of (list.begin(), list.end(), [t] (double x) { return std::abs (x - t) < 0.006; }); };
+        check (apart && hasNear (kept, times[3]) && ! hasNear (kept, times[3] + 0.03), "minimum length: the ghost hit goes, the louder one before it stays");
+
+        // Hand edits: a disabled one never counts, added and locked ones always do.
+        const std::vector<hp::HandEdit> edits { { times[2], hp::State::disabled }, { 6.1, hp::State::added }, { times[1], hp::State::locked } };
+        const auto withEdits = hp::enabledTimes (hp::select (candidates, 0.0, 6.5, strict, edits));
+        check (! hasNear (withEdits, times[2]) && hasNear (withEdits, 6.1) && hasNear (withEdits, times[1]),
+               "disabled never returns; added and locked stay even at the strictest threshold");
+        check (hp::parseEdits (hp::toString (edits)).size() == 3 && hp::parseFilter (hp::toString (spaced)) == spaced,
+               "edits and the filter round-trip through their text");
+
+        // Beats filter: only hits near the 1/8 grid of a 120 BPM song (0.25 s), so the late one goes.
+        auto onEighths = middle;
+        onEighths.beats = 0.5;
+        const auto onGrid = hp::enabledTimes (hp::select (candidates, 0.0, 6.5, onEighths, {}, [] (double s) { return s * 2.0; }));
+        check (! hasNear (onGrid, times[5]) && hasNear (onGrid, times[4]), "Beats keeps the hits near the grid and drops the late one");
+
+        // On a clip: stored in file time, so they survive warping and splitting.
+        const auto folder = juce::File::createTempFile ("micfx-hitpoints");
+        folder.createDirectory();
+        const auto file = folder.getChildFile ("take.wav");
+        writeWav (file, take, sampleRate);
+        daw::Edit edit;
+        daw::AudioPool pool;
+        pool.setSampleRate (sampleRate);
+        edit.setTempo (120.0);
+        const auto track = (int) edit.addTrack ("Drums")[daw::ids::id];
+        const auto clipId = (int) edit.addClip (track, file, 0.0, 6.5)[daw::ids::id];
+        hp::Filter stored;
+        stored.threshold = 0.3;
+        edit.setClipHitpoints (clipId, hp::toString (stored), hp::toString (edits));
+        auto before = hp::enabledTimes (hp::get (edit.getClip (clipId), pool));
+        edit.setClipWarp (clipId, daw::warp::Map ({ { 0.0, 0.0 }, { 3.0, 3.3 }, { 6.5, 6.8 } }));
+        auto after = hp::enabledTimes (hp::get (edit.getClip (clipId), pool));
+        check (before == after && hasNear (after, 6.1) && ! hasNear (after, times[2]), "hitpoints stay with the audio through a warp (file time)");
+        edit.setClipWarp (clipId, {});
+
+        edit.getUndoManager().beginNewTransaction();
+        const auto right = edit.splitClip (clipId, 3.0);
+        const auto leftHits = hp::enabledTimes (hp::get (edit.getClip (clipId), pool));
+        const auto rightHits = hp::enabledTimes (hp::get (edit.getClip (right), pool));
+        check (right > 0 && hasNear (rightHits, 6.1) && ! hasNear (leftHits, 6.1) && hasNear (leftHits, times[1])
+                   && std::all_of (leftHits.begin(), leftHits.end(), [] (double t) { return t <= 3.0 + 1e-6; }),
+               "a split keeps the edits on both halves, each showing its own part");
+        edit.getUndoManager().undo();
+        edit.getUndoManager().beginNewTransaction();
+
+        // Quantize moves exactly the hits shown: a disabled late hit stays late.
+        edit.setClipHitpoints (clipId, hp::toString (stored), hp::toString ({ { times[5], hp::State::disabled } }));
+        const auto grid = edit.getTempoMap().makeGrid (0.5, 0.0, 10.0, 0.0);
+        daw::rhythm::Options options;
+        options.catchRange = 0.5;
+        auto result = daw::rhythm::quantizeClips (edit, pool, { clipId }, grid, options);
+        auto map = daw::Edit::getEffectiveWarp (edit.getClip (clipId));
+        const auto shownCount = (int) hp::enabledTimes (hp::get (edit.getClip (clipId), pool)).size();
+        check (result.onsets == shownCount && std::abs (map.toTarget (times[5]) - times[5]) < 0.01 && std::abs (map.toTarget (times[7]) - 3.75) < 0.002,
+               "quantize uses the shown hits (" + juce::String (result.onsets) + "): the disabled late one isn't pulled, the others land on the grid");
+
+        // Safe zone and max move.
+        edit.setClipWarp (clipId, {});
+        edit.setClipHitpoints (clipId, hp::toString (stored), {});
+        options.safeRange = 0.05; // 12.5 ms at 1/8 of 120 BPM
+        options.maxMove = 0.01;
+        daw::rhythm::quantizeClips (edit, pool, { clipId }, grid, options);
+        map = daw::Edit::getEffectiveWarp (edit.getClip (clipId));
+        check (std::abs (map.toTarget (times[7]) - times[7]) < 0.0015, "safe zone: a hit 4 ms off stays where it is");
+        check (std::abs ((times[5] - map.toTarget (times[5])) - 0.01) < 0.002, "max move: a hit 40 ms late moves only 10 ms");
+
+        // Grooves: offsets within the bar, a grid that repeats.
+        const auto groove = hp::makeGroove ("g", { 0.25, 0.75, 1.25, 1.75, 2.25, 2.75 }, edit.getTempoMap(), 4);
+        const auto parsed = hp::parseGrooves (hp::toString ({ groove }));
+        const auto gridFromGroove = hp::makeGrid (parsed.front(), edit.getTempoMap(), 4, 0.0, 4.0);
+        check (parsed.size() == 1 && groove.offsets.size() == 4 && gridFromGroove.size() == 8 && std::abs (gridFromGroove[1] - 0.75) < 1e-6,
+               "a groove from a clip's hits: 4 places in the bar, repeating every bar (" + juce::String ((int) groove.offsets.size()) + ")");
+
+        folder.deleteRecursively();
+    }
+
+    void testHitpointActions()
+    {
+        std::cout << "\nHitpoint actions (bridge)\n";
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-hitactions", {});
+        folder.createDirectory();
+        juce::PropertiesFile::Options settingsOptions;
+        settingsOptions.applicationName = "MicFXTests";
+        settingsOptions.filenameSuffix = ".settings";
+        juce::PropertiesFile settings (folder.getChildFile ("test.settings"), settingsOptions);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        const auto run = [&] (const juce::String& command, juce::var args)
+        {
+            juce::var result;
+            bridge.handle (command, args, [&] (juce::var r) { result = r; });
+            return result;
+        };
+        const auto args = [] (std::initializer_list<std::pair<const char*, juce::var>> properties)
+        {
+            auto* object = new juce::DynamicObject();
+            for (const auto& [name, value] : properties)
+                object->setProperty (name, value);
+            return juce::var (object);
+        };
+        run ("mode", args ({ { "daw", true } }));
+
+        // Eight hits a beat apart at 120 BPM, louder and softer.
+        juce::AudioBuffer<float> take (1, (int) (4.2 * sampleRate));
+        take.clear();
+        for (int n = 0; n < 8; ++n)
+            for (int i = 0; i < (int) (0.08 * sampleRate); ++i)
+                take.addSample (0, (int) ((0.1 + n * 0.5) * sampleRate) + i, (n % 2 == 0 ? 0.8f : 0.3f) * (float) std::exp (-i / (0.01 * sampleRate)) * (float) std::sin (0.25 * i));
+        const auto file = folder.getChildFile ("take.wav");
+        writeWav (file, take, sampleRate);
+        const auto track = (int) edit.getTracks()[0][daw::ids::id];
+        const auto clipId = (int) edit.addClip (track, file, 1.0, 4.2)[daw::ids::id];
+
+        // Store a filter and edits; the session says so. (The list is built step by step:
+        // brace-initialising an Array from one Array copies it with some compilers.)
+        juce::Array<juce::var> edits;
+        edits.add (juce::var (juce::Array<juce::var> { 0.6, "disabled" }));
+        auto stored = run ("setHitpoints", args ({ { "id", clipId }, { "filter", args ({ { "threshold", 0.4 }, { "minLength", 0.05 }, { "beats", 0.0 } }) },
+                                                   { "edits", edits } }));
+        const auto clip = edit.getClip (clipId);
+        check ((bool) stored["ok"] && daw::hitpoints::hasEdits (clip) && std::abs (daw::hitpoints::getFilter (clip).threshold - 0.4) < 1e-6,
+               "setHitpoints stores the filter and the hand edits");
+        const auto shown = daw::hitpoints::enabledTimes (daw::hitpoints::get (clip, processor.getDawEngine().getAudioPool()));
+        check (shown.size() == 7, "7 of the 8 hits are enabled (" + juce::String ((int) shown.size()) + ")");
+
+        auto midi = run ("hitpointAction", args ({ { "id", clipId }, { "action", "midi" }, { "pitch", 38 } }));
+        const auto midiClip = edit.getClip ((int) midi["clip"]);
+        int notes = 0, loud = 0;
+        for (const auto& note : midiClip)
+            if (note.hasType (daw::ids::NOTE))
+            {
+                ++notes;
+                loud += (int) note[daw::ids::velocity] > 100 ? 1 : 0;
+                check ((int) note[daw::ids::pitch] == 38 || notes > 1, "MIDI notes get the asked pitch");
+            }
+        check ((bool) midi["ok"] && notes == 7 && (int) midi["count"] == 7 && loud >= 3 && loud <= 4,
+               "MIDI notes: one per enabled hit, velocity from each hit's level (" + juce::String (notes) + " notes, " + juce::String (loud) + " loud)");
+
+        const auto markersBefore = edit.getMarkers().size();
+        run ("hitpointAction", args ({ { "id", clipId }, { "action", "markers" } }));
+        check (edit.getMarkers().size() - markersBefore == 7, "a marker at each enabled hit");
+
+        auto groove = run ("hitpointAction", args ({ { "id", clipId }, { "action", "groove" }, { "name", "Feel" } }));
+        check ((bool) groove["ok"] && daw::hitpoints::parseGrooves (edit.getState()[daw::ids::grooves].toString()).size() == 1,
+               "a groove saved in the project");
+        auto quantized = run ("quantize", args ({ { "clips", juce::Array<juce::var> { clipId } }, { "savedGroove", "Feel" } }));
+        check ((bool) quantized["ok"], "quantize to the saved groove");
+        edit.getUndoManager().undo(); // the quantize
+
+        auto split = run ("hitpointAction", args ({ { "id", clipId }, { "action", "split" } }));
+        int pieces = 0;
+        double end = 0.0, firstStart = 1e9;
+        bool gapless = true, faded = true;
+        for (const auto& c : edit.getTracks()[0])
+            if (c.hasType (daw::ids::CLIP))
+            {
+                ++pieces;
+                const auto s = (double) c[daw::ids::start];
+                if (pieces > 1) gapless = gapless && std::abs (s - end) < 1e-9;
+                if (pieces > 1) faded = faded && (double) c[daw::ids::fadeIn] > 0.004;
+                firstStart = std::min (firstStart, s);
+                end = s + (double) c[daw::ids::length];
+            }
+        check ((bool) split["ok"] && pieces == 8 && gapless && faded && std::abs (firstStart - 1.0) < 1e-9 && std::abs (end - 5.2) < 1e-9,
+               "split at the 7 hits: " + juce::String (pieces) + " pieces end to end, with short fades");
+
+        folder.deleteRecursively();
+    }
+
     void testLinkedTracks()
     {
         std::cout << "\nLinked tracks (multi-mic warping stays in phase)\n";
@@ -8117,7 +8350,9 @@ namespace
         // Dragging a transpose knob asks for a new copy at every step: renders nobody wants
         // any more are dropped, so the last one isn't queued behind them.
         {
-            auto& pool = engine.getAudioPool();
+            daw::AudioPool pool; // a live one (an offline engine's pool works synchronously)
+            pool.setSampleRate (sampleRate);
+            pool.loadNow (file);
             daw::warp::Settings first, second;
             first.semitones = 3.0;
             second.semitones = 4.0;
@@ -8139,6 +8374,89 @@ namespace
                "a split keeps the warp on both halves");
         edit.setClipWarp (clip, Map());
         check (! edit.getClip (clip).hasProperty (daw::ids::warp), "clearing the warp removes it from the project");
+
+        folder.deleteRecursively();
+    }
+
+    // An offline engine (exports, Auto Mix, key detection, song map) runs on a worker
+    // thread and is deleted there: it must never post work to the message thread, or that
+    // work runs while it renders, or after it's gone. Detect key crashed this way: the
+    // pool's background decode landed on the message thread, which rebuilt the offline
+    // engine's graph under the worker (and then touched it after it was deleted).
+    void testOfflineEngineStaysOffTheMessageThread()
+    {
+        std::cout << "\nOffline engine stays off the message thread\n";
+        constexpr double sampleRate = 48000.0;
+        constexpr int blockSize = 512;
+
+        juce::AudioBuffer<float> sine (1, (int) (3.0 * sampleRate));
+        for (int i = 0; i < sine.getNumSamples(); ++i)
+            sine.setSample (0, i, 0.5f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * i / sampleRate));
+
+        const auto folder = juce::File::createTempFile ("micfx-offline");
+        folder.createDirectory();
+        const auto file = folder.getChildFile ("sine.wav");
+        writeWav (file, sine, sampleRate);
+
+        daw::Edit live;
+        const auto track = (int) live.addTrack ("Voice")[daw::ids::id];
+        live.addClip (track, file, 0.0, 3.0);
+        const auto transposed = (int) live.addClip (track, file, 3.0, 3.0)[daw::ids::id];
+        live.setClipTranspose (transposed, 3.0); // a rendered copy too
+        const auto session = live.getState().createCopy();
+
+        // Rendered on a worker, the way SessionAnalyser and Exporter do it.
+        std::atomic<int> rebuildsAfterLoad { -1 }, rebuildsAtEnd { -2 };
+        std::atomic<bool> loadedEverything { false }, done { false };
+        std::atomic<float> peak { 0.0f };
+        juce::Thread::launch ([&]
+        {
+            {
+                daw::Edit edit;
+                edit.replaceState (session);
+                daw::DawEngine engine (edit, false);
+                engine.prepare (sampleRate, blockSize);
+                engine.loadAllNow();
+                loadedEverything = ! engine.getAudioPool().isLoading();
+                rebuildsAfterLoad = engine.getRebuildCount();
+
+                engine.seek (0);
+                engine.play();
+                juce::AudioBuffer<float> block (2, blockSize);
+                for (int n = 0; n < (int) (6.0 * sampleRate) / blockSize; ++n)
+                {
+                    engine.process (block, 2, blockSize);
+                    peak = juce::jmax (peak.load(), block.getMagnitude (0, 0, blockSize));
+                    juce::Thread::sleep (n % 64 == 0 ? 5 : 0); // time for posted messages to arrive
+                }
+                rebuildsAtEnd = engine.getRebuildCount();
+            } // deleted here, on the worker
+            done = true;
+        });
+
+        // Meanwhile the message thread keeps delivering whatever arrives.
+        for (int i = 0; i < 2000 && ! done.load(); ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+        for (int i = 0; i < 20; ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (10); // anything left over, after it's gone
+
+        check (done.load(), "the render finishes");
+        check (rebuildsAtEnd.load() == rebuildsAfterLoad.load(), "nothing rebuilds it while it renders");
+        check (loadedEverything.load(), "loadAllNow leaves nothing loading in the background");
+        check (peak.load() > 0.3f, "and it plays the clips");
+
+        // And its pool is synchronous: no decode or render is left for the message thread.
+        {
+            daw::Edit edit;
+            edit.replaceState (session);
+            daw::DawEngine engine (edit, false);
+            engine.prepare (sampleRate, blockSize);
+            auto& pool = engine.getAudioPool();
+            daw::warp::Settings up;
+            up.semitones = 2.0;
+            check (pool.get (file) != nullptr && pool.get (file, up) != nullptr && ! pool.isLoading(),
+                   "an offline pool decodes and renders straight away");
+        }
 
         folder.deleteRecursively();
     }
@@ -14658,8 +14976,18 @@ int main()
         testTimeBypass();
         testLivePreview();
         testWarp();
+        testOfflineEngineStaysOffTheMessageThread();
         testLinkedTracks();
         testPitchNotes();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=hitpoints: stored hitpoints and what uses them.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "hitpoints")
+    {
+        testHitpoints();
+        testHitpointActions();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -14783,8 +15111,11 @@ int main()
     testTempoMap();
     testMusicalMode();
     testTimeBypass();
+    testHitpoints();
+    testHitpointActions();
     testLinkedTracks();
     testWarp();
+    testOfflineEngineStaysOffTheMessageThread();
     testSegments();
     testLivePreview();
     testPitchNotes();

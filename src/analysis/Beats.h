@@ -2,6 +2,7 @@
 
 #include <juce_audio_basics/juce_audio_basics.h>
 
+#include <memory>
 #include <vector>
 
 // Rhythm analysis for quantizing: where notes and hits start (onsets), how fast a
@@ -30,6 +31,27 @@ struct Onset
 // higher finds softer onsets. Onsets are at least 50 ms apart.
 std::vector<Onset> findOnsets (const juce::AudioBuffer<float>&, double sampleRate, double from = 0.0, double to = -1.0,
                                float sensitivity = 0.5f);
+
+// Every note start a take could have, found once at full sensitivity, for hitpoints that
+// are then filtered (and hand-corrected) without analysing again. Candidates are at least
+// 20 ms apart, in time order.
+struct OnsetCandidate
+{
+    double time = 0.0;     // seconds from the buffer's start, at the start of the attack
+    float strength = 0.0f; // 0..1: the flux peak, relative to the strongest in the buffer
+    float margin = 0.0f;   // 0..1: how far it stands out (findOnsets keeps margin >= 0.02 + 0.2 * (1 - sensitivity))
+    float peak = 0.0f;     // the loudest sample level of its attack (linear, 0..1)
+};
+
+std::vector<OnsetCandidate> findOnsetCandidates (const juce::AudioBuffer<float>&, double sampleRate);
+
+// The same, remembered per recording (by its shape and a sparse sample of its audio).
+std::shared_ptr<const std::vector<OnsetCandidate>> findOnsetCandidatesCached (const juce::AudioBuffer<float>&, double sampleRate);
+
+// The margin a candidate needs at a threshold (0: every candidate, 1: only clear ones), so
+// threshold = 1 - sensitivity picks what findOnsets picks.
+inline float marginForThreshold (double threshold) { return 0.02f + 0.2f * (float) juce::jlimit (0.0, 1.0, threshold); }
+
 
 //==============================================================================
 struct Tempo

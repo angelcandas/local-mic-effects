@@ -65,6 +65,8 @@ juce_add_binary_data(MicFX_WebUI
         ui/soundcheck.js
         ui/setlist.js
         ui/daw.css
+        ui/devices.js
+        ui/devices.css
         ui/aiviews.css
         ui/aiviews.js
         ui/practice.js
@@ -154,6 +156,8 @@ set(MICFX_DSP_SOURCES
     src/daw/PluginInsert.cpp
     src/daw/PluginInsert.h
     src/daw/Project.cpp
+    src/daw/Hitpoints.cpp
+    src/daw/Hitpoints.h
     src/daw/Quantize.cpp
     src/daw/Quantize.h
     src/daw/Warp.cpp

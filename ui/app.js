@@ -1433,7 +1433,7 @@ new SoundCheckPanel(document.querySelector(".sound-check"));
 // The "?" overlay with the Live keys.
 const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["Ctrl+← / →", "Previous / next preset"],
                    ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"], ["M", "Mute output (panic)"],
-                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["Esc", "Close"]];
+                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["F1", "The user manual"], ["Esc", "Close"]];
 function toggleLiveKeys(show) {
   let overlay = document.querySelector(".live-keys");
   if (!overlay) {
@@ -1456,6 +1456,7 @@ function toggleLiveKeys(show) {
   overlay.hidden = !(show ?? overlay.hidden);
 }
 document.querySelector(".keys-button").addEventListener("click", () => toggleLiveKeys());
+document.addEventListener("micfx:liveKeys", () => toggleLiveKeys(true));
 
 document.addEventListener("keydown", (event) => {
   if (isTyping(event) || event.altKey) return;

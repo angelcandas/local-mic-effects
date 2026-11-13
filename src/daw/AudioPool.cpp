@@ -410,6 +410,9 @@ AudioPool::Audio AudioPool::get (const juce::File& file)
     if (errors.count (path) > 0 || pending.count (path) > 0)
         return {};
 
+    if (synchronous)
+        return loadNow (file);
+
     pending.insert (path);
     const auto rate = sampleRate;
 
@@ -472,6 +475,9 @@ AudioPool::Audio AudioPool::request (const juce::File& file, const warp::Setting
     const auto key = getWarpKey (file, settings);
     if (const auto it = warps.find (key); it != warps.end())
         return it->second;
+
+    if (synchronous)
+        return loadNow (file, settings);
 
     if (settings.linked.size() > 1)
         return getLinked (file, settings, hint.focus);
