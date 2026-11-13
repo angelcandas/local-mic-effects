@@ -697,6 +697,35 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                        });
                        })
 
+                       // () -> { ok, error, tracks }: the sing-along rows (backing track and recordings)
+                       // become DAW tracks at their places, in one undo step (standalone app).
+                       .withNativeFunction ("singAlongToDaw", [this] (const auto&, auto complete)
+                       {
+                           if (daw == nullptr || ! DawBridge::isAvailable())
+                           {
+                               auto* result = new juce::DynamicObject();
+                               result->setProperty ("ok", false);
+                               result->setProperty ("error", "The DAW is only in the standalone app.");
+                               complete (juce::var (result));
+                               return;
+                           }
+
+                           auto& multitrack = processorRef.getMultitrack();
+                           const auto rate = multitrack.getSampleRate();
+                           std::vector<DawBridge::SingAlongRow> rows;
+                           int recording = 0;
+                           for (const auto& track : multitrack.getTracks())
+                           {
+                               if (! track->file.existsAsFile())
+                                   continue; // rendered copies (Practice) have no file
+                               rows.push_back ({ track->file,
+                                                 track->isTake ? "Recording " + juce::String (++recording) : track->name,
+                                                 (double) track->start / rate, (double) track->audio.getNumSamples() / rate,
+                                                 juce::Decibels::gainToDecibels (track->gain.load(), -60.0f), track->muted.load() });
+                           }
+                           complete (daw->addSingAlongTracks (rows));
+                       })
+
                        // (id, { gain?, muted? }) -> undefined
                        .withNativeFunction ("setTrack", [this] (const auto& args, auto complete)
                        {

@@ -463,6 +463,9 @@ void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
         tree.appendChild (files, nullptr);
     if (juce::JUCEApplicationBase::isStandaloneApp() && (setlist.size() > 0 || setlist.getFile() != juce::File()))
         tree.appendChild (setlist.getSnapshot(), nullptr); // the app's setlist survives a restart
+    if (juce::JUCEApplicationBase::isStandaloneApp() && juce::MessageManager::existsAndIsCurrentThread())
+        if (auto singAlong = multitrack.saveSession(); singAlong.getNumChildren() > 0)
+            tree.appendChild (singAlong, nullptr); // the sing-along rows survive a restart
 
     if (auto xml = tree.createXml())
         copyXmlToBinary (*xml, destData);
@@ -481,6 +484,13 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                 if (juce::JUCEApplicationBase::isStandaloneApp())
                     setlist.restore (saved);
                 tree.removeChild (saved, nullptr);
+            }
+
+            if (const auto singAlong = tree.getChildWithName ("SINGALONG"); singAlong.isValid())
+            {
+                if (juce::JUCEApplicationBase::isStandaloneApp() && juce::MessageManager::existsAndIsCurrentThread())
+                    multitrack.restoreSession (singAlong);
+                tree.removeChild (singAlong, nullptr);
             }
 
             const auto files = tree.getChildWithName ("MODULE_FILES");

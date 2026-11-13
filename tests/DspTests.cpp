@@ -13832,6 +13832,69 @@ static float soundCheckValue (const SoundCheck::Plan& plan, const juce::String& 
     return fallback;
 }
 
+static void testSingAlongSession()
+{
+    std::cout << "\nSing-along session: kept and opened in the DAW\n";
+
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-singalong", {});
+    folder.createDirectory();
+    juce::AudioBuffer<float> song (2, (int) (2.0 * sampleRate));
+    for (int i = 0; i < song.getNumSamples(); ++i)
+        for (int ch = 0; ch < 2; ++ch)
+            song.setSample (ch, i, 0.2f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * i / sampleRate));
+    const auto songFile = folder.getChildFile ("song.wav");
+    writeWav (songFile, song, sampleRate);
+
+    PluginProcessor processor;
+    processor.prepareToPlay (sampleRate, blockSize);
+    auto& tracks = processor.getMultitrack();
+    const auto id = tracks.loadNow (songFile, false, 0);
+    const auto take = tracks.loadNow (songFile, true, (juce::int64) (0.5 * sampleRate));
+    tracks.setTrackGain (id, 0.5f);
+    tracks.setTrackMuted (take, true);
+    tracks.addAudio ("Rendered copy", juce::AudioBuffer<float> (song), 0);
+
+    const auto session = tracks.saveSession();
+    check (session.getNumChildren() == 2, "the rows from files are saved, a rendered copy is not");
+    check (session.getChild (0)["file"].toString() == songFile.getFullPathName() && std::abs ((float) session.getChild (0)["gain"] - 0.5f) < 1e-6f
+               && (bool) session.getChild (1)["take"] && (bool) session.getChild (1)["muted"]
+               && std::abs ((double) session.getChild (1)["start"] - 0.5) < 1e-6,
+           "with their file, place, level and mute");
+
+    // A row whose file is gone is left out when the session comes back.
+    juce::ValueTree withMissing = session.createCopy();
+    juce::ValueTree gone ("ROW");
+    gone.setProperty ("file", folder.getChildFile ("gone.wav").getFullPathName(), nullptr);
+    withMissing.appendChild (gone, nullptr);
+    tracks.restoreSession (withMissing);
+    check (tracks.getTracks().empty() && tracks.getNumLoading() == 2, "restore replaces the rows and loads only the files that exist");
+
+    juce::PropertiesFile::Options options;
+    options.applicationName = "MicFXTests";
+    juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+    DawBridge::availableForTesting = true;
+    {
+        DawBridge bridge (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        auto& edit = processor.getDawEdit();
+        const auto before = edit.getTracks().size();
+        const auto added = bridge.addSingAlongTracks ({ { songFile, "Song", 0.0, 2.0, -6.0f, false },
+                                                        { songFile, "Recording 1", -0.01, 2.0, 0.0f, true } });
+        const auto all = edit.getTracks();
+        const auto clipOf = [] (const juce::ValueTree& track) { return track.getChildWithName (daw::ids::CLIP); };
+        check ((bool) added["ok"] && all.size() == before + 2 && all[before][daw::ids::name].toString() == "Song",
+               "Open in DAW: a track per row");
+        const auto takeClip = clipOf (all[before + 1]);
+        check (std::abs ((double) takeClip[daw::ids::start]) < 1e-9 && std::abs ((double) takeClip[daw::ids::offset] - 0.01) < 1e-6
+                   && (bool) all[before + 1][daw::ids::mute],
+               "a recording that starts before zero is trimmed at its head, and a muted row arrives muted");
+        edit.getUndoManager().undo();
+        check (edit.getTracks().size() == before, "one undo takes it back");
+        check (! (bool) bridge.addSingAlongTracks ({})["ok"], "an empty list is an error");
+    }
+    DawBridge::availableForTesting = false;
+    folder.deleteRecursively();
+}
+
 static void testLiveHistory()
 {
     std::cout << "\nLive mode undo\n";
@@ -14663,6 +14726,7 @@ int main()
         testSoundCheck();
         testAutoLevel();
         testLiveHistory();
+        testSingAlongSession();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -14785,6 +14849,7 @@ int main()
     testSoundCheck();
     testAutoLevel();
     testLiveHistory();
+    testSingAlongSession();
     testSetlist();
     testDawEngine();
     testDeviceEdits();

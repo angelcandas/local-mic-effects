@@ -1523,6 +1523,39 @@ juce::var DawBridge::addLoopTracks (const std::vector<LoopLayer>& layers, double
     return object ({ { "ok", true }, { "error", juce::String() }, { "tracks", added } });
 }
 
+juce::var DawBridge::addSingAlongTracks (const std::vector<SingAlongRow>& rows)
+{
+    if (rows.empty())
+        return error ("There's nothing in the sing-along list to open.");
+
+    for (const auto& row : rows)
+        if (! row.file.existsAsFile())
+            return error ("A file is missing: " + row.file.getFullPathName());
+
+    edit.getUndoManager().beginNewTransaction ("Open the sing-along session");
+    juce::Array<juce::var> added;
+
+    for (const auto& row : rows)
+    {
+        const auto source = project.isOpen() ? project.importAudio (row.file) : row.file;
+        if (! source.existsAsFile())
+            return error ("Couldn't copy " + row.file.getFileName() + " into the project's Audio folder.");
+
+        const auto id = (int) edit.addTrack (row.name)[ids::id];
+        // A take can start a hair before zero (latency compensation): trim its head.
+        const auto offset = juce::jmax (0.0, -row.startSeconds);
+        const auto clip = edit.addClip (id, source, juce::jmax (0.0, row.startSeconds), row.lengthSeconds - offset, offset);
+        if (clip.isValid() && std::abs (row.gainDecibels) > 0.01f)
+            edit.setClipGain ((int) clip[ids::id], row.gainDecibels);
+        if (row.muted)
+            edit.setTrackMute (id, true);
+        added.add (id);
+    }
+
+    sessionChanged = true;
+    return object ({ { "ok", true }, { "error", juce::String() }, { "tracks", added } });
+}
+
 juce::var DawBridge::handleStems (const juce::var& args)
 {
     const auto action = args["action"].toString();

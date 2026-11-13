@@ -1191,6 +1191,8 @@ class Tracks {
 
     studio.querySelectorAll(".add-track, .add-track-inline").forEach((button) =>
       button.addEventListener("click", () => this.loadBacking()));
+    this.openInDaw = studio.querySelector(".open-in-daw");
+    this.openInDaw.addEventListener("click", () => this.sendToDaw());
 
     this.toggleButton.addEventListener("click", () => {
       const collapsed = studio.classList.toggle("is-collapsed");
@@ -1237,7 +1239,17 @@ class Tracks {
     }
 
     this.container.classList.toggle("has-tracks", this.rows.size > 0);
+    this.openInDaw.hidden = this.rows.size === 0 || document.querySelector(".topbar .mode-switch").hidden;
     this.redraw();
+  }
+
+  // The backing track and every recording become DAW tracks, then the DAW opens.
+  async sendToDaw() {
+    const result = await Juce.getNativeFunction("singAlongToDaw")();
+    if (!result?.ok) return recorderBar.setStatus(result?.error || "Couldn't open the session in the DAW.", "is-error");
+    const count = result.tracks?.length ?? 0;
+    recorderBar.setStatus(`Added ${count} track${count === 1 ? "" : "s"} to the DAW project.`);
+    document.querySelector('.topbar .mode-switch [data-mode="daw"]')?.click();
   }
 
   createRow(track) {

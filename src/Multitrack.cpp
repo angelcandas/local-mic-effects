@@ -30,7 +30,10 @@ void Multitrack::prepare (double newSampleRate)
         publish();
 
         for (const auto& track : old)
+        {
+            pendingMix[track->id] = { track->gain.load(), track->muted.load() };
             startLoad (track->file, track->isTake, (juce::int64) ((double) track->start * ratio), track->id);
+        }
     };
 
     if (auto* mm = juce::MessageManager::getInstanceWithoutCreating(); mm == nullptr || mm->isThisTheMessageThread())
@@ -183,10 +186,55 @@ int Multitrack::loadNow (const juce::File& file, bool isTake, juce::int64 startS
 //==============================================================================
 void Multitrack::install (std::shared_ptr<Track> track)
 {
+    if (const auto mix = pendingMix.find (track->id); mix != pendingMix.end())
+    {
+        track->gain = mix->second.first;
+        track->muted = mix->second.second;
+        pendingMix.erase (mix);
+    }
+
     const auto it = std::lower_bound (tracks.begin(), tracks.end(), track->id,
                                       [] (const auto& t, int id) { return t->id < id; });
     tracks.insert (it, std::move (track));
     publish();
+}
+
+juce::ValueTree Multitrack::saveSession() const
+{
+    juce::ValueTree session ("SINGALONG");
+    for (const auto& track : tracks)
+    {
+        if (! track->file.existsAsFile())
+            continue; // rendered copies (Practice) have no file of their own
+
+        juce::ValueTree row ("ROW");
+        row.setProperty ("file", track->file.getFullPathName(), nullptr);
+        row.setProperty ("take", track->isTake, nullptr);
+        row.setProperty ("start", (double) track->start / sampleRate, nullptr);
+        row.setProperty ("gain", track->gain.load(), nullptr);
+        row.setProperty ("muted", track->muted.load(), nullptr);
+        session.appendChild (row, nullptr);
+    }
+    return session;
+}
+
+void Multitrack::restoreSession (const juce::ValueTree& session)
+{
+    for (const auto& id : [this] { std::vector<int> ids; for (const auto& t : tracks) ids.push_back (t->id); return ids; }())
+        removeTrack (id);
+
+    for (const auto& row : session)
+    {
+        const auto path = row.getProperty ("file").toString();
+        const juce::File file (juce::File::isAbsolutePath (path) ? path : juce::String());
+        if (! file.existsAsFile())
+            continue;
+
+        const auto id = nextId++;
+        pendingMix[id] = { (float) row.getProperty ("gain", 1.0f), (bool) row.getProperty ("muted", false) };
+        startLoad (file, (bool) row.getProperty ("take", false),
+                   (juce::int64) std::round ((double) row.getProperty ("start", 0.0) * sampleRate), id);
+    }
 }
 
 void Multitrack::removeTrack (int id)
