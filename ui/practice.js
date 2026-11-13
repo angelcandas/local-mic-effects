@@ -423,14 +423,14 @@ export class PracticeView {
         if (p && Math.abs(p.lean) >= 15) what.push(`${p.lean > 0 ? "sharp" : "flat"} ${Math.round(Math.abs(p.lean))}¢`);
         if (p && Math.abs(p.timing) >= 0.08) what.push(`${p.timing > 0 ? "late" : "early"} ${Math.round(Math.abs(p.timing) * 1000)} ms`);
         if (p && p.coverage < 0.6) what.push("parts not sung");
-        const loopButton = Object.assign(html("button", "tool is-accent", "Loop it"), { type: "button" });
+        const loopButton = Object.assign(html("button", "tool is-accent", "Repeat phrase"), { type: "button" });
         loopButton.addEventListener("click", () => this.loopPhrase(i));
         row.append(html("span", `practice-weak-score ${scoreClass(p?.score ?? 0)}`, String(Math.round(p?.score ?? 0))),
                    html("span", "practice-weak-name", `Phrase ${i + 1}${what.length ? ` · ${what.join(", ")}` : ""}`), loopButton);
         r.append(row);
       }
       const options = html("div", "practice-report-options");
-      const speed = html("label", "", "Loop at ");
+      const speed = html("label", "", "Repeat at ");
       const speedCopy = select([[1, "100%"], [0.9, "90%"], [0.75, "75%"], [0.6, "60%"], [0.5, "50%"]], this.loopSpeed);
       speedCopy.addEventListener("change", () => { this.loopSpeed = Number(speedCopy.value); this.speedSelect.value = speedCopy.value; });
       speed.append(speedCopy);

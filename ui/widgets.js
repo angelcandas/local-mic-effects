@@ -62,6 +62,14 @@ export const keyText = (text) => (IS_MAC && typeof text === "string"
 // The file an effect plays through (an impulse response): its name, Load... and a clear
 // button. load() and clear() resolve to { file, error?, cancelled? }; update(path) shows a
 // file the effect has (an empty path: none).
+// Space is the transport key everywhere (Live, Cubase and FL agree): it must not also press
+// the button or slider that kept focus after a click. Call from a Space keydown handler.
+export function releaseFocus(event) {
+  event.preventDefault();
+  const focused = event.target.closest?.("button, [role=slider], [tabindex], input[type=checkbox], input[type=range]");
+  if (focused) focused.blur();
+}
+
 export function createFilePicker({ label, load, clear }) {
   const element = html("div", "file-picker");
   const name = html("span", "file-name");

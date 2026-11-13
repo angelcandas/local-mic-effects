@@ -1857,7 +1857,7 @@ juce::String getStyleName (MixStyle style)
         case MixStyle::pop:        return "Pop";
         case MixStyle::ballad:     return "Ballad";
         case MixStyle::rock:       return "Rock";
-        case MixStyle::coaching:   return "Coaching";
+        case MixStyle::coaching:   return "Voice up front";
         case MixStyle::hipHop:     return "Hip-hop";
         case MixStyle::rnb:        return "R&B";
         case MixStyle::acoustic:   return "Acoustic";
