@@ -10,6 +10,10 @@ on:
       tag:
         description: Release tag to publish to (the app's URL names stem-model-v1)
         default: stem-model-v1
+      fp32:
+        description: Keep 32-bit precision (twice the size; to find out if 16-bit is what breaks the match)
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -40,7 +44,7 @@ jobs:
           printf 'import truststore\ntruststore.inject_into_ssl()\n' > "$RUNNER_TEMP/sitecustomize/sitecustomize.py"
           echo "PYTHONPATH=$RUNNER_TEMP/sitecustomize" >> "$GITHUB_ENV"
       - name: Convert the network
-        run: python scripts/export_htdemucs_coreml.py --out "$RUNNER_TEMP/model/htdemucs-core.mlpackage"
+        run: python scripts/export_htdemucs_coreml.py --out "$RUNNER_TEMP/model/htdemucs-core.mlpackage" ${{ inputs.fp32 && '--fp32' || '' }}
       - name: Zip it
         run: |
           cd "$RUNNER_TEMP/model"
