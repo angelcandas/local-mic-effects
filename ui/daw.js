@@ -1574,7 +1574,7 @@ class DawScreen {
     projectMenu.setAttribute("aria-haspopup", "menu");
     project.append(projectMenu,
       (this.saveButton = iconButton("tool", "save", "Save the project (Ctrl+S)", () => daw("save"))),
-      (this.exportButton = iconButton("tool is-accent", "export", "Export the mix or stems to WAV (Ctrl+Shift+R)", () => this.toggleExportPanel())),
+      (this.exportButton = iconButton("tool is-accent", "export", "Export the mix or stems as WAV, AIFF, FLAC or OGG (Ctrl+Shift+R)", () => this.toggleExportPanel())),
       html("span", "tb-sep"),
       (this.undoButton = iconButton("tool", "undo", "Undo (Ctrl+Z)", () => daw("undo"))),
       (this.redoButton = iconButton("tool", "redo", "Redo (Ctrl+Shift+Z)", () => daw("redo"))));
@@ -4339,15 +4339,53 @@ class DawScreen {
     };
 
     const panel = this.exportPanel;
-    panel.querySelector(".export-go").addEventListener("click", () => {
-      const value = (name) => panel.querySelector(`[name=${name}]`);
-      daw("export", {
+    const value = (name) => panel.querySelector(`[name=${name}]`);
+    // Bit depth for the lossless formats, quality for ogg; each format's own depths.
+    const DEPTHS = { wav: [16, 24, 32], aiff: [16, 24], flac: [16, 24], ogg: [] };
+    const syncFormat = () => {
+      const format = value("format").value;
+      const depths = DEPTHS[format] ?? DEPTHS.wav;
+      const depth = value("bitDepth");
+      for (const option of depth.options) option.hidden = option.disabled = !depths.includes(Number(option.value));
+      if (!depths.includes(Number(depth.value)) && depths.length) depth.value = String(depths.includes(24) ? 24 : depths[0]);
+      panel.querySelector(".export-depth").hidden = !depths.length;
+      panel.querySelector(".export-quality").hidden = format !== "ogg";
+      this.exportOverwrite = false;
+      panel.querySelector(".export-go").textContent = "Export";
+    };
+    value("format").addEventListener("change", syncFormat);
+    for (const name of ["kind", "bitDepth", "quality", "sampleRate", "name"])
+      value(name).addEventListener("input", () => { this.exportOverwrite = false; panel.querySelector(".export-go").textContent = "Export"; });
+    this.syncExportFormat = syncFormat;
+
+    panel.querySelector(".export-pick").addEventListener("click", async () => {
+      const picked = await daw("pickExportFolder", { folder: value("folder").value });
+      if (picked?.folder) {
+        value("folder").value = picked.folder;
+        this.exportOverwrite = false;
+        panel.querySelector(".export-go").textContent = "Export";
+      }
+    });
+    panel.querySelector(".export-go").addEventListener("click", async () => {
+      const result = await daw("export", {
         kind: value("kind").value,
+        format: value("format").value,
         bitDepth: Number(value("bitDepth").value),
+        quality: Number(value("quality").value),
+        sampleRate: Number(value("sampleRate").value),
+        name: value("name").value,
+        folder: value("folder").value,
+        overwrite: Boolean(this.exportOverwrite),
         normalise: value("normalise").checked,
         tail: Number(value("tail").value),
         loopOnly: value("loopOnly").checked,
       });
+      if (result?.exists) {
+        // Already there: the next click replaces it.
+        this.exportOverwrite = true;
+        panel.querySelector(".export-go").textContent = "Replace";
+        toast(`${result.error} Click Replace to overwrite it.`, "is-error");
+      }
     });
     panel.querySelector(".export-cancel").addEventListener("click", () => daw("cancelExport"));
     panel.querySelector(".export-close").addEventListener("click", () => this.toggleExportPanel(false));
@@ -4362,7 +4400,26 @@ class DawScreen {
     if (show) {
       this.exportPanel.querySelector("[name=loopOnly]").disabled = !this.session?.loop.on;
       this.exportPanel.querySelector(".export-result").replaceChildren();
+      this.loadExportSetup();
     }
+  }
+
+  // The last export choices (remembered between runs) and the default folder and name.
+  async loadExportSetup() {
+    const setup = await nativeDaw("exportSetup", {});
+    if (!setup?.options) return;
+    const panel = this.exportPanel;
+    const value = (name) => panel.querySelector(`[name=${name}]`);
+    const quality = value("quality");
+    if (!quality.options.length && setup.oggQualities?.length)
+      for (const [index, label] of setup.oggQualities.entries()) quality.append(new Option(label, String(index)));
+    const o = setup.options;
+    const set = (name, v) => { if (v !== undefined && v !== null && v !== "") value(name).value = String(v); };
+    for (const name of ["kind", "format", "bitDepth", "quality", "sampleRate", "name", "folder"]) set(name, o[name]);
+    set("tail", o.tail);
+    if (o.normalise !== undefined) value("normalise").checked = Boolean(o.normalise);
+    value("name").placeholder = setup.defaultName ?? "Mix";
+    this.syncExportFormat();
   }
 
   onExport(progress) {

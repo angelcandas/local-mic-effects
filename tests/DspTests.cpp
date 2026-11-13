@@ -4890,6 +4890,45 @@ namespace
             check (stem1.getNumSamples() == bareMix.getNumSamples() && sumError < 1.0e-5f, "the stems sum to the mix before the master bus");
         }
 
+        // Other formats: the same audio, read back through JUCE's readers.
+        {
+            settings.tail = 0.0;
+            settings.start = 0.0;
+            settings.end = 1.0;
+            const auto reference = readWav (mixFile, fileRate);
+            juce::AudioFormatManager formats;
+            formats.registerBasicFormats();
+
+            for (const juce::String format : { "aiff", "flac", "ogg" })
+            {
+                settings.format = format;
+                settings.bitDepth = 24;
+                const auto file = folder.getChildFile ("fmt/mix." + daw::Exporter::formatExtension (format));
+                const auto result = daw::Exporter (edit, settings).exportMix (file);
+                std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+                const auto ok = result.error.isEmpty() && reader != nullptr && reader->numChannels == 2
+                                && reader->lengthInSamples == (juce::int64) sampleRate && juce::exactlyEqual (reader->sampleRate, sampleRate);
+                check (ok, "exports " + format.toUpperCase() + " (" + (result.error.isEmpty() ? "ok" : result.error) + ")");
+
+                if (ok && format != "ogg")
+                {
+                    juce::AudioBuffer<float> back (2, (int) sampleRate);
+                    reader->read (&back, 0, (int) sampleRate, 0, true, true);
+                    check (maxDifference (back.getReadPointer (0), reference.getReadPointer (0), (int) sampleRate) < 1.0e-4f,
+                           format.toUpperCase() + " holds the same audio as the WAV");
+                }
+            }
+
+            check (daw::Exporter::formatExtension ("mp3") == "wav" && daw::Exporter::oggQualityNames().size() > 4,
+                   "unknown formats fall back to WAV; ogg offers quality steps");
+
+            auto stemSettings = settings;
+            stemSettings.format = "flac";
+            const auto flacStems = daw::Exporter (edit, stemSettings).exportStems (folder.getChildFile ("FlacStems"));
+            check (flacStems.files.size() == 2 && flacStems.files[0].getFileName() == "01 Lead.flac", "stems use the chosen format");
+            settings.format = "wav";
+        }
+
         // A range, and cancelling.
         settings.start = 1.0;
         settings.end = 1.5;
