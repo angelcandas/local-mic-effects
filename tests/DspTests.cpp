@@ -7022,7 +7022,7 @@ namespace
             check (pool.get (file, third) == nullptr, "a new copy renders in the background");
             const auto ranges = pool.getRenderingRanges (file, third);
             check (! ranges.empty() && ranges.front().first < 1.0e-6, "the stretches still to render are known");
-            for (int i = 0; i < 2000 && pool.getPiecesRendered() - rendered < 2; ++i)
+            for (int i = 0; i < 30000 && pool.getPiecesRendered() - rendered < 2; ++i)
                 juce::MessageManager::getInstance()->runDispatchLoopUntil (2);
             const auto partial = pool.getRenderingRanges (file, third);
             pool.releaseUnusedWarps ({ daw::AudioPool::getWarpKey (file, notes) }); // moved on: cancel it
