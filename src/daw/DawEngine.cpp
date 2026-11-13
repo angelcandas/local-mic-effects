@@ -971,10 +971,12 @@ juce::String DawEngine::startRecording (const juce::File& folder)
     if (! armedAudio && ! armedMidi)
         return "Arm a track to record on first.";
 
-    if (patternMode >= 0)
-        return "Switch to Song mode to record.";
+    // Pattern mode records MIDI into the pattern only: armed audio tracks sit it out.
+    const auto inPattern = patternMode >= 0;
+    if (inPattern && ! armedMidi)
+        return "Arm a MIDI track to record into the pattern (audio records in Song mode).";
 
-    if (armedAudio)
+    if (armedAudio && ! inPattern)
     {
         // One take per input the armed tracks use: tracks on the same input share it.
         std::vector<Edit::Input> inputs;
@@ -1017,6 +1019,22 @@ juce::String DawEngine::startRecording (const juce::File& folder)
 
     drainRecordedMidi();
     recordedMidi.clear();
+
+    if (inPattern)
+    {
+        patternTracks.clear();
+        for (const auto& track : tracks)
+            if ((bool) track[ids::arm] && Edit::isMidiTrack (track))
+                patternTracks.add ((int) track[ids::id]);
+
+        for (auto& held : patternHeld)
+            held = { -1.0, 0 };
+        patternSustained.reset();
+        patternPedal = false;
+        patternRecorded.clear();
+        patternRecording = true;
+    }
+
     recordingMidi = armedMidi;
 
     const auto start = position.load();
@@ -1045,8 +1063,171 @@ void DawEngine::drainRecordedMidi()
     scope.forEach ([this] (int index) { recordedMidi.push_back (midiFifoData[(size_t) index]); });
 }
 
+void DawEngine::addPatternNote (int pitch, double onBeat, double offBeat, int velocity)
+{
+    const auto pattern = edit.getPattern (patternMode);
+    if (! pattern.isValid())
+        return;
+
+    const auto length = Edit::getPatternLength (pattern);
+    const auto step = Edit::getPatternStep (pattern);
+    auto duration = offBeat - onBeat;
+    if (duration <= 0.0)
+        duration += length; // held across the loop's end
+
+    auto time = onBeat;
+    if (patternSnap)
+    {
+        time = std::round (onBeat / step) * step;
+        duration = juce::jmax (step, std::round (duration / step) * step);
+    }
+    if (time >= length - 1.0e-9)
+        time -= length;
+    time = juce::jlimit (0.0, length, time);
+
+    const Edit::NotUndoable notUndoable (edit);
+    const auto patternId = (int) pattern[ids::id];
+
+    for (auto trackId : patternTracks)
+    {
+        auto part = edit.ensurePart (patternId, trackId);
+        if (! part.isValid())
+            continue;
+
+        const auto drum = (bool) part.getProperty (ids::drum, false);
+        const auto tolerance = patternSnap ? step * 0.5 : 1.0 / 64.0;
+        const auto taken = std::any_of (part.begin(), part.end(), [&] (const juce::ValueTree& note)
+        {
+            return note.hasType (ids::NOTE) && (int) note[ids::pitch] == pitch && std::abs ((double) note[ids::time] - time) < tolerance;
+        });
+
+        if (! taken)
+            patternRecorded.push_back ((int) edit.addPatternNote (patternId, trackId, pitch, time, drum ? step : juce::jmax (0.01, duration), velocity)[ids::id]);
+    }
+}
+
+void DawEngine::collectPatternNotes()
+{
+    if (! patternRecording.load())
+        return;
+
+    drainRecordedMidi();
+    const auto pattern = edit.getPattern (patternMode);
+    if (! pattern.isValid() || recordedMidi.empty())
+    {
+        recordedMidi.clear();
+        return;
+    }
+
+    // Timeline times are inside the loop (0..its length): moved earlier by the output
+    // latency (keys are played to what's heard) and wrapped back into it.
+    const auto tempo = edit.getTempoMap();
+    const auto loop = juce::jmax ((juce::int64) 1, patternLoopEnd.load());
+    const auto toBeat = [&] (juce::int64 time)
+    {
+        auto t = (time - midiRecordingLatency.load()) % loop;
+        if (t < 0)
+            t += loop;
+        return tempo.toBeats ((double) t / sampleRate);
+    };
+
+    const auto end = [&] (int pitch, double beat)
+    {
+        auto& held = patternHeld[(size_t) pitch];
+        if (held.first >= 0.0)
+            addPatternNote (pitch, held.first, beat, held.second);
+        held = { -1.0, 0 };
+        patternSustained.reset ((size_t) pitch);
+    };
+
+    for (const auto& event : recordedMidi)
+    {
+        const auto type = event.status & 0xf0;
+        const auto beat = toBeat (event.time);
+
+        if (type == 0x90 && event.data2 > 0)
+        {
+            end (event.data1, beat);
+            patternHeld[event.data1] = { beat, event.data2 };
+        }
+        else if (type == 0x80 || type == 0x90)
+        {
+            if (patternPedal)
+                patternSustained.set (event.data1, patternHeld[event.data1].first >= 0.0);
+            else
+                end (event.data1, beat);
+        }
+        else if (type == 0xb0 && event.data1 == 64)
+        {
+            patternPedal = event.data2 >= 64;
+            if (! patternPedal)
+                for (int p = 0; p < 128; ++p)
+                    if (patternSustained[(size_t) p])
+                        end (p, beat);
+        }
+    }
+
+    recordedMidi.clear();
+}
+
+int DawEngine::finishPatternRecording()
+{
+    if (! patternRecording.load())
+        return 0;
+
+    collectPatternNotes();
+    recordingMidi = false;
+    patternRecording = false;
+    countingIn = false;
+
+    // Notes still held end here.
+    const auto tempo = edit.getTempoMap();
+    const auto loop = juce::jmax ((juce::int64) 1, patternLoopEnd.load());
+    const auto now = tempo.toBeats ((double) (juce::jmax ((juce::int64) 0, position.load()) % loop) / sampleRate);
+    for (int p = 0; p < 128; ++p)
+        if (patternHeld[(size_t) p].first >= 0.0)
+            addPatternNote (p, patternHeld[(size_t) p].first, now, patternHeld[(size_t) p].second);
+
+    // Everything recorded becomes one undo step: taken out (unrecorded) and put back.
+    struct Recorded { int pattern, track, pitch, velocity; double time, length; };
+    std::vector<Recorded> notes;
+    {
+        const Edit::NotUndoable notUndoable (edit);
+        for (auto noteId : patternRecorded)
+        {
+            const auto note = edit.getNote (noteId);
+            const auto part = note.getParent();
+            if (! note.isValid() || ! part.hasType (ids::PART))
+                continue;
+
+            notes.push_back ({ (int) part.getParent()[ids::id], (int) part[ids::track], (int) note[ids::pitch], (int) note[ids::velocity],
+                               (double) note[ids::time], (double) note[ids::length] });
+            edit.removeNote (noteId);
+        }
+    }
+    patternRecorded.clear();
+
+    if (! notes.empty())
+    {
+        edit.getUndoManager().beginNewTransaction ("Record pattern");
+        for (const auto& n : notes)
+            edit.addPatternNote (n.pattern, n.track, n.pitch, n.time, n.length, n.velocity);
+        edit.getUndoManager().beginNewTransaction();
+    }
+
+    return (int) notes.size();
+}
+
 Recorder::Take DawEngine::stopRecording()
 {
+    if (patternRecording.load())
+    {
+        playing = false;
+        countingIn = false;
+        finishPatternRecording();
+        return {};
+    }
+
     playing = false;
     countingIn = false;
     const auto stopAt = position.load();
@@ -1330,7 +1511,9 @@ void DawEngine::recordMidi (const juce::MidiBuffer& midi, int midiOffset, int nu
         const auto time = blockStart + (metadata.samplePosition - midiOffset);
         const auto message = metadata.getMessage();
 
-        if (time < start || ! (message.isNoteOnOrOff() || message.isSustainPedalOn() || message.isSustainPedalOff()))
+        // Pattern recording: from anywhere in the loop (after the count-in).
+        const auto early = patternRecording.load (std::memory_order_relaxed) ? countingIn.load() : time < start;
+        if (early || ! (message.isNoteOnOrOff() || message.isSustainPedalOn() || message.isSustainPedalOff()))
             continue;
 
         const auto* data = message.getRawData();
@@ -1358,11 +1541,22 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce
 
     if (strip.sounding.any() && (fresh || ! isPlaying || jumped))
     {
+        // A new graph while playing on (an edit, a note added by pattern recording): the
+        // notes it still has sounding at the playhead carry on; the rest stop.
+        std::bitset<128> keep;
+        if (fresh && isPlaying && ! jumped)
+            for (const auto& e : track.midiEvents)
+            {
+                if (e.time >= windowStart)
+                    break;
+                keep.set ((size_t) e.note, e.velocity > 0);
+            }
+
         for (int note = 0; note < 128; ++note)
-            if (strip.sounding[(size_t) note])
+            if (strip.sounding[(size_t) note] && ! keep[(size_t) note])
                 midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
 
-        strip.sounding.reset();
+        strip.sounding &= keep;
     }
 
     if (isPlaying)
