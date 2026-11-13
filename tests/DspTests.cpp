@@ -45,6 +45,7 @@
 #include "instruments/Kit.h"
 #include "daw/Quantize.h"
 #include "daw/Patterns.h"
+#include "daw/Loops.h"
 #include "analysis/Beats.h"
 #include "analysis/ToMidi.h"
 #include "analysis/Structure.h"
@@ -12598,6 +12599,97 @@ namespace
 }
 
 //==============================================================================
+// Audio loops in tempo: tempo from the file name, the acid chunk or the audio; a dropped
+// loop plays at the project's tempo from the bar.
+static void testLoops()
+{
+    std::cout << "\nLoops in tempo\n";
+    const auto near = [] (double a, double b, double tolerance) { return std::abs (a - b) < tolerance; };
+
+    check (near (daw::loops::tempoFromName ("Drums 120bpm"), 120.0, 1e-9) && near (daw::loops::tempoFromName ("loop_98_Am"), 98.0, 1e-9)
+               && near (daw::loops::tempoFromName ("Beat - 85 BPM"), 85.0, 1e-9) && near (daw::loops::tempoFromName ("Funk 2 bars 128 bpm"), 128.0, 1e-9)
+               && daw::loops::tempoFromName ("Take 3") == 0.0 && daw::loops::tempoFromName ("Vocal 2024") == 0.0
+               && daw::loops::tempoFromName ("kick 01") == 0.0,
+           "a tempo in the file name ('120bpm', '_98_', '85 BPM'); take numbers and years aren't one");
+    check (daw::loops::wholeBars (4.0, 120.0, 4) == 2 && daw::loops::wholeBars (4.08, 120.0, 4) == 2 && daw::loops::wholeBars (4.5, 120.0, 4) == 0
+               && daw::loops::wholeBars (0.5, 120.0, 4) == 0 && daw::loops::wholeBars (80.0, 120.0, 4) == 0,
+           "a loop is a whole number of bars, 1 to 32, within 3 %");
+
+    juce::StringPairArray acid;
+    acid.set (juce::WavAudioFormat::acidTempo, "90");
+    acid.set (juce::WavAudioFormat::acidizerFlag, "1");
+    auto loop = daw::loops::findLoop ("untitled", acid, 4 * 4 * 60.0 / 90.0, nullptr, 44100.0, 4);
+    check (loop && loop->bars == 4 && near (loop->bpm, 90.0, 1e-6) && loop->from == "acid", "the acid chunk's tempo");
+    acid.set (juce::WavAudioFormat::acidOneShot, "1");
+    check (! daw::loops::findLoop ("untitled", acid, 4 * 4 * 60.0 / 90.0, nullptr, 44100.0, 4), "an acid one-shot isn't a loop");
+    loop = daw::loops::findLoop ("Groove 100bpm", {}, 4.9, nullptr, 44100.0, 4);
+    check (loop && loop->bars == 2 && near (loop->bpm, 2 * 4 * 60.0 / 4.9, 1e-6) && near (loop->nominalBpm, 100.0, 1e-9),
+           "the exact tempo fits the bars to the file (98 BPM for a slightly long 100 BPM loop)");
+
+    // A detected loop: two bars of hits at 100 BPM, no tempo in the name.
+    std::vector<double> hits;
+    for (int i = 0; i < 16; ++i)
+        hits.push_back (i * 0.3);
+    const auto beat = makeHits (hits, 4.8, 4);
+    loop = daw::loops::findLoop ("mystery", {}, 4.8, &beat, sampleRate, 4);
+    check (loop && loop->bars == 2 && near (loop->bpm, 100.0, 0.01) && loop->from == "audio",
+           "the tempo found in the audio" + (loop ? juce::String (" (") + juce::String (loop->bpm, 2) + " BPM)" : juce::String()));
+
+    // Dropped through the page: on the bar, musical at the loop's tempo, two bars at 120.
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-loops", {});
+    folder.createDirectory();
+    const auto file = folder.getChildFile ("Drums 100bpm.wav");
+    writeWav (file, beat, sampleRate);
+    const auto oneShot = folder.getChildFile ("Clap.wav");
+    writeWav (oneShot, makeHits ({ 0.0 }, 0.4), sampleRate);
+    {
+        juce::PropertiesFile::Options options;
+        options.applicationName = "MicFXTests";
+        options.filenameSuffix = ".settings";
+        juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        const auto run = [&] (const juce::String& command, juce::var args)
+        {
+            juce::var result;
+            bridge.handle (command, args, [&] (juce::var r) { result = r; });
+            return result;
+        };
+        const auto args = [] (std::initializer_list<std::pair<const char*, juce::var>> properties)
+        {
+            auto* object = new juce::DynamicObject();
+            for (const auto& [name, value] : properties)
+                object->setProperty (name, value);
+            return juce::var (object);
+        };
+        run ("mode", args ({ { "daw", true } }));
+
+        auto result = run ("importFile", args ({ { "file", file.getFullPathName() }, { "track", -1 }, { "start", 2.3 } }));
+        const auto clip = edit.getClip ((int) result["clip"]);
+        check ((bool) result["ok"] && result["loop"].isObject() && (int) result["loop"]["bars"] == 2 && near ((double) result["loop"]["to"], 120.0, 0.01),
+               "a dropped loop is matched to the project tempo");
+        check (near ((double) clip[daw::ids::start], 2.0, 1e-9), "and starts on the nearest bar (" + clip[daw::ids::start].toString() + " s)");
+        check (daw::Edit::isMusical (clip) && near (daw::Edit::getClipTempo (clip), 100.0, 0.01) && near ((double) clip[daw::ids::length], 4.0, 0.01),
+               "a 100 BPM two-bar loop is two bars long at 120 (" + clip[daw::ids::length].toString() + " s)");
+        run ("undo", args ({}));
+        check (! edit.getClip ((int) result["clip"]).isValid(), "one undo step takes it away");
+
+        result = run ("importFile", args ({ { "file", oneShot.getFullPathName() }, { "track", -1 }, { "start", 2.3 } }));
+        check ((bool) result["ok"] && ! result["loop"].isObject() && ! daw::Edit::isMusical (edit.getClip ((int) result["clip"]))
+                   && near ((double) result["start"], 2.3, 1e-9),
+               "a one-shot is placed as it is");
+
+        check ((bool) run ("matchLoops", args ({ { "on", false } }))["ok"] && ! settings.getBoolValue ("dawMatchLoops", true), "the switch is kept in the settings");
+        result = run ("importFile", args ({ { "file", file.getFullPathName() }, { "track", -1 }, { "start", 2.3 } }));
+        check (! result["loop"].isObject() && ! daw::Edit::isMusical (edit.getClip ((int) result["clip"])), "and off, loops are placed as they are");
+        run ("matchLoops", args ({ { "on", true } }));
+    }
+    folder.deleteRecursively();
+}
+
 // The step sequencer: patterns, parts, steps, pattern blocks and pattern mode.
 static void testPatterns()
 {
@@ -13996,6 +14088,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=loops: just loops in tempo.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "loops")
+    {
+        testLoops();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=patterns: just the step sequencer.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "patterns")
     {
@@ -14105,6 +14205,7 @@ int main()
     testTrackTools();
     testDawBridge();
     testPatterns();
+    testLoops();
     testLiveControls();
     testAnalysis();
     testMixAssistant();
