@@ -252,6 +252,11 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
 
                            complete (describeWindow());
                        })
+                       .withNativeFunction ("help", [] (const auto& args, auto complete)
+                       {
+                           openHelp (args.size() > 0 ? args[0].toString() : juce::String ("manual"));
+                           complete (true);
+                       })
                        .withNativeFunction ("getPresets", [] (const auto&, auto complete)
                        {
                            juce::Array<juce::var> list;
@@ -795,6 +800,24 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
 void PluginEditor::resized()
 {
     webView->setBounds (getLocalBounds());
+}
+
+void PluginEditor::openHelp (const juce::String& what)
+{
+    static constexpr const char* repo = "https://github.com/angelcandas/local-mic-effects";
+
+    if (what == "whatsNew")
+    {
+        juce::URL (juce::String (repo) + "/commits/main").launchInDefaultBrowser();
+        return;
+    }
+
+   #ifdef MICFX_SOURCE_DIR
+    const auto pdf = juce::File (MICFX_SOURCE_DIR).getChildFile ("docs/manual/user-manual.pdf");
+    if (pdf.existsAsFile() && pdf.startAsProcess())
+        return;
+   #endif
+    juce::URL (juce::String (repo) + "/blob/main/docs/manual/user-manual.md").launchInDefaultBrowser();
 }
 
 void PluginEditor::sendMenuCommand (const juce::String& action)

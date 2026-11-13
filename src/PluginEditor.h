@@ -38,6 +38,9 @@ public:
     // For the standalone app's menu bar: hands a menu item to the page, which runs it like
     // the matching button or shortcut.
     void sendMenuCommand (const juce::String& action);
+    // Help: "manual" opens the user manual (the PDF in the source checkout, else the copy on
+    // GitHub), "whatsNew" the latest changes. Used by the Help menu and the page (F1).
+    static void openHelp (const juce::String& what);
     bool isDawMode() const noexcept { return processorRef.isDawMode(); }
     // What Undo / Redo would do in the DAW ("Move clip"), or empty.
     juce::String getUndoName() const { return daw != nullptr ? daw->getUndoName() : juce::String(); }
