@@ -130,6 +130,8 @@ set(MICFX_DSP_SOURCES
     src/Looper.h
     src/MidiMap.cpp
     src/MidiMap.h
+    src/LiveHistory.cpp
+    src/LiveHistory.h
     src/Scenes.cpp
     src/Scenes.h
     src/Setlist.cpp

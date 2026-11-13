@@ -13832,6 +13832,55 @@ static float soundCheckValue (const SoundCheck::Plan& plan, const juce::String& 
     return fallback;
 }
 
+static void testLiveHistory()
+{
+    std::cout << "\nLive mode undo\n";
+
+    PluginProcessor processor;
+    auto& history = processor.getLiveHistory();
+    auto* mix = processor.getState().getParameter ("reverbMix");
+    auto* hpf = processor.getState().getParameter ("hpfOn");
+    check (mix != nullptr && hpf != nullptr, "the test parameters exist");
+    if (mix == nullptr || hpf == nullptr)
+        return;
+
+    check (history.getUndoName().isEmpty(), "a new processor has nothing to undo");
+    const auto mixBefore = mix->getValue();
+    mix->setValueNotifyingHost (mixBefore > 0.5f ? 0.1f : 0.9f);
+    const auto mixAfter = mix->getValue();
+    history.flush();
+    check (history.getUndoName() == mix->getName (64), "a knob change is one step named after the knob (" + history.getUndoName() + ")");
+    check (history.undo() && juce::approximatelyEqual (mix->getValue(), mixBefore), "undo puts the knob back");
+    check (history.getRedoName() == mix->getName (64) && history.getUndoName().isEmpty(), "and offers redo");
+    check (history.redo() && juce::approximatelyEqual (mix->getValue(), mixAfter), "redo sets it again");
+
+    // A preset: one step, named, and undo brings back the old preset's number too.
+    processor.setCurrentProgram (0);
+    history.flush();
+    processor.setCurrentProgram (3);
+    history.flush();
+    check (history.getUndoName() == "Load preset " + processor.getProgramName (3), "loading a preset is one named step (" + history.getUndoName() + ")");
+    history.undo();
+    check (processor.getCurrentProgram() == 0, "undo returns to the preset before");
+
+    // Held (Sound check): every change in between is one step.
+    history.hold ("Sound check");
+    hpf->setValueNotifyingHost (hpf->getValue() > 0.5f ? 0.0f : 1.0f);
+    history.flush();
+    mix->setValueNotifyingHost (0.33f);
+    history.release();
+    check (history.getUndoName() == "Sound check", "a held run of changes is one step (" + history.getUndoName() + ")");
+    history.hold ("Sound check");
+    history.release();
+    check (history.getUndoName() == "Sound check" && history.getRedoName().isEmpty(), "a hold that changes nothing adds no step");
+
+    // Loading a saved state starts a fresh history.
+    juce::MemoryBlock saved;
+    processor.getStateInformation (saved);
+    processor.setStateInformation (saved.getData(), (int) saved.getSize());
+    check (history.getUndoName().isEmpty() && history.getRedoName().isEmpty(), "loading a state clears the history");
+}
+
 static void testSoundCheck()
 {
     std::cout << "\nSound check\n";
@@ -14613,6 +14662,7 @@ int main()
     {
         testSoundCheck();
         testAutoLevel();
+        testLiveHistory();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -14734,6 +14784,7 @@ int main()
     testScenes();
     testSoundCheck();
     testAutoLevel();
+    testLiveHistory();
     testSetlist();
     testDawEngine();
     testDeviceEdits();

@@ -61,6 +61,7 @@ private:
     juce::File getRecordingFolder();
     juce::var describeCapture();
     juce::var describeRecorderSettings();
+    juce::var describeLiveHistory();
     juce::var describeTracks();
     juce::var describeLooper (bool withOverview);
     juce::var describeMidi();

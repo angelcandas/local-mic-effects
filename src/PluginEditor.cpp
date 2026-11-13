@@ -118,6 +118,9 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     processorRef.getSoundCheck().onChange = [this] (const juce::var& status)
     { webView->emitEventIfBrowserIsVisible ("soundCheck", status); };
 
+    processorRef.getLiveHistory().onChange = [this]
+    { webView->emitEventIfBrowserIsVisible ("liveHistory", describeLiveHistory()); };
+
     // MIDI learn tells the page what it learned, and passes on the actions only the page
     // can do (record, scenes).
     {
@@ -160,6 +163,7 @@ PluginEditor::~PluginEditor()
     daw.reset();
 
     processorRef.getSoundCheck().onChange = nullptr;
+    processorRef.getLiveHistory().onChange = nullptr;
 
     auto& map = processorRef.getMidiMap();
     map.onLearned = nullptr;
@@ -345,6 +349,21 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                            else
                                                                complete (describe (processorRef.setModuleFile (*type, file), false));
                                                        });
+                       })
+
+                       // (action, name?) -> { undo, redo, preset }: undo for Live mode (LiveHistory).
+                       // "undo", "redo", "label" (names the next step), "hold" / "release" (join every change
+                       // in between into one named step), "state".
+                       .withNativeFunction ("liveHistory", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           auto& history = processorRef.getLiveHistory();
+                           if (action == "undo")  history.undo();
+                           if (action == "redo")  history.redo();
+                           if (action == "label") history.label (args.size() > 1 ? args[1].toString() : juce::String());
+                           if (action == "hold")  history.hold (args.size() > 1 ? args[1].toString() : juce::String());
+                           if (action == "release") history.release();
+                           complete (describeLiveHistory());
                        })
 
                        // (action, on) -> { muted, dry }. "mute": the panic button; "dry": hear the mic without effects.
@@ -800,6 +819,16 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
 void PluginEditor::resized()
 {
     webView->setBounds (getLocalBounds());
+}
+
+juce::var PluginEditor::describeLiveHistory()
+{
+    auto& history = processorRef.getLiveHistory();
+    auto* state = new juce::DynamicObject();
+    state->setProperty ("undo", history.getUndoName());
+    state->setProperty ("redo", history.getRedoName());
+    state->setProperty ("preset", processorRef.getCurrentProgram());
+    return juce::var (state);
 }
 
 void PluginEditor::openHelp (const juce::String& what)

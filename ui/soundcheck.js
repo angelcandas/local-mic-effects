@@ -9,6 +9,7 @@ import * as Juce from "./juce/index.js";
 import { html } from "./widgets.js";
 
 const soundCheck = Juce.getNativeFunction("soundCheck");
+const liveHistory = Juce.getNativeFunction("liveHistory");
 const LENGTHS = [[10, "10 s"], [15, "15 s"], [20, "20 s"]];
 
 const row = (className, ...children) => { const element = html("div", className); element.append(...children); return element; };
@@ -50,15 +51,17 @@ export class SoundCheckPanel {
   }
 
   open() {
+    liveHistory("hold", "Sound check"); // every try, compare and revert in here is one undo step
     this.element.hidden = false;
     this.render();
   }
 
   // Closing while listening cancels; closing with a result keeps it.
   close() {
-    if (this.state.phase === "listening") this.send("cancel");
-    else if (this.state.phase === "done") this.send("keep");
+    const done = this.state.phase === "listening" ? this.send("cancel")
+               : this.state.phase === "done" ? this.send("keep") : Promise.resolve();
     this.element.hidden = true;
+    done.then(() => liveHistory("release"));
   }
 
   update(state) {
@@ -202,7 +205,7 @@ export class SoundCheckPanel {
     scene.addEventListener("click", () => this.send("saveScene", { name: "Sound check" }));
     const keep = html("button", "tool is-accent", "Keep");
     keep.type = "button";
-    keep.addEventListener("click", () => this.send("keep").then(() => { this.element.hidden = true; }));
+    keep.addEventListener("click", () => this.send("keep").then(() => { this.element.hidden = true; liveHistory("release"); }));
     this.body.append(row("soundcheck-actions", compare, html("span", "soundcheck-spacer"), revert, scene, keep));
   }
 }

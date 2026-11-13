@@ -8,6 +8,7 @@
 #include "Looper.h"
 #include "MidiMap.h"
 #include "PitchTap.h"
+#include "LiveHistory.h"
 #include "Scenes.h"
 #include "Setlist.h"
 #include "SoundCheck.h"
@@ -100,6 +101,9 @@ public:
     // Scenes: snapshots of the Live sound, recalled with a glide. Message thread.
     Scenes& getScenes() noexcept                            { return scenes; }
 
+    // Undo for Live mode: every change to the Live sound, one named step each. Message thread.
+    LiveHistory& getLiveHistory() noexcept                  { return liveHistory; }
+
     // The setlist (standalone app): songs with their sound, scenes, tempo, key, backing
     // track and lyrics. Message thread.
     Setlist& getSetlist() noexcept                          { return setlist; }
@@ -172,6 +176,7 @@ private:
     Looper looper;
     PitchTap pitchTap;
     Scenes scenes { *this, state };
+    LiveHistory liveHistory { state };
     SoundCheck soundCheck { state, chain, scenes };
     Setlist setlist { *this, scenes, looper, multitrack };
     MidiMap midiMap { state, looper, juce::JUCEApplicationBase::isStandaloneApp() || wrapperType != wrapperType_Undefined

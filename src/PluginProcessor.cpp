@@ -51,6 +51,9 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
         }
     }
 
+    liveHistory.getPreset = [this] { return currentPreset.load(); };
+    liveHistory.setPreset = [this] (int index) { currentPreset = index; };
+
     // MIDI learn's own actions: step through the factory presets, the panic mute.
     midiMap.onPresetStep = [this] (int delta)
     {
@@ -403,6 +406,8 @@ void PluginProcessor::setCurrentProgram (int index)
     if (! juce::isPositiveAndBelow (index, (int) presets.size()))
         return;
 
+    if (juce::MessageManager::existsAndIsCurrentThread())
+        liveHistory.label (juce::String ("Load preset ") + presets[(size_t) index].name);
     currentPreset = index;
     applyPreset (*this, presets[(size_t) index]);
 }
@@ -490,6 +495,7 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                 }
 
             state.replaceState (tree);
+            liveHistory.clear(); // the loaded sound is where undo starts
         }
     }
 }
