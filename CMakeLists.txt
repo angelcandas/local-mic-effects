@@ -102,6 +102,8 @@ set(MICFX_DSP_SOURCES
     src/daw/AudioPool.cpp
     src/daw/DawEngine.cpp
     src/daw/Edit.cpp
+    src/daw/Patterns.cpp
+    src/daw/Patterns.h
     src/daw/Exporter.cpp
     src/daw/Instruments.cpp
     src/daw/PluginHost.cpp

@@ -126,6 +126,19 @@ public:
     void captureInstrumentStates();
     // Live MIDI from code (the on-screen keyboard), as if from the MIDI input. Any thread.
     void addLiveMidi (const juce::MidiMessage&) noexcept;
+    // Live MIDI for one track's instrument only, armed or not (auditioning a pattern row).
+    void addLiveMidi (const juce::MidiMessage&, int trackId) noexcept;
+
+    //==============================================================================
+    // Pattern mode (the step sequencer's "Pattern" switch). Message thread.
+    //
+    // With a pattern id, every track plays just that pattern, as a loop from 0 one pass
+    // long (no clips or pattern blocks), and the playhead moves to its start; the song
+    // position comes back when it goes back to Song mode (-1). Offline engines (exports,
+    // Auto Mix, stems) never set it, so they always play the song. Mute, solo, inserts,
+    // sends and the click work as usual. Removing the pattern goes back to Song mode.
+    void setPatternMode (int patternIdOrNone);
+    int getPatternMode() const noexcept { return patternMode; }
     // Note numbers being played on the MIDI input right now (for the piano roll's keys).
     std::bitset<128> getHeldNotes() const noexcept;
 
@@ -206,6 +219,7 @@ private:
         juce::AudioBuffer<float> buffer;
         juce::AudioBuffer<float> instrumentBuffer;
         juce::MidiBuffer midi;
+        juce::MidiBuffer audition;          // addLiveMidi for this track, played next block
         std::bitset<128> sounding;          // notes the timeline has started and not ended
         juce::int64 nextBlock = -1;         // where playback would carry on; else it jumped
     };
@@ -343,7 +357,10 @@ private:
                            const juce::MidiBuffer* midi, int midiOffset) noexcept;
     void recordMidi (const juce::MidiBuffer&, int midiOffset, int numSamples, juce::int64 blockStart) noexcept;
     void drainRecordedMidi();
-    static void buildMidiEvents (Track&, const juce::ValueTree& trackTree, double sampleRate, juce::int64& end);
+    // A MIDI track's notes: its clips and the pattern blocks, or with `loopPattern` just
+    // that pattern as a loop (pattern mode).
+    static void buildMidiEvents (Track&, const juce::ValueTree& trackTree, double sampleRate, juce::int64& end,
+                                 const TempoMap&, const juce::ValueTree& loopPattern);
     void renderClick (const TempoMap&, juce::AudioBuffer<float>&, int offset, int numChannels, int numSamples, juce::int64 blockStart) noexcept;
     void updateTempo();
     void updateLoop();
@@ -418,6 +435,17 @@ private:
     std::array<juce::uint32, liveFifoCapacity> liveFifoData {};
     juce::MidiBuffer liveMidi; // audio thread
     std::array<std::atomic<juce::uint32>, 4> heldNotes {}; // 128 bits, set by the audio thread
+
+    // addLiveMidi for one track: (track id, packed message), handed to its strip.
+    static constexpr int auditionFifoCapacity = 256;
+    juce::AbstractFifo auditionFifo { auditionFifoCapacity };
+    std::array<std::pair<int, juce::uint32>, auditionFifoCapacity> auditionFifoData {};
+
+    // Pattern mode: the pattern (message thread), the song position to go back to, and the
+    // loop's length in samples (0 when off) for the audio thread.
+    int patternMode = -1;
+    juce::int64 songPosition = 0;
+    std::atomic<juce::int64> patternLoopEnd { 0 };
 
     std::atomic<bool> loopOn { false };
     std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 };
