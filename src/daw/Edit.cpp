@@ -150,8 +150,16 @@ juce::ValueTree Edit::addTrack (const juce::String& name, int index)
 
 void Edit::removeTrack (int trackId)
 {
-    if (auto track = getTrack (trackId); track.isValid())
-        state.removeChild (track, undoTarget);
+    auto track = getTrack (trackId);
+    if (! track.isValid())
+        return;
+
+    // Its parts in the patterns go with it (same undo step).
+    for (auto pattern : getPatterns())
+        if (auto part = getPart ((int) pattern[ids::id], trackId); part.isValid())
+            pattern.removeChild (part, undoTarget);
+
+    state.removeChild (track, undoTarget);
 }
 
 void Edit::moveTrack (int trackId, int newIndex)

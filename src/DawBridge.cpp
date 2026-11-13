@@ -4,6 +4,8 @@
 
 #include "daw/Quantize.h"
 #include "daw/ClipTools.h"
+#include "daw/Patterns.h"
+#include "instruments/InstrumentProcessor.h"
 
 #include "Presets.h"
 #include "dsp/FxModules.h"
@@ -249,6 +251,11 @@ namespace
             { "quantize", "Quantize" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
             { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" },
+            { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
+            { "setPart", "Pattern row" }, { "editPattern", "Edit pattern" }, { "setSteps", "Steps" },
+            { "addPatternClip", "Place pattern" }, { "setPatternClip", "Pattern block change" },
+            { "removePatternClip", "Delete pattern block" }, { "makePatternUnique", "Make pattern unique" },
+            { "patternToClips", "Turn into MIDI clips" }, { "clipToPattern", "Make a pattern" },
         };
         if (const auto it = names.find (command); it != names.end())
             return it->second;
@@ -529,7 +536,8 @@ juce::var DawBridge::describeSession()
                                 }() },
                               { "takesShown", (bool) track.getProperty (ids::takesShown, false) },
                               { "listenTake", daw::Edit::getListenTake (track) },
-                              { "instrument", describeInstrument (track) } }));
+                              { "instrument", describeInstrument (track) },
+                              { "keyNames", describeKeyNames ((int) track[ids::id]) } }));
     }
 
     const auto master = edit.getMaster();
@@ -587,7 +595,68 @@ juce::var DawBridge::describeSession()
         { "master", object ({ { "volume", number (master, ids::volume) }, { "pan", number (master, ids::pan) }, { "inGain", number (master, ids::inGain) },
                               { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) } }) },
         { "tracks", tracks },
+        { "patterns", describePatterns() },
+        { "patternClips", describePatternClips() },
+        { "patternMode", engine.getPatternMode() },
+        { "patternRecording", false },
     });
+}
+
+juce::var DawBridge::describeKeyNames (int trackId) const
+{
+    // The names on an instrument's keys (a drum kit's sounds), from the running instrument
+    // itself (so a kit with its own samples can name them). Empty for plugins and synths.
+    auto* names = new juce::DynamicObject();
+    if (auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (trackId).get()))
+        if (const auto& keyName = instrument->getSpec().keyName)
+            for (int note = 0; note < 128; ++note)
+                if (const auto name = keyName (note); name.isNotEmpty())
+                    names->setProperty (juce::String (note), name);
+    return juce::var (names);
+}
+
+juce::var DawBridge::describePatterns() const
+{
+    // Typed explicitly, as the rest of the session (a loaded project's values are text).
+    juce::Array<juce::var> patterns;
+    for (const auto& pattern : edit.getPatterns())
+    {
+        juce::Array<juce::var> parts;
+        for (const auto& part : pattern)
+        {
+            if (! part.hasType (ids::PART))
+                continue;
+
+            juce::Array<juce::var> rows;
+            for (auto note : daw::Edit::getPartRows (part))
+                rows.add (note);
+
+            parts.add (object ({ { "track", (int) number (part, ids::track) }, { "drum", (bool) part.getProperty (ids::drum, false) },
+                                 { "rows", rows }, { "stepNote", (int) part.getProperty (ids::stepNote, daw::Edit::defaultStepNote) },
+                                 { "mute", (bool) part.getProperty (ids::mute, false) }, { "notes", describeNotes (part) } }));
+        }
+
+        patterns.add (object ({ { "id", (int) pattern[ids::id] }, { "name", pattern[ids::name].toString() },
+                                { "colour", pattern[ids::colour].toString() }, { "length", daw::Edit::getPatternLength (pattern) },
+                                { "step", daw::Edit::getPatternStep (pattern) },
+                                { "swing", juce::jlimit (0.0, 1.0, number (pattern, ids::swing)) }, { "parts", parts } }));
+    }
+    return patterns;
+}
+
+juce::var DawBridge::describePatternClips() const
+{
+    const auto tempo = edit.getTempoMap();
+    juce::Array<juce::var> clips;
+    for (const auto& clip : edit.getPatternClips())
+    {
+        const auto start = number (clip, ids::start), length = number (clip, ids::length);
+        clips.add (object ({ { "id", (int) clip[ids::id] }, { "pattern", (int) number (clip, ids::pattern) },
+                             { "start", start }, { "length", length },
+                             { "startSeconds", tempo.toSeconds (start) }, { "endSeconds", tempo.toSeconds (start + length) },
+                             { "row", (int) number (clip, ids::row) }, { "mute", (bool) clip.getProperty (ids::mute, false) } }));
+    }
+    return clips;
 }
 
 juce::var DawBridge::describeStatus()
@@ -649,6 +718,7 @@ juce::var DawBridge::describeStatus()
         { "chains", juce::var (chains) },
         { "inserts", juce::var (inserts) },
         { "loading", engine.getAudioPool().isLoading() },
+        { "patternMode", engine.getPatternMode() },
         { "midiNotes", [this]
           {
               juce::Array<juce::var> held;
@@ -798,8 +868,8 @@ void DawBridge::tick()
 
     if (processor.isDawMode())
     {
-        // Stop at the end of the song, unless recording or looping.
-        if (engine.isPlaying() && ! engine.isRecording() && engine.getLength() > 0 && engine.getPosition() >= engine.getLength()
+        // Stop at the end of the song, unless recording or looping (pattern mode always loops).
+        if (engine.isPlaying() && ! engine.isRecording() && engine.getPatternMode() < 0 && engine.getLength() > 0 && engine.getPosition() >= engine.getLength()
             && ! (bool) edit.getState().getProperty (ids::loopOn, false))
             engine.stop();
 
@@ -2176,6 +2246,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (handleMidi (command, args, complete))
         return;
 
+    if (handlePatterns (command, args, complete))
+        return;
+
     if (command == "session")               { complete (describeSession()); return; }
     if (command == "mode")                  { setMode (arg (args, "daw", false)); ok(); return; }
     if (command == "undo")                  { undo.undo(); ok(); return; }
@@ -3266,10 +3339,15 @@ bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, 
 
     if (command == "liveNote")
     {
+        // With a track: that track's instrument only, armed or not (auditioning a row).
         const auto note = juce::jlimit (0, 127, arg (args, "note", 60));
         const auto velocity = juce::jlimit (0, 127, arg (args, "velocity", 100));
-        engine.addLiveMidi (velocity > 0 ? juce::MidiMessage::noteOn (1, note, (juce::uint8) velocity)
-                                         : juce::MidiMessage::noteOff (1, note));
+        const auto message = velocity > 0 ? juce::MidiMessage::noteOn (1, note, (juce::uint8) velocity)
+                                          : juce::MidiMessage::noteOff (1, note);
+        if (args.hasProperty ("track"))
+            engine.addLiveMidi (message, arg (args, "track", -1));
+        else
+            engine.addLiveMidi (message);
         complete (error ({}));
         return true;
     }
@@ -3287,4 +3365,151 @@ juce::String DawBridge::getRedoName() const
 {
     auto& undo = edit.getUndoManager();
     return undo.canRedo() ? undo.getRedoDescription() : juce::String();
+}
+
+//==============================================================================
+bool DawBridge::handlePatterns (const juce::String& command, const juce::var& args, Complete& complete)
+{
+    const auto ok = [&] { complete (error ({})); };
+    const auto id = arg (args, "id", -1);
+
+    if (command == "addPattern")
+    {
+        if (args.hasProperty ("from"))
+        {
+            const auto copy = edit.duplicatePattern (arg (args, "from", -1));
+            complete (copy >= 0 ? juce::var (copy) : error ("There's no such pattern."));
+            return true;
+        }
+
+        complete (edit.addPattern (args["name"].toString(), arg (args, "length", 0.0))[ids::id]);
+        return true;
+    }
+
+    if (command == "setPattern")
+    {
+        if (! edit.getPattern (id).isValid()) { complete (error ("There's no such pattern.")); return true; }
+        if (args.hasProperty ("name"))   edit.setPatternName (id, args["name"].toString());
+        if (args.hasProperty ("colour")) edit.setPatternColour (id, args["colour"].toString());
+        if (args.hasProperty ("length")) edit.setPatternLength (id, args["length"]);
+        if (args.hasProperty ("step"))   edit.setPatternStep (id, args["step"]);
+        if (args.hasProperty ("swing"))  edit.setPatternSwing (id, args["swing"]);
+        ok();
+        return true;
+    }
+
+    if (command == "removePattern") { edit.removePattern (id); ok(); return true; }
+
+    const auto patternId = arg (args, "pattern", -1);
+    const auto trackId = arg (args, "track", -1);
+
+    if (command == "setPart" || command == "editPattern" || command == "setSteps")
+    {
+        if (! edit.getPattern (patternId).isValid()) { complete (error ("There's no such pattern.")); return true; }
+        if (! daw::Edit::isMidiTrack (edit.getTrack (trackId))) { complete (error ("Patterns play on MIDI tracks.")); return true; }
+    }
+
+    if (command == "setPart")
+    {
+        edit.ensurePart (patternId, trackId);
+        if (args.hasProperty ("drum"))     edit.setPartDrum (patternId, trackId, args["drum"]);
+        if (args.hasProperty ("stepNote")) edit.setPartStepNote (patternId, trackId, args["stepNote"]);
+        if (args.hasProperty ("mute"))     edit.setPartMute (patternId, trackId, args["mute"]);
+        if (auto* rows = args["rows"].getArray())
+        {
+            juce::Array<int> notes;
+            for (const auto& note : *rows)
+                notes.add ((int) note);
+            edit.setPartRows (patternId, trackId, notes);
+        }
+        ok();
+        return true;
+    }
+
+    if (command == "editPattern")
+    {
+        const auto part = edit.ensurePart (patternId, trackId);
+        const auto inPart = [&] (const juce::ValueTree& note) { return note.isValid() && note.getParent() == part; };
+
+        if (auto* removed = args["remove"].getArray())
+            for (const auto& noteId : *removed)
+                if (inPart (edit.getNote (noteId)))
+                    edit.removeNote (noteId);
+
+        if (auto* changed = args["change"].getArray())
+            for (const auto& n : *changed)
+            {
+                const auto note = edit.getNote (n["id"]);
+                if (! inPart (note))
+                    continue;
+
+                edit.setNote (n["id"], arg (n, "pitch", (int) number (note, ids::pitch)), arg (n, "time", number (note, ids::time)),
+                              arg (n, "length", number (note, ids::length)), arg (n, "velocity", (int) number (note, ids::velocity)));
+            }
+
+        juce::Array<juce::var> added;
+        if (auto* notes = args["add"].getArray())
+            for (const auto& n : *notes)
+                added.add (edit.addPatternNote (patternId, trackId, n["pitch"], n["time"], n["length"], arg (n, "velocity", 100))[ids::id]);
+
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "added", added } }));
+        return true;
+    }
+
+    if (command == "setSteps")
+    {
+        std::vector<std::pair<int, int>> steps;
+        if (auto* list = args["steps"].getArray())
+            for (const auto& item : *list)
+                if (auto* pair = item.getArray(); pair != nullptr && pair->size() >= 2)
+                    steps.emplace_back ((int) (*pair)[0], (int) (*pair)[1]);
+
+        edit.setSteps (patternId, trackId, arg (args, "pitch", daw::Edit::defaultStepNote), steps);
+        ok();
+        return true;
+    }
+
+    if (command == "addPatternClip")
+    {
+        const auto clip = edit.addPatternClip (patternId, arg (args, "start", 0.0), arg (args, "length", 0.0), arg (args, "row", 0));
+        complete (clip.isValid() ? clip[ids::id] : error ("There's no such pattern."));
+        return true;
+    }
+
+    if (command == "setPatternClip")
+    {
+        const auto clip = edit.getPatternClip (id);
+        if (! clip.isValid()) { complete (error ("There's no such pattern block.")); return true; }
+
+        if (args.hasProperty ("start") || args.hasProperty ("length") || args.hasProperty ("row"))
+            edit.setPatternClip (id, arg (args, "start", number (clip, ids::start)), arg (args, "length", number (clip, ids::length)),
+                                 arg (args, "row", (int) number (clip, ids::row)));
+        if (args.hasProperty ("mute"))
+            edit.setPatternClipMute (id, args["mute"]);
+        ok();
+        return true;
+    }
+
+    if (command == "removePatternClip") { edit.removePatternClip (id); ok(); return true; }
+
+    if (command == "makePatternUnique")
+    {
+        const auto copy = edit.makePatternUnique (id);
+        complete (copy >= 0 ? juce::var (copy) : error ("There's no such pattern block."));
+        return true;
+    }
+
+    if (command == "patternMode")
+    {
+        // Not an edit: which loop plays. -1 is Song mode.
+        const auto wanted = arg (args, "pattern", -1);
+        if (wanted >= 0 && ! edit.getPattern (wanted).isValid()) { complete (error ("There's no such pattern.")); return true; }
+        if (wanted >= 0 && engine.isRecording()) { complete (error ("Stop recording first.")); return true; }
+        engine.setPatternMode (wanted);
+        sessionChanged = true;
+        ok();
+        return true;
+    }
+
+    return false;
 }

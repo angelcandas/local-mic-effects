@@ -91,6 +91,11 @@ private:
     // MIDI tracks, notes and instruments (see the commands in DawBridge.cpp). Returns
     // false if `command` isn't one of them.
     bool handleMidi (const juce::String& command, const juce::var& args, Complete&);
+    // The step sequencer's commands (patterns, parts, steps, pattern blocks, pattern mode).
+    bool handlePatterns (const juce::String& command, const juce::var& args, Complete&);
+    juce::var describePatterns() const;
+    juce::var describePatternClips() const;
+    juce::var describeKeyNames (int trackId) const;
     juce::var describeInstruments() const;
     juce::var addInstrument (int trackId, const juce::String& instrumentId);
     void showInstrumentWindow (int trackId);

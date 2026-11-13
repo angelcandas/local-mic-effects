@@ -34,6 +34,7 @@
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
 #include "daw/Quantize.h"
+#include "daw/Patterns.h"
 #include "analysis/Beats.h"
 #include "DeviceFavourites.h"
 #include "dsp/FxChain.h"
@@ -8697,6 +8698,306 @@ namespace
     }
 }
 
+//==============================================================================
+// The step sequencer: patterns, parts, steps, pattern blocks and pattern mode.
+static void testPatterns()
+{
+    std::cout << "\nPatterns (step sequencer)\n";
+
+    const auto near = [] (double a, double b, double tolerance = 1.0e-9) { return std::abs (a - b) < tolerance; };
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-patterns", {});
+    folder.createDirectory();
+
+    {
+        daw::Edit edit;
+        const auto beat = *daw::instruments::findBuiltin ("builtin:beat");
+        const auto drums = (int) edit.addMidiTrack ("Drums", beat)[daw::ids::id];
+        const auto audio = (int) edit.addTrack ("Audio")[daw::ids::id];
+
+        edit.getUndoManager().beginNewTransaction();
+        const auto pattern = edit.addPattern();
+        const auto patternId = (int) pattern[daw::ids::id];
+        check (pattern.isValid() && near (daw::Edit::getPatternLength (pattern), 4.0) && near (daw::Edit::getPatternStep (pattern), 0.25)
+                   && pattern[daw::ids::name].toString() == "Pattern 1",
+               "a new pattern is a bar of 16 steps");
+        check (! edit.ensurePart (patternId, audio).isValid(), "patterns play on MIDI tracks only");
+
+        // Kick on every beat, snare on 2 and 4: one undo step each.
+        edit.getUndoManager().beginNewTransaction();
+        edit.setSteps (patternId, drums, 36, { { 0, 100 }, { 4, 100 }, { 8, 100 }, { 12, 100 } });
+        edit.getUndoManager().beginNewTransaction();
+        edit.setSteps (patternId, drums, 38, { { 4, 90 }, { 12, 90 } });
+        auto events = daw::patterns::getPatternEvents (pattern, drums);
+        check (events.size() == 6 && near (events[0].on, 0.0) && near (events[0].off, 0.25) && events[0].pitch == 36,
+               "steps are one-step notes (" + juce::String ((int) events.size()) + " events)");
+
+        edit.getUndoManager().beginNewTransaction();
+        edit.setSteps (patternId, drums, 36, { { 4, 0 }, { 16, 100 }, { -1, 100 } }); // clear one; outside the pattern ignored
+        check (daw::patterns::getPatternEvents (pattern, drums).size() == 5, "a velocity of 0 clears a step; steps outside the pattern are ignored");
+        edit.getUndoManager().undo();
+        check (daw::patterns::getPatternEvents (pattern, drums).size() == 6, "step painting undoes in one step");
+        edit.setSteps (patternId, drums, 36, { { 0, 120 } });
+        events = daw::patterns::getPatternEvents (pattern, drums);
+        check (events.size() == 6 && events[0].velocity == 120, "painting a lit step again replaces it (no doubled notes)");
+
+        // Blocks: a 2-bar block repeats the 1-bar pattern; times through the tempo map.
+        const auto tempo = edit.getTempoMap(); // 120 BPM
+        const auto block = (int) edit.addPatternClip (patternId, 4.0, 8.0)[daw::ids::id];
+        auto timeline = daw::patterns::getBlockEvents (edit.getState(), drums, tempo);
+        std::sort (timeline.begin(), timeline.end(), [] (const auto& a, const auto& b) { return a.on < b.on; });
+        check (timeline.size() == 12 && near (timeline.front().on, 2.0) && near (timeline.back().on, 5.5) && near (timeline[6].on, 4.0),
+               "a 2-bar block plays a 1-bar pattern twice (" + juce::String ((int) timeline.size()) + " notes, from "
+                   + juce::String (timeline.front().on, 3) + " s)");
+        check (near (daw::patterns::getBlocksEnd (edit.getState(), tempo), 6.0), "blocks end where their last block does");
+
+        // Shorter block: notes past its end don't play, a note crossing it is cut.
+        edit.setPatternClip (block, 4.0, 1.1, 0);
+        timeline = daw::patterns::getBlockEvents (edit.getState(), drums, tempo);
+        check (timeline.size() == 3 && std::all_of (timeline.begin(), timeline.end(), [&] (const auto& e) { return e.off <= tempo.toSeconds (5.1) + 1.0e-9; }),
+               "a block shorter than its pattern plays only what fits");
+        edit.setPatternClip (block, 4.0, 8.0, 0);
+
+        // Swing moves only the odd steps, by swing x step / 3.
+        edit.setSteps (patternId, drums, 42, { { 1, 80 }, { 2, 80 } });
+        edit.setPatternSwing (patternId, 1.0);
+        events = daw::patterns::getPatternEvents (pattern, drums);
+        std::vector<double> hats;
+        for (const auto& e : events)
+            if (e.pitch == 42)
+                hats.push_back (e.on);
+        std::sort (hats.begin(), hats.end());
+        check (hats.size() == 2 && near (hats[0], 0.25 + 0.25 / 3.0) && near (hats[1], 0.5), "swing delays the off steps only");
+        edit.setPatternSwing (patternId, 0.0);
+        edit.setSteps (patternId, drums, 42, { { 1, 0 }, { 2, 0 } });
+
+        // A tempo change inside a block moves the later steps.
+        edit.setTempoMap (daw::TempoMap ({ { 0.0, 120.0, false }, { 8.0, 60.0, false } }));
+        timeline = daw::patterns::getBlockEvents (edit.getState(), drums, edit.getTempoMap());
+        std::sort (timeline.begin(), timeline.end(), [] (const auto& a, const auto& b) { return a.on < b.on; });
+        check (near (timeline[6].on, 4.0) && near (timeline[7].on, 5.0) && near (timeline[9].on, 6.0),
+               "after a tempo change the steps follow the new tempo (" + juce::String (timeline[7].on, 3) + " s)");
+        edit.setTempoMap (daw::TempoMap (120.0));
+
+        // Make unique: the block gets a copy; editing it leaves the original alone.
+        const auto second = (int) edit.addPatternClip (patternId, 12.0)[daw::ids::id];
+        const auto unique = edit.makePatternUnique (second);
+        check (unique > 0 && unique != patternId && (int) edit.getPatternClip (second)[daw::ids::pattern] == unique
+                   && daw::patterns::getPatternEvents (edit.getPattern (unique), drums).size() == 6,
+               "make unique gives the block a copy of its pattern");
+        edit.setSteps (unique, drums, 39, { { 2, 100 } });
+        check (daw::patterns::getPatternEvents (pattern, drums).size() == 6 && daw::patterns::getPatternEvents (edit.getPattern (unique), drums).size() == 7,
+               "the copy is edited on its own");
+        std::set<int> noteIds;
+        for (const auto& p : edit.getPatterns())
+            for (const auto& part : p)
+                for (const auto& n : part)
+                    noteIds.insert ((int) n[daw::ids::id]);
+        check ((int) noteIds.size() == 13, "the copy's notes have ids of their own");
+        edit.removePattern (unique);
+        check (! edit.getPatternClip (second).isValid() && edit.getPatternClip (block).isValid(), "removing a pattern removes its blocks");
+
+        // Removing a track removes its parts; undo puts them back.
+        edit.getUndoManager().beginNewTransaction();
+        edit.removeTrack (drums);
+        check (! edit.getPart (patternId, drums).isValid(), "removing a track removes its parts");
+        edit.getUndoManager().undo();
+        check (edit.getPart (patternId, drums).isValid() && daw::patterns::getPatternEvents (pattern, drums).size() == 6,
+               "undo brings the track and its parts back");
+
+        // The engine: blocks play on the timeline and count towards the song's length.
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        engine.rebuildNow();
+        check (engine.getLength() == (juce::int64) (6.0 * sampleRate), "pattern blocks count towards the song's length");
+        engine.play();
+        auto out = render (engine, 2.5);
+        engine.stop();
+        size_t first = 0;
+        while (first < out[0].size() && std::abs (out[0][first]) < 1.0e-5f)
+            ++first;
+        check (std::abs ((double) first - 2.0 * sampleRate) <= 2.0, "the block's first kick lands on its start (sample " + juce::String ((int) first) + ")");
+        check (rms (out[0], (size_t) (2.0 * sampleRate), (size_t) (2.3 * sampleRate)) > 0.01f, "and is heard");
+
+        // Muted block: silent.
+        edit.setPatternClipMute (block, true);
+        engine.rebuildNow();
+        engine.seek (0);
+        engine.play();
+        out = render (engine, 2.5);
+        engine.stop();
+        check (rms (out[0], (size_t) (2.0 * sampleRate), (size_t) (2.5 * sampleRate)) < 1.0e-4f && engine.getLength() == (juce::int64) (6.0 * sampleRate),
+               "a muted block is silent (and still part of the song)");
+        edit.setPatternClipMute (block, false);
+        render (engine, 1.0);
+
+        // Pattern mode: only the pattern, as a loop from 0, and the song position comes back.
+        engine.seek ((juce::int64) (5.0 * sampleRate));
+        engine.setPatternMode (patternId);
+        check (engine.getPatternMode() == patternId && engine.getPosition() == 0 && engine.getLength() == (juce::int64) (2.0 * sampleRate),
+               "pattern mode starts at the pattern's start and loops one pass");
+        engine.play();
+        out = render (engine, 4.5);
+        check (engine.getPosition() < (juce::int64) (2.0 * sampleRate), "the playhead stays inside the pattern");
+        check (rms (out[0], 0, (size_t) (0.2 * sampleRate)) > 0.01f && rms (out[0], (size_t) (2.0 * sampleRate), (size_t) (2.2 * sampleRate)) > 0.01f
+                   && rms (out[0], (size_t) (4.0 * sampleRate), (size_t) (4.2 * sampleRate)) > 0.01f,
+               "the pattern plays from its start, pass after pass");
+        check (engine.startRecording (folder).isNotEmpty(), "recording waits for Song mode (this PR)");
+        engine.stop();
+        engine.setPatternMode (-1);
+        check (engine.getPatternMode() == -1 && engine.getPosition() == (juce::int64) (5.0 * sampleRate) && engine.getLength() == (juce::int64) (6.0 * sampleRate),
+               "Song mode puts the playhead back where it was");
+
+        engine.setPatternMode (patternId);
+        edit.removePattern (patternId);
+        engine.rebuildNow();
+        check (engine.getPatternMode() == -1 && engine.getPosition() == (juce::int64) (5.0 * sampleRate), "removing the pattern goes back to Song mode");
+        edit.getUndoManager().undo();
+        render (engine, 1.0);
+
+        // Audition: one track's instrument, without arming it.
+        engine.addLiveMidi (juce::MidiMessage::noteOn (1, 36, (juce::uint8) 110), drums);
+        out = render (engine, 0.2);
+        check (rms (out[0], 0, (size_t) (0.2 * sampleRate)) > 0.01f && ! (bool) edit.getTrack (drums)[daw::ids::arm], "a row's sound plays without arming its track");
+        engine.addLiveMidi (juce::MidiMessage::noteOff (1, 36), drums);
+        engine.addLiveMidi (juce::MidiMessage::noteOn (1, 36, (juce::uint8) 110), audio);
+        render (engine, 3.0);
+        out = render (engine, 0.2);
+        check (rms (out[0], 0, (size_t) (0.2 * sampleRate)) < 1.0e-4f, "auditioning an audio track does nothing");
+
+        // Save and open: patterns, parts and blocks come back, typed.
+        {
+            daw::Project project (edit);
+            check (project.saveAs (folder.getChildFile ("Beat")).isEmpty(), "saves a project with patterns");
+            edit.setPartDrum (patternId, drums, true);
+            edit.setPartRows (patternId, drums, { 36, 38, 42 });
+            check (project.save().isEmpty(), "(again, with rows)");
+
+            daw::Edit reopened;
+            daw::Project second (reopened);
+            check (second.open (project.getFolder()).isEmpty(), "opens");
+            const auto back = reopened.getPattern (patternId);
+            const auto part = reopened.getPart (patternId, drums);
+            check (back.isValid() && near (daw::Edit::getPatternLength (back), 4.0) && (bool) part[daw::ids::drum]
+                       && daw::Edit::getPartRows (part) == juce::Array<int> { 36, 38, 42 }
+                       && daw::patterns::getPatternEvents (back, drums).size() == 6
+                       && reopened.getPatternClip (block).isValid() && near ((double) reopened.getPatternClip (block)[daw::ids::start], 4.0),
+                   "patterns, parts and blocks come back from the project file");
+
+            // Export plays the blocks.
+            daw::Exporter::Settings settings;
+            settings.start = 1.5;
+            settings.end = 3.0;
+            settings.tail = 0.0;
+            const auto result = daw::Exporter (reopened, settings).exportMix (folder.getChildFile ("beat.wav"));
+            check (result.error.isEmpty() && result.peakDecibels > -40.0f,
+                   "the mix export plays the pattern blocks (peak " + juce::String (result.peakDecibels, 1) + " dB)");
+            second.close();
+            project.close();
+        }
+    }
+
+    // The page's commands.
+    {
+        juce::PropertiesFile::Options options;
+        options.applicationName = "MicFXTests";
+        options.filenameSuffix = ".settings";
+        juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+
+        std::vector<std::pair<juce::String, juce::var>> events;
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, settings,
+                          [&] (const juce::Identifier& event, const juce::var& payload) { events.emplace_back (event.toString(), payload); },
+                          [] { return (juce::int64) 0; });
+
+        const auto run = [&] (const juce::String& command, juce::var args = juce::var (new juce::DynamicObject()))
+        {
+            juce::var result;
+            auto completed = false;
+            bridge.handle (command, args, [&] (juce::var r) { result = r; completed = true; });
+            return completed ? result : juce::var ("never completed");
+        };
+        const auto args = [] (std::initializer_list<std::pair<const char*, juce::var>> properties)
+        {
+            auto* object = new juce::DynamicObject();
+            for (const auto& [name, value] : properties)
+                object->setProperty (name, value);
+            return juce::var (object);
+        };
+        const auto lastSession = [&]
+        {
+            events.clear();
+            bridge.tick();
+            for (const auto& [name, payload] : events)
+                if (name == "dawSession")
+                    return juce::JSON::parse (juce::JSON::toString (payload, true));
+            return juce::var();
+        };
+        const auto ok = [] (const juce::var& result) { return result.isObject() && (bool) result["ok"]; };
+        const auto list = [] (std::initializer_list<juce::var> items) { return juce::var (juce::Array<juce::var> (items)); };
+
+        run ("mode", args ({ { "daw", true } }));
+        const auto kit = (int) run ("addMidiTrack", args ({ { "instrument", "builtin:beat" }, { "name", "Kit" } }));
+        processor.getDawEngine().rebuildNow();
+
+        const auto patternId = run ("addPattern");
+        check (patternId.isInt() && (int) patternId > 0, "addPattern completes with the new pattern's id");
+        check (ok (run ("setPart", args ({ { "pattern", patternId }, { "track", kit }, { "drum", true }, { "rows", list ({ 36, 38, 42 }) } }))),
+               "setPart makes the kit's part");
+        check (ok (run ("setSteps", args ({ { "pattern", patternId }, { "track", kit }, { "pitch", 36 },
+                                             { "steps", list ({ list ({ 0, 100 }), list ({ 8, 100 }) }) } }))),
+               "setSteps paints steps");
+        check (edit.getUndoManager().getUndoDescription() == "Steps", "as one undo step named Steps");
+        const auto edited = run ("editPattern", args ({ { "pattern", patternId }, { "track", kit },
+                                                        { "add", list ({ args ({ { "pitch", 38 }, { "time", 1.0 }, { "length", 0.25 }, { "velocity", 90 } }) }) } }));
+        check (ok (edited) && edited["added"].size() == 1, "editPattern adds notes");
+        check (ok (run ("setPattern", args ({ { "id", patternId }, { "swing", 0.5 }, { "name", "Groove" } }))), "setPattern");
+        const auto blockId = run ("addPatternClip", args ({ { "pattern", patternId }, { "start", 4.0 }, { "length", 8.0 } }));
+        check (blockId.isInt(), "addPatternClip completes with the block's id");
+        check (! ok (run ("setPart", args ({ { "pattern", 999 }, { "track", kit } })))
+                   && ! ok (run ("setSteps", args ({ { "pattern", patternId }, { "track", 999 }, { "steps", list ({}) } }))),
+               "commands on a missing pattern or track fail with a message");
+
+        auto session = lastSession();
+        const auto pattern = session["patterns"][0];
+        const auto part = pattern["parts"][0];
+        const auto clip = session["patternClips"][0];
+        check (session["patterns"].size() == 1 && pattern["name"].toString() == "Groove" && near ((double) pattern["swing"], 0.5)
+                   && near ((double) pattern["length"], 4.0) && (int) part["track"] == kit && (bool) part["drum"]
+                   && part["rows"].size() == 3 && (int) part["rows"][2] == 42 && part["notes"].size() == 3,
+               "the session describes patterns and their parts");
+        check ((int) clip["pattern"] == (int) patternId && near ((double) clip["start"], 4.0) && near ((double) clip["startSeconds"], 2.0)
+                   && near ((double) clip["endSeconds"], 6.0) && (int) session["patternMode"] == -1,
+               "and the pattern blocks, in beats and seconds");
+        const auto kitTrack = session["tracks"][session["tracks"].size() - 1];
+        check (kitTrack["keyNames"]["36"].toString() == "Kick" && kitTrack["keyNames"]["38"].toString() == "Snare",
+               "a drum kit's track names its keys");
+
+        check (ok (run ("patternMode", args ({ { "pattern", patternId } }))) && (int) lastSession()["patternMode"] == (int) patternId
+                   && processor.getDawEngine().getPatternMode() == (int) patternId,
+               "patternMode switches to the pattern");
+        check (ok (run ("patternMode", args ({ { "pattern", -1 } }))) && processor.getDawEngine().getPatternMode() == -1, "and back to Song mode");
+        check (ok (run ("liveNote", args ({ { "note", 36 }, { "velocity", 100 }, { "track", kit } }))), "liveNote takes a track");
+        run ("liveNote", args ({ { "note", 36 }, { "velocity", 0 }, { "track", kit } }));
+
+        const auto copy = run ("makePatternUnique", args ({ { "id", blockId } }));
+        check (copy.isInt() && (int) copy != (int) patternId && lastSession()["patterns"].size() == 2, "makePatternUnique");
+        run ("undo");
+        check (lastSession()["patterns"].size() == 1, "and undo");
+
+        check (ok (run ("removeTrack", args ({ { "id", kit } }))) && lastSession()["patterns"][0]["parts"].size() == 0, "removing the track removes its part");
+        run ("undo");
+        check (ok (run ("removePattern", args ({ { "id", patternId } }))) && lastSession()["patternClips"].size() == 0, "removePattern removes its blocks");
+        run ("undo");
+        check (lastSession()["patternClips"].size() == 1, "undo brings them back");
+    }
+
+    folder.deleteRecursively();
+}
+
 int main()
 {
     juce::ScopedJuceInitialiser_GUI juce;
@@ -8716,6 +9017,14 @@ int main()
         testMidiLearn();
         testScenes();
         testSetlist();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=patterns: just the step sequencer.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "patterns")
+    {
+        testPatterns();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -8777,6 +9086,7 @@ int main()
     testRhythm();
     testTrackTools();
     testDawBridge();
+    testPatterns();
     testLiveControls();
     testAnalysis();
     testMixAssistant();
