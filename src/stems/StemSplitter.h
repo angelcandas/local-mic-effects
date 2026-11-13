@@ -108,6 +108,13 @@ struct Loaded
 
 enum class LoadPhase { downloading, loading };
 
+// How closely `candidate` reproduces `reference` on a fixed test signal (one 7.8 s segment of
+// tones and bursts): the signal-to-error ratio over all stems in dB, higher is closer. Minus
+// infinity when `candidate` fails or returns the wrong shape. loadBest() uses it to check the
+// GPU model against the CPU one on this Mac before trusting it, once per installed model.
+double matchOnTestSignal (const Separator& candidate, const Separator& reference);
+constexpr double minGpuMatchDb = 15.0; // a broken model sits around 0 dB; fp16 against fp32 is far above this
+
 // Background thread. `onPhase` says what it's doing (progress restarts at each phase);
 // progress returning false cancels.
 Loaded loadBest (const std::function<void (LoadPhase)>& onPhase, const Progress&);

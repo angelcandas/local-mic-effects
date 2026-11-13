@@ -44,7 +44,9 @@ jobs:
           printf 'import truststore\ntruststore.inject_into_ssl()\n' > "$RUNNER_TEMP/sitecustomize/sitecustomize.py"
           echo "PYTHONPATH=$RUNNER_TEMP/sitecustomize" >> "$GITHUB_ENV"
       - name: Convert the network
-        run: python scripts/export_htdemucs_coreml.py --out "$RUNNER_TEMP/model/htdemucs-core.mlpackage" ${{ inputs.fp32 && '--fp32' || '' }}
+        # No check here: this virtual machine can't run Core ML models reliably (the check crashed, or
+        # matched at -0.5 dB). MicFX compares the model with the CPU one on the user's Mac before using it.
+        run: python scripts/export_htdemucs_coreml.py --no-check --out "$RUNNER_TEMP/model/htdemucs-core.mlpackage" ${{ inputs.fp32 && '--fp32' || '' }}
       - name: Zip it
         run: |
           cd "$RUNNER_TEMP/model"
