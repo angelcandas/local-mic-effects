@@ -5849,6 +5849,99 @@ namespace
             edit.removeTrack (backTrack);
         }
 
+        // Build backing vocals: a folded group of voices under the lead, from the chords of the rest.
+        {
+            const auto melodyFile = folder.getChildFile ("Lead.wav"), chordFile = folder.getChildFile ("Chords.wav");
+            writeWav (melodyFile, makeMelody(), sampleRate);
+            {
+                juce::AudioBuffer<float> chord (1, (int) (2.2 * sampleRate)); // A minor, under A3 B3 C4
+                for (int i = 0; i < chord.getNumSamples(); ++i)
+                {
+                    double v = 0.0;
+                    for (auto midi : { 45.0, 57.0, 60.0, 64.0 })
+                        for (int h = 1; h <= 4; ++h)
+                            v += std::sin (juce::MathConstants<double>::twoPi * h * 440.0 * std::pow (2.0, (midi - 69.0) / 12.0) * i / sampleRate) / h;
+                    chord.setSample (0, i, (float) (0.05 * v));
+                }
+                writeWav (chordFile, chord, sampleRate);
+            }
+            const auto before = edit.getTracks().size();
+            const auto leadTrack = (int) edit.addTrack ("Lead")[daw::ids::id];
+            const auto padTrack = (int) edit.addTrack ("Pad")[daw::ids::id];
+            const auto clipId = (int) bridge.importAudio (melodyFile, leadTrack, 4.0)["clip"];
+            bridge.importAudio (chordFile, padTrack, 4.0);
+
+            const auto build = [&] (juce::var request)
+            {
+                const auto started = run ("backingVocals", request);
+                juce::var done;
+                for (int i = 0; i < 3000 && done.isVoid() && ok (started); ++i)
+                {
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+                    events.clear();
+                    bridge.tick();
+                    for (const auto& [name, payload] : events)
+                        if (name == "dawBackingVocals" && payload["state"].toString() != "analysing")
+                            done = payload;
+                }
+                return std::make_pair (started, done);
+            };
+            const auto parts = juce::Array<juce::var> { "thirdAbove", "fifthBelow", "doubleTrack" };
+
+            check (! ok (run ("backingVocals", args ({ { "action", "start" }, { "id", clipId }, { "parts", juce::Array<juce::var>() } }))),
+                   "backing vocals need at least one voice");
+
+            const auto [started, done] = build (args ({ { "action", "start" }, { "id", clipId }, { "parts", parts }, { "feel", "tight" } }));
+            const auto group = edit.getReturn ((int) done["group"]);
+            juce::Array<juce::ValueTree> voices;
+            for (const auto& track : edit.getTracks())
+                if (daw::Edit::getTrackGroup (track) == (int) done["group"])
+                    voices.add (track);
+            check (ok (started) && done["state"].toString() == "done" && (int) done["count"] == 3 && daw::Edit::isGroup (group)
+                       && (bool) group.getProperty (daw::ids::folded, false) && voices.size() == 3,
+                   "three voices in a folded group (" + done["state"].toString() + " " + done["error"].toString() + ")");
+            check ((bool) done["listened"] && (int) done["chords"] >= 1, "the other tracks were listened to for chords (" + done["chords"].toString() + ", " + done["key"].toString() + ")");
+
+            auto allGood = voices.size() == 3;
+            for (const auto& track : voices)
+            {
+                const auto clip = track.getChildWithName (daw::ids::CLIP);
+                allGood = allGood && track[daw::ids::mixRole].toString() == "background" && (float) track[daw::ids::volume] < -3.0f
+                       && clip.isValid() && std::abs ((double) clip[daw::ids::start] - 4.0) < 1.0e-6 && clip.hasProperty (daw::ids::pitchNotes)
+                       && clip.hasProperty (daw::ids::warp);
+            }
+            check (allGood, "each voice: tagged as a backing vocal, under the lead, a copy of the clip with its notes and timing");
+            if (voices.size() == 3)
+                check (std::abs ((float) voices[0][daw::ids::pan] + 0.35f) < 1.0e-3f && std::abs ((float) voices[1][daw::ids::pan] - 0.35f) < 1.0e-3f
+                           && std::abs ((float) voices[2][daw::ids::pan]) < 1.0e-3f
+                           && edit.getTracks().indexOf (voices[0]) == edit.getTracks().indexOf (edit.getTrack (leadTrack)) + 1,
+                       "panned in a pair, the odd one in the middle, right under the lead");
+            if (! voices.isEmpty())
+            {
+                // A3 B3 C4 over A minor: a third above sings C D E.
+                const auto shifts = daw::Edit::getClipNotes (voices[0].getChildWithName (daw::ids::CLIP));
+                juce::String sung;
+                for (const auto& n : shifts)
+                    sung << juce::String (n.pitch + n.shift, 1) << " ";
+                check (shifts.size() == 3 && std::abs (shifts[0].pitch + shifts[0].shift - 60.0f) < 0.15f
+                           && std::abs (shifts[1].pitch + shifts[1].shift - 62.0f) < 0.15f && std::abs (shifts[2].pitch + shifts[2].shift - 64.0f) < 0.15f,
+                       "the third above sings " + sung.trim());
+            }
+
+            edit.getUndoManager().undo();
+            check (edit.getTracks().size() == before + 2 && ! daw::Edit::isGroup (edit.getReturn ((int) done["group"])),
+                   "Build backing vocals undoes in one step");
+
+            const auto [keyStarted, keyDone] = build (args ({ { "action", "start" }, { "id", clipId }, { "parts", juce::Array<juce::var> { "octaveBelow" } },
+                                                              { "feel", "loose" }, { "follow", "key" } }));
+            check (keyDone["state"].toString() == "done" && (int) keyDone["count"] == 1 && ! (bool) keyDone["listened"],
+                   "key only: one voice, the other tracks not listened to");
+            edit.getUndoManager().undo();
+
+            run ("removeTrack", args ({ { "id", leadTrack } }));
+            run ("removeTrack", args ({ { "id", padTrack } }));
+        }
+
         project.close();
         DawBridge::availableForTesting = false;
         folder.deleteRecursively();
@@ -13046,6 +13139,305 @@ static void testAutoLevel()
         processor.processBlock (buffer, midi);
         check (juce::approximatelyEqual (chainModule->getEffectiveTarget(), -18.0f), "stopped: back to the fixed target");
     }
+
+}
+
+namespace
+{
+    //==============================================================================
+    // Runs a module on a mono signal fed to both channels; returns the left channel.
+    std::vector<float> runModuleMono (fx::Module& module, const std::vector<float>& input, bool prepare = true)
+    {
+        if (prepare)
+            module.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+
+        std::vector<float> out (input.size());
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        for (size_t start = 0; start < input.size(); start += (size_t) blockSize)
+        {
+            const auto n = (int) std::min ((size_t) blockSize, input.size() - start);
+            buffer.clear();
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.copyFrom (ch, 0, input.data() + start, n);
+            juce::dsp::AudioBlock<float> block (buffer.getArrayOfWritePointers(), 2, (size_t) n);
+            module.process (juce::dsp::ProcessContextReplacing<float> (block));
+            std::copy_n (buffer.getReadPointer (0), n, out.begin() + (std::ptrdiff_t) start);
+        }
+        return out;
+    }
+
+    // Writes a mono 48 kHz WAV for the impulse response tests.
+    juce::File writeTestWav (const juce::File& file, const std::vector<float>& samples)
+    {
+        file.deleteFile();
+        std::unique_ptr<juce::OutputStream> stream = std::make_unique<juce::FileOutputStream> (file);
+        juce::WavAudioFormat wav;
+        juce::AudioBuffer<float> buffer (1, (int) samples.size());
+        std::copy (samples.begin(), samples.end(), buffer.getWritePointer (0));
+        if (auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions {}.withSampleRate (sampleRate).withNumChannels (1).withBitsPerSample (24)))
+            writer->writeFromAudioSampleBuffer (buffer, 0, buffer.getNumSamples());
+        return file;
+    }
+
+    void testCabAndIrReverb()
+    {
+        std::cout << "\nCabinet and IR reverb\n";
+
+        const auto seconds = 3.0;
+        const auto length = (size_t) (seconds * sampleRate);
+        const auto settle = (size_t) (0.5 * sampleRate);
+        const auto pink = makePinkNoise (seconds, -20.0f, 11);
+        const auto inSpectrum = powerSpectrum (pink, settle, length);
+
+        // Built-in cabinets: level kept in the guitar's range, highs rolled off like a
+        // speaker, the very lows cut by the box.
+        {
+            auto worstLevel = 0.0, leastRollOff = 100.0, leastLowCut = 100.0;
+            for (int model = 0; model < fx::Cabinet::numModels; ++model)
+            {
+                fx::modules::Cab cab;
+                cab.on.store (1.0f);
+                cab.model.store ((float) model);
+                const auto out = runModuleMono (cab, pink);
+                const auto outSpectrum = powerSpectrum (out, settle, length);
+                const auto inBand = bandDb (outSpectrum, 100.0, 4000.0) - bandDb (inSpectrum, 100.0, 4000.0);
+                const auto rollOff = (bandDb (inSpectrum, 9000.0, 16000.0) - bandDb (outSpectrum, 9000.0, 16000.0))
+                                     - (bandDb (inSpectrum, 300.0, 3000.0) - bandDb (outSpectrum, 300.0, 3000.0));
+                const auto lowCut = (bandDb (inSpectrum, 20.0, 30.0) - bandDb (outSpectrum, 20.0, 30.0))
+                                    - (bandDb (inSpectrum, 300.0, 3000.0) - bandDb (outSpectrum, 300.0, 3000.0));
+                worstLevel = std::max (worstLevel, std::abs (inBand));
+                leastRollOff = std::min (leastRollOff, rollOff);
+                leastLowCut = std::min (leastLowCut, lowCut);
+            }
+            check (worstLevel < 3.0, "every built-in cabinet keeps the 100 Hz - 4 kHz level within 3 dB (worst " + juce::String (worstLevel, 1) + " dB)");
+            check (leastRollOff > 20.0, "every cabinet rolls off 9-16 kHz like a speaker (at least " + juce::String (leastRollOff, 1) + " dB down)");
+            check (leastLowCut > 6.0, "every cabinet cuts below 30 Hz (at least " + juce::String (leastLowCut, 1) + " dB)");
+        }
+
+        // The mic on the cone's centre is brighter than at its edge.
+        {
+            const auto presence = [&] (int mic)
+            {
+                fx::modules::Cab cab;
+                cab.on.store (1.0f);
+                cab.mic.store ((float) mic);
+                const auto spectrum = powerSpectrum (runModuleMono (cab, pink), settle, length);
+                return bandDb (spectrum, 2500.0, 6000.0) - bandDb (spectrum, 200.0, 1000.0);
+            };
+            const auto centre = presence (0), edge = presence (2);
+            check (centre - edge > 4.0, "centre mic is brighter than the edge (" + juce::String (centre - edge, 1) + " dB more 2.5-6 kHz)");
+        }
+
+        // Mix 0 is the dry sound untouched; the picture has a response with a shape.
+        {
+            fx::modules::Cab cab;
+            cab.on.store (1.0f);
+            cab.mix.store (0.0f);
+            const auto out = runModuleMono (cab, pink);
+            check (differenceDb (out, pink, 0, 0) < -100.0f, "mix 0 passes the dry sound untouched");
+
+            juce::DynamicObject readings;
+            cab.addReadings (readings);
+            const auto* response = readings.getProperty ("response").getArray();
+            auto lowest = 100.0, highest = -100.0;
+            for (const auto& db : *response)
+            {
+                lowest = std::min (lowest, (double) db);
+                highest = std::max (highest, (double) db);
+            }
+            check (response->size() == fx::modules::Cab::pictureBands && highest - lowest > 15.0,
+                   "the card gets the cabinet's response (" + juce::String (highest - lowest, 1) + " dB from top to bottom)");
+        }
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-ir", {});
+        folder.createDirectory();
+
+        // An impulse response file: two taps 10 samples apart, the second half as loud.
+        std::vector<float> taps (2000, 0.0f);
+        taps[0] = 0.5f;
+        taps[10] = 0.25f;
+        const auto irFile = writeTestWav (folder.getChildFile ("two taps.wav"), taps);
+        const auto notAudio = folder.getChildFile ("notes.wav");
+        notAudio.replaceWithText ("not audio");
+        std::vector<float> impulse ((size_t) sampleRate / 2, 0.0f);
+        impulse[1000] = 1.0f;
+
+        {
+            fx::modules::Cab cab;
+            check (cab.loadFile (notAudio).isNotEmpty() && cab.loadFile (folder.getChildFile ("missing.wav")).isNotEmpty() && cab.getFile() == juce::File(),
+                   "a file that isn't audio, or is missing, is refused with a reason");
+
+            // No file loaded yet: "your IR file" passes the sound through.
+            cab.on.store (1.0f);
+            cab.model.store ((float) fx::modules::Cab::fileModel);
+            const auto through = runModuleMono (cab, pink);
+            check (differenceDb (through, pink, 0, 0) < -100.0f, "with no file loaded, the file model passes the sound through");
+
+            // Loaded before prepare: plays from the first block, with no delay.
+            check (cab.loadFile (irFile).isEmpty() && cab.getFile() == irFile, "a WAV impulse response loads");
+            const auto out = runModuleMono (cab, impulse);
+            const auto first = out[1000], second = out[1010];
+            auto rest = 0.0f;
+            for (size_t i = 1011; i < out.size(); ++i)
+                rest = std::max (rest, std::abs (out[i]));
+            for (size_t i = 0; i < 1000; ++i)
+                rest = std::max (rest, std::abs (out[i]));
+            check (first > 0.1f && std::abs (second / first - 0.5f) < 0.02f && rest < 0.001f,
+                   "the file's taps come out in place, no delay (" + juce::String (first, 3) + ", " + juce::String (second, 3) + ")");
+
+            // Its energy is made up: white-ish noise comes out at about the same level.
+            const auto noise = runModuleMono (cab, pink);
+            const auto change = levelDb (noise, settle, length) - levelDb (pink, settle, length);
+            check (std::abs (change) < 4.0f, "an impulse response file keeps the level (" + juce::String (change, 1) + " dB)");
+        }
+
+        // Switching to a file while playing: JUCE loads it in the background, then plays it.
+        {
+            fx::modules::Cab cab;
+            cab.on.store (1.0f);
+            cab.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            cab.model.store ((float) fx::modules::Cab::fileModel);
+            cab.loadFile (irFile);
+
+            auto matched = false;
+            for (int attempt = 0; attempt < 200 && ! matched; ++attempt)
+            {
+                const auto out = runModuleMono (cab, impulse, false);
+                matched = out[1000] > 0.1f && std::abs (out[1010] / out[1000] - 0.5f) < 0.02f;
+                juce::Thread::sleep (10);
+            }
+            check (matched, "a file loaded while playing takes over within a couple of seconds");
+        }
+
+        // The IR reverb's built-in rooms: decays in order of size, each close to its design.
+        {
+            std::vector<double> measured;
+            juce::String list;
+            auto worstError = 0.0;
+            for (size_t space = 0; space < fx::spaces::getSpaces().size(); ++space)
+            {
+                fx::modules::IrReverb reverb;
+                reverb.on.store (1.0f);
+                reverb.space.store ((float) space);
+                reverb.mix.store (100.0f);
+                reverb.lowCut.store (20.0f);
+                reverb.highCut.store (20000.0f);
+                std::vector<float> click ((size_t) (7.0 * sampleRate), 0.0f);
+                click[100] = 1.0f;
+                const auto out = runModuleMono (reverb, click);
+
+                // T20 (-5 to -25 dB on the backwards-integrated energy), times 3.
+                std::vector<double> energy (out.size());
+                double sum = 0.0;
+                for (size_t i = out.size(); i-- > 0;)
+                    energy[i] = (sum += (double) out[i] * out[i]);
+                const auto timeAt = [&] (double db)
+                {
+                    for (size_t i = 0; i < energy.size(); ++i)
+                        if (10.0 * std::log10 (energy[i] / energy[0] + 1.0e-30) <= db)
+                            return (double) i / sampleRate;
+                    return (double) energy.size() / sampleRate;
+                };
+                const auto rt60 = (timeAt (-25.0) - timeAt (-5.0)) * 3.0;
+                measured.push_back (rt60);
+                const auto design = fx::spaces::getSpaces()[space].decaySeconds;
+                worstError = std::max (worstError, std::abs (rt60 / design - 1.0));
+                list << fx::spaces::getSpaces()[space].name << " " << juce::String (rt60, 2) << " s  ";
+            }
+
+            // Small room < studio < hall < church (the plate sits between, by design).
+            check (measured[0] < measured[1] && measured[1] < measured[3] && measured[3] < measured[4],
+                   "built-in rooms decay in order of size: " + list);
+            check (worstError < 0.4, "each room's decay is within 40% of its design (worst " + juce::String (juce::roundToInt (worstError * 100.0)) + "%)");
+        }
+
+        // Mix, level and pre-delay.
+        {
+            fx::modules::IrReverb dry;
+            dry.on.store (1.0f);
+            dry.mix.store (0.0f);
+            check (differenceDb (runModuleMono (dry, pink), pink, 0, 0) < -100.0f, "IR reverb at mix 0 is the dry sound");
+
+            fx::modules::IrReverb wet;
+            wet.on.store (1.0f);
+            wet.mix.store (100.0f);
+            wet.lowCut.store (20.0f);
+            wet.highCut.store (20000.0f);
+            const auto out = runModuleMono (wet, pink);
+            const auto change = levelDb (out, (size_t) (1.5 * sampleRate), length) - levelDb (pink, (size_t) (1.5 * sampleRate), length);
+            check (std::abs (change) < 6.0f, "fully wet, a built-in room is about as loud as the dry sound (" + juce::String (change, 1) + " dB)");
+
+            fx::modules::IrReverb late;
+            late.on.store (1.0f);
+            late.mix.store (100.0f);
+            late.space.store (0.0f);
+            late.preDelay.store (50.0f);
+            std::vector<float> click ((size_t) sampleRate, 0.0f);
+            click[0] = 1.0f;
+            const auto delayed = runModuleMono (late, click);
+            const auto early = levelDb (delayed, 0, (size_t) (0.045 * sampleRate)), after = levelDb (delayed, (size_t) (0.05 * sampleRate), (size_t) (0.3 * sampleRate));
+            check (after - early > 50.0f, "pre-delay holds the reverb back 50 ms (" + juce::String (after - early, 0) + " dB quieter before)");
+        }
+
+        // A room file, loaded and used in the reverb.
+        {
+            fx::modules::IrReverb reverb;
+            check (reverb.loadFile (irFile).isEmpty(), "the IR reverb loads a file too");
+            reverb.on.store (1.0f);
+            reverb.mix.store (100.0f);
+            reverb.space.store ((float) fx::modules::IrReverb::getFileSpace());
+            reverb.lowCut.store (20.0f);
+            reverb.highCut.store (20000.0f);
+            const auto out = runModuleMono (reverb, impulse);
+            check (out[1000] > 0.1f && std::abs (out[1010] / out[1000] - 0.5f) < 0.05f, "the reverb plays through the loaded file");
+        }
+
+        // Live: the file is kept in the plugin state and the choice turns to "your file".
+        {
+            juce::MemoryBlock saved;
+            {
+                PluginProcessor processor;
+                check (processor.setModuleFile (fx::ModuleType::cab, notAudio).isNotEmpty(), "Live refuses a file that isn't audio");
+                check (processor.setModuleFile (fx::ModuleType::cab, irFile).isEmpty()
+                           && juce::roundToInt (processor.getState().getParameter ("cabModel")->convertFrom0to1 (processor.getState().getParameter ("cabModel")->getValue())) == fx::modules::Cab::fileModel,
+                       "Live loads a cabinet file and selects \"Your IR file\"");
+                processor.getStateInformation (saved);
+            }
+            PluginProcessor restored;
+            restored.setStateInformation (saved.getData(), (int) saved.getSize());
+            check (restored.getModuleFile (fx::ModuleType::cab) == irFile && restored.getModuleFile (fx::ModuleType::irReverb) == juce::File(),
+                   "the Live cabinet file comes back with the plugin state");
+        }
+
+        // DAW: the insert keeps the file, the engine's module plays it, a rebuild keeps it.
+        {
+            daw::Edit edit;
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+            const auto trackId = (int) edit.getTracks()[0][daw::ids::id];
+            const auto insert = edit.addInsert (trackId, fx::ModuleType::cab);
+            const auto insertId = (int) insert[daw::ids::id];
+            edit.setInsertFile (insertId, irFile);
+            engine.rebuildNow();
+
+            const auto fileOnEngine = [&]
+            {
+                juce::File found;
+                engine.forEachInsert (trackId, [&] (int id, fx::Module& module) { if (id == insertId) found = module.getFile(); });
+                return found;
+            };
+            check (fileOnEngine() == irFile, "a DAW cab insert's file loads in the engine");
+
+            edit.addInsert (trackId, fx::ModuleType::irReverb); // a new chain for the track
+            engine.rebuildNow();
+            check (fileOnEngine() == irFile, "the file stays when the track's chain is rebuilt");
+
+            edit.setInsertFile (insertId, {});
+            check (fileOnEngine() == juce::File() && ! edit.getInsert (insertId).hasProperty (daw::ids::file), "clearing it removes the file");
+        }
+
+        folder.deleteRecursively();
+    }
 }
 
 int main()
@@ -13086,6 +13478,14 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "phase")
     {
         testAutoMixPhase();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=cab: just the cabinet and the IR reverb.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "cab")
+    {
+        testCabAndIrReverb();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -13267,6 +13667,7 @@ int main()
     testDenoise();
     testResonanceSuppressor();
     testSmoothAutoMix();
+    testCabAndIrReverb();
     testSmoothing();
     testStems();
 #if MICFX_HAS_DEMUCS

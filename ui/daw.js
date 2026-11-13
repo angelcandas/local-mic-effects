@@ -9,13 +9,14 @@ import { FX_PRESETS, createPresetPicker, presetParams } from "./fxpresets.js";
 import { LibraryBrowser } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
+import { BackingVocals } from "./backing.js";
 import { decorateAiPanels } from "./aiviews.js";
 import { MixCheckView } from "./mixcheck.js";
 import { SongMapView } from "./songmap.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createPatternLane, createPatternsPanel } from "./patterns.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs } from "./rhythm.js";
-import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
+import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, IS_MAC, keyText, polar, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
 
@@ -1135,6 +1136,13 @@ class InsertCard {
   createControl(control) {
     // The autotune key picker and tuner, and the reverb picture, are Live-screen extras.
     if (control.type === "keys") control = { type: "choice", param: control.param, label: "Key" };
+    if (control.type === "file") {
+      const picker = createFilePicker({ label: control.label, load: () => daw("insertFile", { id: this.insert.id }),
+                                        clear: () => daw("insertFile", { id: this.insert.id, path: "" }) });
+      this.filePicker = picker;
+      picker.update(this.insert.file);
+      return picker.element;
+    }
     if (control.type !== "knob" && control.type !== "choice" && control.type !== "toggle") return null;
 
     const info = parameterInfo[control.param] ?? { min: 0, max: 1, skew: 1, step: 0, label: "" };
@@ -1180,6 +1188,7 @@ class InsertCard {
     for (const { param, element } of this.switches)
       element.setAttribute("aria-pressed", String((insert.values[param] ?? 0) >= 0.5));
     for (const { param, widget } of this.controls) widget.update(insert.values[param]);
+    this.filePicker?.update(insert.file);
     this.view?.update();
     for (const { power, row } of this.parts) row.hidden = (insert.values[power] ?? 0) < 0.5;
     for (const [control, element] of this.conditional)
@@ -1279,6 +1288,7 @@ class DawScreen {
     this.buildStems();
     this.buildRebalance();
     this.buildToMidi();
+    this.backing = new BackingVocals(this, this.toMidiPanel, { daw, toast: (...args) => toast(...args) });
     this.buildLibrary();
     this.buildKeyPanel();
     decorateAiPanels(this.root);
@@ -5713,6 +5723,9 @@ class DawScreen {
         heading("Convert to MIDI");
         for (const [label, what, hint] of TO_MIDI_PARTS)
           item(label, () => this.toggleToMidi(true, clip, what), { hint, indent: true });
+        heading("Vocals");
+        item("Build backing vocals…", () => this.backing.toggle(true, clip),
+             { hint: "Harmonies and doubles from this sung lead, as new tracks in a folded group", indent: true });
       }
       if (clip.midi) item("Edit notes", () => { this.setDockTab("track"); this.setDock(true); });
     });

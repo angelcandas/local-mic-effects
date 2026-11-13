@@ -15,7 +15,7 @@ namespace fx
 enum class ModuleType
 {
     highPass, denoise, gate, pitch, eq, paraEq, smooth, compressor, autoLevel, deEsser, exciter, saturation, radio, bitcrusher,
-    robot, filter, autoWah, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, width,
+    robot, filter, autoWah, cab, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, irReverb, width,
     multiband, limiter, masterEq, imager, loudness, // mastering (see Mastering.h)
     transient, dynamicEq
 };
@@ -27,7 +27,7 @@ inline const char* getModuleKey (ModuleType type)
 {
     static constexpr const char* keys[] = {
         "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "smooth", "compressor", "autoLevel", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
-        "robot", "filter", "autoWah", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "width",
+        "robot", "filter", "autoWah", "cab", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "irReverb", "width",
         "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq"
     };
     static_assert (std::size (keys) == numModuleTypes);
@@ -119,6 +119,22 @@ public:
     // what it has learnt that isn't a value, such as the denoiser's noise profile. The
     // previous module may still be running. Message thread.
     virtual void carryStateFrom (const Module&) {}
+
+    // Effects that play through a file the user picks (a cabinet or room impulse
+    // response). Message thread. loadFile says why it can't use a file (empty when it
+    // can); an empty File clears it. The file is the effect's own state, not a value:
+    // the DAW keeps it on the insert, Live in the plugin state.
+    struct FileChoice
+    {
+        juce::String valueId; // the choice that selects "your file", set when one loads
+        float index = 0.0f;
+    };
+
+    virtual bool usesFile() const noexcept                   { return false; }
+    virtual juce::String getFileWildcard() const             { return {}; }
+    virtual juce::String loadFile (const juce::File&)        { return "This effect doesn't use files."; }
+    virtual juce::File getFile() const                       { return {}; }
+    virtual FileChoice getFileChoice() const                 { return {}; }
 
     //==============================================================================
     // Metering, for the UI's live pictures. Peak levels (linear) going into and out of

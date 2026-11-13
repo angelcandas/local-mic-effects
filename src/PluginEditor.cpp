@@ -284,6 +284,64 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                                           args.size() > 1 ? args[1] : juce::var()));
                        })
 
+                       // (moduleKey, action) -> { file, name, error?, cancelled? }. The file a Live effect plays
+                       // through (cabinet, IR reverb): "get", "choose" (a file chooser) or "clear".
+                       .withNativeFunction ("moduleFile", [this] (const auto& args, auto complete)
+                       {
+                           const auto key = args.size() > 0 ? args[0].toString() : juce::String();
+                           const auto action = args.size() > 1 ? args[1].toString() : juce::String ("get");
+
+                           std::optional<fx::ModuleType> type;
+                           for (int i = 0; i < fx::numModuleTypes; ++i)
+                               if (key == fx::getModuleKey ((fx::ModuleType) i))
+                                   type = (fx::ModuleType) i;
+
+                           const auto describe = [this, type] (const juce::String& error, bool cancelled)
+                           {
+                               const auto file = type.has_value() ? processorRef.getModuleFile (*type) : juce::File();
+                               auto* result = new juce::DynamicObject();
+                               result->setProperty ("file", file.getFullPathName());
+                               result->setProperty ("name", file.getFileName());
+                               if (error.isNotEmpty()) result->setProperty ("error", error);
+                               if (cancelled) result->setProperty ("cancelled", true);
+                               return juce::var (result);
+                           };
+
+                           auto* module = type.has_value() ? processorRef.getLiveChain().find (*type) : nullptr;
+                           if (module == nullptr || ! module->usesFile())
+                           {
+                               complete (describe ("This effect doesn't use files.", false));
+                               return;
+                           }
+
+                           if (action == "clear")
+                           {
+                               complete (describe (processorRef.setModuleFile (*type, {}), false));
+                               return;
+                           }
+
+                           if (action != "choose")
+                           {
+                               complete (describe ({}, false));
+                               return;
+                           }
+
+                           const auto current = module->getFile();
+                           folderChooser = std::make_unique<juce::FileChooser> ("Load an impulse response",
+                                                                                current != juce::File() ? current.getParentDirectory()
+                                                                                                        : juce::File::getSpecialLocation (juce::File::userDocumentsDirectory),
+                                                                                module->getFileWildcard());
+                           folderChooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+                                                       [this, describe, type, complete] (const juce::FileChooser& chooser)
+                                                       {
+                                                           const auto file = chooser.getResult();
+                                                           if (! file.existsAsFile())
+                                                               complete (describe ({}, true));
+                                                           else
+                                                               complete (describe (processorRef.setModuleFile (*type, file), false));
+                                                       });
+                       })
+
                        // (action, on) -> { muted, dry }. "mute": the panic button; "dry": hear the mic without effects.
                        .withNativeFunction ("liveControl", [this] (const auto& args, auto complete)
                        {

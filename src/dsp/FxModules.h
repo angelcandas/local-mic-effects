@@ -9,6 +9,8 @@
 #include "PitchEngine.h"
 #include "SpectralDenoiser.h"
 #include "Smooth.h"
+#include "Cabinet.h"
+#include "Convolver.h"
 
 #include <memory>
 
@@ -811,6 +813,255 @@ private:
     std::atomic<double> rate { 48000.0 };
 };
 
+// A speaker cabinet (Cabinet.h): one of the built-in models, or an impulse response file
+// the user loads (Convolver.h), for a guitar or bass played straight in or after an amp.
+// Model and mic are choices: they don't switch the module on.
+class Cab final : public Module
+{
+public:
+    Cab() : Module (ModuleType::cab) {}
+
+    Value& on      = addSwitch ("cabOn");
+    Value& model   = addChoice ("cabModel", (float) Cabinet::Model::closed4x12); // last entry: your IR file
+    Value& mic     = addChoice ("cabMic", (float) Cabinet::Mic::offAxis);
+    Value& lowCut  = addValue ("cabLowCut", 20.0f);    // Hz
+    Value& highCut = addValue ("cabHighCut", 20000.0f); // Hz
+    Value& mix     = addValue ("cabMix", 100.0f);      // %
+
+    static constexpr int fileModel = Cabinet::numModels;
+
+    static juce::StringArray getModelChoices()
+    {
+        auto names = Cabinet::getModelNames();
+        names.add ("Your IR file");
+        return names;
+    }
+
+    // An impulse response longer than this is cut: a cabinet's sound is in its first
+    // few hundred milliseconds, the rest is the room it was measured in.
+    static constexpr double maxIrSeconds = 0.5;
+
+    bool usesFile() const noexcept override              { return true; }
+    juce::String getFileWildcard() const override        { return ImpulseFile::getWildcard(); }
+    juce::File getFile() const override                  { return convolver.getFile(); }
+    FileChoice getFileChoice() const override            { return { "cabModel", (float) fileModel }; }
+
+    juce::String loadFile (const juce::File& file) override
+    {
+        if (file != juce::File())
+            if (const auto error = ImpulseFile::check (file); error.isNotEmpty())
+                return error;
+
+        convolver.setFile (file);
+        fileResponse = file != juce::File() ? measureResponse (file) : std::vector<float>();
+        return {};
+    }
+
+    // response: the cabinet's frequency response (dB at pictureBands log-spaced points,
+    // 40 Hz - 16 kHz), the built-in model's or the loaded file's; file: its name.
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        juce::Array<juce::var> response;
+        const auto usingFile = index (model) >= fileModel;
+
+        if (usingFile)
+        {
+            for (auto db : fileResponse)
+                response.add (std::round (db * 10.0f) / 10.0f);
+        }
+        else
+        {
+            picture.setParameters (getModel(), getMic(), get (lowCut), get (highCut));
+            for (int i = 0; i < pictureBands; ++i)
+                response.add (std::round (picture.getMagnitudeDb (getPictureHz (i)) * 10.0) / 10.0);
+        }
+
+        readings.setProperty ("response", response);
+        readings.setProperty ("file", getFile().getFileName());
+    }
+
+    static constexpr int pictureBands = 48;
+    static double getPictureHz (int i) { return 40.0 * std::pow (400.0, (double) i / (pictureBands - 1)); }
+
+private:
+    Cabinet::Model getModel() const noexcept { return (Cabinet::Model) juce::jlimit (0, Cabinet::numModels - 1, index (model)); }
+    Cabinet::Mic getMic() const noexcept     { return (Cabinet::Mic) juce::jlimit (0, 2, index (mic)); }
+
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override
+    {
+        picture.prepare (spec);
+        cabinet.prepare (spec);
+        dry.setSize ((int) spec.numChannels, (int) spec.maximumBlockSize, false, false, true);
+        update();
+        convolver.prepare (spec);
+    }
+
+    void resetModule() override
+    {
+        cabinet.reset();
+        convolver.reset();
+    }
+
+    void update() noexcept override
+    {
+        cabinet.setParameters (getModel(), getMic(), get (lowCut), get (highCut));
+        convolver.setSource (Convolver::fileSource);
+        convolver.setWetShape (0.0f, get (lowCut), get (highCut));
+        convolver.setMix (fraction (mix), 1.0f - fraction (mix));
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        if (index (model) >= fileModel)
+        {
+            convolver.process (c);
+            return;
+        }
+
+        auto& block = c.getOutputBlock();
+        const auto numSamples = (int) block.getNumSamples();
+        const auto wet = fraction (mix);
+        const auto keepDry = wet < 0.999f && numSamples <= dry.getNumSamples();
+        const auto numChannels = juce::jmin ((int) block.getNumChannels(), dry.getNumChannels());
+
+        if (keepDry)
+            for (int ch = 0; ch < numChannels; ++ch)
+                dry.copyFrom (ch, 0, block.getChannelPointer ((size_t) ch), numSamples);
+
+        cabinet.process (c);
+
+        if (keepDry)
+            for (int ch = 0; ch < numChannels; ++ch)
+            {
+                auto* out = block.getChannelPointer ((size_t) ch);
+                juce::FloatVectorOperations::multiply (out, wet, numSamples);
+                juce::FloatVectorOperations::addWithMultiply (out, dry.getReadPointer (ch), 1.0f - wet, numSamples);
+            }
+    }
+
+    // The file's response for the picture: its first part, first channel, through an
+    // FFT, averaged into the picture's bands and centred on its 100 Hz - 4 kHz average.
+    static std::vector<float> measureResponse (const juce::File& file)
+    {
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        const std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+        if (reader == nullptr)
+            return {};
+
+        constexpr int order = 14, size = 1 << order;
+        std::vector<float> data ((size_t) size * 2, 0.0f);
+        juce::AudioBuffer<float> ir (1, (int) juce::jmin ((juce::int64) size, reader->lengthInSamples));
+        reader->read (&ir, 0, ir.getNumSamples(), 0, true, false);
+        std::copy_n (ir.getReadPointer (0), ir.getNumSamples(), data.begin());
+
+        juce::dsp::FFT fft (order);
+        fft.performFrequencyOnlyForwardTransform (data.data());
+
+        std::vector<float> bands;
+        double centre = 0.0;
+        int counted = 0;
+        for (int i = 0; i < pictureBands; ++i)
+        {
+            const auto lo = getPictureHz (i) / std::pow (400.0, 0.5 / (pictureBands - 1));
+            const auto hi = getPictureHz (i) * std::pow (400.0, 0.5 / (pictureBands - 1));
+            double power = 0.0;
+            int bins = 0;
+            for (auto bin = juce::jmax (1, (int) (lo / reader->sampleRate * size)); bin <= juce::jmin (size / 2, (int) std::ceil (hi / reader->sampleRate * size)); ++bin, ++bins)
+                power += (double) data[(size_t) bin] * data[(size_t) bin];
+
+            const auto db = (float) (10.0 * std::log10 (juce::jmax (1.0e-12, power / juce::jmax (1, bins))));
+            bands.push_back (db);
+            if (getPictureHz (i) >= 100.0 && getPictureHz (i) <= 4000.0)
+            {
+                centre += db;
+                ++counted;
+            }
+        }
+
+        for (auto& db : bands)
+            db = juce::jlimit (-60.0f, 24.0f, db - (float) (centre / juce::jmax (1, counted)));
+        return bands;
+    }
+
+    Cabinet cabinet, picture; // picture: a copy on the message thread for the card
+    Convolver convolver { 128, maxIrSeconds, true };
+    juce::AudioBuffer<float> dry;
+    std::vector<float> fileResponse; // message thread
+};
+
+// A convolution reverb (Convolver.h): built-in rooms made by MicFX, or a room, hall or
+// plate impulse response file the user loads. Pre-delay and low/high cut shape the reverb
+// only; the dry sound passes untouched.
+class IrReverb final : public Module
+{
+public:
+    IrReverb() : Module (ModuleType::irReverb) { convolver.setBuiltIns (spaces::getSpaceImpulses()); }
+
+    Value& on       = addSwitch ("irvOn");
+    Value& space    = addChoice ("irvSpace", 1.0f); // spaces::getSpaces(), last entry: your IR file
+    Value& mix      = addValue ("irvMix", 25.0f);   // %
+    Value& preDelay = addValue ("irvPreDelay", 0.0f); // ms
+    Value& lowCut   = addValue ("irvLowCut", 150.0f);  // Hz
+    Value& highCut  = addValue ("irvHighCut", 12000.0f); // Hz
+
+    static int getFileSpace() { return (int) spaces::getSpaces().size(); }
+
+    static juce::StringArray getSpaceChoices()
+    {
+        juce::StringArray names;
+        for (const auto& s : spaces::getSpaces())
+            names.add (s.name);
+        names.add ("Your IR file");
+        return names;
+    }
+
+    bool usesFile() const noexcept override              { return true; }
+    juce::String getFileWildcard() const override        { return ImpulseFile::getWildcard(); }
+    juce::File getFile() const override                  { return convolver.getFile(); }
+    FileChoice getFileChoice() const override            { return { "irvSpace", (float) getFileSpace() }; }
+
+    juce::String loadFile (const juce::File& file) override
+    {
+        if (file != juce::File())
+            if (const auto error = ImpulseFile::check (file); error.isNotEmpty())
+                return error;
+
+        convolver.setFile (file);
+        return {};
+    }
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        readings.setProperty ("file", getFile().getFileName());
+        readings.setProperty ("seconds", std::round (convolver.getCurrentIrSize() / juce::jmax (1.0, getSampleRate()) * 100.0) / 100.0);
+    }
+
+private:
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override
+    {
+        update();
+        convolver.prepare (spec);
+    }
+
+    void resetModule() override { convolver.reset(); }
+
+    void update() noexcept override
+    {
+        const auto chosen = index (space);
+        convolver.setSource (chosen >= getFileSpace() ? Convolver::fileSource : juce::jmax (0, chosen));
+        convolver.setWetShape (get (preDelay), get (lowCut), get (highCut));
+        // An equal-power crossfade, as the other reverb: 0% is the untouched dry sound.
+        // (The rooms carry more energy than the dry sound; 0.7 brings them level.)
+        const auto angle = fraction (mix) * juce::MathConstants<float>::halfPi;
+        convolver.setMix (0.7f * std::sin (angle), std::cos (angle));
+    }
+
+    void render (const Context& c) noexcept override { convolver.process (c); }
+
+    Convolver convolver { 512, ImpulseFile::maxSeconds, false };
+};
+
 }
 
 namespace fx
@@ -836,6 +1087,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::robot:      return std::make_unique<modules::Robot>();
         case ModuleType::filter:     return std::make_unique<modules::Filter>();
         case ModuleType::autoWah:    return std::make_unique<modules::AutoWah>();
+        case ModuleType::cab:        return std::make_unique<modules::Cab>();
         case ModuleType::tremolo:    return std::make_unique<modules::Tremolo>();
         case ModuleType::vibrato:    return std::make_unique<modules::Vibrato>();
         case ModuleType::chorus:     return std::make_unique<modules::Chorus>();
@@ -844,6 +1096,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::doubler:    return std::make_unique<modules::Doubler>();
         case ModuleType::echo:       return std::make_unique<modules::Echo>();
         case ModuleType::reverb:     return std::make_unique<modules::Reverb>();
+        case ModuleType::irReverb:   return std::make_unique<modules::IrReverb>();
         case ModuleType::width:      return std::make_unique<modules::Width>();
         case ModuleType::multiband:  return std::make_unique<modules::Multiband>();
         case ModuleType::limiter:    return std::make_unique<modules::Limiter>();

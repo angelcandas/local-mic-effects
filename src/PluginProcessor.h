@@ -73,6 +73,13 @@ public:
     // The Live chain, for the effect cards' live readings (module meters are atomics).
     fx::FxChain& getLiveChain() noexcept                    { return chain; }
 
+    // Files the Live chain's effects play through (the cabinet's and the IR reverb's
+    // impulse responses), by module key. Kept in the plugin state; the effect's choice
+    // switches to "your file" when one loads. Returns why a file can't be used (empty
+    // when it loaded); an empty File clears it. Message thread.
+    juce::String setModuleFile (fx::ModuleType, const juce::File&);
+    juce::File getModuleFile (fx::ModuleType) const;
+
     // Records the processed output (and optionally the dry mic) to WAV. Start/stop it
     // from the message thread; processBlock feeds it.
     Recorder& getRecorder() noexcept                        { return recorder; }
