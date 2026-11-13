@@ -18,7 +18,6 @@ export const ALGORITHMS = [
   ["varispeed", "Varispeed", "Like tape: time and pitch change together"],
 ];
 
-const STEPS = [[1, "1/4 (beats)"], [0.5, "1/8"], [1 / 3, "1/8 triplets"], [0.25, "1/16"], ["bar", "Bars"]];
 
 // While the song plays, a drag can be heard before it's let go: `send` passes what the
 // drag would store ({ markers } for previewWarp, { notes } for previewPitchNotes) at most
@@ -201,58 +200,14 @@ export function createRhythmPanel(screen, track, ui) {
   const algorithm = algorithmControls(daw, audioClips);
   sections.append(section("transpose", "Pitch", true, knobs, keyInfo, ...algorithm.elements));
 
-  // Quantize.
-  const grid = html("select", "dropdown");
-  grid.title = "What to quantize to: the project's tempo grid, or the groove of another track";
-  grid.append(new Option("Project grid", -1));
-  for (const other of screen.session.tracks) if (other.id !== track.id && other.clips.length) grid.append(new Option(`Groove of ${other.name}`, other.id));
-  grid.value = String(prefs.get("groove", -1));
-  if (grid.selectedIndex < 0) grid.value = "-1";
-  grid.addEventListener("change", () => prefs.set("groove", Number(grid.value)));
-
-  const steps = html("select", "dropdown");
-  steps.title = "Note value: the grid lines onsets snap to";
-  STEPS.forEach(([v, t]) => steps.append(new Option(t, v)));
-  steps.value = String(prefs.get("steps", 0.5));
-  if (steps.selectedIndex < 0) steps.value = "0.5";
-  steps.addEventListener("change", () => prefs.set("steps", steps.value));
-  const gridRow = html("div", "panel-actions rhythm-grid-row");
-  gridRow.append(grid, steps);
-
-  const percent = (key, label, fallback, title) => {
-    const knob = new ValueKnob({ label, min: 0, max: 100, step: 1, value: prefs.get(key, fallback), defaultValue: fallback,
-                                 format: (v) => `${Math.round(v)}%`, onChange: (v) => prefs.set(key, Math.round(v)) });
-    knob.element.title = title;
-    return knob;
-  };
-  const strength = percent("strength", "Strength", 100, "How far onsets move towards the grid (less keeps some feel)");
-  const swing = percent("swing", "Swing", 0, "Delay every second line, up to a triplet feel");
-  const sensitivity = percent("sensitivity", "Detect", 50, "How soft a note start still counts (also the note starts shown in the clip editor)");
-  const quantizeKnobs = html("div", "insert-controls rhythm-knobs");
-  quantizeKnobs.append(strength.element, swing.element, sensitivity.element);
-
-  const option = (key, text, title) => {
-    const label = html("label", "rhythm-check");
-    const box = html("input");
-    Object.assign(box, { type: "checkbox", checked: prefs.get(key, false) });
-    box.addEventListener("change", () => prefs.set(key, box.checked));
-    label.append(box, document.createTextNode(` ${text}`));
-    label.title = title;
-    return label;
-  };
-  const quantizeOptions = html("div", "panel-actions");
-  quantizeOptions.append(
-    option("iterative", "Iterative", "Each press moves the notes from where they are now: at 50%, two presses close three quarters of the gap"),
-    option("slice", "Slice", "Cut at the notes and move the pieces instead of stretching (best for hard drums; gaps stay silent)"));
-
-  const quantizeRow = html("div", "panel-actions");
-  quantizeRow.append(
-    button("tool", "Quantize track", "Warp every clip on this track so its notes start on the grid",
-      async () => {
-        const result = await daw("quantize", { track: owner.id, ...savedQuantizeArgs(screen.session, owner.id) });
-        if (result?.ok) toast(result.onsets ? `Quantize ${owner.name}: ${result.moved} of ${result.onsets} notes moved onto the grid.` : `Quantize ${owner.name}: no clear note starts found.`);
-      }),
-    button("tool", "Unwarp track", "Put this track's clips back as recorded (time only; pitch stays)", () => daw("clearWarp", { track: owner.id })));
+  // Quantize (the same controls as the clip editor's Quantize section).
+  const quantize = createQuantizeControls(screen, ui, {
+    target: () => ({ track: owner.id }),
+    trackId: () => owner.id,
+    quantizeText: "Quantize track", quantizeTitle: "Warp every clip on this track so its notes start on the grid",
+    resetText: "Reset track", resetTitle: "Put this track's clips back as recorded (time only; pitch stays)",
+    name: () => owner.name,
+  });
 
   // Tempo from this track.
   const lineUp = html("label", "rhythm-check");
@@ -284,7 +239,7 @@ export function createRhythmPanel(screen, track, ui) {
   const linkRow = html("div", "panel-actions");
   linkRow.append(linkSelect, unlink);
 
-  sections.append(section("quantize", "Quantize", true, gridRow, quantizeKnobs, quantizeOptions, quantizeRow),
+  sections.append(section("quantize", "Quantize", true, ...quantize.elements),
                   section("tempo", "Tempo", true, tempoRow, lineUp, tempoInfo),
                   section("link", "Linked tracks", false, linkRow, linkInfo));
 
@@ -293,6 +248,7 @@ export function createRhythmPanel(screen, track, ui) {
     pitch.update(t.transpose);
     keyInfo.textContent = keyCaption(screen.session, t.transpose || 0);
     algorithm.update(audioClips());
+    quantize.update();
     const linked = screen.session.tracks.filter((o) => t.link && o.link === t.link && o.id !== t.id);
     const candidates = screen.session.tracks.filter((o) => o.id !== t.id && o.kind !== "midi" && !(t.link && o.link === t.link));
     linkSelect.replaceChildren(new Option(linked.length ? "Link another track…" : "Link with track…", ""),
@@ -320,19 +276,141 @@ export function drawWarpMarkers(element, clip, zoom) {
   }
 }
 
-// The quantize settings last chosen in the "Pitch & time" panel, for the Q shortcut.
+// Grid note values (beats) and feels; "bar" is a whole bar.
+const NOTE_VALUES = [[1, "1/4"], [0.5, "1/8"], [0.25, "1/16"], [0.125, "1/32"], ["bar", "Bars"]];
+const FEELS = [["straight", "Straight", 1], ["triplet", "Triplet", 2 / 3], ["dotted", "Dotted", 1.5]];
+
+// The note value and feel last chosen (older settings kept a triplet eighth as 1/3).
+function gridChoice() {
+  let steps = prefs.get("steps", 0.5), feel = prefs.get("feel", "straight");
+  if (Math.abs(Number(steps) - 1 / 3) < 1e-6) { steps = 0.5; feel = "triplet"; }
+  if (!NOTE_VALUES.some(([v]) => String(v) === String(steps))) steps = 0.5;
+  if (!FEELS.some(([k]) => k === feel)) feel = "straight";
+  return { steps, feel };
+}
+
+// The quantize settings last chosen (the clip editor's Quantize section and the track's
+// Pitch & time card share them), for the Quantize buttons and the Q shortcut.
 export function savedQuantizeArgs(session, trackId) {
-  const steps = prefs.get("steps", 0.5);
-  let groove = Number(prefs.get("groove", -1));
-  const leader = session.tracks.find((t) => t.id === groove);
-  if (groove === trackId || !leader?.clips.length) groove = -1;
-  return {
-    steps: steps === "bar" ? session.beatsPerBar ?? 4 : Number(steps) || 0.5,
+  const { steps, feel } = gridChoice();
+  const multiplier = FEELS.find(([k]) => k === feel)?.[2] ?? 1;
+  const groove = prefs.get("groove", -1);
+  const args = {
+    steps: steps === "bar" ? session.beatsPerBar ?? 4 : (Number(steps) || 0.5) * multiplier,
     strength: prefs.get("strength", 100) / 100,
     swing: prefs.get("swing", 0) / 100,
-    sensitivity: prefs.get("sensitivity", 50) / 100,
+    catch: prefs.get("catch", 100) / 200,
+    safe: prefs.get("safe", 0) / 200,
+    maxMove: prefs.get("maxMove", 0) / 1000,
     iterative: prefs.get("iterative", false),
     slice: prefs.get("slice", false),
-    groove,
+    groove: -1,
+  };
+  if (typeof groove === "string" && groove.startsWith("saved:")) {
+    const name = groove.slice(6);
+    if ((session.grooves ?? []).some((g) => g.name === name)) args.savedGroove = name;
+  } else {
+    const leader = session.tracks.find((t) => t.id === Number(groove));
+    if (Number(groove) !== trackId && leader?.clips.length) args.groove = Number(groove);
+  }
+  return args;
+}
+
+// The quantize controls: grid (note value, feel, or a groove: another track's or a saved one),
+// Strength, Swing, Catch, Safe zone, Max move, Iterative, Slice, Auto, and the Quantize and
+// Reset buttons. `options`: target() -> the quantize/clearWarp args ({ clips } or { track }),
+// trackId(), name(), and the buttons' texts. With Auto on, changing a control quantizes again
+// (joined to the last Quantize as one undo step).
+export function createQuantizeControls(screen, ui, options) {
+  const { daw, ValueKnob, button, toast } = ui;
+  let autoChained = false;
+  const run = async (chained) => {
+    const result = await daw("quantize", { ...options.target(), ...savedQuantizeArgs(screen.session, options.trackId()), continue: chained });
+    if (!result?.ok) return;
+    autoChained = true;
+    if (!chained) toast(result.onsets ? `Quantize ${options.name()}: ${result.moved} of ${result.onsets} notes moved onto the grid.` : `Quantize ${options.name()}: no clear note starts found.`);
+  };
+  let autoTimer = 0;
+  const changed = () => {
+    if (!prefs.get("autoQuantize", false) || !autoChained) return;
+    clearTimeout(autoTimer);
+    autoTimer = setTimeout(() => run(true), 250);
+  };
+
+  const { steps, feel } = gridChoice();
+  const noteValue = html("select", "dropdown");
+  noteValue.title = "The grid's note value";
+  NOTE_VALUES.forEach(([v, t]) => noteValue.append(new Option(t, v)));
+  noteValue.value = String(steps);
+  const feelSelect = html("select", "dropdown");
+  feelSelect.title = "Straight, triplet or dotted lines";
+  FEELS.forEach(([k, t]) => feelSelect.append(new Option(t, k)));
+  feelSelect.value = feel;
+  const groove = html("select", "dropdown rhythm-groove");
+  groove.title = "What to quantize to: the grid, the groove of another track, or a groove saved from hitpoints (Hitpoints: Create groove)";
+  const fillGrooves = () => {
+    const keep = String(prefs.get("groove", -1));
+    groove.replaceChildren(new Option("Grid", -1));
+    for (const other of screen.session.tracks) if (other.id !== options.trackId() && other.clips.length && other.kind !== "midi") groove.append(new Option(`Groove of ${other.name}`, other.id));
+    for (const g of screen.session.grooves ?? []) groove.append(new Option(`Groove: ${g.name}`, `saved:${g.name}`));
+    groove.value = keep;
+    if (groove.selectedIndex < 0) groove.value = "-1";
+    const byGroove = groove.value !== "-1";
+    noteValue.disabled = byGroove && groove.value.startsWith("saved:");
+    feelSelect.disabled = noteValue.disabled || noteValue.value === "bar";
+  };
+  noteValue.addEventListener("change", () => { prefs.set("steps", noteValue.value); fillGrooves(); changed(); });
+  feelSelect.addEventListener("change", () => { prefs.set("feel", feelSelect.value); changed(); });
+  groove.addEventListener("change", () => {
+    const v = groove.value;
+    prefs.set("groove", v.startsWith("saved:") ? v : Number(v));
+    fillGrooves();
+    changed();
+  });
+  const gridRow = html("div", "panel-actions rhythm-grid-row");
+  gridRow.append(noteValue, feelSelect, groove);
+
+  const knob = (key, label, max, fallback, unit, title) => {
+    const k = new ValueKnob({ label, min: 0, max, step: 1, value: prefs.get(key, fallback), defaultValue: fallback,
+                              format: (v) => (unit === "ms" ? (Math.round(v) ? `${Math.round(v)} ms` : "Off") : `${Math.round(v)}%`),
+                              onChange: (v) => { prefs.set(key, Math.round(v)); changed(); } });
+    k.element.title = title;
+    return k;
+  };
+  const knobs = html("div", "insert-controls rhythm-knobs");
+  knobs.append(
+    knob("strength", "Strength", 100, 100, "%", "How far note starts move towards the grid (less keeps some feel)").element,
+    knob("swing", "Swing", 100, 0, "%", "Delay every second line, up to a triplet feel").element,
+    knob("catch", "Catch", 100, 100, "%", "Only note starts this close to a grid line move (100%: all of them)").element,
+    knob("safe", "Safe zone", 100, 0, "%", "Note starts already this close to a grid line stay where they are").element,
+    knob("maxMove", "Max move", 500, 0, "ms", "The farthest a note start moves (Off: no limit)").element);
+
+  const option = (key, text, title, onChange) => {
+    const label = html("label", "rhythm-check");
+    const box = html("input");
+    Object.assign(box, { type: "checkbox", checked: prefs.get(key, false) });
+    box.addEventListener("change", () => { prefs.set(key, box.checked); onChange?.(box.checked); });
+    label.append(box, document.createTextNode(` ${text}`));
+    label.title = title;
+    return label;
+  };
+  const optionRow = html("div", "panel-actions");
+  optionRow.append(
+    option("iterative", "Iterative", "Each press moves the notes from where they are now: at 50%, two presses close three quarters of the gap", changed),
+    option("slice", "Slice", "Cut at the notes and move the pieces instead of stretching (best for hard drums; gaps stay silent)", changed),
+    option("autoQuantize", "Auto", "After a Quantize, changing a setting quantizes again at once (one undo step)"));
+
+  const buttons = html("div", "panel-actions");
+  const reset = button("tool", options.resetText ?? "Reset", options.resetTitle ?? "Put the timing back as recorded (pitch stays)",
+    () => { autoChained = false; daw("clearWarp", options.target()); });
+  buttons.append(button("tool", options.quantizeText ?? "Quantize", options.quantizeTitle ?? "Warp so the note starts land on the grid (Q)", () => run(false)), reset);
+
+  const caption = html("p", "panel-caption", "Uses the hitpoints the clip editor shows (Hitpoints sets which count).");
+  fillGrooves();
+  return {
+    elements: [gridRow, knobs, optionRow, buttons, caption],
+    reset,
+    update: () => fillGrooves(),
+    dispose: () => clearTimeout(autoTimer),
   };
 }

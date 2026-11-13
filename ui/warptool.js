@@ -94,7 +94,7 @@ export function createWarpTool(ctx) {
   // A note start within SNAP_PX of a moment (rendered time), or -1.
   const hitAt = (lane, renderedTime) => {
     let best = -1, distance = SNAP_PX * perPx();
-    lane.hits.forEach(([t], i) => { const d = Math.abs(t - renderedTime); if (d < distance) { distance = d; best = i; } });
+    lane.hits.forEach(([t, , state], i) => { const d = Math.abs(t - renderedTime); if (state !== "disabled" && d < distance) { distance = d; best = i; } });
     return best;
   };
   // Where a new tab goes: on a note start nearby (unless Alt), or right at the pointer.
@@ -570,7 +570,7 @@ export function createWarpTool(ctx) {
     if (lane.clip.timeBypass || !lane.hits.length) return;
     const markers = withEdges(lane, markersOf(lane));
     const c = lane.clip;
-    for (const [t] of lane.hits) if (t > c.offset + 0.005 && t < c.offset + c.length - 0.005) addTab(lane, markers, t);
+    for (const [t, , state] of lane.hits) if (state !== "disabled" && t > c.offset + 0.005 && t < c.offset + c.length - 0.005) addTab(lane, markers, t);
     store(lane, markers);
   };
 
