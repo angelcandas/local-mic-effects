@@ -11,6 +11,7 @@ import { PianoRoll } from "./pianoroll.js";
 import { TakeLanes } from "./takes.js";
 import { decorateAiPanels } from "./aiviews.js";
 import { MixCheckView } from "./mixcheck.js";
+import { SongMapView } from "./songmap.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createPatternLane, createPatternsPanel } from "./patterns.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs } from "./rhythm.js";
@@ -136,6 +137,7 @@ const ICONS = {
   saveas: '<path d="M5 3h11l4 4v6M5 3a1 1 0 0 0-1 1v16a1 1 0 0 0 1 1h7"/><path d="M8 3v5h7V3M17 15v6M14 18h6"/>',
   import: '<path d="M12 3v12M7 10l5 5 5-5M4 20h16"/>',
   mixcheck: '<path d="M3 12h3l2-6 4 12 3-9 2 3h4"/>',
+  songmap: '<rect x="2" y="8" width="7" height="8" rx="1.5"/><rect x="10.5" y="8" width="4.5" height="8" rx="1.5"/><rect x="16.5" y="8" width="5.5" height="8" rx="1.5"/>',
   automix: '<path d="M5 4v16M12 4v16M19 4v16"/><circle cx="5" cy="14" r="2" fill="currentColor"/><circle cx="12" cy="8" r="2" fill="currentColor"/><circle cx="19" cy="15" r="2" fill="currentColor"/>',
   export: '<path d="M12 15V3M7 8l5-5 5 5M4 20h16"/>',
   tempo: '<path d="M3 18h5l5-10h8"/><circle cx="8" cy="18" r="1.6" fill="currentColor"/><circle cx="13" cy="8" r="1.6" fill="currentColor"/><path d="M3 21h18" stroke-dasharray="2 3"/>',
@@ -1273,6 +1275,7 @@ class DawScreen {
     this.buildBanners();
     this.buildAutoMix();
     this.buildMixCheck();
+    this.buildSongMap();
     this.buildStems();
     this.buildRebalance();
     this.buildToMidi();
@@ -1406,23 +1409,36 @@ class DawScreen {
   }
 
   renderMarkers() {
-    this.ruler.querySelectorAll(".marker").forEach((m) => m.remove());
+    this.ruler.querySelectorAll(".marker, .marker-span").forEach((m) => m.remove());
     this.inner.querySelectorAll(".marker-line").forEach((m) => m.remove());
     for (const marker of this.markers) {
       const flag = html("div", "marker");
       flag.style.left = `${marker.time * this.zoom}px`;
       flag.title = `${marker.name}\nClick to go here · Drag to move · Double-click to rename`;
+      const section = marker.length > 0 && marker.section;
+      let span = null;
+      if (section) {
+        flag.classList.add("is-section");
+        flag.style.setProperty("--section", marker.colour || "var(--warn)");
+        flag.style.maxWidth = `${Math.max(24, marker.length * this.zoom - 2)}px`;
+        flag.title = `${marker.name} (song section, ${spokenDuration(marker.length)})\nClick to go here · Drag to move · Double-click to rename · Right-click to loop it`;
+        span = html("div", "marker-span");
+        span.style.setProperty("--section", marker.colour || "var(--warn)");
+        span.style.left = `${marker.time * this.zoom}px`;
+        span.style.width = `${marker.length * this.zoom}px`;
+      }
       const name = html("span", "marker-name", marker.name);
       const remove = button("marker-remove", "×", "Delete the marker", (event) => { event.stopPropagation(); daw("removeMarker", { id: marker.id }); });
       remove.addEventListener("pointerdown", (event) => event.stopPropagation());
       flag.append(name, remove);
       flag.addEventListener("pointerdown", (event) => {
+        event.stopPropagation(); // not the ruler's (a right-click there would move the playhead)
         if (event.button !== 0) return;
-        event.stopPropagation();
         let time = marker.time;
         drag(event, (dx, dy, e) => {
           time = this.snapTime(marker.time + dx / this.zoom, e);
           flag.style.left = `${time * this.zoom}px`;
+          if (span) span.style.left = `${time * this.zoom}px`;
           line.style.left = `${this.headWidth + time * this.zoom}px`;
         }, (moved) => {
           if (moved) daw("setMarker", { id: marker.id, time });
@@ -1436,7 +1452,8 @@ class DawScreen {
         popMenu(event.clientX, event.clientY, ({ item, rule }) => {
           item("Go here", () => this.seek(marker.time));
           item("Rename", () => flag.dispatchEvent(new MouseEvent("dblclick", { bubbles: false })), { hint: "Or double-click the marker" });
-          item(next ? `Loop to "${next.name}"` : "Loop to the next marker", () => daw("loop", { on: true, start: marker.time, end: next.time }), { disabled: !next });
+          if (section) item("Loop this section", () => daw("loop", { on: true, start: marker.time, end: marker.time + marker.length }));
+          else item(next ? `Loop to "${next.name}"` : "Loop to the next marker", () => daw("loop", { on: true, start: marker.time, end: next.time }), { disabled: !next });
           rule();
           item("Delete", () => daw("removeMarker", { id: marker.id }), { danger: true });
         });
@@ -1465,8 +1482,10 @@ class DawScreen {
         input.focus();
         input.select();
       });
-      const line = html("div", "marker-line");
+      const line = html("div", section ? "marker-line is-section" : "marker-line");
       line.style.left = `${this.headWidth + marker.time * this.zoom}px`;
+      if (section) line.style.setProperty("--section", marker.colour || "var(--warn)");
+      if (span) this.ruler.append(span);
       this.ruler.append(flag);
       this.inner.append(line);
     }
@@ -1514,6 +1533,7 @@ class DawScreen {
     this.signature.addEventListener("change", () => daw("beatsPerBar", { beats: Number(this.signature.value) }));
 
     this.keyButton = iconButton("tool key-button", "key", "The song's key: detect it, pick it, and set the autotune to it", () => this.toggleKeyPanel());
+    this.songMapButton = iconButton("tool songmap-button", "songmap", "Song map: find the intro, verses, choruses and bars, and let the tempo follow a take played without a click", () => this.songMap.toggle());
     this.showTempo = prefs.get("showTempo", false);
     this.tempoButton = iconButton("toggle has-label", "tempo", "Tempo track: tempo changes and ramps over the song", () => {
       this.showTempo = !this.showTempo;
@@ -1553,7 +1573,7 @@ class DawScreen {
     const click = html("div", "tb-joined click-group");
     click.append(this.metronomeButton, this.clickMore, this.clickPopover);
 
-    const left = zone("zone-song", songTempo, this.signature, this.keyButton, this.tempoButton, click);
+    const left = zone("zone-song", songTempo, this.signature, this.keyButton, this.songMapButton, this.tempoButton, click);
 
     //---------------------------------------------------------------- centre: transport
     const start = button("transport-button", "", "Back to the start (Enter)", () => daw("transport", { action: "stop" }));
@@ -1687,6 +1707,7 @@ class DawScreen {
       { level: 3, element: this.tempoButton, label: "Tempo track", run: () => this.tempoButton.click(), checked: () => this.showTempo },
       { level: 3, element: tap, label: "Tap tempo", run: () => this.tapTempo() },
       { level: 3, element: this.keyButton, label: "Song key…", run: () => this.toggleKeyPanel() },
+      { level: 3, element: this.songMapButton, label: "Song map…", run: () => this.songMap.toggle() },
       { level: 4, element: this.libraryButton, label: "Library", run: () => this.library.toggle(), checked: () => !this.library.collapsed },
       { level: 4, element: this.dockButton, label: "Bottom panel", run: () => this.run("toggleDock"), checked: () => !this.root.classList.contains("dock-hidden") },
       { level: 5, element: this.autoMixButton, label: "Auto Mix…", run: () => this.toggleAutoMix() },
@@ -4276,6 +4297,7 @@ class DawScreen {
     if (show && this.stemsPanel) this.stemsPanel.hidden = true;
     if (show && this.keyPanel) this.keyPanel.hidden = true;
     if (show && this.mixCheck) this.mixCheck.panel.hidden = true;
+    if (show && this.songMap) this.songMap.panel.hidden = true;
     if (show) {
       this.exportPanel.querySelector("[name=loopOnly]").disabled = !this.session?.loop.on;
       this.exportPanel.querySelector(".export-result").replaceChildren();
@@ -4337,7 +4359,7 @@ class DawScreen {
     const panel = this.toMidiPanel;
     panel.hidden = !show;
     if (!show) return;
-    for (const other of [this.exportPanel, this.stemsPanel, this.autoMixPanel, this.mixCheck?.panel]) if (other) other.hidden = true;
+    for (const other of [this.exportPanel, this.stemsPanel, this.autoMixPanel, this.mixCheck?.panel, this.songMap?.panel]) if (other) other.hidden = true;
     if (!this.toMidi.running) {
       this.toMidi.clip = clip;
       panel.querySelector("[name=what]").value = what;
@@ -4415,6 +4437,7 @@ class DawScreen {
     if (this.exportPanel) this.exportPanel.hidden = true;
     if (this.autoMixPanel) this.autoMixPanel.hidden = true;
     if (this.mixCheck) this.mixCheck.panel.hidden = true;
+    if (this.songMap) this.songMap.panel.hidden = true;
     if (this.rebalancePanel) this.rebalancePanel.hidden = true;
     if (!this.stems.running) {
       this.stems.clip = clip;
@@ -4503,7 +4526,7 @@ class DawScreen {
     panel.hidden = !show;
     if (!show) return;
     if (this.mixCheck) this.mixCheck.panel.hidden = true;
-    for (const other of [this.exportPanel, this.toMidiPanel, this.stemsPanel, this.autoMixPanel]) if (other) other.hidden = true;
+    for (const other of [this.exportPanel, this.toMidiPanel, this.stemsPanel, this.autoMixPanel, this.songMap?.panel]) if (other) other.hidden = true;
     if (this.rebalance.running) return;
     this.rebalance.clip = clip;
     this.rebalance.info = null;
@@ -4684,6 +4707,26 @@ class DawScreen {
         this.stemsPanel.hidden = true;
         this.toMidiPanel.hidden = true;
         if (this.rebalancePanel) this.rebalancePanel.hidden = true;
+        if (this.songMap) this.songMap.panel.hidden = true;
+      },
+    });
+  }
+
+  buildSongMap() {
+    this.songMap = new SongMapView(this.root.querySelector(".songmap-panel"), {
+      daw,
+      seek: (seconds) => this.seek(seconds),
+      loop: (start, end) => daw("loop", { on: true, start, end }),
+      setJob: (id, job) => this.setJob(id, job),
+      endJob: (id) => this.endJob(id),
+      closeOthers: () => {
+        this.toggleExportPanel(false);
+        this.autoMixPanel.hidden = true;
+        this.keyPanel.hidden = true;
+        this.stemsPanel.hidden = true;
+        this.toMidiPanel.hidden = true;
+        this.mixCheck.panel.hidden = true;
+        if (this.rebalancePanel) this.rebalancePanel.hidden = true;
       },
     });
   }
@@ -4696,6 +4739,7 @@ class DawScreen {
     if (show) {
       this.toggleExportPanel(false);
       this.mixCheck.panel.hidden = true;
+      this.songMap.panel.hidden = true;
       this.renderAutoMixMode();
       if (!this.autoMix.plan) this.refreshAutoMixTags(true);
     }
@@ -4827,6 +4871,7 @@ class DawScreen {
       this.toggleExportPanel(false);
       this.autoMixPanel.hidden = true;
       this.mixCheck.panel.hidden = true;
+      this.songMap.panel.hidden = true;
       this.renderKeyPanel();
     }
   }
@@ -5663,6 +5708,8 @@ class DawScreen {
         heading("Audio");
         for (const [label, command, hint] of AUDIO_PROCESSES)
           item(label, () => this.run(command), { hint, indent: true });
+        item("Find song sections…", () => this.songMap.toggle(true, { id: clip.id, name: clip.name }), { indent: true,
+             hint: "Song map: the intro, verses, choruses and bars of this clip (an imported song or a take), and its tempo" });
         heading("Convert to MIDI");
         for (const [label, what, hint] of TO_MIDI_PARTS)
           item(label, () => this.toggleToMidi(true, clip, what), { hint, indent: true });

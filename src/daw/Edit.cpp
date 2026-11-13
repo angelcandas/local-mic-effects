@@ -1806,6 +1806,37 @@ juce::Array<juce::ValueTree> Edit::getMarkers() const
     return markers;
 }
 
+void Edit::setSongSections (const std::vector<SectionMarker>& sections)
+{
+    for (const auto& marker : getSongSections())
+        state.removeChild (marker, undoTarget);
+
+    for (const auto& s : sections)
+    {
+        if (s.length <= 0.0)
+            continue;
+        juce::ValueTree marker (ids::MARKER);
+        marker.setProperty (ids::id, takeNextId(), nullptr);
+        marker.setProperty (ids::name, s.name.isNotEmpty() ? s.name.substring (0, 60) : juce::String ("Section"), nullptr);
+        marker.setProperty (ids::time, juce::jmax (0.0, s.start), nullptr);
+        marker.setProperty (ids::length, s.length, nullptr);
+        marker.setProperty (ids::section, s.kind.isNotEmpty() ? s.kind : juce::String ("part"), nullptr);
+        marker.setProperty (ids::letter, s.letter, nullptr);
+        if (s.colour.isNotEmpty())
+            marker.setProperty (ids::colour, s.colour, nullptr);
+        state.appendChild (marker, undoTarget);
+    }
+}
+
+juce::Array<juce::ValueTree> Edit::getSongSections() const
+{
+    juce::Array<juce::ValueTree> sections;
+    for (const auto& marker : getMarkers())
+        if (isSection (marker))
+            sections.add (marker);
+    return sections;
+}
+
 void Edit::setLoop (bool on, double startSeconds, double endSeconds)
 {
     const auto start = juce::jmax (0.0, juce::jmin (startSeconds, endSeconds));
