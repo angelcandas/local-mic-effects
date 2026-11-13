@@ -637,6 +637,11 @@ export class LibraryBrowser {
   // target: { track (-1: a new one, 0: master), start (seconds; -1: the playhead) }
   async drop(payload, target) {
     const screen = this.screen;
+    if (payload.kind === "audio" && target.pattern) {
+      await screen.patternsPanel.dropSample(payload.file, target);
+      this.addRecent(payload);
+      return;
+    }
     if (payload.kind === "audio") {
       const result = await this.run("importFile", { file: payload.file, track: target.track, start: target.start ?? -1 });
       if (result?.ok && typeof result.track === "number") screen.showWhenDrawn({ track: result.track, clip: result.clip, start: result.start });
@@ -758,6 +763,14 @@ export class LibraryBrowser {
     if (!under || !screen.root.contains(under)) return null;
 
     const timeIn = (lane) => screen.snapTime((event.clientX - lane.getBoundingClientRect().left) / screen.zoom, event);
+
+    // The Patterns tab takes an audio file as a sample: on a row of a Kit, or as a new row.
+    const rack = kind === "audio" ? under.closest(".patterns-panel") : null;
+    if (rack && screen.patternsPanel?.dropSample) {
+      const label = under.closest(".pat-label[data-track]");
+      return { pattern: true, track: label ? Number(label.dataset.track) : null, pitch: label ? Number(label.dataset.pitch) : null,
+               element: label ?? rack, label: label ? `Kit pad ${label.textContent}` : "Pattern rack: new row" };
+    }
 
     // The master takes effects and presets; a file or an instrument dropped on it goes
     // on a new track (the master row is the space below the tracks).

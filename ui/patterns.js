@@ -469,6 +469,8 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
       const line = html("div", "pat-row");
       const label = html("button", "pat-label", view.drum ? row.name : noteName(row.pitch));
       label.type = "button";
+      label.dataset.track = String(track.id);
+      label.dataset.pitch = String(row.pitch);
       label.title = `${row.name}: click to hear it and show its velocity bars, right-click for fill, shift and more`;
       label.classList.toggle("is-selected", selectedRow()?.track === track.id && selectedRow()?.pitch === row.pitch);
       label.addEventListener("click", () => { audition(track, row.pitch); selectRow(track, row.pitch); });
@@ -618,7 +620,7 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
       element.append(empty());
       return;
     }
-    const rack = html("div", "pat-rack");
+    const rack = html("div", "pat-rack is-drop-rack");
     tracks.forEach((track, i) => rack.append(trackBlock(pattern, track, i)));
     const add = html("div", "pat-foot");
     const addTrack = html("button", "tool", "+ instrument");
@@ -632,10 +634,53 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     rack.scrollTop = scroll;
   };
 
+  // A sample dragged from the library onto the rack (browser.js). On a row of a Kit track it
+  // goes on that pad; anywhere else in the rack it becomes a new row: the next free pad of a Kit
+  // track (the selected one if it is a Kit, else the first, else a new Kit track).
+  const isKit = (track) => /kit/i.test(track.instrument?.id ?? "") || /^kit$/i.test(track.instrument?.name ?? "");
+  const dropSample = async (file, hit) => {
+    const patternId = selected()?.id ?? (await newPattern());
+    if (typeof patternId !== "number") return;
+    let track = null, pitch = null;
+    if (hit?.track != null) {
+      track = midiTracks().find((t) => t.id === hit.track) ?? null;
+      pitch = hit.pitch ?? null;
+      if (track && !isKit(track)) track = null;
+    }
+    if (!track) {
+      track = midiTracks().find((t) => t.id === selectedRow()?.track && isKit(t)) ?? midiTracks().find(isKit) ?? null;
+      if (!track) {
+        const found = await daw("instruments");
+        const kit = (found?.instruments ?? []).find((i) => /kit/i.test(i.id) || i.name === "Kit");
+        if (!kit) return void toast("The Kit instrument isn't available.", "is-error");
+        const id = await addInstrumentTrack(kit);
+        if (typeof id !== "number") return;
+        await screen.waitForTrack?.(id);
+        track = (screen.session?.tracks ?? []).find((t) => t.id === id) ?? { id, keyNames: {} };
+      }
+    }
+    const target = screen.session?.patterns?.find((p) => p.id === patternId) ?? { id: patternId, parts: [] };
+    const part = partOf(target, track.id);
+    const shown = trackRows(track, part).rows.map((r) => r.pitch);
+    if (pitch == null) {
+      // The next pad (notes 36-51) with no sample whose row isn't busy.
+      const named = new Set(Object.keys(track.keyNames ?? {}).filter((k) => track.keyNames[k]).map(Number));
+      pitch = Array.from({ length: 16 }, (_, i) => 36 + i).find((p) => !named.has(p) && !(part?.notes ?? []).some((n) => n.pitch === p)) ?? 36;
+    }
+    const result = await daw("kitSample", { track: track.id, note: pitch, file });
+    if (result?.ok === false) return;
+    if (!shown.includes(pitch))
+      await daw("setPart", { pattern: target.id, track: track.id, drum: true, rows: [...shown, pitch] });
+    screen.selectedPattern = target.id;
+    screen.patternRow = { track: track.id, pitch };
+    render(true);
+  };
+
   return {
     element,
     update() { render(); },
     ensurePattern,
+    dropSample,
     // The light that runs along the steps while the pattern loops.
     setStatus(status) {
       const pattern = selected();
