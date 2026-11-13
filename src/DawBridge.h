@@ -200,6 +200,9 @@ private:
     analysis::MixPlan autoMixPlan;
     analysis::MixOptions autoMixOptions; // the effects it may add (the inserts are filled per plan)
     bool autoMixReference = false; // the plan matches a reference song
+    std::map<int, float> autoMixPans;  // pans the last applied plan set (not yours: planned again)
+    std::map<juce::String, bool> stereoFiles; // audio files by path: a real stereo image (hasStereoImage)
+    bool hasStereoImage (const juce::ValueTree& track);
     bool autoMixSplit = false;
     juce::String autoMixSplitNote;     // split full songs (instrumentals) into stems before listening
     juce::String autoMixReferenceName;

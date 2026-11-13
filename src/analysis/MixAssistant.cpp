@@ -1173,6 +1173,393 @@ namespace
             plan.notes.add (name + " already sounds clean: nothing to change.");
         plan.notes.add ("Clean & polish: only " + name + " was changed (no level, space or other tracks).");
     }
+    //==============================================================================
+    // Placement (pan).
+
+    // The mixer's balance law (DawEngine): the centre is unity on both sides, panning
+    // turns the other side down.
+    std::pair<double, double> getBalanceGains (float pan)
+    {
+        const auto halfPi = juce::MathConstants<double>::halfPi;
+        const auto p = (double) juce::jlimit (-1.0f, 1.0f, pan);
+        return { p > 0.0 ? std::cos (p * halfPi) : 1.0, p < 0.0 ? std::cos (-p * halfPi) : 1.0 };
+    }
+
+    // What a pan does to a mono part's loudness against the centre, dB (<= 0).
+    double getPanLoudnessDb (float pan)
+    {
+        const auto [left, right] = getBalanceGains (pan);
+        return powerToDb (0.5 * (left * left + right * right));
+    }
+
+    // The side a track's name says it is ("OH L", "Piano Right", "Guitarra Izq"): -1 left,
+    // 1 right, 0 none.
+    int getNamedSide (const juce::String& trackName)
+    {
+        juce::StringArray words;
+        words.addTokens (trackName.toLowerCase().replaceCharacters ("_-.()[]/", "        "), " ", "");
+        words.removeEmptyStrings();
+        for (const auto& word : words)
+        {
+            if (word == "l" || word == "left" || word == "lft" || word == "izq" || word == "izquierda" || word == "izquierdo")
+                return -1;
+            if (word == "r" || word == "right" || word == "rt" || word == "der" || word == "derecha" || word == "derecho")
+                return 1;
+        }
+        return 0;
+    }
+
+    // Where a drum mic sits on a kit seen from the drummer's seat (the hi-hat on the left,
+    // the floor tom on the right), by its name; nothing for a whole kit or a name that
+    // doesn't say. Kick and snare are 0.
+    std::optional<std::pair<float, juce::String>> getDrumPiecePan (const juce::String& trackName)
+    {
+        const auto name = trackName.toLowerCase().replaceCharacters ("_-.()[]/", "        ");
+        juce::StringArray words;
+        words.addTokens (name, " ", "");
+        words.removeEmptyStrings();
+        const auto has = [&] (std::initializer_list<const char*> list, bool whole)
+        {
+            for (auto w : list)
+                if (whole ? words.contains (w) : name.contains (w))
+                    return true;
+            return false;
+        };
+
+        if (has ({ "kick", "bombo" }, false) || has ({ "kd", "bd" }, true))
+            return std::pair<float, juce::String> { 0.0f, "the kick" };
+        if (has ({ "snare", "caja" }, false) || has ({ "sn", "sd" }, true))
+            return std::pair<float, juce::String> { 0.0f, "the snare" };
+        if (has ({ "hihat", "hi hat", "charles" }, false) || has ({ "hh", "hat", "hats" }, true))
+            return std::pair<float, juce::String> { -0.3f, "the hi-hat" };
+        if (has ({ "floor", "base", "goliat" }, false))
+            return std::pair<float, juce::String> { 0.4f, "the floor tom" };
+        if (has ({ "ride" }, true))
+            return std::pair<float, juce::String> { 0.35f, "the ride cymbal" };
+        const auto tom = words.indexOf ("tom") >= 0 ? words.indexOf ("tom") : words.indexOf ("toms");
+        if (tom >= 0 || name.contains ("tom"))
+        {
+            int number = 0;
+            for (const auto& word : words)
+                if (word.containsOnly ("0123456789"))
+                    number = word.getIntValue();
+            if (name.contains ("low"))  number = 3;
+            if (name.contains ("mid"))  number = 2;
+            if (name.contains ("high") || name.contains ("rack")) number = 1;
+            if (number == 0)
+                return {};
+            return std::pair<float, juce::String> { juce::jlimit (-0.3f, 0.5f, -0.25f + 0.3f * (float) (number - 1)),
+                                                    "tom " + juce::String (number) };
+        }
+        return {};
+    }
+
+    juce::String describePan (float pan)
+    {
+        if (std::abs (pan) < 0.01f)
+            return "centre";
+        if (std::abs (pan) > 0.99f)
+            return pan < 0 ? "fully left" : "fully right";
+        return juce::String (juce::roundToInt (std::abs (pan) * 100.0f)) + "% " + (pan < 0 ? "left" : "right");
+    }
+
+    // The pan where a mono part loses `maxLossDb` in mono.
+    float getMonoSafePan (float maxLossDb)
+    {
+        float pan = 1.0f;
+        while (pan > 0.0f && getMonoLossDb (pan) > maxLossDb)
+            pan -= 0.01f;
+        return pan;
+    }
+
+    struct PlacementPart
+    {
+        int id = 0;
+        Role role = Role::other;
+        double power = 0.0;                // loudness as power (at the centre)
+        std::array<double, 3> regions {};  // that power under 250 Hz, 250 Hz-2.5 kHz, above
+        double centroidHz = 1000.0;        // where its spectrum sits (log-frequency centre of power)
+        float pan = 0.0f;
+        bool planned = false;              // Auto Mix places it
+        bool free = false;                 // placed to balance the sides (not a pair, not by name)
+        juce::StringArray reasons;
+    };
+
+    // Left minus right loudness (dB) of the whole mix, and per region.
+    std::array<double, 4> getSideBalance (const std::vector<PlacementPart>& parts, float freeScale = 1.0f)
+    {
+        std::array<double, 4> left {}, right {};
+        for (const auto& part : parts)
+        {
+            const auto [l, r] = getBalanceGains (part.free ? part.pan * freeScale : part.pan);
+            left[3] += part.power * l * l;
+            right[3] += part.power * r * r;
+            for (size_t i = 0; i < 3; ++i)
+            {
+                left[i] += part.regions[i] * l * l;
+                right[i] += part.regions[i] * r * r;
+            }
+        }
+        std::array<double, 4> balance {};
+        for (size_t i = 0; i < 4; ++i)
+            balance[i] = left[i] > 0.0 && right[i] > 0.0 ? powerToDb (left[i]) - powerToDb (right[i]) : 0.0;
+        return balance;
+    }
+
+    // Plans the pans: fills `parts` (every track with sound, by its level after the plan)
+    // and returns the moves. `placeable`: the tracks Auto Mix may move.
+    std::vector<MixMove> planPlacement (std::vector<PlacementPart>& parts, const std::set<int>& placeable, const MixTargets& targets,
+                                        const MixOptions& options, juce::StringArray& notes)
+    {
+        constexpr float maxMonoLossDb = 1.5f; // what a panned part may lose against the centre in mono
+        const auto monoSafe = getMonoSafePan (maxMonoLossDb);
+        const auto spread = juce::jlimit (0.0f, 1.0f, targets.spread);
+        const auto styleName = getStyleName (targets.style);
+
+        juce::StringArray keptPans, keptImages;
+        std::map<Role, std::vector<PlacementPart*>> groups;
+
+        for (auto& part : parts)
+        {
+            const auto current = options.currentPans.count (part.id) > 0 ? options.currentPans.at (part.id) : 0.0f;
+            part.pan = current;
+            if (placeable.count (part.id) == 0)
+                continue;
+
+            const auto name = nameOf (options, part.id, getRoleName (part.role));
+            if (std::abs (current) > 0.02f)
+            {
+                keptPans.add (name);
+                continue;
+            }
+            if (options.stereoTracks.count (part.id) > 0)
+            {
+                keptImages.add (name);
+                continue;
+            }
+
+            // Named as one side of a stereo pair: it goes all the way, like the pair was recorded.
+            if (const auto side = getNamedSide (name); side != 0 && part.role != Role::bass)
+            {
+                part.pan = (float) side;
+                part.planned = true;
+                part.reasons.add ("Pan " + describePan (part.pan) + ": the " + (side < 0 ? "left" : "right")
+                                  + " side of a stereo pair (by its name), as it was recorded");
+                continue;
+            }
+
+            if (part.role == Role::bass || part.role == Role::backing)
+                continue; // the low end and a full backing stay in the middle
+
+            if (part.role == Role::drums)
+            {
+                if (const auto piece = getDrumPiecePan (name); piece.has_value() && std::abs (piece->first) > 0.0f)
+                {
+                    part.pan = roundTo (piece->first * juce::jlimit (0.5f, 1.3f, spread / 0.7f), 0.05);
+                    part.planned = true;
+                    part.reasons.add ("Pan " + describePan (part.pan) + ": where " + piece->second
+                                      + " sits on a kit, seen from the drummer's seat");
+                }
+                continue; // a whole kit, the kick and the snare stay in the middle
+            }
+
+            groups[part.role].push_back (&part);
+        }
+
+        const auto pairAmount = [] (Role role)
+        {
+            switch (role)
+            {
+                case Role::guitar:       return 1.0f;
+                case Role::pad:          return 0.9f;
+                case Role::piano:        return 0.6f;
+                case Role::backingVocal: return 0.8f;
+                default:                 return 0.8f;
+            }
+        };
+        const auto freeAmount = [] (Role role)
+        {
+            switch (role)
+            {
+                case Role::guitar:       return 0.6f;
+                case Role::piano:        return 0.4f;
+                case Role::pad:          return 0.4f;
+                case Role::synth:        return 0.5f;
+                case Role::backingVocal: return 0.45f;
+                default:                 return 0.55f;
+            }
+        };
+        const auto plural = [] (Role role)
+        {
+            switch (role)
+            {
+                case Role::guitar:       return juce::String ("guitars");
+                case Role::piano:        return juce::String ("keys");
+                case Role::pad:          return juce::String ("pads");
+                case Role::synth:        return juce::String ("synths");
+                case Role::backingVocal: return juce::String ("background vocals");
+                default:                 return juce::String ("parts");
+            }
+        };
+
+        // A pan held so the part doesn't drop out when the mix plays in mono.
+        const auto holdForMono = [&] (PlacementPart& part, float wanted)
+        {
+            if (std::abs (wanted) > monoSafe)
+            {
+                part.pan = std::copysign (monoSafe, wanted);
+                return juce::String (" (held at " + juce::String (juce::roundToInt (monoSafe * 100.0f))
+                                     + "% so it loses under " + juce::String (maxMonoLossDb, 1) + " dB when the mix plays in mono)");
+            }
+            part.pan = wanted;
+            return juce::String();
+        };
+
+        // Pairs of the same role, the loudest two first: one each side by the same amount
+        // (the second pair a little inside the first). The one earlier in the session goes left.
+        std::vector<PlacementPart*> freeParts;
+        for (auto& [role, members] : groups)
+        {
+            std::stable_sort (members.begin(), members.end(), [] (auto* a, auto* b) { return a->power > b->power; });
+            size_t i = 0;
+            for (int pair = 0; i + 1 < members.size(); i += 2, ++pair)
+            {
+                auto* a = members[i];
+                auto* b = members[i + 1];
+                if (b->id < a->id)
+                    std::swap (a, b);
+                const auto amount = roundTo (spread * pairAmount (role) * juce::jmax (0.4f, 1.0f - 0.3f * (float) pair), 0.05);
+                const auto heldA = holdForMono (*a, -amount);
+                holdForMono (*b, amount);
+                for (auto* part : { a, b })
+                {
+                    const auto* other = part == a ? b : a;
+                    part->planned = true;
+                    part->reasons.add ("Pan " + describePan (part->pan) + ", with " + nameOf (options, other->id, getRoleName (role))
+                                       + " " + describePan (other->pan) + ": a pair of " + plural (role) + ", one each side around the voice ("
+                                       + styleName + ")" + heldA);
+                }
+            }
+            if (i < members.size())
+                freeParts.push_back (members[i]);
+        }
+
+        // The rest, loudest first, each to the side where it evens out the loudness and the
+        // spectrum most; the low ones nearer the middle.
+        std::stable_sort (freeParts.begin(), freeParts.end(), [] (auto* a, auto* b) { return a->power > b->power; });
+        for (auto* part : freeParts)
+        {
+            const auto low = part->centroidHz < 200.0 ? 0.35f : part->centroidHz < 500.0 ? 0.7f : 1.0f;
+            const auto amount = roundTo (spread * freeAmount (part->role) * low, 0.05);
+            if (amount < 0.05f)
+                continue;
+
+            part->free = true;
+            part->planned = true;
+            double bestCost = 1.0e9;
+            float best = amount;
+            for (auto side : { -1.0f, 1.0f })
+            {
+                part->pan = side * amount;
+                const auto balance = getSideBalance (parts);
+                const auto cost = std::abs (balance[3]) + 0.5 * (std::abs (balance[0]) + std::abs (balance[1]) + std::abs (balance[2]));
+                if (cost < bestCost - 1.0e-9)
+                {
+                    bestCost = cost;
+                    best = part->pan;
+                }
+            }
+            const auto held = holdForMono (*part, best);
+            part->reasons.add ("Pan " + describePan (part->pan) + ": spread with the other parts so both sides carry about the same"
+                               + (low < 1.0f ? ", near the middle as it plays low" : "") + held);
+        }
+
+        // Left and right within 1 LU: the free parts come in towards the middle until they are.
+        constexpr double maxImbalanceLu = 1.0;
+        if (! freeParts.empty())
+        {
+            float scale = 1.0f, bestScale = 1.0f;
+            double bestImbalance = 1.0e9;
+            for (int step = 20; step >= 0; --step)
+            {
+                scale = (float) step / 20.0f;
+                const auto imbalance = std::abs (getSideBalance (parts, scale)[3]);
+                if (imbalance <= maxImbalanceLu)
+                {
+                    bestScale = scale;
+                    bestImbalance = imbalance;
+                    break;
+                }
+                if (imbalance < bestImbalance)
+                {
+                    bestImbalance = imbalance;
+                    bestScale = scale;
+                }
+            }
+            if (bestScale < 1.0f)
+                for (auto* part : freeParts)
+                    if (part->free)
+                    {
+                        const auto pan = roundTo (part->pan * bestScale, 0.05);
+                        part->reasons.clear();
+                        part->pan = pan;
+                        part->planned = std::abs (pan) >= 0.05f;
+                        if (part->planned)
+                            part->reasons.add ("Pan " + describePan (pan) + ": only this far, so the left and right of the mix stay within "
+                                               + juce::String (maxImbalanceLu, 0) + " LU of each other");
+                        else
+                            part->pan = 0.0f;
+                    }
+        }
+
+        const auto balance = getSideBalance (parts);
+        if (std::abs (balance[3]) > maxImbalanceLu + 0.05)
+            notes.add ("The mix leans " + formatDb (balance[3]).replace (" dB", " LU") + (balance[3] > 0 ? " to the left" : " to the right")
+                       + " from pans you set: Auto Mix left those as they are.");
+        if (! keptPans.isEmpty())
+            notes.add ("Kept where you panned " + (keptPans.size() == 1 ? juce::String ("it") : juce::String ("them")) + ": " + keptPans.joinIntoString (", ") + ".");
+        if (! keptImages.isEmpty())
+            notes.add ("Kept the stereo image of " + keptImages.joinIntoString (", ") + " (recorded in stereo, so not panned).");
+
+        std::vector<MixMove> moves;
+        for (const auto& part : parts)
+            if (part.planned && ! part.reasons.isEmpty())
+            {
+                MixMove move;
+                move.trackId = part.id;
+                move.values = { { "pan", part.pan } };
+                move.reasons = part.reasons;
+                moves.push_back (move);
+            }
+        return moves;
+    }
+}
+
+//==============================================================================
+bool hasStereoImage (const juce::AudioBuffer<float>& audio)
+{
+    if (audio.getNumChannels() < 2 || audio.getNumSamples() == 0)
+        return false;
+
+    // The side (L - R) against the mid (L + R): a dual-mono file has none.
+    double mid = 0.0, side = 0.0;
+    const auto* l = audio.getReadPointer (0);
+    const auto* r = audio.getReadPointer (1);
+    for (int i = 0; i < audio.getNumSamples(); ++i)
+    {
+        const auto m = (double) l[i] + (double) r[i];
+        const auto d = (double) l[i] - (double) r[i];
+        mid += m * m;
+        side += d * d;
+    }
+    return mid > 0.0 && side > mid * 1.0e-3; // the side more than 30 dB under the mid is dual mono
+}
+
+float getMonoLossDb (float pan)
+{
+    const auto [left, right] = getBalanceGains (pan);
+    const auto mono = 20.0 * std::log10 (juce::jmax (1.0e-9, 0.5 * (left + right)));
+    return (float) juce::jmax (0.0, getPanLoudnessDb (pan) - mono);
 }
 
 //==============================================================================
@@ -1186,57 +1573,68 @@ MixTargets getTargets (MixStyle style)
             t = { 1.5f, 2.0f, 0.0f, -14.0f, 12.0f, 45.0f, 6.0f };
             t.voiceSaturationDb = 3.0f; t.exciterAmount = 20.0f; t.echoMix = 10.0f; t.echoBeats = 0.5f; t.widthAmount = 115.0f;
             t.drumAttack = 20.0f;
+            t.spread = 0.7f;
             break;
         case MixStyle::ballad:
             t = { 2.5f, 0.0f, 1.5f, -14.0f, 20.0f, 65.0f, 7.0f };
             t.exciterAmount = 10.0f; t.echoMix = 12.0f; t.echoBeats = 1.0f; t.echoFeedback = 30.0f; t.widthAmount = 110.0f;
             t.rideRangeDb = 5.0f; t.duckDb = 2.0f; t.drumAttack = -15.0f; t.drumSustain = 10.0f;
+            t.spread = 0.6f;
             break;
         case MixStyle::rock:
             t = { 0.0f, 1.0f, -1.0f, -14.0f, 9.0f, 35.0f, 5.0f };
             t.voiceSaturationDb = 6.0f; t.bassSaturationDb = 6.0f; t.widthAmount = 120.0f; t.duckDb = 1.0f;
             t.drumsLufs = -19.0f; t.guitarLufs = -21.0f; t.drumAttack = 30.0f; t.drumSustain = -10.0f;
+            t.spread = 0.85f;
             break;
         case MixStyle::coaching: // the voice up front and dry, so every detail of it can be heard
             t = { 4.0f, 1.5f, 0.0f, -14.0f, 0.0f, 50.0f, 9.0f };
             t.rideRangeDb = 3.0f; t.duckDb = 3.0f;
+            t.spread = 0.4f;
             break;
         case MixStyle::hipHop:
             t = { 2.5f, 2.5f, 0.5f, -13.0f, 6.0f, 30.0f, 6.0f };
             t.voiceSaturationDb = 4.0f; t.bassSaturationDb = 4.0f; t.exciterAmount = 25.0f;
             t.echoMix = 8.0f; t.echoBeats = 0.5f; t.echoFeedback = 20.0f; t.widthAmount = 110.0f;
             t.drumsLufs = -19.0f; t.bassLufs = -19.5f; t.duckDb = 2.0f; t.drumAttack = 35.0f; t.drumSustain = -15.0f;
+            t.spread = 0.55f;
             break;
         case MixStyle::rnb:
             t = { 2.0f, 1.5f, 1.5f, -14.0f, 16.0f, 55.0f, 6.0f };
             t.voiceSaturationDb = 2.0f; t.exciterAmount = 20.0f; t.echoMix = 12.0f; t.echoBeats = 0.75f; t.echoFeedback = 30.0f;
             t.widthAmount = 120.0f; t.bassLufs = -20.0f; t.drumAttack = 15.0f;
+            t.spread = 0.65f;
             break;
         case MixStyle::acoustic:
             t = { 2.0f, 0.5f, 1.0f, -16.0f, 14.0f, 50.0f, 7.0f };
             t.widthAmount = 110.0f; t.guitarLufs = -20.0f; t.pianoLufs = -21.0f; t.drumsLufs = -23.0f;
             t.drumAttack = -10.0f; t.drumSustain = 10.0f;
+            t.spread = 0.7f;
             break;
         case MixStyle::electronic:
             t = { 1.0f, 2.5f, -0.5f, -12.0f, 14.0f, 60.0f, 5.0f };
             t.voiceSaturationDb = 3.0f; t.bassSaturationDb = 3.0f; t.exciterAmount = 30.0f;
             t.echoMix = 15.0f; t.echoBeats = 0.75f; t.echoFeedback = 35.0f; t.widthAmount = 140.0f;
             t.drumsLufs = -19.0f; t.bassLufs = -20.0f; t.duckDb = 2.0f; t.drumAttack = 30.0f; t.drumSustain = -10.0f;
+            t.spread = 0.8f;
             break;
         case MixStyle::jazz:
             t = { 1.0f, 0.0f, 1.0f, -18.0f, 18.0f, 55.0f, 8.0f };
             t.voiceSaturationDb = 2.0f; t.pianoLufs = -21.0f; t.drumsLufs = -23.0f; t.rideRangeDb = 3.0f; t.duckDb = 1.0f;
             t.drumAttack = -20.0f; t.drumSustain = 15.0f;
+            t.spread = 0.75f;
             break;
         case MixStyle::lofi:
             t = { 0.5f, -2.0f, 2.0f, -14.0f, 15.0f, 45.0f, 6.0f };
             t.voiceSaturationDb = 8.0f; t.bassSaturationDb = 5.0f; t.echoMix = 10.0f; t.echoBeats = 0.5f; t.echoFeedback = 30.0f;
             t.widthAmount = 90.0f; t.rideRangeDb = 3.0f; t.duckDb = 1.0f; t.drumAttack = -25.0f;
+            t.spread = 0.5f;
             break;
         case MixStyle::speech: // every word clear, the music a bed under it that dips while you talk
             t = { 10.0f, 2.0f, 1.0f, -16.0f, 0.0f, 30.0f, 6.0f };
             t.rideRangeDb = 6.0f; t.duckDb = 6.0f;
             t.voiceLufs = -18.0f; t.instrumentalLufs = -26.0f;
+            t.spread = 0.3f;
             break;
     }
     t.style = style;
@@ -1915,6 +2313,63 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
         focusInstrumentPeakChange += eqChange;
     }
 
+    // Placement: who goes left and right (mixing the whole song only: fit leaves the
+    // backing where it is). It changes the loudness of what it pans, so it comes before
+    // the balance.
+    if (options.pan && ! fit)
+    {
+        std::vector<PlacementPart> parts;
+        std::set<int> placeable;
+        for (const auto& [id, profile] : analysis.tracks)
+        {
+            const auto role = roleOf (id);
+            if (profile.getActiveSeconds() <= 0.0 || role == Role::other)
+                continue;
+
+            double lufs = finalLoudness[id];
+            if (voicePlans.count (id) > 0)
+                lufs = profile.integratedLufs + voicePlans[id].loudnessChange + volumeOf (id);
+            if (role == Role::backingVocal || backingChange.count (id) > 0)
+                placeable.insert (id);
+
+            PlacementPart part;
+            part.id = id;
+            part.role = role;
+            part.power = dbToPower (lufs);
+            const auto spectrum = profile.getAverageSpectrum();
+            double total = 0.0, logSum = 0.0;
+            for (int b = 0; b < numBands; ++b)
+            {
+                const auto p = dbToPower (spectrum[(size_t) b]);
+                const auto hz = getBandCentre (b);
+                total += p;
+                logSum += p * std::log (hz);
+                part.regions[hz < 250.0 ? 0 : hz < 2500.0 ? 1 : 2] += p;
+            }
+            if (total > 0.0)
+            {
+                part.centroidHz = std::exp (logSum / total);
+                for (auto& region : part.regions)
+                    region *= part.power / total;
+            }
+            parts.push_back (part);
+        }
+
+        for (auto& move : planPlacement (parts, placeable, targets, options, plan.notes))
+        {
+            const auto change = getPanLoudnessDb (move.values.at ("pan"));
+            if (voicePlans.count (move.trackId) > 0)
+                voicePlans[move.trackId].loudnessChange += change; // background vocals: balanced below with it
+            else
+            {
+                if (backingChange.count (move.trackId) > 0)
+                    backingChange[move.trackId] += change;
+                finalLoudness[move.trackId] += change;
+            }
+            plan.moves.push_back (std::move (move));
+        }
+    }
+
     for (const auto& move : pendingWidth)
         plan.moves.push_back (move);
 
@@ -2369,11 +2824,11 @@ MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float 
 }
 
 //==============================================================================
-void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
+void applyMix (daw::Edit& edit, const MixPlan& plan, float amount, const char* undoName)
 {
     // Volume rides are written whole (a new ride replaces one the track had).
     amount = juce::jlimit (0.0f, 1.0f, amount);
-    edit.getUndoManager().beginNewTransaction ("Auto Mix"); // DawBridge looks for this name
+    edit.getUndoManager().beginNewTransaction (undoName); // DawBridge looks for "Auto Mix"
 
     std::map<int, int> added; // inserts added per track, so they keep the plan's order
 
@@ -2406,6 +2861,17 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, float amount)
             // A change from the input gain it was measured with.
             const auto current = (float) owner.getProperty (daw::ids::inGain, 0.0f);
             edit.setChainGain (move.trackId, false, current + move.values.at ("inGain") * amount);
+            continue;
+        }
+
+        if (! move.insert.has_value() && move.values.count ("pan") > 0)
+        {
+            const auto current = (float) owner.getProperty (daw::ids::pan, 0.0f);
+            const auto pan = current + (move.values.at ("pan") - current) * amount;
+            if (move.trackId == daw::Edit::masterId)
+                edit.setMasterPan (pan);
+            else
+                edit.setTrackPan (move.trackId, pan);
             continue;
         }
 
