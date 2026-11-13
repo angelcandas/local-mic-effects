@@ -214,6 +214,7 @@ private:
     // were last tick (a change redraws the session and closes stale windows).
     std::map<int, std::unique_ptr<juce::Component>> instrumentWindows;
     std::map<int, std::unique_ptr<juce::Component>> pluginWindows; // effect plugin inserts', by insert id
+    juce::Array<juce::ValueTree> deviceClipboard; // effects copied with copyDevices (copies, not in the edit)
     juce::String instrumentsSeen;
     int scanTicks = 0, inputTicks = 0;
     juce::StringArray lastInputNames;
