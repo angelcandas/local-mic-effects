@@ -31,6 +31,7 @@ namespace
             case T::paraEq:     return "Parametric EQ";
             case T::smooth:     return "Smooth";
             case T::compressor: return "Compressor";
+            case T::opto:       return "Opto";
             case T::deEsser:    return "De-esser";
             case T::dynamicEq:  return "Dynamic EQ";
             case T::reverb:     return "Reverb";

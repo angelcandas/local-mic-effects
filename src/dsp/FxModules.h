@@ -9,6 +9,7 @@
 #include "PitchEngine.h"
 #include "SpectralDenoiser.h"
 #include "Smooth.h"
+#include "VocalDynamics.h"
 #include "Cabinet.h"
 #include "GuitarAmp.h"
 #include "Convolver.h"
@@ -120,6 +121,23 @@ public:
 
     Value& on        = addSwitch ("gateOn", true);
     Value& threshold = addValue ("gateThreshold", -55.0f);
+    Value& range     = addValue ("gateRange", 80.0f);    // dB it turns down when closed
+    Value& hold      = addValue ("gateHold", 0.0f);      // ms
+    Value& release   = addValue ("gateRelease", 150.0f); // ms
+    Value& focus     = addChoice ("gateFocus", 0.0f);    // detector hears 150 Hz-4 kHz only
+
+    // At these defaults the gate is the original one (juce::dsp::NoiseGate), so saved
+    // sessions sound the same; any change moves it to vocal::ExpanderGate.
+    bool usesOriginal() const noexcept
+    {
+        return get (range) >= 79.95f && get (hold) < 0.5f && std::abs (get (release) - 150.0f) < 0.5f && ! flag (focus);
+    }
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        if (! original.load (std::memory_order_relaxed))
+            readings.setProperty ("reduction", std::round (expander.takeReductionDb() * 10.0f) / 10.0f);
+    }
 
 private:
     void prepareModule (const juce::dsp::ProcessSpec& spec) override
@@ -128,13 +146,41 @@ private:
         gate.setRatio (10.0f);
         gate.setAttack (1.0f);
         gate.setRelease (150.0f);
+        expander.prepare (spec.sampleRate);
     }
 
-    void resetModule() override                    { gate.reset(); }
-    void update() noexcept override                { gate.setThreshold (get (threshold)); }
-    void render (const Context& c) noexcept override { gate.process (c); }
+    void resetModule() override { gate.reset(); expander.reset(); }
+
+    void update() noexcept override
+    {
+        gate.setThreshold (get (threshold));
+        expander.setSettings ({ get (threshold), get (range), get (hold), get (release), flag (focus) });
+
+        const auto useOriginal = usesOriginal();
+        if (useOriginal != original.load (std::memory_order_relaxed))
+        {
+            // Switching engines: the one taking over starts clean.
+            if (useOriginal) gate.reset(); else expander.reset();
+            original.store (useOriginal, std::memory_order_relaxed);
+        }
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        if (original.load (std::memory_order_relaxed))
+        {
+            gate.process (c);
+        }
+        else
+        {
+            auto block = c.getOutputBlock();
+            expander.process (block);
+        }
+    }
 
     juce::dsp::NoiseGate<float> gate;
+    vocal::ExpanderGate expander;
+    std::atomic<bool> original { true };
 };
 
 // Autotune, pitch/formant shift and harmonizer share one pitch detector, so they are
@@ -319,17 +365,38 @@ class Compressor final : public Module
 public:
     Compressor() : Module (ModuleType::compressor) {}
 
-    Value& on        = addSwitch ("compOn", true);
-    Value& threshold = addValue ("compThreshold", -18.0f);
-    Value& ratio     = addValue ("compRatio", 3.0f);
-    Value& attack    = addValue ("compAttack", 10.0f);  // ms
-    Value& release   = addValue ("compRelease", 120.0f); // ms
-    Value& makeup    = addValue ("compMakeup", 0.0f);    // dB
+    Value& on         = addSwitch ("compOn", true);
+    Value& threshold  = addValue ("compThreshold", -18.0f);
+    Value& ratio      = addValue ("compRatio", 3.0f);
+    Value& attack     = addValue ("compAttack", 10.0f);  // ms
+    Value& release    = addValue ("compRelease", 120.0f); // ms
+    Value& makeup     = addValue ("compMakeup", 0.0f);    // dB
+    Value& style      = addChoice ("compStyle", 0.0f);    // vocal::VoiceCompressor::Style
+    Value& knee       = addValue ("compKnee", 0.0f);      // dB
+    Value& mix        = addValue ("compMix", 100.0f);     // %
+    Value& autoMakeup = addChoice ("compAutoMakeup", 0.0f);
+
+    // Clean with no knee, full mix and no auto make-up is the original compressor
+    // (juce::dsp::Compressor), so saved sessions sound the same.
+    bool usesOriginal() const noexcept
+    {
+        return index (style) == 0 && get (knee) < 0.01f && get (mix) >= 99.99f && ! flag (autoMakeup);
+    }
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        if (! original.load (std::memory_order_relaxed))
+            readings.setProperty ("reduction", std::round (voice.takeReductionDb() * 10.0f) / 10.0f);
+    }
 
 private:
-    void prepareModule (const juce::dsp::ProcessSpec& spec) override { compressor.prepare (spec); }
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override
+    {
+        compressor.prepare (spec);
+        voice.prepare (spec.sampleRate);
+    }
 
-    void resetModule() override { compressor.reset(); }
+    void resetModule() override { compressor.reset(); voice.reset(); }
 
     void update() noexcept override
     {
@@ -338,17 +405,83 @@ private:
         compressor.setAttack (juce::jmax (0.1f, get (attack)));
         compressor.setRelease (juce::jmax (1.0f, get (release)));
         makeupGain = juce::Decibels::decibelsToGain (get (makeup));
+
+        vocal::VoiceCompressor::Settings s;
+        s.style = (vocal::VoiceCompressor::Style) juce::jlimit (0, 2, index (style));
+        s.thresholdDb = get (threshold);
+        s.ratio = get (ratio);
+        s.attackMs = get (attack);
+        s.releaseMs = get (release);
+        s.kneeDb = get (knee);
+        s.mix = fraction (mix);
+        s.makeupDb = get (makeup);
+        s.autoMakeup = flag (autoMakeup);
+        voice.setSettings (s);
+
+        const auto useOriginal = usesOriginal();
+        if (useOriginal != original.load (std::memory_order_relaxed))
+        {
+            if (useOriginal) compressor.reset(); else voice.reset();
+            original.store (useOriginal, std::memory_order_relaxed);
+        }
     }
 
     void render (const Context& c) noexcept override
     {
-        compressor.process (c);
-        if (makeupGain != 1.0f)
-            c.getOutputBlock().multiplyBy (makeupGain);
+        if (original.load (std::memory_order_relaxed))
+        {
+            compressor.process (c);
+            if (makeupGain != 1.0f)
+                c.getOutputBlock().multiplyBy (makeupGain);
+        }
+        else
+        {
+            auto block = c.getOutputBlock();
+            voice.process (block);
+        }
     }
 
     juce::dsp::Compressor<float> compressor;
+    vocal::VoiceCompressor voice;
+    std::atomic<bool> original { true };
     float makeupGain = 1.0f;
+};
+
+// The slow, smooth second compressor (vocal::OptoCompressor): after the Compressor for
+// "fast one for the peaks, then a slow one for the level".
+class Opto final : public Module
+{
+public:
+    Opto() : Module (ModuleType::opto) {}
+
+    Value& on     = addSwitch ("optoOn");
+    Value& amount = addValue ("optoAmount", 30.0f);  // %
+    Value& output = addValue ("optoOutput", 0.0f);   // dB
+    Value& mode   = addChoice ("optoMode", 0.0f);    // vocal::OptoCompressor::Mode
+    Value& mix    = addValue ("optoMix", 100.0f);    // %
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        readings.setProperty ("reduction", std::round (opto.takeReductionDb() * 10.0f) / 10.0f);
+    }
+
+private:
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override { opto.prepare (spec.sampleRate); }
+    void resetModule() override { opto.reset(); }
+
+    void update() noexcept override
+    {
+        opto.setSettings ({ fraction (amount), index (mode) == 1 ? vocal::OptoCompressor::Mode::limit : vocal::OptoCompressor::Mode::compress,
+                            get (output), fraction (mix) });
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        auto block = c.getOutputBlock();
+        opto.process (block);
+    }
+
+    vocal::OptoCompressor opto;
 };
 
 class DeEsser final : public Module
@@ -359,14 +492,66 @@ public:
     Value& on        = addSwitch ("deessOn");
     Value& threshold = addValue ("deessThreshold", -30.0f);
     Value& freq      = addValue ("deessFreq", 6000.0f);
+    Value& mode      = addChoice ("deessMode", 0.0f);     // vocal::SmartDeEsser::Mode
+    Value& amount    = addValue ("deessAmount", 50.0f);   // %, Smart
+    Value& range     = addValue ("deessRange", 24.0f);    // dB, the most it cuts
+    Value& band      = addChoice ("deessBand", 0.0f);     // vocal::SmartDeEsser::Band
+    Value& listen    = addChoice ("deessListen", 0.0f);
+
+    // Classic, full range, Split and not listening is the original de-esser (fx::DeEsser).
+    bool usesOriginal() const noexcept
+    {
+        return index (mode) == 0 && get (range) >= 23.95f && index (band) == 0 && ! flag (listen);
+    }
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        if (! original.load (std::memory_order_relaxed))
+            readings.setProperty ("reduction", std::round (smart.takeReductionDb() * 10.0f) / 10.0f);
+    }
 
 private:
-    void prepareModule (const juce::dsp::ProcessSpec& spec) override { deEsser.prepare (spec); }
-    void resetModule() override                                      { deEsser.reset(); }
-    void update() noexcept override                  { deEsser.setParameters (get (threshold), get (freq)); }
-    void render (const Context& c) noexcept override { deEsser.process (c); }
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override { deEsser.prepare (spec); smart.prepare (spec.sampleRate); }
+    void resetModule() override                                      { deEsser.reset(); smart.reset(); }
+
+    void update() noexcept override
+    {
+        deEsser.setParameters (get (threshold), get (freq));
+
+        vocal::SmartDeEsser::Settings s;
+        s.mode = index (mode) == 1 ? vocal::SmartDeEsser::Mode::smart : vocal::SmartDeEsser::Mode::classic;
+        s.thresholdDb = get (threshold);
+        s.amount = fraction (amount);
+        s.frequency = get (freq);
+        s.rangeDb = get (range);
+        s.band = index (band) == 1 ? vocal::SmartDeEsser::Band::wide : vocal::SmartDeEsser::Band::split;
+        s.listen = flag (listen);
+        smart.setSettings (s);
+
+        const auto useOriginal = usesOriginal();
+        if (useOriginal != original.load (std::memory_order_relaxed))
+        {
+            if (useOriginal) deEsser.reset(); else smart.reset();
+            original.store (useOriginal, std::memory_order_relaxed);
+        }
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        if (original.load (std::memory_order_relaxed))
+        {
+            deEsser.process (c);
+        }
+        else
+        {
+            auto block = c.getOutputBlock();
+            smart.process (block);
+        }
+    }
 
     fx::DeEsser deEsser;
+    vocal::SmartDeEsser smart;
+    std::atomic<bool> original { true };
 };
 
 class Exciter final : public Module
@@ -1146,6 +1331,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::paraEq:     return std::make_unique<modules::ParaEq>();
         case ModuleType::smooth:     return std::make_unique<modules::Smooth>();
         case ModuleType::compressor: return std::make_unique<modules::Compressor>();
+        case ModuleType::opto:       return std::make_unique<modules::Opto>();
         case ModuleType::autoLevel:  return std::make_unique<modules::AutoLevel>();
         case ModuleType::deEsser:    return std::make_unique<modules::DeEsser>();
         case ModuleType::exciter:    return std::make_unique<modules::Exciter>();

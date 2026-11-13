@@ -798,6 +798,361 @@ namespace
     // Auto Mix adding effects: reverb on a dry voice (at the end of its chain), EQ and a
     // compressor on an instrument, none on a voice that rings already, and only the
     // effects it's allowed.
+    //==========================================================================
+    // Voice dynamics (VocalDynamics.h): Compressor styles, Opto, gate / expander, Smart
+    // de-esser.
+    std::vector<float> runLeft (fx::FxChain& chain, const std::vector<float>& signal)
+    {
+        const auto both = runChain (chain, signal);
+        std::vector<float> left;
+        for (size_t start = 0; start + 2 * blockSize <= both.size(); start += 2 * blockSize)
+            left.insert (left.end(), both.begin() + (long) start, both.begin() + (long) start + blockSize);
+        return left;
+    }
+
+    float rmsDb (const std::vector<float>& x, size_t from, size_t to)
+    {
+        double sum = 0.0;
+        to = std::min (to, x.size());
+        for (auto i = from; i < to; ++i)
+            sum += (double) x[i] * x[i];
+        return (float) (10.0 * std::log10 (std::max (1.0e-20, sum / (double) std::max<size_t> (1, to - from))));
+    }
+
+    std::vector<float> sine (float frequency, double seconds, float peak)
+    {
+        std::vector<float> out ((size_t) (seconds * sampleRate));
+        for (size_t i = 0; i < out.size(); ++i)
+            out[i] = peak * (float) std::sin (juce::MathConstants<double>::twoPi * frequency * (double) i / sampleRate);
+        return out;
+    }
+
+    // A sung-like line with an S every half second: 200 ms of voice, then 80 ms of hiss
+    // above 5 kHz riding on a little voice, as a real "s" does.
+    std::vector<float> makeSibilantLine (float peak)
+    {
+        auto voice = makeVoice (220.0f, 2.0, peak);
+        juce::Random random (7);
+        fx::Biquad hiss;
+        hiss.setup (fx::Biquad::Type::highPass, sampleRate, 5000.0, 0.707);
+
+        for (size_t i = 0; i < voice.size(); ++i)
+        {
+            const auto inPeriod = i % (size_t) (0.5 * sampleRate);
+            if (inPeriod >= (size_t) (0.3 * sampleRate) && inPeriod < (size_t) (0.38 * sampleRate))
+                voice[i] = 0.15f * voice[i] + hiss.process (0, (random.nextFloat() * 2.0f - 1.0f) * peak * 2.5f);
+            else
+                hiss.process (0, 0.0f);
+        }
+
+        return voice;
+    }
+
+    float highBandDb (const std::vector<float>& x)
+    {
+        fx::Biquad filter;
+        filter.setup (fx::Biquad::Type::highPass, sampleRate, 5000.0, 0.707);
+        std::vector<float> highs (x.size());
+        for (size_t i = 0; i < x.size(); ++i)
+            highs[i] = filter.process (0, x[i]);
+        return rmsDb (highs, (size_t) (0.1 * sampleRate), highs.size());
+    }
+
+    void testVocalDynamics()
+    {
+        std::cout << "\nVoice dynamics (Compressor styles, Opto, gate / expander, Smart de-esser)\n";
+
+        const auto voice = makeVoice (180.0f, 1.5, 0.6f);
+        const auto single = [] (fx::ModuleType type)
+        {
+            auto chain = std::make_unique<fx::FxChain> (std::vector<fx::ModuleType> { type });
+            switchAll (*chain, true);
+            return chain;
+        };
+        const auto maxDifference = [] (const std::vector<float>& a, const std::vector<float>& b)
+        {
+            float worst = 0.0f;
+            for (size_t i = 0; i < std::min (a.size(), b.size()); ++i)
+                worst = std::max (worst, std::abs (a[i] - b[i]));
+            return worst;
+        };
+
+        // At their defaults the Compressor, Gate and De-esser are bit-identical to the
+        // original processors (old sessions, presets and the Live null test).
+        {
+            auto chain = single (fx::ModuleType::compressor);
+            const auto ours = runLeft (*chain, voice);
+
+            juce::dsp::Compressor<float> reference;
+            reference.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            reference.setThreshold (-18.0f); reference.setRatio (3.0f); reference.setAttack (10.0f); reference.setRelease (120.0f);
+            auto expected = voice;
+            for (size_t start = 0; start + blockSize <= expected.size(); start += blockSize)
+            {
+                float* channels[] = { expected.data() + start };
+                juce::dsp::AudioBlock<float> block (channels, 1, (size_t) blockSize);
+                reference.process (juce::dsp::ProcessContextReplacing<float> (block));
+            }
+            expected.resize (ours.size());
+            check (maxDifference (ours, expected) == 0.0f, "Compressor at its defaults is the original compressor, bit for bit");
+        }
+        {
+            auto chain = single (fx::ModuleType::gate);
+            auto quiet = makeVoice (180.0f, 1.0, 0.002f);
+            quiet.insert (quiet.end(), voice.begin(), voice.end());
+            const auto ours = runLeft (*chain, quiet);
+
+            juce::dsp::NoiseGate<float> reference;
+            reference.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+            reference.setRatio (10.0f); reference.setAttack (1.0f); reference.setRelease (150.0f); reference.setThreshold (-55.0f);
+            auto expected = quiet;
+            for (size_t start = 0; start + blockSize <= expected.size(); start += blockSize)
+            {
+                float* channels[] = { expected.data() + start };
+                juce::dsp::AudioBlock<float> block (channels, 1, (size_t) blockSize);
+                reference.process (juce::dsp::ProcessContextReplacing<float> (block));
+            }
+            expected.resize (ours.size());
+            check (maxDifference (ours, expected) == 0.0f, "Gate at its defaults is the original gate, bit for bit");
+        }
+        {
+            auto chain = single (fx::ModuleType::deEsser);
+            const auto line = makeSibilantLine (0.3f);
+            const auto ours = runLeft (*chain, line);
+
+            fx::DeEsser reference;
+            reference.prepare ({ sampleRate, (juce::uint32) blockSize, 1 });
+            reference.setParameters (-30.0f, 6000.0f);
+            auto expected = line;
+            for (size_t start = 0; start + blockSize <= expected.size(); start += blockSize)
+            {
+                float* channels[] = { expected.data() + start };
+                juce::dsp::AudioBlock<float> block (channels, 1, (size_t) blockSize);
+                reference.process (juce::dsp::ProcessContextReplacing<float> (block));
+            }
+            expected.resize (ours.size());
+            check (maxDifference (ours, expected) == 0.0f, "De-esser at its defaults is the original de-esser, bit for bit");
+        }
+
+        // Parallel: Mix at 0 % is the dry signal, in every style.
+        for (int style = 0; style < 3; ++style)
+        {
+            auto chain = single (fx::ModuleType::compressor);
+            chain->setValue ("compStyle", (float) style);
+            chain->setValue ("compThreshold", -40.0f);
+            chain->setValue ("compRatio", 10.0f);
+            chain->setValue ("compMix", 0.0f);
+            const auto out = runLeft (*chain, voice);
+            check (maxDifference (out, voice) < 1.0e-6f, "Compressor style " + juce::String (style) + " at Mix 0 % is dry");
+        }
+
+        // Every style compresses a loud voice by a sensible amount, and Glue more gently
+        // than Punch at the same settings.
+        {
+            std::array<float, 3> reduction {};
+            for (int style = 0; style < 3; ++style)
+            {
+                auto chain = single (fx::ModuleType::compressor);
+                chain->setValue ("compStyle", (float) style);
+                chain->setValue ("compKnee", 0.1f); // off the original path, even for Clean
+                chain->setValue ("compThreshold", -24.0f);
+                chain->setValue ("compRatio", 4.0f);
+                const auto out = runLeft (*chain, voice);
+                const auto from = (size_t) (0.5 * sampleRate);
+                reduction[(size_t) style] = rmsDb (voice, from, out.size()) - rmsDb (out, from, out.size());
+                const auto* module = dynamic_cast<fx::modules::Compressor*> (chain->find (fx::ModuleType::compressor));
+                juce::DynamicObject readings;
+                const_cast<fx::modules::Compressor*> (module)->addReadings (readings);
+                check ((float) readings.getProperty ("reduction") > 1.0f,
+                       "style " + juce::String (style) + " reports its gain reduction (" + readings.getProperty ("reduction").toString() + " dB)");
+            }
+            std::cout << "        reduction Clean " << reduction[0] << " dB, Punch " << reduction[1] << " dB, Glue " << reduction[2] << " dB\n";
+            check (reduction[0] > 4.0f && reduction[0] < 16.0f, "Clean compresses a loud voice");
+            check (reduction[1] > 4.0f && reduction[1] < 16.0f, "Punch compresses a loud voice");
+            check (reduction[2] > 4.0f && reduction[2] < 16.0f, "Glue compresses a loud voice");
+        }
+
+        // Punch catches a 1 ms peak.
+        {
+            auto signal = sine (1000.0f, 0.5, 0.03f);
+            const auto spike = (size_t) (0.3 * sampleRate);
+            for (size_t i = 0; i < (size_t) (0.001 * sampleRate); ++i)
+                signal[spike + i] = (float) std::sin (juce::MathConstants<double>::twoPi * 1000.0 * (double) i / sampleRate);
+
+            auto chain = single (fx::ModuleType::compressor);
+            chain->setValue ("compStyle", 1.0f);
+            chain->setValue ("compThreshold", -20.0f);
+            chain->setValue ("compRatio", 8.0f);
+            chain->setValue ("compAttack", 0.5f);
+            const auto out = runLeft (*chain, signal);
+            float latePeak = 0.0f;
+            for (auto i = spike + (size_t) (0.0005 * sampleRate); i < spike + (size_t) (0.001 * sampleRate); ++i)
+                latePeak = std::max (latePeak, std::abs (out[i]));
+            std::cout << "        1 ms peak at 0 dBFS comes out at " << juce::Decibels::gainToDecibels (latePeak) << " dBFS\n";
+            check (latePeak < 0.5f, "Punch catches a 1 ms peak (second half over 6 dB down)");
+        }
+
+        // Auto make-up brings a compressed voice back near its level.
+        {
+            auto plain = single (fx::ModuleType::compressor), made = single (fx::ModuleType::compressor);
+            for (auto* c : { plain.get(), made.get() })
+            {
+                c->setValue ("compStyle", 1.0f);
+                c->setValue ("compThreshold", -24.0f);
+                c->setValue ("compRatio", 4.0f);
+            }
+            made->setValue ("compAutoMakeup", 1.0f);
+            const auto a = runLeft (*plain, voice), b = runLeft (*made, voice);
+            const auto from = (size_t) (0.5 * sampleRate);
+            check (rmsDb (b, from, b.size()) - rmsDb (a, from, a.size()) > 4.0f, "auto make-up raises the compressed level");
+        }
+
+        // Opto: about half of the reduction lets go fast, the rest over a tail that is
+        // longer after a long, hard squeeze than after a short one.
+        {
+            const auto reductionAfter = [&] (double burstSeconds, double afterSeconds)
+            {
+                fx::vocal::OptoCompressor opto;
+                opto.prepare (sampleRate);
+                opto.setSettings ({ 0.6f, fx::vocal::OptoCompressor::Mode::compress, 0.0f, 1.0f });
+                auto signal = sine (500.0f, burstSeconds, 0.7f);
+                const auto quiet = sine (500.0f, 3.0, 0.002f);
+                signal.insert (signal.end(), quiet.begin(), quiet.end());
+                auto out = signal;
+                for (size_t start = 0; start + blockSize <= out.size(); start += blockSize)
+                {
+                    float* channels[] = { out.data() + start };
+                    juce::dsp::AudioBlock<float> block (channels, 1, (size_t) blockSize);
+                    opto.process (block);
+                }
+                const auto at = (size_t) ((burstSeconds + afterSeconds) * sampleRate);
+                const auto window = (size_t) (0.01 * sampleRate);
+                return rmsDb (signal, at, at + window) - rmsDb (out, at, at + window);
+            };
+
+            const auto atEnd = reductionAfter (2.0, 0.0);
+            const auto fast = reductionAfter (2.0, 0.2), tail = reductionAfter (2.0, 0.8);
+            const auto shortTail = reductionAfter (0.25, 0.8);
+            std::cout << "        opto reduction " << atEnd << " dB, 200 ms later " << fast << " dB, 800 ms later " << tail
+                      << " dB (after a short burst: " << shortTail << " dB)\n";
+            check (atEnd > 6.0f, "opto pushed at 60 % on a loud tone reduces by over 6 dB");
+            check (fast < 0.65f * atEnd && fast > 0.25f * atEnd, "opto lets go of about half quickly");
+            check (tail > 0.12f * atEnd, "opto keeps a slow tail");
+            check (tail > shortTail + 0.3f, "opto's tail is longer after a long squeeze than a short one");
+        }
+
+        // Gate: Range turns down by that much instead of muting; Hold keeps it open; Focus
+        // ignores a low thump.
+        {
+            auto chain = single (fx::ModuleType::gate);
+            chain->setValue ("gateThreshold", -40.0f);
+            chain->setValue ("gateRange", 10.0f);
+            const auto quiet = makeVoice (300.0f, 1.0, 0.003f);
+            const auto out = runLeft (*chain, quiet);
+            const auto drop = rmsDb (quiet, (size_t) (0.5 * sampleRate), out.size()) - rmsDb (out, (size_t) (0.5 * sampleRate), out.size());
+            check (std::abs (drop - 10.0f) < 0.5f, "gate with a 10 dB range turns a quiet voice down 10 dB (" + juce::String (drop, 2) + ")");
+
+            const auto opensOn = [&] (bool focus, const std::vector<float>& signal)
+            {
+                auto c = single (fx::ModuleType::gate);
+                c->setValue ("gateThreshold", -40.0f);
+                c->setValue ("gateRange", 30.0f);
+                c->setValue ("gateFocus", focus ? 1.0f : 0.0f);
+                const auto o = runLeft (*c, signal);
+                return rmsDb (signal, (size_t) (0.5 * sampleRate), o.size()) - rmsDb (o, (size_t) (0.5 * sampleRate), o.size()) < 3.0f;
+            };
+            const auto thump = sine (50.0f, 1.0, 0.03f);
+            check (opensOn (false, thump), "without Focus a low thump opens the gate");
+            check (! opensOn (true, thump), "with Focus a low thump doesn't open it");
+            check (opensOn (true, makeVoice (250.0f, 1.0, 0.03f)), "with Focus a voice still opens it");
+
+            // Hold: the gate closes about that much later after the voice stops.
+            auto signal = makeVoice (250.0f, 0.5, 0.3f);
+            const auto tail = makeVoice (250.0f, 1.0, 0.001f);
+            signal.insert (signal.end(), tail.begin(), tail.end());
+            const auto closesAt = [&] (float holdMs)
+            {
+                auto c = single (fx::ModuleType::gate);
+                c->setValue ("gateThreshold", -40.0f);
+                c->setValue ("gateRange", 40.0f);
+                c->setValue ("gateRelease", 10.0f);
+                c->setValue ("gateHold", holdMs);
+                const auto o = runLeft (*c, signal);
+                const auto window = (size_t) (0.005 * sampleRate);
+                for (auto at = (size_t) (0.5 * sampleRate); at + window < o.size(); at += window)
+                    if (rmsDb (o, at, at + window) - rmsDb (signal, at, at + window) < -20.0f)
+                        return (double) at / sampleRate;
+                return 99.0;
+            };
+            const auto without = closesAt (0.0f), with = closesAt (300.0f);
+            std::cout << "        gate closes " << (without - 0.5) * 1000.0 << " ms after the voice, with Hold 300 ms "
+                      << (with - 0.5) * 1000.0 << " ms\n";
+            check (without < 0.75, "without Hold the gate closes soon after the voice");
+            check (std::abs ((with - without) - 0.3) < 0.03, "Hold 300 ms keeps it open 300 ms longer");
+        }
+
+        // Smart de-esser: cuts the S the same at a whisper and a belt, leaves a bright
+        // vowel alone, and Listen plays only what it takes out.
+        {
+            const auto cutAt = [&] (float peak, int mode)
+            {
+                auto chain = single (fx::ModuleType::deEsser);
+                chain->setValue ("deessMode", (float) mode);
+                chain->setValue ("deessAmount", 50.0f);
+                chain->setValue ("deessThreshold", -30.0f);
+                chain->setValue ("deessRange", 23.0f); // off the original path for Classic too
+                const auto line = makeSibilantLine (peak);
+                const auto out = runLeft (*chain, line);
+                return highBandDb (std::vector<float> (line.begin(), line.begin() + (long) out.size())) - highBandDb (out);
+            };
+
+            const auto quietCut = cutAt (0.03f, 1), loudCut = cutAt (0.25f, 1);
+            const auto classicQuiet = cutAt (0.03f, 0), classicLoud = cutAt (0.25f, 0);
+            std::cout << "        S cut, Smart: " << quietCut << " dB quiet, " << loudCut << " dB loud; Classic: "
+                      << classicQuiet << " / " << classicLoud << " dB\n";
+            check (quietCut > 3.0f && loudCut > 3.0f, "Smart cuts the S at both levels");
+            check (std::abs (quietCut - loudCut) < 1.0f, "Smart cuts the same amount 18 dB apart (within 1 dB)");
+            check (classicLoud - classicQuiet > 1.5f, "Classic depends on the level (why Smart exists)");
+
+            auto chain = single (fx::ModuleType::deEsser);
+            chain->setValue ("deessMode", 1.0f);
+            const auto bright = makeVoice (700.0f, 1.0, 0.3f);
+            const auto out = runLeft (*chain, bright);
+            const auto from = (size_t) (0.2 * sampleRate);
+            check (std::abs (rmsDb (bright, from, out.size()) - rmsDb (out, from, out.size())) < 0.5f, "Smart leaves a bright vowel alone");
+
+            auto listen = single (fx::ModuleType::deEsser);
+            listen->setValue ("deessMode", 1.0f);
+            listen->setValue ("deessRange", 0.0f);
+            listen->setValue ("deessListen", 1.0f);
+            const auto removed = runLeft (*listen, makeSibilantLine (0.3f));
+            check (rmsDb (removed, 0, removed.size()) < -100.0f, "Listen with a 0 dB range plays silence (nothing removed)");
+
+            for (int bandMode = 0; bandMode < 2; ++bandMode)
+            {
+                auto c = single (fx::ModuleType::deEsser);
+                c->setValue ("deessMode", 1.0f);
+                c->setValue ("deessBand", (float) bandMode);
+                c->setValue ("deessRange", 6.0f);
+                c->setValue ("deessAmount", 100.0f);
+                const auto line = makeSibilantLine (0.3f);
+                const auto o = runLeft (*c, line);
+                const auto cut = highBandDb (std::vector<float> (line.begin(), line.begin() + (long) o.size())) - highBandDb (o);
+                check (cut > 1.0f && cut < 6.5f, juce::String (bandMode == 0 ? "Split" : "Wide") + " stays within its 6 dB range ("
+                                                     + juce::String (cut, 2) + " dB)");
+            }
+        }
+
+        // The opto is in Live's chain right after the compressor, off by default.
+        {
+            const auto all = fx::FxChain::getAllTypes();
+            const auto comp = std::find (all.begin(), all.end(), fx::ModuleType::compressor);
+            check (comp + 1 != all.end() && *(comp + 1) == fx::ModuleType::opto, "Live runs the opto right after the compressor");
+            fx::FxChain chain (all);
+            check (! chain.find (fx::ModuleType::opto)->isOn(), "the opto starts off");
+        }
+    }
+
     void testAutoMixEffects()
     {
         std::cout << "\nAuto Mix adds effects\n";
@@ -14654,9 +15009,9 @@ static void testAutoLevel()
         for (int i = 0; i < processor.getLiveChain().size(); ++i)
         {
             if (processor.getLiveChain()[i].getType() == fx::ModuleType::autoLevel) position = i;
-            if (processor.getLiveChain()[i].getType() == fx::ModuleType::compressor) compressor = i;
+            if (processor.getLiveChain()[i].getType() == fx::ModuleType::opto) compressor = i;
         }
-        check (position == compressor + 1, "right after the compressor");
+        check (position == compressor + 1, "right after the compressors (Compressor, then Opto)");
 
         processor.prepareToPlay (sampleRate, blockSize);
         const auto backingNoise = makeSoundCheckVoice (6.0, 0.0f, juce::Decibels::decibelsToGain (-30.0f));
@@ -15188,6 +15543,15 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=vocal: just the voice effects.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "vocal")
+    {
+        testFxChain();
+        testVocalDynamics();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=smooth: just the resonance suppressor.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "smooth")
     {
@@ -15400,6 +15764,7 @@ int main()
     testAutoMixMaster();
     testAutoMixSends();
     testDynamics();
+    testVocalDynamics();
     testEffectAutomation();
     testAnalysisSpeed();
     testLatency();
