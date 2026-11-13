@@ -51,6 +51,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/browser.js
         ui/pianoroll.js
         ui/takes.js
+        ui/backing.js
         ui/capture.js
         ui/looper.js
         ui/midilearn.js
@@ -108,6 +109,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/TakeComp.h
     src/analysis/ToMidi.cpp
     src/analysis/ToMidi.h
+    src/analysis/Harmony.cpp
+    src/analysis/Harmony.h
     src/Parameters.cpp
     src/Presets.cpp
     src/PluginProcessor.cpp
@@ -129,6 +132,8 @@ set(MICFX_DSP_SOURCES
     src/SoundCheck.h
     src/Multitrack.cpp
     src/daw/AudioPool.cpp
+    src/daw/BackingVocals.cpp
+    src/daw/BackingVocals.h
     src/daw/DawEngine.cpp
     src/daw/Edit.cpp
     src/daw/Patterns.cpp

@@ -41,6 +41,8 @@
 #include "daw/Patterns.h"
 #include "analysis/Beats.h"
 #include "analysis/ToMidi.h"
+#include "analysis/Harmony.h"
+#include "daw/BackingVocals.h"
 #include "DeviceFavourites.h"
 #include "dsp/FxChain.h"
 #include "dsp/PitchDetector.h"
@@ -5846,6 +5848,99 @@ namespace
             edit.removeTrack (backTrack);
         }
 
+        // Build backing vocals: a folded group of voices under the lead, from the chords of the rest.
+        {
+            const auto melodyFile = folder.getChildFile ("Lead.wav"), chordFile = folder.getChildFile ("Chords.wav");
+            writeWav (melodyFile, makeMelody(), sampleRate);
+            {
+                juce::AudioBuffer<float> chord (1, (int) (2.2 * sampleRate)); // A minor, under A3 B3 C4
+                for (int i = 0; i < chord.getNumSamples(); ++i)
+                {
+                    double v = 0.0;
+                    for (auto midi : { 45.0, 57.0, 60.0, 64.0 })
+                        for (int h = 1; h <= 4; ++h)
+                            v += std::sin (juce::MathConstants<double>::twoPi * h * 440.0 * std::pow (2.0, (midi - 69.0) / 12.0) * i / sampleRate) / h;
+                    chord.setSample (0, i, (float) (0.05 * v));
+                }
+                writeWav (chordFile, chord, sampleRate);
+            }
+            const auto before = edit.getTracks().size();
+            const auto leadTrack = (int) edit.addTrack ("Lead")[daw::ids::id];
+            const auto padTrack = (int) edit.addTrack ("Pad")[daw::ids::id];
+            const auto clipId = (int) bridge.importAudio (melodyFile, leadTrack, 4.0)["clip"];
+            bridge.importAudio (chordFile, padTrack, 4.0);
+
+            const auto build = [&] (juce::var request)
+            {
+                const auto started = run ("backingVocals", request);
+                juce::var done;
+                for (int i = 0; i < 3000 && done.isVoid() && ok (started); ++i)
+                {
+                    juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+                    events.clear();
+                    bridge.tick();
+                    for (const auto& [name, payload] : events)
+                        if (name == "dawBackingVocals" && payload["state"].toString() != "analysing")
+                            done = payload;
+                }
+                return std::make_pair (started, done);
+            };
+            const auto parts = juce::Array<juce::var> { "thirdAbove", "fifthBelow", "doubleTrack" };
+
+            check (! ok (run ("backingVocals", args ({ { "action", "start" }, { "id", clipId }, { "parts", juce::Array<juce::var>() } }))),
+                   "backing vocals need at least one voice");
+
+            const auto [started, done] = build (args ({ { "action", "start" }, { "id", clipId }, { "parts", parts }, { "feel", "tight" } }));
+            const auto group = edit.getReturn ((int) done["group"]);
+            juce::Array<juce::ValueTree> voices;
+            for (const auto& track : edit.getTracks())
+                if (daw::Edit::getTrackGroup (track) == (int) done["group"])
+                    voices.add (track);
+            check (ok (started) && done["state"].toString() == "done" && (int) done["count"] == 3 && daw::Edit::isGroup (group)
+                       && (bool) group.getProperty (daw::ids::folded, false) && voices.size() == 3,
+                   "three voices in a folded group (" + done["state"].toString() + " " + done["error"].toString() + ")");
+            check ((bool) done["listened"] && (int) done["chords"] >= 1, "the other tracks were listened to for chords (" + done["chords"].toString() + ", " + done["key"].toString() + ")");
+
+            auto allGood = voices.size() == 3;
+            for (const auto& track : voices)
+            {
+                const auto clip = track.getChildWithName (daw::ids::CLIP);
+                allGood = allGood && track[daw::ids::mixRole].toString() == "background" && (float) track[daw::ids::volume] < -3.0f
+                       && clip.isValid() && std::abs ((double) clip[daw::ids::start] - 4.0) < 1.0e-6 && clip.hasProperty (daw::ids::pitchNotes)
+                       && clip.hasProperty (daw::ids::warp);
+            }
+            check (allGood, "each voice: tagged as a backing vocal, under the lead, a copy of the clip with its notes and timing");
+            if (voices.size() == 3)
+                check (std::abs ((float) voices[0][daw::ids::pan] + 0.35f) < 1.0e-3f && std::abs ((float) voices[1][daw::ids::pan] - 0.35f) < 1.0e-3f
+                           && std::abs ((float) voices[2][daw::ids::pan]) < 1.0e-3f
+                           && edit.getTracks().indexOf (voices[0]) == edit.getTracks().indexOf (edit.getTrack (leadTrack)) + 1,
+                       "panned in a pair, the odd one in the middle, right under the lead");
+            if (! voices.isEmpty())
+            {
+                // A3 B3 C4 over A minor: a third above sings C D E.
+                const auto shifts = daw::Edit::getClipNotes (voices[0].getChildWithName (daw::ids::CLIP));
+                juce::String sung;
+                for (const auto& n : shifts)
+                    sung << juce::String (n.pitch + n.shift, 1) << " ";
+                check (shifts.size() == 3 && std::abs (shifts[0].pitch + shifts[0].shift - 60.0f) < 0.15f
+                           && std::abs (shifts[1].pitch + shifts[1].shift - 62.0f) < 0.15f && std::abs (shifts[2].pitch + shifts[2].shift - 64.0f) < 0.15f,
+                       "the third above sings " + sung.trim());
+            }
+
+            edit.getUndoManager().undo();
+            check (edit.getTracks().size() == before + 2 && ! daw::Edit::isGroup (edit.getReturn ((int) done["group"])),
+                   "Build backing vocals undoes in one step");
+
+            const auto [keyStarted, keyDone] = build (args ({ { "action", "start" }, { "id", clipId }, { "parts", juce::Array<juce::var> { "octaveBelow" } },
+                                                              { "feel", "loose" }, { "follow", "key" } }));
+            check (keyDone["state"].toString() == "done" && (int) keyDone["count"] == 1 && ! (bool) keyDone["listened"],
+                   "key only: one voice, the other tracks not listened to");
+            edit.getUndoManager().undo();
+
+            run ("removeTrack", args ({ { "id", leadTrack } }));
+            run ("removeTrack", args ({ { "id", padTrack } }));
+        }
+
         project.close();
         DawBridge::availableForTesting = false;
         folder.deleteRecursively();
@@ -11402,6 +11497,240 @@ namespace
         return { right, extra };
     }
 
+    //==============================================================================
+    void testBackingVocals()
+    {
+        std::cout << "\nBacking vocals (harmony parts, doubles)\n";
+        namespace harmony = analysis::harmony;
+        namespace pitch = analysis::pitch;
+
+        const auto makeLine = [] (std::initializer_list<int> pitches, double each = 0.4, double gap = 0.05)
+        {
+            std::vector<pitch::Note> notes;
+            double t = 0.2;
+            for (auto p : pitches)
+            {
+                pitch::Note n;
+                n.start = t;
+                n.end = t + each;
+                n.pitch = (float) p + 0.08f; // a touch sharp, as sung
+                notes.push_back (n);
+                t += each + gap;
+            }
+            return notes;
+        };
+        const auto describe = [] (const std::vector<pitch::Note>& lead, const std::vector<int>& intervals)
+        {
+            juce::String text;
+            for (size_t i = 0; i < lead.size(); ++i)
+                text << (int) std::lround (lead[i].pitch) + intervals[i] << " ";
+            return text.trim();
+        };
+        const auto inScale = [] (const std::vector<pitch::Note>& lead, const std::vector<int>& intervals, int mask)
+        {
+            for (size_t i = 0; i < lead.size(); ++i)
+                if (((mask >> (((int) std::lround (lead[i].pitch) + intervals[i]) % 12)) & 1) == 0)
+                    return false;
+            return true;
+        };
+
+        harmony::Context inC;
+        inC.tonic = 0;
+        const auto cMajor = analysis::getKeyMask (0, false);
+        const auto line = makeLine ({ 60, 64, 67, 69, 65, 62 });
+
+        // Scale parts: every harmony note on the key's scale, the right number of steps away.
+        {
+            const auto third = harmony::getIntervals (line, harmony::Part::thirdAbove, inC);
+            check (third == std::vector<int> { 4, 3, 4, 3, 4, 3 } && inScale (line, third, cMajor),
+                   "a third above in C major: " + describe (line, third));
+            const auto fifth = harmony::getIntervals (line, harmony::Part::fifthBelow, inC);
+            check (fifth == std::vector<int> { -7, -7, -7, -7, -6, -7 } && inScale (line, fifth, cMajor),
+                   "a fifth below: " + describe (line, fifth) + " (B under F stays in the key)");
+            const auto low = harmony::getIntervals (line, harmony::Part::thirdBelow, inC);
+            const auto sixth = harmony::getIntervals (line, harmony::Part::sixthBelow, inC);
+            check (inScale (line, low, cMajor) && inScale (line, sixth, cMajor)
+                       && std::all_of (low.begin(), low.end(), [] (int d) { return d == -3 || d == -4; })
+                       && std::all_of (sixth.begin(), sixth.end(), [] (int d) { return d == -8 || d == -9; }),
+                   "a third below (" + describe (line, low) + ") and a sixth below (" + describe (line, sixth) + ")");
+            const auto octave = harmony::getIntervals (line, harmony::Part::octaveBelow, inC);
+            const auto twin = harmony::getIntervals (line, harmony::Part::doubleTrack, inC);
+            check (std::all_of (octave.begin(), octave.end(), [] (int d) { return d == -12; })
+                       && std::all_of (twin.begin(), twin.end(), [] (int d) { return d == 0; }),
+                   "octaves and doubles");
+
+            harmony::Context inAMinor;
+            inAMinor.tonic = 9;
+            inAMinor.minor = true;
+            const auto minorLine = makeLine ({ 57, 59, 60, 62, 64 });
+            const auto minorThird = harmony::getIntervals (minorLine, harmony::Part::thirdAbove, inAMinor);
+            check (minorThird == std::vector<int> { 3, 3, 4, 3, 3 }, "a third above in A minor: " + describe (minorLine, minorThird));
+
+            // A chromatic passing note keeps its distance from the scale note below it.
+            const auto passing = makeLine ({ 60, 61, 62 });
+            const auto passed = harmony::getIntervals (passing, harmony::Part::thirdAbove, inC);
+            check (passed == std::vector<int> { 4, 4, 3 }, "a passing note moves with its neighbour: " + describe (passing, passed));
+
+            // The transpose of the clip counts: a line sung in B flat, played a tone up in C.
+            harmony::Context moved = inC;
+            moved.transpose = 2.0f;
+            const auto lowered = makeLine ({ 58, 62, 65 });
+            check (harmony::getIntervals (lowered, harmony::Part::thirdAbove, moved) == std::vector<int> { 4, 3, 4 },
+                   "the clip's transpose is part of the lead's pitch");
+        }
+
+        // The key, guessed from the lead when the project has none.
+        {
+            const auto gLine = makeLine ({ 67, 69, 71, 72, 74, 76, 78, 79, 74, 71, 67 });
+            const auto guess = harmony::guessKey (gLine);
+            check (guess.isValid() && analysis::getKeyMask (guess.key, guess.minor) == analysis::getKeyMask (7, false),
+                   "a G major tune: the key is " + guess.getName());
+            const auto third = harmony::getIntervals (gLine, harmony::Part::thirdAbove, {});
+            check (inScale (gLine, third, analysis::getKeyMask (7, false)), "and its harmony uses F#: " + describe (gLine, third));
+        }
+
+        // Chords: harmony notes on the chord's notes where the lead sings one, with small steps.
+        {
+            const auto cChord = analysis::Chord { 0, analysis::Chord::major }, fChord = analysis::Chord { 5, analysis::Chord::major },
+                       gChord = analysis::Chord { 7, analysis::Chord::major }, amChord = analysis::Chord { 9, analysis::Chord::minor };
+            harmony::Context withChords = inC;
+            const auto song = makeLine ({ 64, 67, 65, 69, 62, 67, 64, 60 }, 0.45, 0.05);
+            // C | F | G | C, two notes each
+            withChords.chords = { { 0.0, cChord }, { song[2].start - 0.02, fChord }, { song[4].start - 0.02, gChord }, { song[6].start - 0.02, cChord } };
+            const auto chordAt = [&] (const pitch::Note& n)
+            {
+                analysis::Chord found;
+                for (const auto& c : withChords.chords)
+                    if (c.start <= 0.5 * (n.start + n.end))
+                        found = c.chord;
+                return found;
+            };
+            const auto onChord = [&] (const std::vector<int>& intervals)
+            {
+                for (size_t i = 0; i < song.size(); ++i)
+                    if (! chordAt (song[i]).contains (((int) std::lround (song[i].pitch) + intervals[i]) % 12))
+                        return false;
+                return true;
+            };
+            const auto biggestStep = [&] (const std::vector<int>& intervals)
+            {
+                int most = 0;
+                for (size_t i = 1; i < song.size(); ++i)
+                    most = juce::jmax (most, std::abs (((int) std::lround (song[i].pitch) + intervals[i]) - ((int) std::lround (song[i - 1].pitch) + intervals[i - 1])));
+                return most;
+            };
+
+            const auto above = harmony::getIntervals (song, harmony::Part::chordAbove, withChords);
+            const auto below = harmony::getIntervals (song, harmony::Part::chordBelow, withChords);
+            check (onChord (above) && onChord (below), "chord parts sing the chord's notes: above " + describe (song, above) + ", below " + describe (song, below));
+            check (std::all_of (above.begin(), above.end(), [] (int d) { return d >= 3 && d <= 9; })
+                       && std::all_of (below.begin(), below.end(), [] (int d) { return d <= -3 && d >= -9; }),
+                   "and stay on their side of the lead, a third to a sixth away");
+            const auto leadSteps = biggestStep (std::vector<int> (song.size(), 0));
+            check (biggestStep (above) <= 5 && biggestStep (below) <= 5,
+                   "voice leading: the parts move at most " + juce::String (juce::jmax (biggestStep (above), biggestStep (below)))
+                       + " semitones from note to note (the lead leaps " + juce::String (leadSteps) + ")");
+
+            // A scale third that misses the chord moves to the chord's note next to it.
+            const auto third = harmony::getIntervals (song, harmony::Part::thirdAbove, withChords);
+            check (onChord (third), "a third above follows the chords where the lead sings a chord note: " + describe (song, third));
+
+            // With no chord at a moment (before the first), the scale decides.
+            harmony::Context late = inC;
+            late.chords = { { 100.0, amChord } };
+            check (harmony::getIntervals (song, harmony::Part::chordAbove, late) == harmony::getIntervals (song, harmony::Part::thirdAbove, inC),
+                   "no chord yet: a chord part sings the scale's third");
+        }
+
+        // Voices: each a different take, all under the lead.
+        {
+            const auto tight = harmony::makeVoice (line, harmony::Part::thirdAbove, inC, harmony::Feel::tight, 0);
+            const auto again = harmony::makeVoice (line, harmony::Part::thirdAbove, inC, harmony::Feel::tight, 0);
+            const auto other = harmony::makeVoice (line, harmony::Part::thirdAbove, inC, harmony::Feel::tight, 1);
+            const auto loose = harmony::makeVoice (line, harmony::Part::thirdAbove, inC, harmony::Feel::loose, 0);
+            const auto twin = harmony::makeVoice (line, harmony::Part::doubleTrack, inC, harmony::Feel::tight, 2);
+            const auto intervals = harmony::getIntervals (line, harmony::Part::thirdAbove, inC);
+
+            bool onPitch = tight.notes.size() == line.size();
+            for (size_t i = 0; onPitch && i < line.size(); ++i)
+                onPitch = std::abs (tight.notes[i].shift - (float) intervals[i]) < 0.1f && tight.notes[i].isEdited();
+            check (onPitch, "a voice's notes move by the part's interval (give or take a few cents)");
+
+            const auto range = [] (const std::vector<double>& offsets)
+            {
+                auto low = 1.0, high = -1.0, most = 0.0;
+                for (auto d : offsets)
+                    low = juce::jmin (low, d), high = juce::jmax (high, d), most = juce::jmax (most, std::abs (d));
+                return std::tuple<double, double, double> { low, high, most };
+            };
+            const auto [tightLow, tightHigh, tightMost] = range (tight.offsets);
+            const auto [looseLow, looseHigh, looseMost] = range (loose.offsets);
+            check (tight.offsets.size() == line.size() && tightMost <= 0.0195 && tightMost >= 0.008 && tightLow < 0.0 && tightHigh > 0.0,
+                   "tight: notes " + juce::String (tightLow * 1000.0, 1) + " to " + juce::String (tightHigh * 1000.0, 1) + " ms off the lead, early and late");
+            check (looseMost <= 0.0335 && looseMost > tightMost && looseHigh - looseLow > tightHigh - tightLow,
+                   "loose: wider (" + juce::String (looseLow * 1000.0, 1) + " to " + juce::String (looseHigh * 1000.0, 1) + " ms)");
+            check (again.offsets == tight.offsets && other.offsets != tight.offsets
+                       && std::abs (other.notes[0].formant - tight.notes[0].formant) > 1.0e-3f,
+                   "the same voice comes out the same, the next one differs");
+            check (tight.notes[0].formant > 0.3f && tight.notes[0].straighten > 0.15f && tight.notes[0].vibrato < 0.85f && tight.levelDb < -5.0f,
+                   "an upper part: a smaller voice, steadier, under the lead (" + juce::String (tight.levelDb, 1) + " dB)");
+
+            auto twinOk = twin.notes.size() == line.size() && twin.levelDb < -3.0f;
+            for (const auto& n : twin.notes)
+                twinOk = twinOk && std::abs (n.shift) < 0.13f && std::abs (n.shift) > 0.02f;
+            check (twinOk, "a double: the lead's notes, only detuned (" + juce::String (twin.notes[0].shift * 100.0f, 1) + " cents)");
+
+            // Notes close together aren't squashed by their nudges.
+            std::vector<pitch::Note> fast = makeLine ({ 60, 62, 64, 65 }, 0.03, 0.01);
+            std::vector<double> offsets { 0.02, -0.02, 0.02, -0.02 };
+            harmony::limitOffsets (fast, offsets);
+            auto worst = 1.0;
+            for (size_t i = 1; i < fast.size(); ++i)
+            {
+                const auto span = fast[i].start - fast[i - 1].start;
+                const auto rate = (span + offsets[i] - offsets[i - 1]) / span;
+                worst = juce::jmax (worst, rate, 1.0 / rate);
+            }
+            check (worst <= 1.5 + 1.0e-6, "fast notes: stretched at most 1.5x between nudges (" + juce::String (worst, 2) + "x)");
+        }
+
+        // Rendered: the voice sings a third above the melody, on time give or take its nudges.
+        {
+            const auto melody = makeMelody(); // A3, B3, C4
+            const auto track = pitch::analyse (melody, sampleRate);
+            const auto lead = pitch::findNotes (track);
+            const auto voice = harmony::makeVoice (lead, harmony::Part::thirdAbove, inC, harmony::Feel::tight, 3);
+
+            daw::Edit edit;
+            const auto leadTrack = (int) edit.addTrack ("Lead")[daw::ids::id];
+            const auto harmonyTrack = (int) edit.addTrack ("Harmony")[daw::ids::id];
+            const auto file = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-backing-melody.wav");
+            const auto clip = edit.addClip (leadTrack, file, 2.0, 2.1, 0.0);
+            const auto clipId = (int) clip[daw::ids::id];
+            const auto copyId = daw::backing::addVoiceClip (edit, clipId, harmonyTrack, voice);
+            const auto copy = edit.getClip (copyId);
+            check (copy.isValid() && copy.getParent() == edit.getTrack (harmonyTrack)
+                       && (double) copy[daw::ids::start] == 2.0 && (double) copy[daw::ids::offset] == 0.0 && (double) copy[daw::ids::length] == 2.1
+                       && copy[daw::ids::stretch].toString() == "solo" && daw::Edit::getClipNotes (copy).size() == lead.size()
+                       && ! edit.getClip (clipId).hasProperty (daw::ids::pitchNotes) && ! edit.getClip (clipId).hasProperty (daw::ids::warp),
+                   "the voice is a copy of the clip on its own track, same place, with its notes; the lead is untouched");
+
+            const auto settings = daw::Edit::getWarpSettings (copy);
+            auto timed = ! lead.empty();
+            for (size_t i = 0; i < lead.size(); ++i)
+                timed = timed && std::abs (settings.map.toTarget (lead[i].start) - lead[i].start - voice.offsets[i]) < 0.004;
+            check (timed && std::abs (settings.map.toTarget (0.0)) < 1.0e-6 && std::abs (settings.map.toTarget (2.1) - 2.1) < 1.0e-6,
+                   "its note starts move by their nudges, the clip's edges stay");
+
+            const auto out = daw::warp::render (melody, sampleRate, settings);
+            const auto sung = pitch::analyse (out, sampleRate);
+            const auto p1 = pitch::getPitch (sung, 0.2, 0.5), p2 = pitch::getPitch (sung, 0.72, 1.0), p3 = pitch::getPitch (sung, 1.35, 1.85);
+            check (std::abs (p1 - 60.0f) < 0.25f && std::abs (p2 - 62.0f) < 0.25f && std::abs (p3 - 64.0f) < 0.3f,
+                   "rendered a third above A3 B3 C4: " + juce::String (p1, 2) + " " + juce::String (p2, 2) + " " + juce::String (p3, 2));
+            check (std::abs (out.getNumSamples() - melody.getNumSamples()) < (int) (0.01 * sampleRate), "same length as the lead");
+        }
+    }
+
     void testToMidi()
     {
         std::cout << "\nAudio to MIDI (melody and drums)\n";
@@ -12773,6 +13102,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=backing: just the backing vocal builder.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "backing")
+    {
+        testBackingVocals();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=tomidi: just audio to MIDI.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "tomidi")
     {
@@ -12832,6 +13169,7 @@ int main()
     testPracticeLoops();
     testRhythm();
     testToMidi();
+    testBackingVocals();
     testTrackTools();
     testDawBridge();
     testPatterns();

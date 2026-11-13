@@ -300,6 +300,7 @@ public:
     void trimClipEnd (int clipId, double newEnd);
     int splitClip (int clipId, double time);           // returns the new (right-hand) clip, or -1
     int duplicateClip (int clipId);                    // placed right after the original
+    int copyClipTo (int clipId, int trackId);          // the same clip, at the same time, on another track; returns its id or -1
     void setClipGain (int clipId, float decibels);
 
     // Rebalance: the clip plays `mixed`, a re-mix of its stems at other levels (same length as the
