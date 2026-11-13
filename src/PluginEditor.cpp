@@ -91,6 +91,11 @@ PluginEditor::PluginEditor (PluginProcessor& p)
                                        { webView->emitEventIfBrowserIsVisible (event, payload); },
                                        [this] { return getRoundTripLatency(); });
 
+    practice = std::make_unique<Practice> (processorRef, settings,
+                                           [this] (const juce::Identifier& event, const juce::var& payload)
+                                           { webView->emitEventIfBrowserIsVisible (event, payload); },
+                                           [this] { return getDeviceLatency(); });
+
    #if JucePlugin_Build_Standalone
     // The app's audio interface: its open inputs by name, for the tracks' input pickers.
     if (juce::JUCEApplicationBase::isStandaloneApp())
@@ -145,6 +150,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
 
 PluginEditor::~PluginEditor()
 {
+    practice.reset();
     daw.reset();
 
     auto& map = processorRef.getMidiMap();
@@ -251,6 +257,15 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            }
 
                            complete (list);
+                       })
+
+                       // (action, options) -> see Practice::handle.
+                       .withNativeFunction ("practice", [this] (const auto& args, auto complete)
+                       {
+                           if (practice == nullptr)
+                               return complete ({});
+                           complete (practice->handle (args.size() > 0 ? args[0].toString() : juce::String(),
+                                                       args.size() > 1 ? args[1] : juce::var()));
                        })
 
                        // (action, on) -> { muted, dry }. "mute": the panic button; "dry": hear the mic without effects.
@@ -668,6 +683,8 @@ void PluginEditor::timerCallback()
 {
     if (daw != nullptr)
         daw->tick();
+    if (practice != nullptr && ! processorRef.isDawMode())
+        practice->tick();
 
     // The title bar button or the system can change full screen too; keep the page's button in step.
     if (auto* window = getAppWindow(); window != nullptr && window->isFullScreen() != lastFullScreen)
@@ -984,7 +1001,12 @@ juce::var PluginEditor::describeTracks()
 
 juce::int64 PluginEditor::getRoundTripLatency()
 {
-    juce::int64 latency = processorRef.getLatencySamples();
+    return processorRef.getLatencySamples() + getDeviceLatency();
+}
+
+juce::int64 PluginEditor::getDeviceLatency()
+{
+    juce::int64 latency = 0;
 
    #if JucePlugin_Build_Standalone
     // In the app, add the audio interface's own input + output latency. In a DAW the

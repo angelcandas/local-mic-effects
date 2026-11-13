@@ -1174,66 +1174,22 @@ juce::var DawBridge::handleStems (const juce::var& args)
 
     const auto folder = getRecordingFolder();
     const auto name = source.getFileNameWithoutExtension();
-    const auto model = stems::Model::getDefaultFile();
 
-    juce::Thread::launch ([job, source, folder, name, model]
+    juce::Thread::launch ([job, source, folder, name]
     {
         const auto progress = [job] (double p) { job->progress = p; return ! job->cancel.load(); };
         auto& result = job->result;
-        stems::Separator separator;
-
-        // The GPU first, where Core ML is built in: its converted model downloads once, like the CPU one.
-        if (const auto gpuModel = stems::GpuModel::getDefaultFile(); stems::GpuModel::isBuiltIn())
-        {
-            juce::String problem;
-
-            if (! gpuModel.isDirectory())
-            {
-                job->phase = StemJob::downloading;
-                problem = stems::GpuModel::download (gpuModel, progress);
-
-                if (job->cancel.load())
-                {
-                    result.cancelled = true;
-                    job->finished = true;
-                    return;
-                }
-
-                if (problem.isNotEmpty())
-                    problem = "couldn't get it: " + problem;
-            }
-
-            if (problem.isEmpty())
-            {
-                job->phase = StemJob::loading;
-                job->progress = 0.0;
-                separator = stems::GpuModel::load (gpuModel, problem);
-            }
-
-            if (separator != nullptr)
-                job->gpu = true;
-            else
-                job->note = "The GPU model didn't work (" + problem + "), so this split ran on the CPU.";
-        }
-
-        if (separator == nullptr && ! job->cancel.load())
-        {
-            if (! model.existsAsFile() || stems::Model::verify (model).isNotEmpty())
-            {
-                job->phase = StemJob::downloading;
-                if (const auto problem = stems::Model::download (model, progress); problem.isNotEmpty())
-                {
-                    result.cancelled = job->cancel.load();
-                    result.error = result.cancelled ? juce::String() : problem;
-                    job->finished = true;
-                    return;
-                }
-            }
-
-            job->phase = StemJob::loading;
-            job->progress = 0.0;
-            separator = stems::Model::load (model, result.error);
-        }
+        auto loaded = stems::loadBest ([job] (stems::LoadPhase phase)
+                                       {
+                                           job->phase = phase == stems::LoadPhase::downloading ? StemJob::downloading : StemJob::loading;
+                                           job->progress = 0.0;
+                                       },
+                                       progress);
+        const auto separator = loaded.separator;
+        job->gpu = loaded.gpu;
+        job->note = loaded.note;
+        result.error = loaded.error;
+        result.cancelled = loaded.cancelled;
 
         if (separator != nullptr && ! job->cancel.load())
         {

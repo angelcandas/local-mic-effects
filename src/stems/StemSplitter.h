@@ -95,6 +95,24 @@ struct GpuModel
 };
 
 //==============================================================================
+// The best separator this machine has, downloading its model the first time: the GPU
+// model where Core ML is built in, else (or when that fails) the CPU one.
+struct Loaded
+{
+    Separator separator;  // null when it couldn't (see error) or was cancelled
+    bool gpu = false;
+    bool cancelled = false;
+    juce::String error;   // why there's no separator
+    juce::String note;    // why the GPU wasn't used, when it was meant to be
+};
+
+enum class LoadPhase { downloading, loading };
+
+// Background thread. `onPhase` says what it's doing (progress restarts at each phase);
+// progress returning false cancels.
+Loaded loadBest (const std::function<void (LoadPhase)>& onPhase, const Progress&);
+
+//==============================================================================
 struct Settings
 {
     int threads = 0;            // 0: up to 4, one per physical core
