@@ -36,6 +36,14 @@ const prefs = {
 
 const sizeText = (bytes) => (bytes >= 1e6 ? `${(bytes / 1e6).toFixed(1)} MB` : `${Math.max(1, Math.round(bytes / 1e3))} kB`);
 
+// "98 → 120 BPM", or "120 BPM" when the loop is already in tempo.
+const tempoText = (from, to) => (Math.abs(from - to) < 0.05 ? `${+to.toFixed(1)} BPM` : `${+from.toFixed(1)} → ${+to.toFixed(1)} BPM`);
+
+// The toast for a loop placed in tempo (importFile's `loop`).
+export const loopText = (loop) => (Math.abs(loop.from - loop.to) < 0.05
+  ? `Placed ${loop.bars} bar${loop.bars === 1 ? "" : "s"} in tempo on the bar`
+  : `Stretched ${+loop.from.toFixed(1)} to ${+loop.to.toFixed(1)} BPM (${loop.bars} bar${loop.bars === 1 ? "" : "s"}), on the bar`);
+
 export class LibraryBrowser {
   // screen: the DawScreen. call(command, args): the native daw function, without the
   // error toast (instruments may not exist yet). run(command, args): with it.
@@ -48,7 +56,9 @@ export class LibraryBrowser {
     this.favourites = [];                    // payloads, newest first
     this.recent = [];                        // payloads, newest first
     this.openFx = new Set();                 // effect ids whose presets are unfolded
-    this.preview = { file: null, playing: false, auto: prefs.get("previewAuto", false), volume: prefs.get("previewVolume", -6) };
+    this.preview = { file: null, playing: false, auto: prefs.get("previewAuto", false), volume: prefs.get("previewVolume", -6),
+                     match: prefs.get("matchLoops", true) };
+    call("matchLoops", { on: this.preview.match }); // dropped and imported loops follow the switch
 
     this.section = prefs.get("section", "audio");
     this.place = prefs.get("place", null);   // the selected place's path (audio section)
@@ -452,7 +462,19 @@ export class LibraryBrowser {
       prefs.set("previewAuto", this.preview.auto);
       if (!this.preview.auto) this.stopPreview();
     });
-    bar.append(this.previewButton, this.previewName, volume, auto);
+    // Loops in tempo: a loop (tempo in its name, its WAV chunk or its beat) previews at the
+    // project's tempo from the next bar and repeats; dropped or imported, it plays in tempo.
+    const match = html("button", "library-preview-auto library-preview-match", "Tempo");
+    Object.assign(match, { type: "button", title: "Match loops to the tempo: loops preview, drop and import at the project's tempo, starting on the bar" });
+    match.setAttribute("aria-pressed", String(this.preview.match));
+    match.addEventListener("click", () => {
+      this.preview.match = !this.preview.match;
+      match.setAttribute("aria-pressed", String(this.preview.match));
+      prefs.set("matchLoops", this.preview.match);
+      this.call("matchLoops", { on: this.preview.match });
+      if (this.preview.playing) this.playPreview();
+    });
+    bar.append(this.previewButton, this.previewName, volume, match, auto);
     this.previewBar = bar;
     this.renderPreview();
     return bar;
@@ -472,12 +494,19 @@ export class LibraryBrowser {
     clearTimeout(this.preview.timer);
     this.preview.playing = true;
     this.renderPreview();
-    const result = await this.call("preview", { file, volume: this.preview.volume });
+    this.preview.loop = null;
+    const result = await this.call("preview", { file, volume: this.preview.volume, sync: this.preview.match });
     if (this.preview.file !== file) return;
     if (!result?.ok) {
       this.preview.playing = false;
       this.renderPreview();
       return this.toast(result?.error || "Couldn't play that file.", "is-error");
+    }
+    // A loop repeats until stopped.
+    if (result.loop) {
+      this.preview.loop = result;
+      this.renderPreview();
+      return;
     }
     this.preview.timer = setTimeout(() => { this.preview.playing = false; this.renderPreview(); }, result.seconds * 1000 + 100);
   }
@@ -494,7 +523,8 @@ export class LibraryBrowser {
     this.previewButton.disabled = !this.preview.file;
     this.previewButton.textContent = this.preview.playing ? "■" : "▶";
     this.previewButton.setAttribute("aria-label", this.preview.playing ? "Stop the preview" : "Play the preview");
-    this.previewName.textContent = this.preview.name ?? "Select a file to listen";
+    const loop = this.preview.playing && this.preview.loop;
+    this.previewName.textContent = (this.preview.name ?? "Select a file to listen") + (loop ? ` · ${tempoText(loop.from, loop.to)}` : "");
   }
 
   effectItems() {
@@ -664,8 +694,9 @@ export class LibraryBrowser {
       return;
     }
     if (payload.kind === "audio") {
-      const result = await this.run("importFile", { file: payload.file, track: target.track, start: target.start ?? -1 });
+      const result = await this.run("importFile", { file: payload.file, track: target.track, start: target.start ?? -1, match: this.preview.match });
       if (result?.ok && typeof result.track === "number") screen.showWhenDrawn({ track: result.track, clip: result.clip, start: result.start });
+      if (result?.loop) this.toast(loopText(result.loop), "", "undo");
       if (result?.ok) this.addRecent(payload);
       return;
     }

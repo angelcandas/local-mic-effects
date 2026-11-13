@@ -155,7 +155,6 @@ TempoMap TempoMap::fromDownbeats (std::vector<double> downbeats, int beatsPerBar
         return TempoMap (120.0);
 
     const auto bar = (double) juce::jlimit (1, 16, beatsPerBar);
-    const auto numBars = downbeats.size() - 1;
 
     // Misplaced bar lines: bar k runs long and bar k + 1 short (or the other way round) by
     // more than 12 % of the local bar length, while the two together keep the pace.
@@ -163,7 +162,7 @@ TempoMap TempoMap::fromDownbeats (std::vector<double> downbeats, int beatsPerBar
         for (size_t k = 0; k + 2 < downbeats.size(); ++k)
         {
             std::vector<double> nearby;
-            for (auto j = (size_t) juce::jmax (0, (int) k - 2); j <= juce::jmin (numBars - 1, k + 3); ++j)
+            for (auto j = (size_t) juce::jmax (0, (int) k - 2); j <= juce::jmin (downbeats.size() - 2, k + 3); ++j)
                 nearby.push_back (downbeats[j + 1] - downbeats[j]);
             std::nth_element (nearby.begin(), nearby.begin() + (long) nearby.size() / 2, nearby.end());
             const auto typical = nearby[nearby.size() / 2];
@@ -175,17 +174,32 @@ TempoMap TempoMap::fromDownbeats (std::vector<double> downbeats, int beatsPerBar
         }
 
     const auto bpmOf = [bar] (double seconds) { return juce::jlimit (minBpm, maxBpm, 60.0 * bar / seconds); };
-    const auto firstBarBpm = bpmOf (downbeats[1] - downbeats[0]);
 
-    // The lead-in: whole bars from 0 s to the first downbeat, at the tempo nearest the first bar's.
+    // The lead-in: whole bars from 0 s to the first downbeat, at the tempo nearest the first
+    // bar's. When the music starts too soon after 0 s for a whole bar at a sensible pace
+    // (the lead-in bar would run over 1.5 times the first bar's tempo), the first bar of
+    // music joins the lead-in and the bar lines follow from the second downbeat on.
     int lead = 0;
+    auto firstBarBpm = bpmOf (downbeats[1] - downbeats[0]);
     auto leadBpm = firstBarBpm;
-    if (const auto t0 = downbeats.front(); t0 > 1.0e-3)
+    for (int attempt = 0; attempt < 2; ++attempt)
     {
+        lead = 0;
+        firstBarBpm = bpmOf (downbeats[1] - downbeats[0]);
+        leadBpm = firstBarBpm;
+        const auto t0 = downbeats.front();
+        if (t0 <= 1.0e-3)
+            break;
+
         const auto barSeconds = 60.0 * bar / firstBarBpm;
         lead = juce::jmax (1, (int) std::lround (t0 / barSeconds));
-        leadBpm = juce::jlimit (minBpm, maxBpm, 60.0 * bar * lead / t0);
+        const auto exact = 60.0 * bar * lead / t0;
+        leadBpm = juce::jlimit (minBpm, maxBpm, exact);
+        if (exact <= 1.5 * firstBarBpm || downbeats.size() < 3 || attempt > 0)
+            break;
+        downbeats.erase (downbeats.begin());
     }
+    const auto numBars = downbeats.size() - 1;
 
     std::vector<Point> points { { 0.0, leadBpm, false } };
     for (size_t k = 0; k < numBars; ++k)

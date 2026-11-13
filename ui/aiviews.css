@@ -16,9 +16,10 @@
 .ai-plugin[data-accent="stems"] { --ai: #ffc94d; --ai-2: #ff7a90; }
 .ai-plugin[data-accent="mix"] { --ai: #8c7bff; --ai-2: #3fd9c6; }
 .ai-plugin[data-accent="check"] { --ai: #3fd9c6; --ai-2: #9be36b; }
+.ai-plugin[data-accent="map"] { --ai: #ff9a4d; --ai-2: #4f8cff; }
 .automix-panel.ai-plugin { width: min(540px, calc(100% - 20px)); display: flex; flex-direction: column; }
 .stems-panel.ai-plugin { width: min(460px, calc(100% - 20px)); }
-.stems-panel.ai-plugin[hidden], .automix-panel.ai-plugin[hidden], .mixcheck-panel.ai-plugin[hidden] { display: none; }
+.stems-panel.ai-plugin[hidden], .automix-panel.ai-plugin[hidden], .mixcheck-panel.ai-plugin[hidden], .songmap-panel.ai-plugin[hidden] { display: none; }
 
 .ai-head {
   display: flex; align-items: center; gap: 10px;
@@ -201,3 +202,32 @@
   position: sticky; bottom: -14px; z-index: 1; margin: 0 -14px -14px; padding: 10px 14px;
   border-top: 1px solid var(--line); background: #11141b;
 }
+
+/* Song map (ui/songmap.js) */
+.songmap-panel.ai-plugin { width: min(500px, calc(100% - 20px)); }
+.songmap-summary { display: flex; gap: 8px; margin: 10px 0 8px; }
+.songmap-summary[hidden], .songmap-strip[hidden], .songmap-list[hidden], .songmap-options[hidden] { display: none; }
+.songmap-stat { display: grid; flex: 1; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: rgba(0, 0, 0, 0.18); }
+.songmap-stat small { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.05em; }
+.songmap-stat strong { font-size: 13px; white-space: nowrap; }
+.songmap-strip { display: flex; gap: 2px; height: 34px; margin-bottom: 8px; }
+.songmap-block {
+  display: flex; flex-direction: column; justify-content: center; align-items: flex-start;
+  min-width: 0; flex-basis: 0; padding: 0 5px; overflow: hidden;
+  border: 0; border-top: 3px solid var(--section); border-radius: 5px;
+  background: color-mix(in srgb, var(--section) 26%, #0c0e14);
+  color: var(--text); font: 600 10px/1.2 var(--mono); text-align: left; cursor: pointer;
+}
+.songmap-block:hover { background: color-mix(in srgb, var(--section) 40%, #0c0e14); }
+.songmap-letter { color: var(--section); font-size: 11px; }
+.songmap-name { max-width: 100%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--muted); }
+.songmap-list { display: grid; grid-template-columns: minmax(0, 1fr); gap: 2px; max-height: 210px; margin-bottom: 8px; overflow-x: hidden; overflow-y: auto; }
+.songmap-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 6px; cursor: pointer; }
+.songmap-row:hover { background: rgba(255, 255, 255, 0.04); }
+.songmap-row-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.songmap-row-name small { color: var(--muted); }
+.songmap-dot { display: inline-block; width: 8px; height: 8px; margin-right: 7px; border-radius: 2px; background: var(--section); }
+.songmap-row-where { flex: none; color: var(--muted); font: 11px var(--mono); }
+.songmap-loop.mini { flex: none; width: auto; padding: 0 8px; font-size: 11px; }
+.songmap-options { margin-bottom: 4px; }
+.songmap-options label.check { font-size: 12px; }
