@@ -806,6 +806,10 @@ body.is-daw .chip--live { display: none; }
 .export-head { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
 .export-options { display: grid; gap: 8px; }
 .export-options label { display: grid; grid-template-columns: 70px 1fr; align-items: center; color: var(--muted); }
+.export-options label[hidden] { display: none; }
+.export-options .text-input { min-width: 0; width: 100%; padding: 5px 8px; border: 1px solid var(--line-strong); border-radius: 8px; background: #080a0e; color: var(--text); font: inherit; }
+.export-folder { display: flex; gap: 6px; min-width: 0; }
+.export-folder .text-input { flex: 1; text-overflow: ellipsis; }
 .export-options label.check { display: flex; gap: 8px; color: var(--text); }
 .export-options input[type=checkbox] { accent-color: var(--accent); }
 .automix-effects { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 12px; }

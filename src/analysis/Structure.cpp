@@ -106,6 +106,16 @@ namespace
 }
 
 //==============================================================================
+juce::String Section::getColour() const
+{
+    if (kind == "intro" || kind == "outro") return "#7d8799";
+    if (kind == "verse")  return "#4f8cff";
+    if (kind == "chorus") return "#ff7a45";
+    if (kind == "bridge") return "#b26bff";
+    static const char* letters[] = { "#2bb5a0", "#e0b23a", "#e05a8a", "#6fbf4a", "#5aa6e0", "#c07a4a" };
+    return letters[juce::jlimit (0, 5, letter % 6)];
+}
+
 int SongMap::getSectionAt (double seconds) const noexcept
 {
     for (size_t i = 0; i < sections.size(); ++i)

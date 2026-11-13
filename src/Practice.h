@@ -4,6 +4,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "analysis/Coach.h"
+#include "analysis/Structure.h"
 #include "stems/StemSplitter.h"
 
 #include <functional>
@@ -46,6 +47,11 @@ public:
     //   "report"                   -> describeReport()
     //   "loop" { phrase, speed, semitones } loops one phrase (with a lead-in), slower and/or in
     //                              another key (rendered with the warp engine); "loopReady" follows
+    //   "loop" { section, ... }    loops a section of the song (verse, chorus...: see "sections"),
+    //                              with every phrase in it to sing
+    //   "sections"                 finds the song's sections (analysis::structure) in the
+    //                              background, once per song (kept in its cache folder); a
+    //                              "practice" event { state: "sections", sections } follows
     //   "unloop"                   back to the whole song
     juce::var handle (const juce::String& action, const juce::var& options);
 
@@ -104,6 +110,22 @@ public:
     // `speed` times as fast and `semitones` higher.
     static analysis::coach::Song cutSong (const analysis::coach::Song&, int phrase, double offset, double speed, double semitones);
 
+    // Phrases first..last (each kept as a phrase of its own), the same way.
+    static analysis::coach::Song cutSong (const analysis::coach::Song&, int firstPhrase, int lastPhrase, double offset,
+                                          double speed, double semitones);
+
+    // The phrases that start inside a stretch of the song: { first, last }, or { -1, -1 }.
+    static std::pair<int, int> getPhrasesIn (const analysis::coach::Song&, double from, double to);
+
+    // The song's sections, as found (empty until "sections" has run). Tests may set them.
+    const std::vector<analysis::structure::Section>& getSections() const noexcept { return sections; }
+    void setSections (std::vector<analysis::structure::Section> s) { sections = std::move (s); sectionsKnown = true; }
+
+    // Sections to and from the cache file's text (a line per section).
+    static juce::String sectionsToText (const std::vector<analysis::structure::Section>&);
+    static std::vector<analysis::structure::Section> sectionsFromText (const juce::String&);
+    static constexpr const char* sectionsFileName = "sections-v1.txt";
+
     struct LoopAudio
     {
         juce::AudioBuffer<float> backing, guide; // empty when there was none
@@ -138,8 +160,13 @@ public:
 private:
     struct Job;
     struct LoopJob;
+    struct SectionsJob;
 
     void startLoop (int phrase, double speed, double semitones);
+    void startSectionLoop (int section, double speed, double semitones);
+    void startRangeLoop (int firstPhrase, int lastPhrase, int section, double from, double to, double speed, double semitones);
+    void findSections();
+    juce::var describeSections() const;
     void finishLoop (LoopJob&);
     void endLoop (bool restoreTracks = true);
 
@@ -182,13 +209,19 @@ private:
     struct Loop
     {
         bool active = false;
-        int phrase = -1;
+        int phrase = -1;                  // the first phrase looped
+        int lastPhrase = -1, section = -1;  // the last one; the section looped (-1: a phrase)
         double speed = 1.0, semitones = 0.0;
         double from = 0.0, to = 0.0;      // in the song
         int backingId = -1, guideId = -1; // rendered tracks (-1: looping the song's own tracks)
         std::vector<std::pair<int, bool>> muted; // the song's tracks muted meanwhile, and how they were
     } loop;
     std::shared_ptr<LoopJob> loopJob;
+
+    // The song's sections.
+    std::vector<analysis::structure::Section> sections;
+    bool sectionsKnown = false;
+    std::shared_ptr<SectionsJob> sectionsJob;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Practice)
 };

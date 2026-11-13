@@ -65,10 +65,19 @@ struct Practice::Job
     Prepared result; // written by the job before `finished`
 };
 
+struct Practice::SectionsJob
+{
+    std::atomic<bool> cancel { false }, finished { false };
+    std::vector<std::shared_ptr<const Multitrack::Track>> tracks; // the song's, kept alive while it listens
+    double sampleRate = 48000.0;
+    analysis::structure::SongMap map;
+    juce::File folder; // the song's cache folder, for the result
+};
+
 struct Practice::LoopJob
 {
     std::atomic<bool> cancel { false }, finished { false };
-    int phrase = 0;
+    int phrase = 0, lastPhrase = 0, section = -1;
     double speed = 1.0, semitones = 0.0, from = 0.0, to = 0.0;
     std::shared_ptr<const Multitrack::Track> backing, guide; // kept alive while it renders
     LoopAudio result;
@@ -104,6 +113,8 @@ Practice::~Practice()
         job->cancel = true;
     if (loopJob != nullptr)
         loopJob->cancel = true;
+    if (sectionsJob != nullptr)
+        sectionsJob->cancel = true;
     if (loop.active)
         endLoop();
     processor.getPitchTap().setEnabled (false);
@@ -304,10 +315,19 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
     {
         return describeReport();
     }
+    else if (action == "loop" && options.hasProperty ("section"))
+    {
+        startSectionLoop ((int) options.getProperty ("section", -1), (double) options.getProperty ("speed", 1.0),
+                          (double) options.getProperty ("semitones", 0.0));
+    }
     else if (action == "loop")
     {
         startLoop ((int) options.getProperty ("phrase", -1), (double) options.getProperty ("speed", 1.0),
                    (double) options.getProperty ("semitones", 0.0));
+    }
+    else if (action == "sections")
+    {
+        findSections();
     }
     else if (action == "unloop")
     {
@@ -357,7 +377,9 @@ juce::var Practice::describeSong() const
     return object ({ { "name", songName }, { "file", source.getFullPathName() }, { "notes", notes }, { "phrases", phrases },
                      { "lowest", round2 (song.getLowest()) }, { "highest", round2 (song.getHighest()) },
                      { "hasBacking", backingFile != juce::File() },
-                     { "loop", loop.active ? object ({ { "phrase", loop.phrase }, { "speed", loop.speed }, { "semitones", loop.semitones },
+                     { "sections", describeSections() },
+                     { "loop", loop.active ? object ({ { "phrase", loop.phrase }, { "lastPhrase", loop.lastPhrase }, { "section", loop.section },
+                                                       { "speed", loop.speed }, { "semitones", loop.semitones },
                                                        { "from", round3 (loop.from) }, { "to", round3 (loop.to) } })
                                            : juce::var() } });
 }
@@ -438,6 +460,17 @@ void Practice::install (const Prepared& prepared)
     if (prepared.backing != juce::File())
         multitrack.loadBackingTrack (prepared.backing);
     multitrack.loadBackingTrack (prepared.guide);
+
+    if (sectionsJob != nullptr)
+        sectionsJob->cancel = true;
+    sectionsJob = nullptr;
+    sections.clear();
+    sectionsKnown = false;
+    if (const auto cached = prepared.folder.getChildFile (sectionsFileName); prepared.folder != juce::File() && cached.existsAsFile())
+    {
+        sections = sectionsFromText (cached.loadFileAsString());
+        sectionsKnown = true;
+    }
 
     source = job != nullptr ? job->source : prepared.guide;
     songName = source.getFileNameWithoutExtension();
@@ -571,6 +604,20 @@ void Practice::tick()
     else if (job != nullptr)
     {
         emit ("practice", object ({ { "state", "preparing" }, { "job", describeJob() } }));
+    }
+
+    if (sectionsJob != nullptr && sectionsJob->finished)
+    {
+        const auto finished = sectionsJob;
+        sectionsJob = nullptr;
+        if (! finished->cancel && ! finished->map.cancelled)
+        {
+            sections = finished->map.sections;
+            sectionsKnown = true;
+            if (finished->folder.isDirectory())
+                finished->folder.getChildFile (sectionsFileName).replaceWithText (sectionsToText (sections));
+            emit ("practice", object ({ { "state", "sections" }, { "sections", describeSections() } }));
+        }
     }
 
     if (loopJob != nullptr && loopJob->finished)
@@ -709,6 +756,139 @@ coach::Song Practice::cutSong (const coach::Song& whole, int phrase, double offs
     return part;
 }
 
+coach::Song Practice::cutSong (const coach::Song& whole, int firstPhrase, int lastPhrase, double offset, double speed, double semitones)
+{
+    coach::Song part;
+    if (! juce::isPositiveAndBelow (firstPhrase, (int) whole.phrases.size()) || lastPhrase < firstPhrase)
+        return part;
+    lastPhrase = juce::jmin (lastPhrase, (int) whole.phrases.size() - 1);
+
+    const auto scale = 1.0 / juce::jlimit (0.25, 2.0, speed);
+    for (int p = firstPhrase; p <= lastPhrase; ++p)
+    {
+        const auto& phrase = whole.phrases[(size_t) p];
+        const auto index = (int) part.phrases.size();
+        coach::Phrase cut = phrase;
+        cut.start = (phrase.start - offset) * scale;
+        cut.end = (phrase.end - offset) * scale;
+        cut.firstNote = (int) part.notes.size();
+        for (int i = phrase.firstNote; i < phrase.endNote; ++i)
+        {
+            const auto& n = whole.notes[(size_t) i];
+            part.notes.push_back ({ (n.start - offset) * scale, (n.end - offset) * scale, n.pitch + (float) semitones, index });
+        }
+        cut.endNote = (int) part.notes.size();
+        part.phrases.push_back (cut);
+    }
+    return part;
+}
+
+std::pair<int, int> Practice::getPhrasesIn (const coach::Song& whole, double from, double to)
+{
+    // A phrase belongs to the section it starts in (a pickup sung just before the bar line
+    // still counts: a quarter of a second of slack).
+    int first = -1, last = -1;
+    for (int i = 0; i < (int) whole.phrases.size(); ++i)
+        if (const auto start = whole.phrases[(size_t) i].start; start >= from - 0.25 && start < to - 0.25)
+        {
+            if (first < 0)
+                first = i;
+            last = i;
+        }
+    return { first, last };
+}
+
+juce::String Practice::sectionsToText (const std::vector<analysis::structure::Section>& list)
+{
+    juce::StringArray lines;
+    for (const auto& section : list)
+        lines.add (juce::String (section.start, 3) + "\t" + juce::String (section.end, 3) + "\t" + section.kind + "\t"
+                   + juce::String (section.letter) + "\t" + juce::String (section.firstBar) + "\t" + juce::String (section.bars)
+                   + "\t" + section.name);
+    return lines.joinIntoString ("\n");
+}
+
+std::vector<analysis::structure::Section> Practice::sectionsFromText (const juce::String& text)
+{
+    std::vector<analysis::structure::Section> list;
+    for (const auto& line : juce::StringArray::fromLines (text))
+    {
+        const auto fields = juce::StringArray::fromTokens (line, "\t", {});
+        if (fields.size() < 7)
+            continue;
+        analysis::structure::Section section;
+        section.start = fields[0].getDoubleValue();
+        section.end = fields[1].getDoubleValue();
+        section.kind = fields[2];
+        section.letter = fields[3].getIntValue();
+        section.firstBar = fields[4].getIntValue();
+        section.bars = fields[5].getIntValue();
+        section.name = fields[6];
+        if (section.end > section.start)
+            list.push_back (section);
+    }
+    return list;
+}
+
+juce::var Practice::describeSections() const
+{
+    if (! sectionsKnown)
+        return sectionsJob != nullptr ? juce::var ("finding") : juce::var();
+
+    juce::Array<juce::var> list;
+    for (const auto& s : sections)
+        list.add (object ({ { "name", s.name }, { "kind", s.kind }, { "letter", s.getLetterName() }, { "colour", s.getColour() },
+                            { "start", round3 (s.start) }, { "end", round3 (s.end) }, { "bars", s.bars } }));
+    return list;
+}
+
+void Practice::findSections()
+{
+    if (sectionsKnown)
+    {
+        emit ("practice", object ({ { "state", "sections" }, { "sections", describeSections() } }));
+        return;
+    }
+    if (sectionsJob != nullptr)
+        return;
+
+    // The song's own tracks (the backing and the guide voice), summed.
+    auto newJob = std::make_shared<SectionsJob>();
+    const auto& multitrack = processor.getMultitrack();
+    newJob->sampleRate = multitrack.getSampleRate();
+    for (const auto& track : multitrack.getTracks())
+        if ((track->file == guideFile || (backingFile != juce::File() && track->file == backingFile)) && track->audio.getNumSamples() > 0)
+            newJob->tracks.push_back (track);
+
+    if (newJob->tracks.empty())
+    {
+        emit ("practice", object ({ { "state", "sections" }, { "sections", juce::var() },
+                                    { "error", baseSong.notes.empty() ? "Open a song first." : "The song is still loading. Try again in a moment." } }));
+        return;
+    }
+
+    newJob->folder = juce::File (settings.getValue ("practice.folder"));
+    sectionsJob = newJob;
+
+    juce::Thread::launch ([newJob]
+    {
+        auto length = 0;
+        for (const auto& track : newJob->tracks)
+            length = juce::jmax (length, track->audio.getNumSamples());
+
+        juce::AudioBuffer<float> mix (1, length);
+        mix.clear();
+        for (const auto& track : newJob->tracks)
+            for (int ch = 0; ch < track->audio.getNumChannels(); ++ch)
+                mix.addFrom (0, 0, track->audio, ch, 0, track->audio.getNumSamples(), 1.0f / (float) track->audio.getNumChannels());
+
+        newJob->map = analysis::structure::analyse (mix, newJob->sampleRate, {}, [newJob] { return ! newJob->cancel.load(); });
+        newJob->finished = true;
+    });
+
+    emit ("practice", object ({ { "state", "sections" }, { "sections", "finding" } }));
+}
+
 Practice::LoopAudio Practice::renderLoop (const juce::AudioBuffer<float>* backing, const juce::AudioBuffer<float>* guide, double rate,
                                           double from, double to, double speed, double semitones,
                                           const std::function<bool()>& shouldContinue)
@@ -753,6 +933,35 @@ void Practice::startLoop (int phrase, double speed, double semitones)
     if (! juce::isPositiveAndBelow (phrase, (int) baseSong.phrases.size()))
         return;
 
+    const auto& p = baseSong.phrases[(size_t) phrase];
+    const auto& multitrack = processor.getMultitrack();
+    const auto length = (double) multitrack.getLength() / juce::jmax (1.0, multitrack.getSampleRate());
+    const auto from = juce::jmax (0.0, p.start - loopLeadIn);
+    const auto to = juce::jmin (length > 0.0 ? length : p.end + loopTail, p.end + loopTail);
+    startRangeLoop (phrase, phrase, -1, from, to, speed, semitones);
+}
+
+void Practice::startSectionLoop (int index, double speed, double semitones)
+{
+    if (! juce::isPositiveAndBelow (index, (int) sections.size()))
+        return;
+
+    // The whole section, from a short lead-in to just past its end, with every phrase that
+    // starts in it to sing (an instrumental section just loops).
+    const auto& section = sections[(size_t) index];
+    const auto& multitrack = processor.getMultitrack();
+    const auto length = (double) multitrack.getLength() / juce::jmax (1.0, multitrack.getSampleRate());
+    const auto from = juce::jmax (0.0, section.start - loopLeadIn);
+    const auto to = juce::jmin (length > 0.0 ? length : section.end + loopTail, section.end + loopTail);
+    const auto [first, last] = getPhrasesIn (baseSong, section.start, section.end);
+    startRangeLoop (first, last, index, from, to, speed, semitones);
+}
+
+void Practice::startRangeLoop (int phrase, int lastPhrase, int section, double from, double to, double speed, double semitones)
+{
+    if (to <= from)
+        return;
+
     if (loopJob != nullptr)
         loopJob->cancel = true;
     loopJob = nullptr;
@@ -763,10 +972,6 @@ void Practice::startLoop (int phrase, double speed, double semitones)
     semitones = juce::jlimit (-6.0, 6.0, std::round (semitones));
 
     auto& multitrack = processor.getMultitrack();
-    const auto& p = baseSong.phrases[(size_t) phrase];
-    const auto length = (double) multitrack.getLength() / juce::jmax (1.0, multitrack.getSampleRate());
-    const auto from = juce::jmax (0.0, p.start - loopLeadIn);
-    const auto to = juce::jmin (length > 0.0 ? length : p.end + loopTail, p.end + loopTail);
 
     // As it is: loop the song's own tracks.
     if (std::abs (speed - 1.0) < 1.0e-4 && std::abs (semitones) < 1.0e-4)
@@ -774,12 +979,14 @@ void Practice::startLoop (int phrase, double speed, double semitones)
         loop = {};
         loop.active = true;
         loop.phrase = phrase;
+        loop.lastPhrase = lastPhrase;
+        loop.section = section;
         loop.from = from;
         loop.to = to;
         const auto rate = multitrack.getSampleRate();
         multitrack.setLoop ((juce::int64) (from * rate), (juce::int64) (to * rate));
         multitrack.seek ((juce::int64) (from * rate));
-        song = cutSong (baseSong, phrase, 0.0, 1.0, 0.0);
+        song = section >= 0 ? cutSong (baseSong, phrase, lastPhrase, 0.0, 1.0, 0.0) : cutSong (baseSong, phrase, 0.0, 1.0, 0.0);
         noteScores.assign (song.notes.size(), {});
         phraseScores.assign (song.phrases.size(), {});
         restartFrom (from);
@@ -791,6 +998,8 @@ void Practice::startLoop (int phrase, double speed, double semitones)
 
     auto newJob = std::make_shared<LoopJob>();
     newJob->phrase = phrase;
+    newJob->lastPhrase = lastPhrase;
+    newJob->section = section;
     newJob->speed = speed;
     newJob->semitones = semitones;
     newJob->from = from;
@@ -826,6 +1035,8 @@ void Practice::finishLoop (LoopJob& done)
     loop = {};
     loop.active = true;
     loop.phrase = done.phrase;
+    loop.lastPhrase = done.lastPhrase;
+    loop.section = done.section;
     loop.speed = done.speed;
     loop.semitones = done.semitones;
     loop.from = done.from;
@@ -851,7 +1062,8 @@ void Practice::finishLoop (LoopJob& done)
     }
     applyGuideLevel();
 
-    song = cutSong (baseSong, done.phrase, done.from, done.speed, done.semitones);
+    song = done.section >= 0 ? cutSong (baseSong, done.phrase, done.lastPhrase, done.from, done.speed, done.semitones)
+                             : cutSong (baseSong, done.phrase, done.from, done.speed, done.semitones);
     noteScores.assign (song.notes.size(), {});
     phraseScores.assign (song.phrases.size(), {});
     restartFrom (0.0);

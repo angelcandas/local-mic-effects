@@ -133,7 +133,9 @@ export class PracticeView {
     const relooped = () => {
       this.loopSpeed = Number(this.speedSelect.value);
       this.loopKey = Number(this.keySelect.value);
-      if (this.song?.loop) this.loopPhrase(this.song.loop.phrase);
+      const loop = this.song?.loop;
+      if (loop?.section >= 0) this.loopSection(loop.section);
+      else if (loop) this.loopPhrase(loop.phrase);
     };
     this.speedSelect.addEventListener("change", relooped);
     this.keySelect.addEventListener("change", relooped);
@@ -169,6 +171,10 @@ export class PracticeView {
     this.stage.append(this.canvas, this.tuner, this.empty);
     this.stage.addEventListener("pointerdown", (event) => this.onStageClick(event));
 
+    // The song's sections (song map): click one to loop it.
+    this.sections = null; // [{ name, kind, letter, colour, start, end }], "finding", or null (not looked for)
+    this.sectionStrip = html("div", "practice-sections");
+
     // The phrases, scored as you go; click one to go back to it.
     this.phraseStrip = html("div", "practice-phrases");
 
@@ -179,7 +185,7 @@ export class PracticeView {
     this.stage.append(this.report);
     this.report.addEventListener("pointerdown", (event) => event.stopPropagation());
 
-    s.append(bar, this.loopBar, this.progress, this.stage, this.phraseStrip, this.message);
+    s.append(bar, this.loopBar, this.progress, this.stage, this.sectionStrip, this.phraseStrip, this.message);
   }
 
   show(on, remember = true) {
@@ -221,6 +227,8 @@ export class PracticeView {
     this.trail = [];
     this.pass = 0;
 
+    if (song && "sections" in song) this.sections = song.sections ?? null;
+    if (!song) this.sections = null;
     this.songLabel.textContent = this.song ? this.song.name || "Song" : "No song yet";
     if (!this.song?.loop) this.songInfo.textContent = this.song
       ? `${this.song.notes.length} notes in ${this.song.phrases.length} phrases · ${noteName(this.song.lowest)} to ${noteName(this.song.highest)}`
@@ -231,7 +239,9 @@ export class PracticeView {
     this.loopBar.hidden = !loop;
     this.section.classList.toggle("is-looping", Boolean(loop));
     if (loop) {
-      const parts = [`Looping phrase ${loop.phrase + 1}`];
+      const section = loop.section >= 0 && Array.isArray(this.sections) ? this.sections[loop.section] : null;
+      const phrases = loop.lastPhrase > loop.phrase ? `phrases ${loop.phrase + 1}–${loop.lastPhrase + 1}` : loop.phrase >= 0 ? `phrase ${loop.phrase + 1}` : "no singing";
+      const parts = [section ? `Looping ${section.name} (${phrases})` : `Looping phrase ${loop.phrase + 1}`];
       if (loop.speed < 0.999) parts.push(`${Math.round(loop.speed * 100)}% speed`);
       if (loop.semitones) parts.push(`${loop.semitones > 0 ? "+" : "−"}${Math.abs(loop.semitones)} st`);
       this.loopLabel.textContent = parts.join(" · ");
@@ -239,12 +249,45 @@ export class PracticeView {
       this.loopKey = loop.semitones;
       this.speedSelect.value = String([1, 0.9, 0.75, 0.6, 0.5].reduce((a, b) => (Math.abs(b - loop.speed) < Math.abs(a - loop.speed) ? b : a)));
       this.keySelect.value = String(loop.semitones);
-      this.nextWeak.hidden = this.weak.length < 2;
+      this.nextWeak.hidden = this.weak.length < 2 || loop.section >= 0;
       this.report.hidden = true;
     }
     this.buildPhraseStrip();
+    this.buildSectionStrip();
     this.updatePass();
     this.draw();
+  }
+
+  // The sections of the song as coloured blocks (their lengths to scale); click one to loop it.
+  buildSectionStrip() {
+    const strip = this.sectionStrip;
+    strip.replaceChildren();
+    strip.hidden = !this.song;
+    if (!this.song) return;
+    const looping = this.song.loop?.section ?? -1;
+    if (!Array.isArray(this.sections) || !this.sections.length) {
+      const finding = this.sections === "finding";
+      const find = Object.assign(html("button", "text-button practice-sections-find", finding ? "Finding the sections…" : "Find the song's sections"),
+                                 { type: "button", disabled: finding, title: "Song map: finds the intro, verses, choruses and bridge, so you can loop a whole section" });
+      find.addEventListener("click", () => practice("sections"));
+      strip.append(html("span", "practice-sections-label", "Sections"), find);
+      return;
+    }
+    strip.append(html("span", "practice-sections-label", "Loop a section"));
+    this.sections.forEach((section, i) => {
+      const chip = Object.assign(html("button", `practice-section${i === looping ? " is-looping" : ""}`), { type: "button" });
+      chip.style.flexGrow = String(Math.max(0.5, section.end - section.start));
+      chip.style.setProperty("--section", section.colour);
+      chip.title = `${section.name} · ${formatDuration(section.start)}, ${section.bars} bars. Click to loop it (speed and key as set).`;
+      chip.append(html("span", "practice-section-letter", section.letter), html("span", "practice-section-name", section.name));
+      chip.addEventListener("click", () => this.loopSection(i));
+      strip.append(chip);
+    });
+  }
+
+  loopSection(section) {
+    if (section == null || section < 0) return;
+    practice("loop", { section, speed: this.loopSpeed, semitones: this.loopKey });
   }
 
   showProgress(job) {
@@ -260,6 +303,13 @@ export class PracticeView {
       this.setMessage("");
       return;
     }
+    if (event.state === "sections") {
+      this.sections = event.sections ?? null;
+      if (event.error) this.setMessage(event.error, true);
+      else if (Array.isArray(event.sections)) this.setMessage(event.sections.length ? "Click a section to loop it." : "No sections found in this song.");
+      this.buildSectionStrip();
+      return;
+    }
     if (event.state === "rendering") {
       this.setMessage("Preparing the loop…");
       return;
@@ -267,7 +317,8 @@ export class PracticeView {
     this.showProgress(null);
     if (event.state === "loop") {
       this.setSong(event.song);
-      this.setMessage("Sing the phrase each time it comes round. Its score is the last time round.");
+      this.setMessage(event.song?.loop?.section >= 0 ? "Sing the section each time it comes round. Each phrase's score is the last time round."
+                                                      : "Sing the phrase each time it comes round. Its score is the last time round.");
     } else if (event.state === "ready") {
       this.setSong(event.song);
       this.setMessage(event.quiet ? "" : event.fromCache ? "Ready (prepared before). Press play and sing."
