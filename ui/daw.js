@@ -1974,7 +1974,7 @@ class DawScreen {
     this.patternRow.hidden = true;
 
     this.rows = html("div", "track-rows");
-    // The returns and the master, pinned to the bottom of the view (sticky).
+    // The returns and the master: rows after the last track that scroll with the list.
     this.pinned = html("div", "pinned-rows");
     this.returnRows = html("div", "return-rows");
     this.masterRow = html("div", "master-slot");
@@ -2768,7 +2768,7 @@ class DawScreen {
     return wrap;
   }
 
-  // The return and master rows, pinned under the tracks so they never scroll away: name,
+  // The return and master rows, after the last track and scrolling with it: name,
   // M and S (returns), effects, volume, pan and a stereo meter. "+ Return" after them;
   // double-clicking a name folds or unfolds them all. Updated in place like the tracks.
   renderPinnedRows(force) {
