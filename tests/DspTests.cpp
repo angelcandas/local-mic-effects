@@ -11,6 +11,11 @@
 
 #include <set>
 #include <thread>
+#include <csignal>
+#include <unistd.h>
+#if JUCE_LINUX || JUCE_MAC
+ #include <execinfo.h>
+#endif
 
 #include "DawBridge.h"
 #include "PluginProcessor.h"
@@ -13758,8 +13763,27 @@ namespace
     }
 }
 
+// A crash prints where it happened (CI keeps no core dumps), and stdout goes out line by
+// line so the last PASS before it is the last one shown.
+static void printCrash (int signal)
+{
+   #if JUCE_LINUX || JUCE_MAC
+    void* frames[64];
+    const auto count = backtrace (frames, 64);
+    const char header[] = "\n*** crashed, backtrace:\n";
+    [[maybe_unused]] const auto written = write (STDERR_FILENO, header, sizeof (header) - 1);
+    backtrace_symbols_fd (frames, count, STDERR_FILENO);
+   #endif
+    std::signal (signal, SIG_DFL);
+    std::raise (signal);
+}
+
 int main()
 {
+    std::cout << std::unitbuf;
+    std::signal (SIGSEGV, printCrash);
+    std::signal (SIGBUS, printCrash);
+    std::signal (SIGABRT, printCrash);
     juce::ScopedJuceInitialiser_GUI juce;
 
     // MICFX_TEST_ONLY=instruments runs just those (quicker while working on them).
