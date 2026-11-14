@@ -432,6 +432,10 @@ class PresetBar {
     this.modified = false;
 
     this.loadPreset = Juce.getNativeFunction("loadPreset");
+    this.library = Juce.getNativeFunction("library");
+    this.sounds = [];     // your saved sounds (library chains): [{ name, live }]
+    this.soundName = "";  // the one playing, when it's one of yours
+    this.refreshSounds();
 
     this.button.addEventListener("click", (event) => {
       event.stopPropagation();
@@ -457,6 +461,45 @@ class PresetBar {
       try { this.favourites = (JSON.parse(saved || "[]") ?? []).filter((name) => this.presets.some((p) => p.name === name)); } catch { this.favourites = []; }
       this.buildMenu();
       this.render();
+    });
+  }
+
+  refreshSounds() {
+    return this.library("chains").then((chains) => {
+      this.sounds = Array.isArray(chains) ? chains : [];
+      if (!this.menu.hidden || this.presets.length) this.buildMenu();
+    }).catch(() => {});
+  }
+
+  // The Live chain as it sounds now, saved under a name (typed in the menu).
+  saveSound(name) {
+    name = name.trim();
+    if (!name) return;
+    this.library("saveSound", name).then((result) => {
+      if (result?.ok === false) { recorderBar.setStatus(result.error, "is-error"); return; }
+      this.soundName = name;
+      this.current = -1;
+      this.modified = false;
+      recorderBar.setStatus(`Saved “${name}” in your sounds.`);
+      this.refreshSounds().then(() => this.render());
+    });
+  }
+
+  loadSound(name) {
+    this.close();
+    this.library("loadSound", name).then((result) => {
+      if (result?.ok === false) recorderBar.setStatus(result.error, "is-error");
+      this.soundName = name;
+      this.current = -1;
+      this.modified = false;
+      this.render();
+    });
+  }
+
+  deleteSound(name) {
+    this.library("deleteChain", name).then(() => {
+      if (this.soundName === name) this.soundName = "";
+      this.refreshSounds().then(() => this.render());
     });
   }
 
@@ -509,6 +552,44 @@ class PresetBar {
       return row;
     };
 
+    // Your sounds: save the current one, load or delete the saved ones.
+    const yours = html("div", "preset-group is-yours");
+    yours.append(html("h3", "", "Your sounds"));
+    const saveRow = html("div", "preset-item preset-save-row");
+    saveRow.dataset.search = "";
+    const saveButton = html("button", "preset-load preset-save", "＋ Save this sound as…");
+    saveButton.title = "Keep the effects that are on, their settings and their order under a name";
+    saveButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const input = html("input", "preset-search preset-save-name");
+      Object.assign(input, { placeholder: "Name for this sound", maxLength: 60, spellcheck: false, value: this.soundName });
+      input.addEventListener("click", (e) => e.stopPropagation());
+      input.addEventListener("keydown", (e) => {
+        e.stopPropagation();
+        if (e.key === "Enter") { this.saveSound(input.value); this.close(); }
+        else if (e.key === "Escape") this.buildMenu();
+      });
+      saveRow.replaceChildren(input);
+      input.focus();
+      input.select();
+    });
+    saveRow.append(saveButton);
+    yours.append(saveRow);
+    for (const sound of this.sounds) {
+      const row = html("div", "preset-item");
+      row.dataset.search = `${sound.name} your sounds`.toLowerCase();
+      const load = html("button", "preset-load", sound.name);
+      load.dataset.sound = sound.name;
+      load.addEventListener("click", () => this.loadSound(sound.name));
+      if (!sound.live) load.title = "Made in the DAW: Live plays one of each built-in effect, so some of it is left out";
+      const remove = html("button", "preset-star preset-delete", "×");
+      remove.title = `Delete “${sound.name}”`;
+      remove.addEventListener("click", (event) => { event.stopPropagation(); this.deleteSound(sound.name); });
+      row.append(load, remove);
+      yours.append(row);
+    }
+    this.menu.append(yours);
+
     const favourites = this.favouriteIndices;
     if (favourites.length) {
       const group = html("div", "preset-group is-favourites");
@@ -536,7 +617,7 @@ class PresetBar {
     for (const group of this.menu.querySelectorAll(".preset-group")) {
       let visible = 0;
       for (const row of group.querySelectorAll(".preset-item")) {
-        row.hidden = !words.every((w) => row.dataset.search.includes(w));
+        row.hidden = !row.classList.contains("preset-save-row") && !words.every((w) => row.dataset.search.includes(w));
         if (!row.hidden) visible++;
       }
       group.hidden = visible === 0;
@@ -574,6 +655,8 @@ class PresetBar {
     this.close();
     this.loadPreset(wrapped).then((loaded) => {
       this.current = loaded;
+      this.hostPreset = loaded;
+      this.soundName = "";
       this.modified = false;
       this.render();
     });
@@ -585,8 +668,12 @@ class PresetBar {
 
   // The host (or a restored session) may change the preset behind our back.
   syncFromHost(index) {
+    // Only a change counts (one of your sounds leaves the host's program where it was).
+    if (index === this.hostPreset) return;
+    this.hostPreset = index;
     if (index === this.current) return;
     this.current = index;
+    this.soundName = "";
     this.modified = false;
     this.render();
   }
@@ -598,10 +685,12 @@ class PresetBar {
   }
 
   render() {
-    this.nameLabel.textContent = this.presets[this.current]?.name ?? "—";
+    this.nameLabel.textContent = this.soundName || (this.presets[this.current]?.name ?? "—");
     this.element.classList.toggle("is-modified", this.modified);
     this.menu.querySelectorAll("[data-index]").forEach((button) =>
       button.classList.toggle("is-current", Number(button.dataset.index) === this.current));
+    this.menu.querySelectorAll("[data-sound]").forEach((button) =>
+      button.classList.toggle("is-current", button.dataset.sound === this.soundName));
   }
 }
 

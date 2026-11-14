@@ -154,21 +154,34 @@ export function presetParams(id) {
 }
 
 //==============================================================================
-// Your own presets: { effectId: [{ name, values }] }, kept in the app's settings.
+// Your own presets: { effectId: [{ name, values }] }, files in the preset library
+// (src/PresetLibrary.h). The ones kept in the app's settings before are copied over once.
 let userPresets = {};
 let loaded = null;
 let version = 0; // bumped on every change, so other cards' menus catch up
 
 function loadUserPresets(getNativeFunction) {
+  const library = getNativeFunction("library");
   loaded ??= getNativeFunction("uiPref")("fxPresets")
-    .then((text) => { try { userPresets = JSON.parse(text || "{}") ?? {}; } catch { userPresets = {}; } ++version; })
+    .then((text) => (text ? library("import", text) : 0))
+    .catch(() => 0)
+    .then(() => library("effects"))
+    .then((presets) => { userPresets = presets ?? {}; ++version; })
     .catch(() => {});
   return loaded;
 }
 
-function saveUserPresets(getNativeFunction) {
+function saveUserPreset(getNativeFunction, key, name, values) {
+  userPresets[key] = [...(userPresets[key] ?? []).filter((p) => p.name !== name), { name, values }]
+    .sort((a, b) => a.name.localeCompare(b.name, undefined, { numeric: true, sensitivity: "base" }));
   ++version;
-  getNativeFunction("uiPref")("fxPresets", JSON.stringify(userPresets)).catch(() => {});
+  return getNativeFunction("library")("saveEffect", key, name, values).catch(() => ({ ok: false }));
+}
+
+function deleteUserPreset(getNativeFunction, key, name) {
+  userPresets[key] = (userPresets[key] ?? []).filter((p) => p.name !== name);
+  ++version;
+  return getNativeFunction("library")("deleteEffect", key, name).catch(() => ({ ok: false }));
 }
 
 // A preset menu for one effect card.
@@ -241,8 +254,8 @@ export function createPresetPicker({ getNativeFunction, ids, read, apply, defaul
     select.value = "";
     if (value === "save") return showName();
     if (value.startsWith("d")) {
-      userPresets[key] = (userPresets[key] ?? []).filter((_, i) => i !== Number(value.slice(1)));
-      saveUserPresets(getNativeFunction);
+      const preset = (userPresets[key] ?? [])[Number(value.slice(1))];
+      if (preset) deleteUserPreset(getNativeFunction, key, preset.name);
       return build();
     }
     const preset = value.startsWith("f") ? factory[Number(value.slice(1))] : (userPresets[key] ?? [])[Number(value.slice(1))];
@@ -255,8 +268,7 @@ export function createPresetPicker({ getNativeFunction, ids, read, apply, defaul
   const commit = () => {
     const name = nameInput.value.trim();
     if (!name) return hideName();
-    userPresets[key] = [...(userPresets[key] ?? []).filter((p) => p.name !== name), { name, values: read() }];
-    saveUserPresets(getNativeFunction);
+    saveUserPreset(getNativeFunction, key, name, read());
     build();
     hideName();
   };

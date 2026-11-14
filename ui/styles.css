@@ -146,7 +146,7 @@ button { font: inherit; color: inherit; }
 .preset-menu {
   position: absolute;
   top: calc(100% + 8px);
-  left: 50%;
+  left: 0; /* from the preset bar's left edge: centred, it ran off a narrow window */
   z-index: 20;
   display: grid;
   grid-template-columns: repeat(5, minmax(120px, 1fr));
@@ -157,7 +157,6 @@ button { font: inherit; color: inherit; }
   border-radius: 16px;
   background: rgba(21, 24, 33, 0.97);
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.55);
-  transform: translateX(-50%);
   backdrop-filter: blur(12px);
 }
 
@@ -1568,6 +1567,15 @@ body.is-daw .setlist-drawer, body.is-daw .stage-view { display: none; }
 .file-picker .file-clear { padding: 3px 6px; }
 .file-picker .file-error { width: 100%; font-size: 10px; color: #ff8a8a; }
 .file-picker .file-error:empty { display: none; }
+
+/* Your sounds in the preset menu: save the current one, load or delete saved ones. */
+.preset-group .preset-item button.preset-save { color: var(--accent); }
+.preset-group .preset-item button.preset-delete:hover { color: #ff6b6b; }
+.preset-save-row .preset-save-name { width: 100%; margin: 2px 0; }
+.preset-group.is-yours { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 2px 6px; padding-bottom: 6px; border-bottom: 1px solid var(--line); }
+.preset-group.is-yours h3 { flex: 1 1 100%; }
+.preset-group.is-yours .preset-item { display: flex; }
+.preset-group.is-yours .preset-save-row { flex: 0 0 220px; }
 
 /* Audio status strip (ui/setup.js), at the right of each hint line. */
 .audio-status {

@@ -11,6 +11,7 @@
 #include "LiveHistory.h"
 #include "Scenes.h"
 #include "Setlist.h"
+#include "PresetLibrary.h"
 #include "SoundCheck.h"
 #include "Multitrack.h"
 #include "Recorder.h"
@@ -82,6 +83,12 @@ public:
     juce::StringArray getChainOrder() const;
     void setChainOrder (const juce::StringArray& keys);
 
+    // The Live chain as a library chain (INSERTS: one INSERT per effect that's on, in
+    // order, with all its values), and back: effects not in it are switched off, its
+    // order is taken. Message thread.
+    juce::ValueTree captureLiveChain() const;
+    void applyLiveChain (const juce::ValueTree& inserts);
+
     // The tempo Live's synced echo follows: the echo card's tap (0 clears it), else the
     // host's, else the looper's. Any thread.
     void setEchoTapTempo (double bpm) noexcept               { echoTapTempo.store (bpm); }
@@ -120,6 +127,7 @@ public:
     // The setlist (standalone app): songs with their sound, scenes, tempo, key, backing
     // track and lyrics. Message thread.
     Setlist& getSetlist() noexcept                          { return setlist; }
+    PresetLibrary& getLibrary() noexcept                    { return library; }
 
     // MIDI learn: pedals, knobs and keys on parameters and actions (Live mode).
     MidiMap& getMidiMap() noexcept                          { return midiMap; }
@@ -193,6 +201,7 @@ private:
     LiveHistory liveHistory { state };
     SoundCheck soundCheck { state, chain, scenes };
     Setlist setlist { *this, scenes, looper, multitrack };
+    PresetLibrary library; // your presets and chains on disk (shared with the DAW and the plug-in)
     MidiMap midiMap { state, looper, juce::JUCEApplicationBase::isStandaloneApp() || wrapperType != wrapperType_Undefined
                                          ? MidiMap::getDefaultFile() : juce::File() };
     juce::AudioBuffer<float> loopInput; // the voice before the limiter, for the looper
