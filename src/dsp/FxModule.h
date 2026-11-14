@@ -22,7 +22,9 @@ enum class ModuleType
     // Not a built-in effect: a third-party VST3/AU effect hosted as a DAW insert (see
     // daw/PluginInsert.h). It comes after numModuleTypes, so Live mode, the parameters
     // and every list of effects leave it out.
-    plugin
+    plugin,
+    // A rack of parallel chains (daw/RackInsert.h), DAW only, likewise.
+    rack
 };
 
 inline constexpr int numModuleTypes = (int) ModuleType::dynamicEq + 1;
@@ -32,6 +34,8 @@ inline const char* getModuleKey (ModuleType type)
 {
     if (type == ModuleType::plugin)
         return "plugin";
+    if (type == ModuleType::rack)
+        return "rack";
 
     static constexpr const char* keys[] = {
         "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "smooth", "compressor", "opto", "autoLevel", "deEsser", "exciter", "saturation", "radio", "bitcrusher",

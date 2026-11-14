@@ -485,6 +485,7 @@ private:
     };
     std::map<int, RunningInsert> runningInserts;
     std::shared_ptr<fx::Module> takeRunningInsert (const juce::ValueTree& insert);
+    static juce::String describeLayout (const juce::ValueTree& insert);
     std::map<int, AudioPool::Audio> lastClipAudio;
     std::map<int, warp::Map> lastClipMap; // the map of what each clip played in the last graph
 

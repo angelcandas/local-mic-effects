@@ -12,6 +12,7 @@ import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { clamp, createFilePicker, html, IS_MAC } from "./widgets.js";
 import * as Juce from "./juce/index.js";
+import { buildRack } from "./racks.js";
 
 const PITCH_PARTS = ["tune", "pitch", "harmony"].map((id) => MODULES.find((m) => m.id === id));
 const MOD = IS_MAC ? "Cmd" : "Ctrl";
@@ -21,6 +22,7 @@ const MOD = IS_MAC ? "Cmd" : "Ctrl";
 // any of them on means it's on).
 export function insertSwitches(insert) {
   if (insert.type === "plugin") return ["pluginOn"];
+  if (insert.type === "rack") return ["rackOn"];
   if (insert.type === "pitch") return ["tune", "pitch", "harmony"].map((id) => MODULES.find((m) => m.id === id)?.power).filter(Boolean);
   const power = MODULES.find((m) => MODULE_KEYS[m.id] === insert.type)?.power;
   return power ? [power] : [];
@@ -28,6 +30,7 @@ export function insertSwitches(insert) {
 
 export function effectName(insert) {
   if (insert.type === "plugin") return insert.plugin?.name || "Plug-in";
+  if (insert.type === "rack") return "Rack";
   if (insert.module) return MODULES.find((m) => m.id === insert.module)?.name ?? insert.module;
   if (insert.type === "pitch") return "Pitch";
   return MODULES.find((m) => MODULE_KEYS[m.id] === insert.type)?.name ?? insert.type;
@@ -96,7 +99,7 @@ export class DeviceChain {
       if (now - (this.lastLive ?? 0) < 250) return;
       this.lastLive = now;
     }
-    for (const [id, card] of this.cards) card.live(readings?.[id] ?? null);
+    for (const [id, card] of this.cards) card.live(readings?.[id] ?? null, readings);
   }
 
   build() {
@@ -112,6 +115,7 @@ export class DeviceChain {
         rename: () => this.rename(insert.id),
         switchAB: () => this.kit.daw("insertAB", { id: insert.id, action: "switch" }),
         openMenu: (x, y, anchor) => this.openCardMenu(this.cards.get(insert.id), x, y, anchor),
+        chain: this, // a rack builds its own chains inside, with this chain's screen and kit
       });
       this.cards.set(insert.id, card);
       card.element.classList.toggle("is-folded", folded.has(insert.id));
@@ -206,6 +210,11 @@ export class DeviceChain {
     if (!mod && !event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { done(); return this.moveSelection(event.key === "ArrowLeft" ? -1 : 1); }
     if (mod && key === "v") { done(); return this.paste(ids.length ? this.indexAfter(ids) : this.owner.inserts.length); }
     if (!ids.length) return;
+    if (mod && key === "g" && this.canGroup) {
+      done();
+      const rack = ids.length === 1 && this.cards.get(ids[0])?.insert.type === "rack";
+      return event.shiftKey ? (rack ? this.ungroup(ids[0]) : undefined) : this.group(ids);
+    }
     if (!mod && (event.key === "Delete" || event.key === "Backspace")) { done(); return this.remove(ids); }
     if (mod && !event.shiftKey && key === "d") { done(); return this.duplicate(ids); }
     if (mod && key === "c") { done(); return this.copy(ids); }
@@ -219,6 +228,7 @@ export class DeviceChain {
   //============================================================================ verbs
   // Hot-swap (DAW): the library browses effects to put in this one's place.
   get canSwap() { return typeof this.screen.library?.startSwap === "function"; }
+  get canGroup() { return this.kit.racks !== false; }
   swap(id) {
     const card = this.cards.get(id);
     if (card) this.screen.library.startSwap({ insert: card.insert, track: this.owner.id, name: card.effectName,
@@ -237,8 +247,19 @@ export class DeviceChain {
   // Copies right after the last of them (in order, one undo step).
   async duplicate(ids) {
     if (ids.length === 1) return this.kit.daw("duplicateInsert", { id: ids[0] });
-    return this.kit.daw("pasteInserts", { ids, to: this.owner.id, index: this.indexAfter(ids) });
+    return this.kit.daw("pasteInserts", { ids, ...this.target, index: this.indexAfter(ids) });
   }
+
+  // Where pastes go: the track's chain, or (inside a rack) one of the rack's chains.
+  get target() { return this.owner.rack != null ? { rack: this.owner.rack, chain: this.owner.chain } : { to: this.owner.id }; }
+
+  // Racks (DAW): the effects into one rack (Ctrl/Cmd+G), a rack back into the chain.
+  group(ids) {
+    return this.kit.daw("groupInserts", { ids }).then((result) => {
+      if (result?.ok) this.kit.toast(`Grouped ${ids.length === 1 ? "it" : `${ids.length} effects`} into a rack: add chains beside the first to play in parallel.`, "", "undo");
+    });
+  }
+  ungroup(id) { return this.kit.daw("ungroupInsert", { id }); }
 
   async copy(ids, quiet = false) {
     const result = await this.kit.daw("copyDevices", { ids });
@@ -256,7 +277,7 @@ export class DeviceChain {
   paste(index) {
     if (!this.screen.deviceClipboard) return this.kit.toast("Copy an effect first (select it, then " + MOD + "+C).");
     this.element.focus({ preventScroll: true });
-    return this.kit.daw("pasteInserts", { to: this.owner.id, index, clipboard: true });
+    return this.kit.daw("pasteInserts", { ...this.target, index, clipboard: true });
   }
 
   toggleOn(ids) {
@@ -303,7 +324,7 @@ export class DeviceChain {
     const index = this.owner.inserts.findIndex((insert) => insert.id === id);
     const ids = this.selected.has(id) && this.selected.size > 1 ? this.selectedIds : [id];
     const several = ids.length > 1;
-    const isPlugin = card.insert.type === "plugin";
+    const isPlugin = card.insert.type === "plugin", isRack = card.insert.type === "rack";
     const clipboard = this.screen.deviceClipboard;
     this.kit.popMenu(x, y, ({ item, rule, heading }) => {
       if (several) heading(`${ids.length} effects`);
@@ -312,7 +333,7 @@ export class DeviceChain {
         item(this.screen.foldedInserts.has(id) ? "Unfold" : "Fold", () => this.toggleFold(id), { hint: "Or double-click its title" });
         item("Show trims", () => card.setTrimsShown(!card.trimsShown), { checked: !card.gains.hidden });
       }
-      if (!several && !isPlugin) {
+      if (!several && !isPlugin && !isRack) {
         rule();
         const onB = card.insert.ab === "b";
         item(onB ? "Switch to A" : "Switch to B", () => daw("insertAB", { id, action: "switch" }),
@@ -327,7 +348,14 @@ export class DeviceChain {
       item(clipboard ? `Paste ${clipboard.name} after` : "Paste after", () => this.paste(this.indexAfter(ids)), { disabled: !clipboard, shortcut: `${MOD}+V` });
       item(clipboard ? `Paste ${clipboard.name} before` : "Paste before", () => this.paste(index), { disabled: !clipboard });
       if (!several) item("Rename", () => this.rename(id), { shortcut: "F2", hint: card.insert.name ? `Back to "${card.effectName}" by leaving it empty` : "" });
-      if (!several && this.canSwap) item("Swap from the library…", () => this.swap(id), { shortcut: "Q", hint: "Try other effects and presets in its place: ↑ ↓ to hear each, Enter to keep, Esc to put it back" });
+      if (!several && this.canSwap && !isRack) item("Swap from the library…", () => this.swap(id), { shortcut: "Q", hint: "Try other effects and presets in its place: ↑ ↓ to hear each, Enter to keep, Esc to put it back" });
+      if (this.canGroup) {
+        rule();
+        item(several ? `Group ${ids.length} effects into a rack` : "Group into a rack", () => this.group(ids),
+             { shortcut: `${MOD}+G`, hint: "A rack plays chains of effects side by side (in parallel)" });
+        if (!several && isRack) item("Ungroup", () => this.ungroup(id), { shortcut: `${MOD}+Shift+G`, hint: "Its chains go back into this chain, one after another" });
+        if (!several && isRack) item("Add a chain", () => this.kit.daw("addRackChain", { id }));
+      }
       rule();
       if (!several) {
         item("Move earlier", () => daw("moveInsert", { id, index: index - 1 }), { disabled: index === 0 });
@@ -468,27 +496,28 @@ export class DeviceCard {
     this.trimsShown = false;
     this.effectName = effectName(insert);
 
-    const isPlugin = insert.type === "plugin";
+    const isPlugin = insert.type === "plugin", isRack = insert.type === "rack";
     // The Live screen shows autotune, pitch shift and harmonizer as cards of their own
     // (insert.module); the DAW's pitch insert holds all three.
-    const parts = isPlugin ? [] : insert.module ? MODULES.filter((m) => m.id === insert.module)
+    const parts = isPlugin || isRack ? [] : insert.module ? MODULES.filter((m) => m.id === insert.module)
       : insert.type === "pitch" ? PITCH_PARTS : MODULES.filter((m) => MODULE_KEYS[m.id] === insert.type).slice(0, 1);
-    this.single = !isPlugin && (insert.type !== "pitch" || Boolean(insert.module));
+    this.single = !isPlugin && !isRack && (insert.type !== "pitch" || Boolean(insert.module));
     const main = parts[0];
     const category = CATEGORIES[main?.category] ?? CATEGORIES.cleanup;
 
     const wide = insert.module ? main?.wide : ["pitch", "paraEq", "multiband", "masterEq"].includes(insert.type);
-    this.element = html("section", isPlugin ? "insert is-plugin" : wide ? "insert is-wide" : "insert");
-    if (!isPlugin) this.element.style.setProperty("--cat", category.color);
+    this.element = html("section", isPlugin ? "insert is-plugin" : isRack ? "insert is-rack" : wide ? "insert is-wide" : "insert");
+    if (!isPlugin && !isRack) this.element.style.setProperty("--cat", category.color);
     this.element.dataset.insert = insert.id;
 
     // The Live screen has no activator (an effect that's off leaves the chain) and no A/B.
-    const activator = kit.activator === false ? null : isPlugin ? "pluginOn" : this.single ? main.power : null;
-    this.buildHead(activator, !isPlugin && kit.ab !== false);
+    const activator = kit.activator === false ? null : isPlugin ? "pluginOn" : isRack ? "rackOn" : this.single ? main.power : null;
+    this.buildHead(activator, !isPlugin && !isRack && kit.ab !== false);
     this.body = html("div", "insert-body");
     this.element.append(this.head, this.body);
 
     if (isPlugin) this.buildPlugin();
+    else if (isRack) this.rack = buildRack(this, verbs.chain);
     else this.buildEffect(parts);
     kit.decorate?.(this);
 
@@ -666,7 +695,8 @@ export class DeviceCard {
   }
 
   // Animates the picture and the level bars from the signal (see fxviews.js).
-  live(reading) {
+  live(reading, all) {
+    this.rack?.live(all);
     this.view?.live(reading);
     const level = this.activity.push(reading);
     this.element.classList.toggle("is-live", Boolean(reading));
@@ -805,6 +835,7 @@ export class DeviceCard {
     this.element.classList.toggle("is-off", !this.isOn);
     this.renderTrims();
     if (insert.type === "plugin") this.updatePlugin(insert);
+    this.rack?.update(insert);
 
     // Title bar: its own name, A/B, the delay it adds.
     const title = this.title;
