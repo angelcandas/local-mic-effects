@@ -1050,6 +1050,16 @@ export class LibraryBrowser {
     if (kind === "effect" && !this.drag.payload.plugin && under.closest(".add-return, .strip.is-add-return"))
       return { newReturn: true, element: under.closest(".strip.is-add-return") ?? under.closest(".add-return"), label: "New return" };
 
+    // An effect slot in a mixer strip: the effect goes in front of it.
+    const slot = (kind === "effect" || kind === "preset") ? under.closest(".strip-insert[data-insert]") : null;
+    if (slot) {
+      const strip = slot.closest(".strip");
+      const track = strip.classList.contains("is-master") ? 0 : Number(strip.dataset.track);
+      const owner = track === 0 ? screen.session?.master : screen.channelById?.(track);
+      const index = owner?.inserts.findIndex((x) => x.id === Number(slot.dataset.insert)) ?? -1;
+      if (owner && index >= 0) return { track, index, element: slot, label: `${track === 0 ? "Master" : owner.name}, before ${slot.textContent}` };
+    }
+
     // The master takes effects and presets; a file or an instrument dropped on it goes
     // on a new track (the master row is the space below the tracks).
     const master = under.closest(".master-row, .strip.is-master");

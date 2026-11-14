@@ -17,6 +17,15 @@ const PITCH_PARTS = ["tune", "pitch", "harmony"].map((id) => MODULES.find((m) =>
 const MOD = IS_MAC ? "Cmd" : "Ctrl";
 
 // The effect's own name for an insert type ("Pitch" for the shared pitch insert).
+// The switches that turn a DAW insert on and off (the pitch insert has one per part;
+// any of them on means it's on).
+export function insertSwitches(insert) {
+  if (insert.type === "plugin") return ["pluginOn"];
+  if (insert.type === "pitch") return ["tune", "pitch", "harmony"].map((id) => MODULES.find((m) => m.id === id)?.power).filter(Boolean);
+  const power = MODULES.find((m) => MODULE_KEYS[m.id] === insert.type)?.power;
+  return power ? [power] : [];
+}
+
 export function effectName(insert) {
   if (insert.type === "plugin") return insert.plugin?.name || "Plug-in";
   if (insert.module) return MODULES.find((m) => m.id === insert.module)?.name ?? insert.module;

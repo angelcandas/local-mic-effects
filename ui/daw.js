@@ -5,7 +5,7 @@
 import * as Juce from "./juce/index.js";
 import { MODULE_KEYS, MODULES, NOTE_NAMES } from "./modules.js";
 import { FX_PRESETS, presetParams } from "./fxpresets.js";
-import { DeviceChain } from "./devices.js";
+import { DeviceChain, effectName, insertSwitches } from "./devices.js";
 import { LibraryBrowser, loopText } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { markLearnable } from "./midilearn.js";
@@ -3268,10 +3268,12 @@ class DawScreen {
   renderMixer() {
     const session = this.session;
     const returns = session.returns ?? [];
-    const describe = (t) => `${t.id}:${t.name}:${t.inserts.map((i) => i.type).join("+")}:${t.colour}`;
+    // The strips' effect slots show each effect's name and whether it's on.
+    const slotKey = (inserts) => inserts.map((i) => `${i.id}.${i.name ?? ""}.${insertSwitches(i).some((p) => (i.values?.[p] ?? 0) >= 0.5) ? 1 : 0}`).join("+");
+    const describe = (t) => `${t.id}:${t.name}:${slotKey(t.inserts)}:${t.colour}`;
     const groups = session.groups ?? [];
     const signature = session.tracks.map(describe).join("|") + `|g:${groups.map((g) => describe(g) + g.folded).join("|")}` + `|r:${returns.map(describe).join("|")}` + `|in:${(session.inputs ?? []).join(",")}`
-                      + `|m:${session.master.inserts.map((i) => i.type).join("+")}`;
+                      + `|m:${slotKey(session.master.inserts)}`;
 
     // The track headers' I/O and Sends switches show the same sections on the strips.
     this.mixer.classList.toggle("show-routing", this.showRouting);
@@ -3328,6 +3330,119 @@ class DawScreen {
     });
     element.append(html("div", "strip-add-caption", "Returns hold shared effects: turn up a track's send to feed one."), pick);
     return element;
+  }
+
+  // One effect in a mixer strip: its on/off dot and its name. Click the name to edit it in
+  // the effects panel; drag it up or down the strip to reorder, onto another strip to move it
+  // there (Alt: a copy). The library drops effects in front of it.
+  createStripSlot(track, insert) {
+    const slot = html("div", "strip-insert");
+    slot.dataset.insert = insert.id;
+    const name = effectName(insert);
+    const switches = insertSwitches(insert);
+    const isOn = !switches.length || switches.some((param) => (insert.values?.[param] ?? 0) >= 0.5);
+    slot.classList.toggle("is-off", !isOn);
+    const dot = html("button", "strip-insert-dot");
+    Object.assign(dot, { type: "button", title: `${isOn ? "Switch off" : "Switch on"} ${name}` });
+    dot.setAttribute("aria-pressed", String(isOn));
+    dot.disabled = !switches.length;
+    dot.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const params = isOn ? switches : switches.slice(0, 1);
+      params.forEach((param, i) => daw("setInsert", { id: insert.id, param, value: isOn ? 0 : 1, continue: i > 0 }));
+    });
+    const label = html("span", "strip-insert-name", name);
+    slot.title = `${name}: click to edit · drag to move (Alt: copy)`;
+    slot.append(dot, label);
+    slot.addEventListener("pointerdown", (event) => this.pressStripSlot(event, slot, track, insert, name));
+    return slot;
+  }
+
+  pressStripSlot(event, slot, track, insert, name) {
+    if (event.button !== 0 || event.target.closest(".strip-insert-dot")) return;
+    event.preventDefault();
+    const start = { x: event.clientX, y: event.clientY };
+    let drag = null;
+    const findTarget = (e) => {
+      const under = document.elementFromPoint(e.clientX, e.clientY);
+      const other = under?.closest(".strip-insert[data-insert]");
+      const strip = under?.closest(".strip[data-track], .strip.is-master");
+      if (!strip) return null;
+      const to = strip.classList.contains("is-master") ? 0 : Number(strip.dataset.track);
+      const owner = to === 0 ? this.session.master : this.channelById(to);
+      if (!owner) return null;
+      let index = -1;
+      if (other) {
+        const i = owner.inserts.findIndex((x) => x.id === Number(other.dataset.insert));
+        const box = other.getBoundingClientRect();
+        index = i + (e.clientY > box.top + box.height / 2 ? 1 : 0);
+      }
+      return { track: to, index, element: other ?? strip, after: other && index > owner.inserts.findIndex((x) => x.id === Number(other.dataset.insert)), label: to === 0 ? "Master" : owner.name };
+    };
+    const move = (e) => {
+      if (!drag) {
+        if (Math.hypot(e.clientX - start.x, e.clientY - start.y) < 5) return;
+        drag = { ghost: html("div", "library-ghost is-effect", name), target: null, highlight: null };
+        document.body.append(drag.ghost);
+        slot.classList.add("is-dragging");
+      }
+      drag.ghost.style.transform = `translate(${e.clientX + 12}px, ${e.clientY + 10}px)`;
+      drag.target = findTarget(e);
+      const highlight = drag.target?.element ?? null;
+      if (drag.highlight !== highlight) {
+        drag.highlight?.classList.remove("is-drop-target", "is-drop-before", "is-drop-after");
+        drag.highlight = highlight;
+      }
+      highlight?.classList.toggle("is-drop-target", !highlight.classList.contains("strip-insert"));
+      if (highlight?.classList.contains("strip-insert")) {
+        highlight.classList.toggle("is-drop-after", Boolean(drag.target.after));
+        highlight.classList.toggle("is-drop-before", !drag.target.after);
+      }
+      drag.ghost.classList.toggle("is-refused", !drag.target);
+      drag.ghost.dataset.where = drag.target ? `${e.altKey ? "Copy to" : drag.target.track === track.id ? "Move in" : "Move to"} ${drag.target.label}` : "";
+    };
+    const up = (e) => {
+      window.removeEventListener("pointermove", move);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      if (!drag) {
+        if (e.type === "pointerup") this.editInsert(track.id, insert.id);
+        return;
+      }
+      drag.ghost.remove();
+      drag.highlight?.classList.remove("is-drop-target", "is-drop-before", "is-drop-after");
+      slot.classList.remove("is-dragging");
+      const target = e.type === "pointerup" ? drag.target : null;
+      if (!target) return;
+      if (e.altKey) return daw("copyInsert", { id: insert.id, track: target.track, index: target.index });
+      if (target.track === track.id) {
+        const from = track.inserts.findIndex((x) => x.id === insert.id);
+        let index = target.index < 0 ? track.inserts.length - 1 : target.index > from ? target.index - 1 : target.index;
+        if (index !== from) daw("moveInsert", { id: insert.id, index });
+        return;
+      }
+      daw("moveInsert", { id: insert.id, track: target.track, index: target.index });
+    };
+    window.addEventListener("pointermove", move);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
+  }
+
+  // A track, return or group by id.
+  channelById(id) {
+    return [...this.session.tracks, ...(this.session.returns ?? []), ...(this.session.groups ?? [])].find((t) => t.id === id);
+  }
+
+  // Shows one effect in the effects panel, selected and in view.
+  editInsert(trackId, insertId) {
+    this.select(trackId, null);
+    this.setDockTab("effects");
+    this.setDock(true);
+    requestAnimationFrame(() => {
+      const card = this.inspector?.querySelector(`.device-chain > .insert[data-insert="${insertId}"]`);
+      card?.scrollIntoView({ block: "nearest", inline: "nearest" });
+      card?.focus({ preventScroll: true });
+    });
   }
 
   async addReturn(effect) {
@@ -3481,11 +3596,7 @@ class DawScreen {
     });
 
     const inserts = html("div", "strip-inserts");
-    for (const insert of track.inserts) {
-      const part = insert.type === "pitch" ? { name: "Pitch" } : insert.type === "plugin" ? { name: insert.plugin?.name || "Plug-in" }
-        : MODULES.find((m) => MODULE_KEYS[m.id] === insert.type);
-      inserts.append(button("strip-insert", part?.name ?? insert.type, "Edit in the side panel", () => this.select(track.id, null)));
-    }
+    for (const insert of track.inserts) inserts.append(this.createStripSlot(track, insert));
     inserts.append(button("strip-insert is-add", "+ Effect", "Add an effect", () => this.select(track.id, null, true, true)));
 
     const send = (key) => kind === "track" ? this.groupSetter(track.id, key) : (value, first) =>
