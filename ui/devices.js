@@ -19,6 +19,7 @@ const MOD = IS_MAC ? "Cmd" : "Ctrl";
 // The effect's own name for an insert type ("Pitch" for the shared pitch insert).
 export function effectName(insert) {
   if (insert.type === "plugin") return insert.plugin?.name || "Plug-in";
+  if (insert.module) return MODULES.find((m) => m.id === insert.module)?.name ?? insert.module;
   if (insert.type === "pitch") return "Pitch";
   return MODULES.find((m) => MODULE_KEYS[m.id] === insert.type)?.name ?? insert.type;
 }
@@ -399,20 +400,28 @@ export class DeviceCard {
     this.effectName = effectName(insert);
 
     const isPlugin = insert.type === "plugin";
-    const parts = isPlugin ? [] : insert.type === "pitch" ? PITCH_PARTS : MODULES.filter((m) => MODULE_KEYS[m.id] === insert.type).slice(0, 1);
+    // The Live screen shows autotune, pitch shift and harmonizer as cards of their own
+    // (insert.module); the DAW's pitch insert holds all three.
+    const parts = isPlugin ? [] : insert.module ? MODULES.filter((m) => m.id === insert.module)
+      : insert.type === "pitch" ? PITCH_PARTS : MODULES.filter((m) => MODULE_KEYS[m.id] === insert.type).slice(0, 1);
+    this.single = !isPlugin && (insert.type !== "pitch" || Boolean(insert.module));
     const main = parts[0];
     const category = CATEGORIES[main?.category] ?? CATEGORIES.cleanup;
 
-    this.element = html("section", isPlugin ? "insert is-plugin" : ["pitch", "paraEq", "multiband", "masterEq"].includes(insert.type) ? "insert is-wide" : "insert");
+    const wide = insert.module ? main?.wide : ["pitch", "paraEq", "multiband", "masterEq"].includes(insert.type);
+    this.element = html("section", isPlugin ? "insert is-plugin" : wide ? "insert is-wide" : "insert");
     if (!isPlugin) this.element.style.setProperty("--cat", category.color);
     this.element.dataset.insert = insert.id;
 
-    this.buildHead(isPlugin ? "pluginOn" : insert.type !== "pitch" ? main.power : null, !isPlugin);
+    // The Live screen has no activator (an effect that's off leaves the chain) and no A/B.
+    const activator = kit.activator === false ? null : isPlugin ? "pluginOn" : this.single ? main.power : null;
+    this.buildHead(activator, !isPlugin && kit.ab !== false);
     this.body = html("div", "insert-body");
     this.element.append(this.head, this.body);
 
     if (isPlugin) this.buildPlugin();
     else this.buildEffect(parts);
+    kit.decorate?.(this);
 
     this.element.append(this.foldedName = html("span", "insert-folded-name", this.effectName));
     this.update(insert);
@@ -454,7 +463,7 @@ export class DeviceCard {
   buildEffect(parts) {
     const insert = this.insert;
     // A picture of what the effect does; some have handles to drag.
-    this.view = insert.type === "pitch" ? null : createFxView(insert.type, {
+    this.view = insert.type === "pitch" || this.kit.ownPicture?.(insert.type) ? null : createFxView(insert.type, {
       get: (param) => this.access.get(param),
       set: (param, value, first) => {
         this.access.set(param, value, first);
@@ -467,7 +476,7 @@ export class DeviceCard {
     for (const part of parts) {
       const row = html("div", "insert-controls");
 
-      if (insert.type === "pitch") {
+      if (insert.type === "pitch" && !insert.module) {
         const sub = html("div", "insert-sub");
         sub.append(this.addSwitch(part.power, `Switch ${part.name} on or off`), html("span", "", part.name));
         this.body.append(sub);
@@ -475,9 +484,10 @@ export class DeviceCard {
       }
 
       for (const control of part.controls) {
-        if (control.liveOnly) continue; // the DAW listens to the other tracks for chords
+        if (control.liveOnly && !this.kit.live) continue; // the DAW listens to the other tracks for chords
         const widget = this.createControl(control);
         if (!widget) continue;
+        this.kit.decorateControl?.(control, widget);
         row.append(widget);
         if (control.when) this.conditional.push([control, widget]);
       }
@@ -561,7 +571,7 @@ export class DeviceCard {
   createFooter(parts) {
     const footer = html("div", "insert-footer");
     const ids = parts.map((part) => part.id);
-    const isPitch = this.insert.type === "pitch";
+    const isPitch = this.insert.type === "pitch" && !this.insert.module;
     // The pitch insert's presets also remember which of its parts are on.
     const params = () => [...ids.flatMap((id) => presetParams(id)), ...(isPitch ? parts.map((part) => part.power) : [])];
 
@@ -603,7 +613,10 @@ export class DeviceCard {
   }
 
   createControl(control) {
-    // The autotune key picker and tuner, and the reverb picture, are Live-screen extras.
+    // The autotune key picker and tuner, and the reverb picture, are Live-screen extras
+    // (the Live screen builds them itself).
+    const extra = this.kit.createExtra?.(control, this);
+    if (extra !== undefined) return extra;
     if (control.type === "keys") control = { type: "choice", param: control.param, label: "Key" };
     if (control.type === "file") {
       const picker = createFilePicker({ label: control.label, load: () => this.access.file.load(), clear: () => this.access.file.clear() });
@@ -617,11 +630,36 @@ export class DeviceCard {
     const value = this.insert.values[control.param] ?? info.default ?? info.min;
 
     if (control.type === "choice") {
+      const choices = info.choices ?? [];
+      // A few short options: buttons side by side; more: a dropdown.
+      if (choices.length >= 2 && choices.length <= 3 && choices.join("").length <= 24) {
+        const wrapper = html("div", "insert-choice");
+        const group = html("div", "segmented");
+        group.setAttribute("role", "radiogroup");
+        group.setAttribute("aria-label", control.label);
+        const buttons = choices.map((choice, index) => {
+          const b = html("button", "", choice);
+          b.type = "button";
+          b.setAttribute("role", "radio");
+          b.addEventListener("click", () => { this.access.set(control.param, index, true); this.update(this.insert); });
+          group.append(b);
+          return b;
+        });
+        const show = (v) => buttons.forEach((b, i) => {
+          b.classList.toggle("is-selected", i === Math.round(v));
+          b.setAttribute("aria-checked", String(i === Math.round(v)));
+        });
+        show(value);
+        wrapper.append(html("span", "name", control.label), group);
+        this.controls.push({ param: control.param, widget: { update: show } });
+        return wrapper;
+      }
       const wrapper = html("label", "insert-choice");
       const select = html("select", "dropdown");
-      (info.choices ?? []).forEach((choice) => select.append(new Option(choice)));
+      choices.forEach((choice) => select.append(new Option(choice)));
       select.addEventListener("change", () => { this.access.set(control.param, select.selectedIndex, true); this.update(this.insert); });
       wrapper.append(html("span", "name", control.label), select);
+      select.selectedIndex = Math.round(value);
       this.controls.push({ param: control.param, widget: { update: (v) => { select.selectedIndex = Math.round(v); } } });
       return wrapper;
     }
@@ -717,7 +755,10 @@ export class DeviceCard {
     this.latencyBadge.dataset.tip = `Adds ${latency.toFixed(1)} ms of delay. The other tracks are delayed to match, so it stays in time.`;
   }
 
-  get isOn() { return this.switches.some(({ param }) => (this.insert.values[param] ?? 0) >= 0.5); }
+  get isOn() {
+    if (this.kit.activator === false) return true; // on the Live screen, a card that shows is on
+    return this.switches.some(({ param }) => (this.insert.values[param] ?? 0) >= 0.5);
+  }
 
   // On or off: every part of the pitch insert, or the effect's one switch.
   setOn(on) {

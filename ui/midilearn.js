@@ -19,7 +19,7 @@ export function markLearnable(element, target, label) {
 // "Echo · Time": the control's name, after its effect card's when it's on one.
 function labelOf(element) {
   const own = element.dataset.learnLabel || element.getAttribute("aria-label") || element.textContent.trim() || element.dataset.learn;
-  const card = element.closest(".card")?.querySelector("header h2")?.textContent;
+  const card = element.closest(".card, .insert")?.querySelector("header h2, .insert-name")?.textContent;
   return card && !own.startsWith(card) ? `${card} · ${own}` : own;
 }
 

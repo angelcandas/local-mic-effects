@@ -5,7 +5,8 @@ import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, SCALES, isControlShown } 
 import { createActivity, createFxView } from "./fxviews.js";
 import { createPresetPicker, presetParams } from "./fxpresets.js";
 import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, keyText, polar, releaseFocus, svg } from "./widgets.js";
-import { initDaw } from "./daw.js";
+import { deviceKit, initDaw } from "./daw.js";
+import { DeviceCard } from "./devices.js";
 import { LOOPER_KEYS, LoopPanel } from "./looper.js";
 import { MidiLearn, markLearnable } from "./midilearn.js";
 import { PracticeView } from "./practice.js";
@@ -24,6 +25,7 @@ window.addEventListener("unhandledrejection", (event) => logError(`Unhandled rej
 const METER_FLOOR_DB = -60;
 
 let parameterDefaults = {};
+let parameterInfo = {}; // { param: { min, max, skew, step, label, default, choices } }, for the effect cards
 
 // Parameter kind by ID ("choice" | "toggle"; anything else is a slider), from the catalog.
 const parameterKinds = Object.fromEntries(MODULES.flatMap((m) => [[m.power, "toggle"],
@@ -168,83 +170,6 @@ class Knob {
 }
 
 //==============================================================================
-// Choice parameter: segmented buttons for a few options, a dropdown for more.
-class Choice {
-  constructor(param, label, onUserChange) {
-    this.state = Juce.getComboBoxState(param);
-    this.onUserChange = onUserChange;
-    this.element = html("div", "choice");
-    this.element.append(html("div", "name", label));
-    markLearnable(this.element, `param:${param}`, label);
-    this.signature = null; // choices arrive from C++ after construction; build once now, rebuild then
-
-    this.state.valueChangedEvent.addListener(() => this.render());
-    this.state.propertiesChangedEvent.addListener(() => this.render());
-    this.render();
-  }
-
-  select(index) {
-    this.state.setChoiceIndex(index);
-    this.onUserChange();
-    this.render();
-  }
-
-  build(choices) {
-    this.control?.remove();
-
-    if (choices.length <= 3) {
-      this.control = html("div", "segmented");
-      choices.forEach((choice, index) => {
-        const button = html("button", "", choice);
-        button.addEventListener("click", () => this.select(index));
-        this.control.append(button);
-      });
-    } else {
-      this.control = html("select", "dropdown");
-      choices.forEach((choice) => this.control.append(new Option(choice)));
-      this.control.addEventListener("change", () => this.select(this.control.selectedIndex));
-    }
-
-    this.element.append(this.control);
-  }
-
-  render() {
-    const choices = this.state.properties.choices ?? [];
-    if (choices.join("|") !== this.signature) {
-      this.signature = choices.join("|");
-      this.build(choices);
-    }
-
-    const index = choices.length > 0 ? this.state.getChoiceIndex() : 0;
-
-    if (this.control.tagName === "SELECT") this.control.selectedIndex = index;
-    else [...this.control.children].forEach((button, i) => button.classList.toggle("is-selected", i === index));
-  }
-}
-
-//==============================================================================
-// On/off switch for a bool parameter that isn't a module's power button.
-class Pill {
-  constructor(param, label, onUserChange) {
-    this.state = Juce.getToggleState(param);
-    this.element = html("button", "pill");
-    this.element.append(html("span", "switch"), html("span", "", label));
-    markLearnable(this.element, `param:${param}`, label);
-    this.element.addEventListener("click", () => {
-      this.state.setValue(!this.state.getValue());
-      onUserChange();
-      this.render();
-    });
-
-    this.state.valueChangedEvent.addListener(() => this.render());
-    this.render();
-  }
-
-  render() {
-    this.element.setAttribute("aria-pressed", String(Boolean(this.state.getValue())));
-  }
-}
-
 //==============================================================================
 // One-octave keyboard for choosing the autotune key; lights up the scale and the
 // note currently being tuned to.
@@ -421,6 +346,8 @@ class ReverbGraphic {
     this.energy = 1;
     this.render();
   }
+
+  update() { this.render(); }
 
   // Live: the tail swells with what comes out of the reverb and dies away with it.
   live(reading) {
@@ -780,7 +707,7 @@ class Rack {
         if (!dragging && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 5) return;
         dragging = true;
         card.classList.add("is-dragging");
-        const over = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest(".card");
+        const over = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest(".live-card");
         const entry = this.entries.find((e) => e.card === over && !e.card.hidden && MODULE_KEYS[e.module.id] !== MODULE_KEYS[module.id]);
         clear();
         target = entry?.module ?? null;
@@ -811,75 +738,161 @@ class Rack {
     });
   }
 
+  // One effect's card: the same device card as the DAW's (ui/devices.js), reading and
+  // writing the parameters through the relays. Live keeps its extras: the number to
+  // drag it by, reset, echo tap, the tuner, chord readout and key picker, MIDI learn.
   buildCard(module, power) {
-    const card = html("section", `card${module.wide ? " wide" : ""}`);
+    const key = MODULE_KEYS[module.id];
+    const insert = {
+      id: module.id, type: key, module: module.id, name: "",
+      values: new Proxy({}, { get: (_, param) => (typeof param === "string" ? this.getParameter(param) : undefined) }),
+    };
+    const access = {
+      insert,
+      get: (param) => this.getParameter(param),
+      set: (param, value, first) => this.setLive(param, value, first),
+      info: (param) => parameterInfo[param],
+    };
+    const verbs = {
+      remove: () => {
+        power.setValue(false);
+        this.onUserChange();
+        this.refresh();
+      },
+      openMenu: (x, y, anchor) => this.openCardMenu(module, power, device, x, y, anchor),
+      switchAB: () => {},
+    };
+    const device = new DeviceCard(insert, access, this.cardKit(module), verbs);
+    const card = device.element;
     card.dataset.module = module.id;
-    card.style.setProperty("--cat", CATEGORIES[module.category].color);
+    card.classList.add("live-card");
     card.hidden = true;
-
-    const header = html("header");
-    const powerButton = html("button", "power");
-    powerButton.setAttribute("aria-label", `Turn ${module.name} off`);
-    markLearnable(powerButton, `param:${module.power}`, `${module.name} on/off`);
-    powerButton.title = "Turn off";
-    powerButton.addEventListener("click", () => {
-      power.setValue(false);
-      this.onUserChange();
-      this.refresh();
+    card.device = device;
+    card.addEventListener("animationend", () => card.classList.add("is-settled"));
+    card.addEventListener("contextmenu", (event) => {
+      if (event.target.closest("input, select")) return;
+      event.preventDefault();
+      this.openCardMenu(module, power, device, event.clientX, event.clientY);
     });
 
-    const reset = html("button", "card-reset", "↺");
-    reset.title = `Reset ${module.name} to its default settings`;
-    reset.setAttribute("aria-label", reset.title);
-    reset.addEventListener("click", () => this.resetModule(module));
-
-    // Live: in/out level bars, and the picture (below) animates from the signal.
-    const activity = createActivity();
-    card.live = { activity, view: null };
-    const step = html("span", "step");
-    step.tabIndex = 0;
-    step.title = "Drag to move this effect in the chain (or press ← / →)";
-    step.setAttribute("role", "button");
-    step.setAttribute("aria-label", `Move ${module.name} in the chain`);
-    this.enableReorder(module, card, step);
-    card.addEventListener("animationend", () => card.classList.add("is-settled"));
-    header.append(step, html("h2", "", module.name), activity.element);
-    if (module.id === "echo") {
-      const tap = html("button", "card-tap", "Tap");
-      tap.title = "Tap the beat a few times to set the echo time (with Sync on, the tempo the echo follows)";
-      tap.addEventListener("click", () => this.tapEcho(tap));
-      header.append(tap);
-    }
-    header.append(reset, powerButton);
-
-    const controls = html("div", "controls");
-    const conditional = []; // [control, element]: shown only for some values of other controls
-    for (const control of module.controls) {
-      const element = this.buildControl(control, card);
-      controls.append(element);
-      if (control.when) conditional.push([control, element]);
-    }
-    if (conditional.length) {
-      const refresh = () => conditional.forEach(([control, element]) => {
-        element.hidden = !isControlShown(control, (param) => this.getParameter(param));
+    // The host, MIDI, presets, scenes or the other screen change values too: redraw
+    // (once a frame) when any of this card's parameters moves.
+    let pending = false;
+    const redraw = () => {
+      if (pending) return;
+      pending = true;
+      requestAnimationFrame(() => {
+        pending = false;
+        if (!card.hidden) device.update(insert);
+        card.dispatchEvent(new Event("knob-change"));
       });
-      for (const param of new Set(conditional.flatMap(([control]) => Object.keys(control.when))))
-        Juce.getComboBoxState(param).valueChangedEvent.addListener(refresh);
-      refresh();
-    }
-
-    card.append(header, html("p", "desc", module.description));
-
-    // A picture of what the effect does (reverb has its own; pitch has the tuner).
-    const key = MODULE_KEYS[module.id];
-    if (key !== "pitch" && key !== "reverb") {
-      const view = createFxView(key, this.liveAccess(() => view?.update()));
-      if (view) card.append(view.element);
-      card.live.view = view;
-    }
-
-    card.append(controls, this.buildCardFooter(module, card));
+    };
+    const params = new Set([`${key}InGain`, `${key}OutGain`]);
+    for (const control of module.controls) for (const param of [control.param, control.scaleParam]) if (param) params.add(param);
+    for (const param of params) this.relay(param).valueChangedEvent.addListener(redraw);
+    card.redraw = redraw;
     return card;
+  }
+
+  // The device card's pieces, with the Live screen's extras.
+  cardKit(module) {
+    const rack = this;
+    return {
+      ...deviceKit(),
+      live: true,
+      activator: false,
+      ab: false,
+      ownPicture: (type) => type === "reverb", // its decay picture is one of its controls
+      createExtra: (control, device) => rack.buildExtra(control, device),
+      decorateControl: (control, element) => {
+        if (control.param) markLearnable(element, `param:${control.param}`, control.label);
+      },
+      decorate: (device) => {
+        const head = device.head;
+        head.title = "";
+        const step = html("span", "step");
+        step.tabIndex = 0;
+        step.title = "Drag to move this effect in the chain (or press ← / →)";
+        step.setAttribute("role", "button");
+        step.setAttribute("aria-label", `Move ${module.name} in the chain`);
+        rack.enableReorder(module, device.element, step);
+        head.prepend(step);
+
+        head.querySelector(".insert-more").title = "More: move, trims, reset";
+        const remove = head.querySelector(".insert-remove");
+        remove.title = "Take it out of the chain (it stays in the list)";
+        remove.setAttribute("aria-label", `Turn ${module.name} off`);
+        markLearnable(remove, `param:${module.power}`, `${module.name} on/off`);
+
+        // Reset is in the ⋯ menu (and a double-click resets one control).
+        if (module.id === "echo") {
+          const tap = html("button", "mini card-tap", "Tap");
+          tap.title = "Tap the beat a few times to set the echo time (with Sync on, the tempo the echo follows)";
+          tap.addEventListener("click", () => rack.tapEcho(tap));
+          head.querySelector(".insert-trim-switch").before(tap);
+        }
+        device.body.prepend(html("p", "desc live-desc", module.description));
+      },
+    };
+  }
+
+  // Live-only controls the device card doesn't draw itself (undefined: the card does).
+  buildExtra(control, device) {
+    switch (control.type) {
+      case "file": {
+        const moduleFile = Juce.getNativeFunction("moduleFile");
+        const picker = createFilePicker({ label: control.label, load: () => moduleFile(control.module, "choose"),
+                                          clear: () => moduleFile(control.module, "clear") });
+        moduleFile(control.module, "get").then((result) => picker.update(result?.file)).catch(() => {});
+        return picker.element;
+      }
+      case "tuner": return (this.tuner = new Tuner()).element;
+      case "chord": return (this.chordReadout = new ChordReadout()).element;
+      case "keys": return (this.keyPicker = new KeyPicker(control.param, control.scaleParam, this.onUserChange)).element;
+      case "reverb-graphic": {
+        const graphic = new ReverbGraphic(device.element);
+        device.view = graphic;
+        return graphic.element;
+      }
+      default: return undefined;
+    }
+  }
+
+  // ⋯ or right-click on a card.
+  openCardMenu(module, power, device, x, y, anchor = null) {
+    const { popMenu } = deviceKit();
+    const visible = this.entries.filter((entry) => !entry.card.hidden);
+    const at = visible.findIndex((entry) => entry.module === module);
+    popMenu(x, y, ({ item, rule }) => {
+      item("Move earlier", () => this.nudge(module, -1), { disabled: at <= 0, shortcut: "←" , hint: "Or drag it by its number" });
+      item("Move later", () => this.nudge(module, 1), { disabled: at >= visible.length - 1, shortcut: "→" });
+      rule();
+      item("Show trims", () => device.setTrimsShown(!device.trimsShown), { checked: !device.gains.hidden });
+      item("Reset to default settings", () => this.resetModule(module));
+      rule();
+      item("Take out of the chain", () => { power.setValue(false); this.onUserChange(); this.refresh(); }, { danger: true });
+    }, anchor);
+  }
+
+  relay(param) {
+    const kind = parameterKinds[param] ?? "slider";
+    return kind === "choice" ? Juce.getComboBoxState(param) : kind === "toggle" ? Juce.getToggleState(param) : Juce.getSliderState(param);
+  }
+
+  // A value from a card, as a host gesture: a drag is one undo step (it ends a moment
+  // after the last move).
+  setLive(param, value, first) {
+    const kind = parameterKinds[param] ?? "slider";
+    if (kind === "toggle") Juce.getToggleState(param).setValue(value >= 0.5);
+    else if (kind === "choice") Juce.getComboBoxState(param).setChoiceIndex(Math.round(value));
+    else {
+      const state = Juce.getSliderState(param);
+      if (first || !this.gestureTimers?.[param]) state.sliderDragStarted();
+      state.setNormalisedValue(toNormalised(state, value));
+      clearTimeout(this.gestureTimers?.[param]);
+      (this.gestureTimers ??= {})[param] = setTimeout(() => { state.sliderDragEnded(); delete this.gestureTimers[param]; }, 300);
+    }
+    this.onUserChange();
   }
 
   // From the "meters" event: each effect's live reading by module key ({ in, out,
@@ -887,11 +900,7 @@ class Rack {
   live(readings) {
     for (const { module, card } of this.entries) {
       if (card.hidden) continue;
-      const reading = readings?.[MODULE_KEYS[module.id]] ?? null;
-      card.live.view?.live(reading);
-      const level = card.live.activity.push(reading);
-      card.classList.toggle("is-live", Boolean(reading));
-      card.style.setProperty("--act", level.toFixed(2));
+      card.device.live(readings?.[MODULE_KEYS[module.id]] ?? null);
     }
   }
 
@@ -928,35 +937,6 @@ class Rack {
     return Juce.getSliderState(param).getScaledValue();
   }
 
-  // The bottom row of a card: the effect's presets, and its own input and output gain.
-  buildCardFooter(module, card) {
-    const footer = html("div", "card-footer");
-    const picker = createPresetPicker({
-      getNativeFunction: Juce.getNativeFunction,
-      ids: [module.id],
-      read: () => Object.fromEntries(presetParams(module.id).map((param) => [param, this.getParameter(param)])),
-      apply: (values) => {
-        for (const [param, value] of Object.entries(values)) this.setParameter(param, value);
-        this.onUserChange();
-        card.dispatchEvent(new Event("knob-change"));
-      },
-      defaultOf: (param) => parameterDefaults[param],
-    });
-
-    const key = MODULE_KEYS[module.id];
-    const gains = html("div", "card-gains");
-    const shared = key === "pitch" ? " (shared by autotune, pitch shift and harmonizer)" : "";
-    for (const [suffix, label, title] of [["InGain", "In", "Input gain: the level going into this effect"],
-                                          ["OutGain", "Out", "Output gain: the level coming out of this effect"]]) {
-      const element = html("div", "card-gain");
-      new Knob(element, { param: `${key}${suffix}`, label, bipolar: true, onUserChange: this.onUserChange });
-      element.title = `${title}${shared}. Drag or scroll · Double-click to reset`;
-      gains.append(element);
-    }
-    footer.append(picker.element, gains);
-    return footer;
-  }
-
   // Tap tempo for the echo: the average gap between taps becomes the echo time.
   tapEcho(button) {
     const now = performance.now();
@@ -984,71 +964,6 @@ class Rack {
     clearTimeout(this.tapLabelTimer);
     this.tapLabelTimer = setTimeout(() => { button.textContent = "Tap"; }, 2500);
     this.onUserChange();
-  }
-
-  // How an effect picture reads and writes parameters on the Live screen: through
-  // the relays, redrawing whenever one of the values it uses changes.
-  liveAccess(redraw) {
-    const watched = new Set();
-    const state = (param) => {
-      const kind = parameterKinds[param] ?? "slider";
-      const s = kind === "choice" ? Juce.getComboBoxState(param) : kind === "toggle" ? Juce.getToggleState(param) : Juce.getSliderState(param);
-      if (!watched.has(param)) {
-        watched.add(param);
-        s.valueChangedEvent.addListener(() => redraw());
-        s.propertiesChangedEvent?.addListener(() => redraw());
-      }
-      return { kind, s };
-    };
-
-    return {
-      get: (param) => {
-        const { kind, s } = state(param);
-        return kind === "choice" ? s.getChoiceIndex() : kind === "toggle" ? (s.getValue() ? 1 : 0) : s.getScaledValue();
-      },
-      set: (param, value, first) => {
-        const { kind, s } = state(param);
-        if (kind !== "slider") return;
-        if (first) s.sliderDragStarted();
-        s.setNormalisedValue(toNormalised(s, value));
-        clearTimeout(this.gestureTimers?.[param]);
-        (this.gestureTimers ??= {})[param] = setTimeout(() => s.sliderDragEnded(), 300);
-        this.onUserChange();
-        redraw();
-      },
-      range: (param) => {
-        const { kind, s } = state(param);
-        return kind === "slider" ? { min: s.properties.start, max: s.properties.end } : null;
-      },
-    };
-  }
-
-  buildControl(control, card) {
-    switch (control.type) {
-      case "knob": {
-        const element = html("div");
-        new Knob(element, { ...control, onUserChange: this.onUserChange });
-        return element;
-      }
-      case "choice": return new Choice(control.param, control.label, this.onUserChange).element;
-      case "toggle": return new Pill(control.param, control.label, this.onUserChange).element;
-      case "file": {
-        const moduleFile = Juce.getNativeFunction("moduleFile");
-        const picker = createFilePicker({ label: control.label, load: () => moduleFile(control.module, "choose"),
-                                          clear: () => moduleFile(control.module, "clear") });
-        moduleFile(control.module, "get").then((result) => picker.update(result?.file)).catch(() => {});
-        return picker.element;
-      }
-      case "tuner": return (this.tuner = new Tuner()).element;
-      case "chord": return (this.chordReadout = new ChordReadout()).element;
-      case "keys": return (this.keyPicker = new KeyPicker(control.param, control.scaleParam, this.onUserChange)).element;
-      case "reverb-graphic": {
-        const graphic = new ReverbGraphic(card);
-        card.live.view = graphic;
-        return graphic.element;
-      }
-      default: throw new Error(`Unknown control type ${control.type}`);
-    }
   }
 
   buildSidebarItem(module, power, card) {
@@ -1086,6 +1001,7 @@ class Rack {
     for (const { power, card, item } of this.entries) {
       const on = Boolean(power.getValue());
       if (!on) card.classList.remove("is-settled"); // shown again: it makes its entrance
+      if (on && card.hidden) card.device.update(card.device.insert); // it didn't redraw while hidden
       card.hidden = !on;
       item.classList.toggle("is-on", on);
       item.setAttribute("aria-pressed", String(on));
@@ -1145,12 +1061,17 @@ const liveUndo = (() => {
 })();
 const markModified = () => presetBar.markModified();
 
-const rack = new Rack({
-  sidebar: document.querySelector(".sidebar-groups"),
-  grid: document.querySelector(".chain-grid"),
-  empty: document.querySelector(".chain-empty"),
-  count: document.querySelector(".active-count"),
-  onUserChange: markModified,
+// The effect cards need the parameters' ranges, so the rack waits for them.
+let rack = null;
+Juce.getNativeFunction("getParameterInfo")().catch(() => ({})).then((info) => {
+  parameterInfo = info ?? {};
+  rack = new Rack({
+    sidebar: document.querySelector(".sidebar-groups"),
+    grid: document.querySelector(".chain-grid"),
+    empty: document.querySelector(".chain-empty"),
+    count: document.querySelector(".active-count"),
+    onUserChange: markModified,
+  });
 });
 
 // Input/output gain belong to the mic setup rather than the preset.
@@ -1521,10 +1442,10 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   meters.input.push(status.input);
   if (micCheck) micCheck.peak = Math.max(micCheck.peak, status.input);
   meters.output.push(status.output);
-  rack.tuner?.update(status.note, status.target);
-  rack.chordReadout?.update(status.chord, status.voices);
-  if (!document.hidden) rack.live(status.fx);
-  rack.keyPicker?.setTarget(status.target);
+  rack?.tuner?.update(status.note, status.target);
+  rack?.chordReadout?.update(status.chord, status.voices);
+  if (!document.hidden) rack?.live(status.fx);
+  rack?.keyPicker?.setTarget(status.target);
   presetBar.syncFromHost(status.preset);
   recorderBar.update(status.recording);
   capturePanel.setAvailable(status.capture);
