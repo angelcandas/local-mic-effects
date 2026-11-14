@@ -2598,3 +2598,9 @@ body.is-daw .library-hint { display: none; }
 .clip.is-stretching { outline: 1px dashed var(--accent-2); }
 .arrange[data-tool="warp"] .clip { cursor: crosshair; }
 .arrange[data-tool="warp"] .clip .handle { display: none; }
+
+/* Library drops into a device chain: the slot the effect goes into. */
+.device-drop-line { position: fixed; z-index: 1000; width: 4px; border-radius: 2px; background: var(--accent); box-shadow: 0 0 8px var(--accent); pointer-events: none; }
+.device-chain > .insert.is-drop-target { outline: 2px solid var(--accent); outline-offset: 2px; }
+/* A card dragged out of its chain, towards another track or the library. */
+.device-chain > .insert.is-leaving { opacity: 0.45; }

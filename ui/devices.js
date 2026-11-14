@@ -322,6 +322,21 @@ export class DeviceChain {
     }, anchor);
   }
 
+  // A card dragged out of the chain and let go over `target` (see deviceDropTarget in daw.js).
+  async dropOutside(card, id, target, copy) {
+    if (target.library) {
+      if (!card.presetPicker) return this.kit.toast("Plug-ins keep their presets in their own window.");
+      card.element.scrollIntoView({ block: "nearest", inline: "nearest" });
+      return card.presetPicker.saveAs();
+    }
+    if (target.track === this.owner.id && !copy) return;
+    const ids = this.selected.has(id) ? this.selectedIds : [id];
+    let n = 0;
+    for (const insertId of ids)
+      await this.kit.daw(copy ? "copyInsert" : "moveInsert", { id: insertId, track: target.track, index: -1, continue: n++ > 0 });
+    this.kit.toast(`${copy ? "Copied" : "Moved"} ${ids.length === 1 ? card.effectName ?? "the effect" : `${ids.length} effects`} to ${target.label}.`, "", "undo");
+  }
+
   // Drag a card by its header to reorder the chain (pointer events, so it works in the
   // WebView). A press without a drag selects it (Shift: adds it to the selection).
   enableDrag(card, id) {
@@ -346,14 +361,46 @@ export class DeviceChain {
           c.style.transform = shift ? `translateX(${shift}px)` : "";
         });
       };
+      // Out of the chain (up or down, DAW only): onto another track, return or the master
+      // to move it there (Alt: a copy), or into the library to save it as a preset.
+      const chainBox = this.element.getBoundingClientRect();
+      const canLeave = typeof this.screen.deviceDropTarget === "function";
+      let out = null; // { ghost, target, highlight } while outside
+      const leave = (e) => {
+        if (!out) {
+          cards.forEach((c) => { c.style.transform = ""; });
+          to = from;
+          out = { ghost: html("div", "library-ghost is-effect", card.effectName ?? ""), target: null, highlight: null };
+          document.body.append(out.ghost);
+        }
+        out.ghost.style.transform = `translate(${e.clientX + 12}px, ${e.clientY + 10}px)`;
+        out.target = this.screen.deviceDropTarget(e.clientX, e.clientY, this.owner.id);
+        const highlight = out.target?.element ?? null;
+        if (out.highlight !== highlight) { out.highlight?.classList.remove("is-drop-target"); highlight?.classList.add("is-drop-target"); out.highlight = highlight; }
+        out.ghost.classList.toggle("is-refused", !out.target);
+        out.ghost.dataset.where = out.target ? (out.target.library ? out.target.label : `${e.altKey ? "Copy to" : "Move to"} ${out.target.label}`) : "";
+      };
+      const comeBack = () => {
+        if (!out) return;
+        out.ghost.remove();
+        out.highlight?.classList.remove("is-drop-target");
+        out = null;
+      };
       const move = (e) => {
         const dx = e.clientX - startX;
         if (!dragging) {
-          if (Math.abs(dx) < 5) return;
+          if (Math.abs(dx) < 5 && Math.abs(e.clientY - event.clientY) < 5) return;
           dragging = true;
           this.element.classList.add("is-reordering");
           card.element.classList.add("is-dragging");
         }
+        if (canLeave && (e.clientY < chainBox.top - 24 || e.clientY > chainBox.bottom + 24)) {
+          card.element.style.transform = "";
+          card.element.classList.add("is-leaving");
+          return leave(e);
+        }
+        card.element.classList.remove("is-leaving");
+        comeBack();
         card.element.style.transform = `translateX(${dx}px)`;
         const centre = rects[from].left + rects[from].width / 2 + dx;
         let target = from;
@@ -370,8 +417,11 @@ export class DeviceChain {
           return;
         }
         this.element.classList.remove("is-reordering");
-        card.element.classList.remove("is-dragging");
+        card.element.classList.remove("is-dragging", "is-leaving");
         cards.forEach((c) => { c.style.transform = ""; });
+        const target = out?.target;
+        comeBack();
+        if (target && e.type === "pointerup") return this.dropOutside(card, id, target, e.altKey);
         if (e.type === "pointerup" && to !== from) this.kit.daw("moveInsert", { id, index: to });
       };
       head.addEventListener("pointermove", move);
@@ -589,6 +639,7 @@ export class DeviceCard {
       defaultKey: this.kit.live ? undefined : this.insert.type,
     });
 
+    this.presetPicker = picker;
     this.gains = this.createGains(this.insert.type);
     footer.append(picker.element, this.gains);
     return footer;

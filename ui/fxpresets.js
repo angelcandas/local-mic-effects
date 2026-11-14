@@ -300,6 +300,6 @@ export function createPresetPicker({ getNativeFunction, ids, read, apply, defaul
     getNativeFunction("library")("getDefault", defaultKey)
       .then((values) => { savedDefaults[defaultKey] = Boolean(values && typeof values === "object"); ++version; build(); })
       .catch(() => {});
-  return { element, refresh: build };
+  return { element, refresh: build, saveAs: showName };
 }
 
