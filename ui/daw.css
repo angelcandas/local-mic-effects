@@ -2645,3 +2645,13 @@ body.is-daw .library-hint { display: none; }
 .is-macro-mapping [data-param] { outline: 1px dashed color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 2px; border-radius: 6px; cursor: copy; }
 [data-param].is-macro-mapped { position: relative; }
 [data-param].is-macro-mapped::after { content: ""; position: absolute; top: 2px; right: 2px; width: 7px; height: 7px; border-radius: 50%; background: var(--macro); box-shadow: 0 0 5px var(--macro); pointer-events: none; }
+/* Live macros: the same panel, as one row of eight above the cards (folded to its title until opened). */
+.live-macros { margin: 0 0 12px; }
+.live-macros .macro-panel { width: auto; }
+.live-macros .macro-grid { grid-template-columns: repeat(8, minmax(0, 1fr)); }
+.live-macros:not(.is-open) :is(.macro-grid, .macro-ranges, .macro-map) { display: none; }
+.live-macros-toggle { padding: 0; border: 0; background: none; color: var(--muted); font: inherit; font-size: 10.5px; font-weight: 600; letter-spacing: 0.7px; text-transform: uppercase; cursor: pointer; }
+.live-macros-toggle::before { content: "\25B8  "; }
+.live-macros.is-open .live-macros-toggle::before { content: "\25BE  "; }
+/* A Live control a macro drives follows the macro, not the mouse (Map mode still clicks it). */
+.chain-grid:not(.is-macro-mapping) [data-param].is-macro-mapped { pointer-events: none; }

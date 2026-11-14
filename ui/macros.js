@@ -62,7 +62,8 @@ export class MacroPanel {
       if (!control || !card || !this.chain().contains(card)) return;
       event.preventDefault();
       event.stopPropagation();
-      this.toggleMap(Number(card.dataset.insert), control.dataset.param);
+      const id = card.dataset.insert;
+      this.toggleMap(/^\d+$/.test(id) ? Number(id) : id, control.dataset.param); // DAW inserts have numbers, Live cards module ids
     };
     this.update(owner);
   }

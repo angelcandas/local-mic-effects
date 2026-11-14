@@ -392,4 +392,8 @@ Parameters::Parameters (Layout& l)
     choice (l, "doublerMode", "Doubler Mode", { "Classic", "Micro shift", "Double track" }, 0);
     number (l, "doublerDetune", "Doubler Detune", 0.0f, 20.0f, 0.1f, 8.0f, "ct");
     number (l, "doublerDelay", "Doubler Delay", 1.0f, 40.0f, 0.1f, 12.0f, "ms");
+
+    // Macros (Macros.h), last: eight knobs that each turn any of the values above.
+    for (int m = 1; m <= 8; ++m)
+        number (l, "macro" + juce::String (m), "Macro " + juce::String (m), 0.0f, 100.0f, 0.1f, 0.0f, "%");
 }

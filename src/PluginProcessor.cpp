@@ -51,6 +51,10 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
         }
     }
 
+    liveMacros = std::make_unique<LiveMacros> (bindings.size());
+    for (int m = 0; m < LiveMacros::numMacros; ++m)
+        macroParams[(size_t) m] = dynamic_cast<juce::AudioParameterFloat*> (state.getParameter ("macro" + juce::String (m + 1)));
+
     liveHistory.getPreset = [this] { return currentPreset.load(); };
     liveHistory.setPreset = [this] (int index) { currentPreset = index; };
 
@@ -166,6 +170,92 @@ void PluginProcessor::updateDspParameters()
                                                         : static_cast<juce::AudioParameterFloat*> (binding.parameter)->get();
         binding.value->store (value, std::memory_order_relaxed);
     }
+
+    // Mapped values come from their macro (the host may be automating the macro).
+    if (liveMacros->anyMapped())
+    {
+        std::array<float, LiveMacros::numMacros> macros {};
+        for (size_t m = 0; m < macros.size(); ++m)
+            macros[m] = macroParams[m] != nullptr ? macroParams[m]->get() / 100.0f : 0.0f;
+        for (size_t i = 0; i < bindings.size(); ++i)
+            if (const auto m = liveMacros->getMacro (i); m >= 0)
+                bindings[i].value->store (macroTarget (i, macros[(size_t) m]), std::memory_order_relaxed);
+    }
+}
+
+//==============================================================================
+int PluginProcessor::findBinding (const juce::String& param) const
+{
+    for (size_t i = 0; i < bindings.size(); ++i)
+        if (bindings[i].parameter->getParameterID() == param)
+            return (int) i;
+    return -1;
+}
+
+float PluginProcessor::macroTarget (size_t binding, float macroValue) const
+{
+    const auto value = liveMacros->target (binding, macroValue);
+    return bindings[binding].kind == Binding::Kind::number ? value : std::round (value); // switches and choices step
+}
+
+juce::var PluginProcessor::describeLiveMacros() const
+{
+    juce::Array<juce::var> result;
+    for (int m = 0; m < LiveMacros::numMacros; ++m)
+    {
+        juce::Array<juce::var> maps;
+        for (size_t i = 0; i < bindings.size(); ++i)
+            if (liveMacros->getMacro (i) == m)
+            {
+                auto* map = new juce::DynamicObject();
+                map->setProperty ("param", bindings[i].parameter->getParameterID());
+                map->setProperty ("min", liveMacros->getMin (i));
+                map->setProperty ("max", liveMacros->getMax (i));
+                maps.add (juce::var (map));
+            }
+        auto* macro = new juce::DynamicObject();
+        macro->setProperty ("name", liveMacros->names[(size_t) m]);
+        macro->setProperty ("value", macroParams[(size_t) m] != nullptr ? macroParams[(size_t) m]->get() / 100.0f : 0.0f);
+        macro->setProperty ("maps", maps);
+        result.add (juce::var (macro));
+    }
+    return result;
+}
+
+bool PluginProcessor::mapLiveMacro (int index, const juce::String& param, float min, float max)
+{
+    const auto binding = findBinding (param);
+    if (binding < 0 || index < 0 || index >= LiveMacros::numMacros)
+        return false;
+    liveMacros->map ((size_t) binding, index, min, max);
+    syncLiveMacros();
+    return true;
+}
+
+void PluginProcessor::unmapLiveMacro (const juce::String& param)
+{
+    if (const auto binding = findBinding (param); binding >= 0)
+        liveMacros->unmap ((size_t) binding);
+}
+
+void PluginProcessor::nameLiveMacro (int index, const juce::String& name)
+{
+    if (index >= 0 && index < LiveMacros::numMacros)
+        liveMacros->names[(size_t) index] = name.trim().substring (0, 30);
+}
+
+void PluginProcessor::syncLiveMacros()
+{
+    if (! liveMacros->anyMapped())
+        return;
+    for (size_t i = 0; i < bindings.size(); ++i)
+        if (const auto m = liveMacros->getMacro (i); m >= 0 && macroParams[(size_t) m] != nullptr)
+        {
+            auto* parameter = bindings[i].parameter;
+            const auto normal = parameter->convertTo0to1 (macroTarget (i, macroParams[(size_t) m]->get() / 100.0f));
+            if (std::abs (parameter->getValue() - normal) > 1.0e-5f)
+                parameter->setValueNotifyingHost (normal);
+        }
 }
 
 double PluginProcessor::getLiveTempo() noexcept
@@ -598,9 +688,33 @@ juce::File PluginProcessor::getModuleFile (fx::ModuleType type) const
 
 void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
+    if (juce::MessageManager::existsAndIsCurrentThread())
+        syncLiveMacros(); // mapped values as their macros have them
     auto tree = state.copyState();
     tree.setProperty ("preset", currentPreset.load(), nullptr);
     tree.setProperty ("chainOrder", getChainOrder().joinIntoString (","), nullptr);
+
+    // The Live macros: names and mappings (their values are the macro parameters).
+    juce::ValueTree macros ("LIVE_MACROS");
+    for (int m = 0; m < LiveMacros::numMacros; ++m)
+    {
+        juce::ValueTree macro ("MACRO");
+        macro.setProperty ("index", m, nullptr);
+        macro.setProperty ("name", liveMacros->names[(size_t) m], nullptr);
+        for (size_t i = 0; i < bindings.size(); ++i)
+            if (liveMacros->getMacro (i) == m)
+            {
+                juce::ValueTree map ("MAP");
+                map.setProperty ("param", bindings[i].parameter->getParameterID(), nullptr);
+                map.setProperty ("min", liveMacros->getMin (i), nullptr);
+                map.setProperty ("max", liveMacros->getMax (i), nullptr);
+                macro.appendChild (map, nullptr);
+            }
+        if (macro.getNumChildren() > 0 || liveMacros->names[(size_t) m].isNotEmpty())
+            macros.appendChild (macro, nullptr);
+    }
+    if (macros.getNumChildren() > 0)
+        tree.appendChild (macros, nullptr);
 
     // The effects' files, by module key.
     juce::ValueTree files ("MODULE_FILES");
@@ -630,6 +744,23 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
             // The effects' order (a state from before orders existed: the standard one).
             setChainOrder (juce::StringArray::fromTokens (tree.getProperty ("chainOrder").toString(), ",", ""));
             tree.removeProperty ("chainOrder", nullptr);
+
+            liveMacros->unmapAll();
+            liveMacros->names.fill ({});
+            if (const auto macros = tree.getChildWithName ("LIVE_MACROS"); macros.isValid())
+            {
+                for (const auto& macro : macros)
+                {
+                    const auto index = (int) macro.getProperty ("index", -1);
+                    if (index < 0 || index >= LiveMacros::numMacros)
+                        continue;
+                    liveMacros->names[(size_t) index] = macro.getProperty ("name").toString();
+                    for (const auto& map : macro)
+                        if (const auto binding = findBinding (map.getProperty ("param").toString()); binding >= 0)
+                            liveMacros->map ((size_t) binding, index, (float) map.getProperty ("min"), (float) map.getProperty ("max"));
+                }
+                tree.removeChild (macros, nullptr);
+            }
             if (const auto saved = tree.getChildWithName ("SETLIST"); saved.isValid())
             {
                 if (juce::JUCEApplicationBase::isStandaloneApp())

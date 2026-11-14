@@ -4699,6 +4699,75 @@ namespace
         check (macros.getChildWithProperty (daw::ids::index, 2).getNumChildren() == 1, "an effect moved to another channel is unmapped");
     }
 
+    void testLiveMacros()
+    {
+        std::cout << "\nMacros (Live)\n";
+        const auto set = [] (PluginProcessor& p, const char* id, float value)
+        {
+            auto* parameter = p.getState().getParameter (id);
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+        };
+        const auto get = [] (PluginProcessor& p, const char* id)
+        {
+            auto* parameter = p.getState().getParameter (id);
+            return parameter->convertFrom0to1 (parameter->getValue());
+        };
+        const auto render = [] (PluginProcessor& p)
+        {
+            const auto voice = makeVoice (180.0f, 0.5);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            juce::MidiBuffer midi;
+            std::vector<float> out;
+            for (size_t start = 0; start + blockSize <= voice.size(); start += blockSize)
+            {
+                buffer.clear();
+                buffer.copyFrom (0, 0, voice.data() + start, blockSize);
+                p.processBlock (buffer, midi);
+                out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+            }
+            return out;
+        };
+
+        check (PluginProcessor().getState().getParameter ("macro8") != nullptr, "eight macro parameters for the host");
+
+        // The audio thread takes mapped values from their macro (a host automating the
+        // macro, no sync in between) and sounds like the value set by hand.
+        PluginProcessor mapped, byHand;
+        for (auto* p : { &mapped, &byHand })
+        {
+            set (*p, "compOn", 1.0f);
+            set (*p, "satOn", 1.0f);
+            p->prepareToPlay (sampleRate, blockSize);
+        }
+        check (mapped.mapLiveMacro (0, "compThreshold", -10.0f, -40.0f), "a Live value maps to a macro");
+        check (mapped.mapLiveMacro (0, "satDrive", 0.0f, 20.0f), "a macro takes more than one value");
+        check (! mapped.mapLiveMacro (0, "noSuchValue", 0.0f, 1.0f), "a value that doesn't exist can't be mapped");
+        set (mapped, "macro1", 50.0f);
+        set (byHand, "compThreshold", -25.0f);
+        set (byHand, "satDrive", 10.0f);
+        check (render (mapped) == render (byHand), "the sound follows the macro before the parameters catch up");
+
+        mapped.syncLiveMacros();
+        check (std::abs (get (mapped, "compThreshold") + 25.0f) < 0.05f && std::abs (get (mapped, "satDrive") - 10.0f) < 0.05f,
+               "mapped parameters follow their macro (for the page and the host)");
+
+        // Saved with the state.
+        mapped.nameLiveMacro (0, " Push ");
+        juce::MemoryBlock saved;
+        mapped.getStateInformation (saved);
+        PluginProcessor loaded;
+        loaded.setStateInformation (saved.getData(), (int) saved.getSize());
+        const auto macros = loaded.describeLiveMacros();
+        check (macros[0]["name"].toString() == "Push" && macros[0]["maps"].size() == 2
+                   && juce::approximatelyEqual ((float) macros[0]["value"], 0.5f),
+               "names, mappings and values come back with the state");
+
+        loaded.mapLiveMacro (1, "satDrive", 0.0f, 5.0f);
+        check (loaded.describeLiveMacros()[0]["maps"].size() == 1, "a value follows one macro: mapping it to another takes it off the first");
+        loaded.unmapLiveMacro ("compThreshold");
+        check (loaded.describeLiveMacros()[0]["maps"].size() == 0, "a value can be unmapped");
+    }
+
     void testDeviceEdits()
     {
         std::cout << "\nEffect chain edits (seamless, duplicate, move, replace, rename, A/B)\n";
@@ -17285,6 +17354,7 @@ int main()
         testChainOrder();
         testPresetLibrary();
         testMacros();
+        testLiveMacros();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -17329,6 +17399,7 @@ int main()
     testChainOrder();
     testPresetLibrary();
     testMacros();
+    testLiveMacros();
     testReturns();
     testPreview();
     testGroups();

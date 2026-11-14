@@ -9,6 +9,7 @@
 #include "MidiMap.h"
 #include "PitchTap.h"
 #include "LiveHistory.h"
+#include "Macros.h"
 #include "Scenes.h"
 #include "Setlist.h"
 #include "PresetLibrary.h"
@@ -82,6 +83,15 @@ public:
     // and in each setlist song; loading a factory preset sets its order. Message thread.
     juce::StringArray getChainOrder() const;
     void setChainOrder (const juce::StringArray& keys);
+
+    // Live macros (Macros.h), message thread. -> 8 × { name, value (0..1), maps: [{ param, min, max }] }.
+    juce::var describeLiveMacros() const;
+    // False when there's no Live effect value called `param`.
+    bool mapLiveMacro (int index, const juce::String& param, float min, float max);
+    void unmapLiveMacro (const juce::String& param);
+    void nameLiveMacro (int index, const juce::String& name);
+    // Mapped parameters take their macro's value, so the page, the host and saved states see it.
+    void syncLiveMacros();
 
     // The Live chain as a library chain (INSERTS: one INSERT per effect that's on, in
     // order, with all its values), and back: effects not in it are switched off, its
@@ -179,7 +189,7 @@ private:
 
     void updateDspParameters();
 
-    void timerCallback() override { updateLatency(); }
+    void timerCallback() override { updateLatency(); syncLiveMacros(); }
 
     Parameters params;
     juce::AudioProcessorValueTreeState state;
@@ -242,6 +252,10 @@ private:
     };
 
     std::vector<Binding> bindings;
+    std::unique_ptr<LiveMacros> liveMacros; // one slot per binding
+    std::array<juce::AudioParameterFloat*, LiveMacros::numMacros> macroParams {};
+    int findBinding (const juce::String& param) const;
+    float macroTarget (size_t binding, float macroValue) const;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (PluginProcessor)
 };
