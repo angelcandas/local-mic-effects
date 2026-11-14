@@ -4677,6 +4677,26 @@ namespace
         edit.removeInsert (comp);
         check (macros.getChildWithProperty (daw::ids::index, 0).getNumChildren() == 0, "removing an effect removes its mappings");
         edit.setMacro (track, 0, 1.0f); // nothing mapped: no harm
+
+        // A chain's macros go with it, by the effects' places in the chain.
+        const auto delay = (int) edit.addInsert (track, fx::ModuleType::echo)[daw::ids::id];
+        edit.mapMacro (track, 2, delay, "delayMix", 0.0f, 40.0f);
+        edit.mapMacro (track, 2, reverb, "reverbMix", 20.0f, 60.0f);
+        edit.setMacro (track, 2, 0.5f);
+        const auto saved = edit.getChainMacros (track);
+        juce::Array<juce::ValueTree> trees;
+        for (const auto& insert : daw::Edit::getInserts (edit.getChannel (track)))
+            trees.add (insert);
+        const auto copies = edit.pasteInsertTrees (trees, other, -1);
+        edit.setChainMacros (other, saved, copies);
+        const auto loaded = daw::Edit::getMacros (edit.getChannel (other)).getChildWithProperty (daw::ids::index, 2);
+        check (loaded.getNumChildren() == 2 && (int) loaded.getChild (0)[daw::ids::insert] == (int) copies[1][daw::ids::id]
+                   && juce::approximatelyEqual ((float) loaded[daw::ids::value], 0.5f),
+               "a saved chain's macros map onto the loaded copies, at the macro's value");
+
+        // Moved to another channel, an effect leaves its old channel's macros.
+        edit.moveInsertTo (delay, other, -1);
+        check (macros.getChildWithProperty (daw::ids::index, 2).getNumChildren() == 1, "an effect moved to another channel is unmapped");
     }
 
     void testDeviceEdits()

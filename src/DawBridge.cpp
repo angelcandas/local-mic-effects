@@ -4264,7 +4264,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             juce::Array<juce::ValueTree> trees;
             for (const auto& insert : chain)
                 trees.add (insert);
-            edit.pasteInsertTrees (trees, track[ids::id], -1);
+            const auto copies = edit.pasteInsertTrees (trees, track[ids::id], -1);
+            if (const auto macros = chain.getChildWithName (ids::MACROS); macros.isValid())
+                edit.setChainMacros (track[ids::id], macros, copies);
         }
         complete (track[ids::id]);
         return;
@@ -4468,12 +4470,14 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         engine.captureInstrumentStates(); // plug-ins' current settings go with them
         auto& library = processor.getLibrary();
-        const auto inserts = daw::Edit::getInserts (edit.getChannel (arg (args, "track", -1)));
+        const auto track = arg (args, "track", -1);
+        const auto inserts = daw::Edit::getInserts (edit.getChannel (track));
+        const auto macros = edit.getChainMacros (track); // the chain's macros go with it
         juce::String problem;
         if ((bool) args["default"])
-            problem = inserts.isValid() ? library.setDefaultChain (inserts) : (library.clearDefaultChain(), juce::String());
+            problem = inserts.isValid() ? library.setDefaultChain (inserts, macros) : (library.clearDefaultChain(), juce::String());
         else
-            problem = inserts.isValid() ? library.saveChain (args["name"].toString(), inserts) : juce::String ("There's no such track.");
+            problem = inserts.isValid() ? library.saveChain (args["name"].toString(), inserts, macros) : juce::String ("There's no such track.");
         complete (problem.isEmpty() ? object ({ { "ok", true } }) : error (problem));
         return;
     }
@@ -4498,8 +4502,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         juce::Array<juce::ValueTree> trees;
         for (const auto& insert : chain)
             trees.add (insert);
+        const auto copies = edit.pasteInsertTrees (trees, track, args.hasProperty ("index") ? arg (args, "index", -1) : -1);
+        // In place of the chain, its macros come too (in among one, the track keeps its own).
+        if (! args.hasProperty ("index"))
+            edit.setChainMacros (track, chain.getChildWithName (ids::MACROS), copies);
         juce::Array<juce::var> newIds;
-        for (const auto& copy : edit.pasteInsertTrees (trees, track, args.hasProperty ("index") ? arg (args, "index", -1) : -1))
+        for (const auto& copy : copies)
             newIds.add (copy[ids::id]);
         complete (object ({ { "ok", true }, { "ids", newIds } }));
         return;

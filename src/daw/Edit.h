@@ -126,7 +126,7 @@ namespace ids
     MICFX_DAW_ID (section) MICFX_DAW_ID (letter)
     MICFX_DAW_ID (rows) MICFX_DAW_ID (stepNote) MICFX_DAW_ID (step) MICFX_DAW_ID (swing) MICFX_DAW_ID (pattern) MICFX_DAW_ID (row)
     MICFX_DAW_ID (muted) MICFX_DAW_ID (levels)
-    MICFX_DAW_ID (MACROS) MICFX_DAW_ID (MACRO) MICFX_DAW_ID (MAP) MICFX_DAW_ID (insert) MICFX_DAW_ID (param)
+    MICFX_DAW_ID (MACROS) MICFX_DAW_ID (MACRO) MICFX_DAW_ID (MAP) MICFX_DAW_ID (insert) MICFX_DAW_ID (param) MICFX_DAW_ID (slot)
     MICFX_DAW_ID (min) MICFX_DAW_ID (max) MICFX_DAW_ID (value) MICFX_DAW_ID (index)
 #undef MICFX_DAW_ID
 }
@@ -642,6 +642,8 @@ public:
     juce::ValueTree addPluginInsert (int trackId, const InstrumentInfo& plugin, int index = -1);
     static bool isPluginInsert (const juce::ValueTree& insert) { return insert[ids::type].toString() == "plugin"; }
     void removeInsert (int insertId);
+    // Takes an insert's value off every macro of its channel.
+    void unmapInsert (const juce::ValueTree& insert);
     void moveInsert (int insertId, int newIndex);
     void setInsertValue (int insertId, const juce::String& valueId, float value);
     // The file an insert plays through (a cabinet or room impulse response), stored as
@@ -669,6 +671,12 @@ public:
     void nameMacro (int channelId, int index, const juce::String& name);
     // The value that macros of a channel write to an effect value (min + (max - min) * macro).
     static float macroTarget (const juce::ValueTree& map, float macroValue);
+    // A channel's macros for a saved chain: MAP `slot` (the effect's place in the chain) in
+    // place of `insert`. Invalid when there's nothing to keep.
+    juce::ValueTree getChainMacros (int channelId) const;
+    // A loaded chain's macros onto a channel (whose old ones go), `inserts` being the
+    // chain's effects as pasted, in order.
+    void setChainMacros (int channelId, const juce::ValueTree& macros, const juce::Array<juce::ValueTree>& inserts);
 
     // A new insert starting from those values (an effect with a preset, one undo step).
     // Values the effect doesn't have are ignored.
