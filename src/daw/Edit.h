@@ -128,6 +128,7 @@ namespace ids
     MICFX_DAW_ID (muted) MICFX_DAW_ID (levels)
     MICFX_DAW_ID (MACROS) MICFX_DAW_ID (MACRO) MICFX_DAW_ID (MAP) MICFX_DAW_ID (insert) MICFX_DAW_ID (param) MICFX_DAW_ID (slot)
     MICFX_DAW_ID (min) MICFX_DAW_ID (max) MICFX_DAW_ID (value) MICFX_DAW_ID (index)
+    MICFX_DAW_ID (CHAIN) // a rack's chain (INSERT type "rack", see RackInsert.h)
 #undef MICFX_DAW_ID
 }
 
@@ -637,10 +638,30 @@ public:
     static constexpr int masterId = 0;
 
     juce::ValueTree addInsert (int trackId, fx::ModuleType, int index = -1);
+    // A new insert of that type from its defaults, switched on (not in the project yet).
+    juce::ValueTree createInsertTree (fx::ModuleType);
     // A third-party effect plugin as an insert (type "plugin", see PluginInsert.h), on, at
     // unity gain, starting from the info's state (none: the plugin's own defaults).
     juce::ValueTree addPluginInsert (int trackId, const InstrumentInfo& plugin, int index = -1);
     static bool isPluginInsert (const juce::ValueTree& insert) { return insert[ids::type].toString() == "plugin"; }
+    static bool isRackInsert (const juce::ValueTree& insert) { return insert[ids::type].toString() == "rack"; }
+    // The track, return, group or master an insert is on (through any racks it's in).
+    static juce::ValueTree getChannelOf (const juce::ValueTree& insert);
+    // Racks (RackInsert.h): parallel chains of effects as one insert.
+    // The inserts become one rack, in the first one's place, as its first chain. -> the rack.
+    juce::ValueTree groupInserts (const juce::Array<int>& insertIds);
+    // The rack's chains back into its chain one after another, where the rack was.
+    void ungroupInsert (int rackId);
+    // A new chain (with those inserts' copies, or empty) -> its index, or -1.
+    int addRackChain (int rackId, const juce::String& name = {});
+    void removeRackChain (int rackId, int chain);
+    void renameRackChain (int rackId, int chain, const juce::String& name);
+    // A rack chain's INSERTS (invalid if there's no such rack or chain).
+    juce::ValueTree getRackChainInserts (int rackId, int chain) const;
+    // Moves an insert into a rack's chain at an index (-1: the end).
+    bool moveInsertToRack (int insertId, int rackId, int chain, int index);
+    // A new built-in effect in a rack's chain -> the INSERT.
+    juce::ValueTree addRackInsert (int rackId, int chain, fx::ModuleType type, int index = -1);
     void removeInsert (int insertId);
     // Takes an insert's value off every macro of its channel.
     void unmapInsert (const juce::ValueTree& insert);

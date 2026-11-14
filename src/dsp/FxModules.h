@@ -1542,6 +1542,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::transient:  return std::make_unique<modules::Transient>();
         case ModuleType::dynamicEq:  return std::make_unique<modules::DynamicEq>();
         case ModuleType::plugin:     return {}; // made by daw::PluginInsert, from its plugin
+        case ModuleType::rack:       return {}; // made by daw::RackInsert, from its chains
     }
 
     jassertfalse;

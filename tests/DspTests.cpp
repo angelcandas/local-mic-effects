@@ -28,6 +28,7 @@
 #include "Presets.h"
 #include "FactoryChains.h"
 #include "daw/DawEngine.h"
+#include "daw/RackInsert.h"
 #include "daw/ClipTools.h"
 #include "daw/Exporter.h"
 #include "daw/Instruments.h"
@@ -4768,6 +4769,155 @@ namespace
         check (loaded.describeLiveMacros()[0]["maps"].size() == 1, "a value follows one macro: mapping it to another takes it off the first");
         loaded.unmapLiveMacro ("compThreshold");
         check (loaded.describeLiveMacros()[0]["maps"].size() == 0, "a value can be unmapped");
+    }
+
+    void testRacks()
+    {
+        std::cout << "\nRacks (parallel chains)\n";
+
+        // Chains with different latency stay aligned: an impulse through a look-ahead
+        // limiter in one chain and nothing in the other comes out once, not twice.
+        {
+            daw::RackInsert rack (2);
+            auto& limiter = rack.getChain (0).add (fx::createModule (fx::ModuleType::limiter));
+            limiter.findValue ("limOn")->store (1.0f);
+            limiter.findValue ("limCeiling")->store (0.0f);
+            rack.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            const auto latency = rack.getLatencySamples();
+
+            std::vector<float> out;
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            for (int b = 0; b < 8; ++b)
+            {
+                buffer.clear();
+                if (b == 0)
+                    for (int ch = 0; ch < 2; ++ch)
+                        buffer.setSample (ch, 0, 0.1f);
+                juce::dsp::AudioBlock<float> block (buffer);
+                rack.process (juce::dsp::ProcessContextReplacing<float> (block));
+                out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+            }
+            int peaks = 0, at = -1;
+            for (int i = 0; i < (int) out.size(); ++i)
+                if (std::abs (out[(size_t) i]) > 0.02f)
+                    ++peaks, at = i;
+            check (latency > 0 && rack.getLatencySamples() == latency, "a rack reports its slowest chain's delay (" + juce::String (latency) + " samples)");
+            check (peaks == 1 && at == latency && std::abs (out[(size_t) at] - 0.2f) < 0.01f,
+                   "chains with different delays come out aligned (one impulse at " + juce::String (at) + ")");
+        }
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-racks", {});
+        folder.createDirectory();
+        juce::AudioBuffer<float> burst (2, (int) sampleRate);
+        burst.clear();
+        for (int i = 0; i < (int) (0.2 * sampleRate); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                burst.setSample (ch, i, 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 220.0 * i / sampleRate));
+        const auto burstFile = folder.getChildFile ("burst.wav");
+        writeWav (burstFile, burst, sampleRate);
+
+        struct Session
+        {
+            daw::Edit edit;
+            daw::DawEngine engine { edit };
+            int track = 0;
+        };
+        const auto makeSession = [&] (Session& session)
+        {
+            session.engine.prepare (sampleRate, blockSize);
+            session.track = (int) session.edit.addTrack ("Voice")[daw::ids::id];
+            session.edit.addClip (session.track, burstFile, 0.0, 1.0);
+            session.engine.getAudioPool().loadNow (burstFile);
+        };
+
+        // A two-chain rack sounds like the two chains on their own, added together.
+        Session racked, first, second;
+        for (auto* session : { &racked, &first, &second })
+            makeSession (*session);
+        const auto saturation = (int) racked.edit.addInsert (racked.track, fx::ModuleType::saturation)[daw::ids::id];
+        const auto rack = racked.edit.groupInserts ({ saturation });
+        const auto rackId = (int) rack[daw::ids::id];
+        check (rack.isValid() && daw::Edit::getInserts (racked.edit.getTrack (racked.track)).getNumChildren() == 1,
+               "grouping puts the effects in a rack in their place");
+        check (racked.edit.addRackChain (rackId) == 1, "a rack takes another chain");
+        const auto echo = (int) racked.edit.addRackInsert (rackId, 1, fx::ModuleType::echo)[daw::ids::id];
+        first.edit.addInsert (first.track, fx::ModuleType::saturation);
+        second.edit.addInsert (second.track, fx::ModuleType::echo);
+        for (auto* session : { &racked, &first, &second })
+        {
+            session->engine.rebuildNow();
+            session->engine.play();
+        }
+
+        const auto sumDifference = [&] (double seconds)
+        {
+            const auto a = render (racked.engine, seconds), b = render (first.engine, seconds), c = render (second.engine, seconds);
+            float worst = 0.0f, level = 0.0f;
+            for (size_t ch = 0; ch < 2; ++ch)
+                for (size_t i = 0; i < a[ch].size(); ++i)
+                {
+                    worst = std::max (worst, std::abs (a[ch][i] - (b[ch][i] + c[ch][i])));
+                    level = std::max (level, std::abs (a[ch][i]));
+                }
+            return std::pair { worst, level };
+        };
+        auto [difference, level] = sumDifference (0.3);
+        check (level > 0.05f && difference < 1.0e-4f, "a two-chain rack nulls against the chains summed by hand (differs by " + juce::String (difference, 7) + ")");
+
+        // A value inside the rack goes straight into its running effect.
+        racked.edit.setInsertValue (echo, "delayMix", 60.0f);
+        second.edit.setInsertValue ((int) daw::Edit::getInserts (second.edit.getTrack (second.track)).getChild (0)[daw::ids::id], "delayMix", 60.0f);
+        std::tie (difference, level) = sumDifference (0.2);
+        check (difference < 1.0e-4f, "an effect's value inside a rack reaches it (differs by " + juce::String (difference, 7) + ")");
+
+        // An edit outside the rack keeps it (and its echo's tail) running.
+        const auto chorusModule = fx::createModule (fx::ModuleType::chorus);
+        std::map<juce::String, float> off;
+        for (int v = 0; v < chorusModule->getNumValues(); ++v)
+            if (chorusModule->isSwitch (v))
+                off[chorusModule->getValueId (v)] = 0.0f;
+        racked.edit.addInsert (racked.track, fx::ModuleType::chorus, -1, off);
+        racked.engine.rebuildNow();
+        std::tie (difference, level) = sumDifference (0.2);
+        check (difference < 1.0e-4f, "adding an effect after a rack leaves the rack running (differs by " + juce::String (difference, 7) + ")");
+
+        // Chain gain, solo.
+        racked.edit.setInsertValue (rackId, daw::RackInsert::soloId (0), 1.0f);
+        racked.engine.rebuildNow();
+        {
+            const auto a = render (racked.engine, 0.3), b = render (first.engine, 0.3);
+            render (second.engine, 0.3);
+            float worst = 0.0f;
+            for (size_t i = 2400; i < a[0].size(); ++i) // after the 30 ms glide
+                worst = std::max (worst, std::abs (a[0][i] - b[0][i]));
+            check (worst < 1.0e-4f, "a soloed chain plays alone (differs by " + juce::String (worst, 7) + ")");
+        }
+
+        // Group, ungroup and undo.
+        {
+            daw::Edit edit;
+            const auto track = (int) edit.addTrack ("Voice")[daw::ids::id];
+            const auto a = (int) edit.addInsert (track, fx::ModuleType::compressor)[daw::ids::id];
+            const auto b = (int) edit.addInsert (track, fx::ModuleType::reverb)[daw::ids::id];
+            edit.mapMacro (track, 0, b, "reverbMix", 0.0f, 50.0f);
+            edit.getUndoManager().beginNewTransaction();
+            const auto grouped = (int) edit.groupInserts ({ a, b })[daw::ids::id];
+            const auto inserts = daw::Edit::getInserts (edit.getTrack (track));
+            check (inserts.getNumChildren() == 1 && edit.getRackChainInserts (grouped, 0).getNumChildren() == 2,
+                   "two effects grouped into one rack's chain");
+            check (edit.mapMacro (track, 1, a, "compThreshold", 0.0f, -20.0f) && daw::Edit::getChannelOf (edit.getInsert (a)) == edit.getTrack (track),
+                   "an effect inside a rack still belongs to its track (macros reach it)");
+            edit.getUndoManager().beginNewTransaction();
+            edit.getUndoManager().undo(); // the grouping and that mapping
+            check (inserts.getNumChildren() == 2 && (int) inserts.getChild (0)[daw::ids::id] == a,
+                   "undo takes the rack apart again (" + juce::String (inserts.getNumChildren()) + " " + inserts.getChild (0)[daw::ids::type].toString() + ")");
+            edit.getUndoManager().redo();
+            edit.ungroupInsert (grouped);
+            check (inserts.getNumChildren() == 2 && (int) inserts.getChild (1)[daw::ids::id] == b
+                       && daw::Edit::getMacros (edit.getTrack (track)).getChildWithProperty (daw::ids::index, 0).getNumChildren() == 1,
+                   "ungrouping puts the chain back in order, mappings kept");
+        }
+        folder.deleteRecursively();
     }
 
     void testDeviceEdits()
@@ -17357,6 +17507,7 @@ int main()
         testPresetLibrary();
         testMacros();
         testLiveMacros();
+        testRacks();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -17402,6 +17553,7 @@ int main()
     testPresetLibrary();
     testMacros();
     testLiveMacros();
+    testRacks();
     testReturns();
     testPreview();
     testGroups();

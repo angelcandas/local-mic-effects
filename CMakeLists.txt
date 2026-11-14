@@ -168,6 +168,8 @@ set(MICFX_DSP_SOURCES
     src/daw/PluginHost.cpp
     src/daw/PluginInsert.cpp
     src/daw/PluginInsert.h
+    src/daw/RackInsert.cpp
+    src/daw/RackInsert.h
     src/daw/Project.cpp
     src/daw/Hitpoints.cpp
     src/daw/Hitpoints.h

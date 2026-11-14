@@ -1,4 +1,5 @@
 #include "Edit.h"
+#include "RackInsert.h"
 
 #include "dsp/FxModules.h"
 
@@ -2134,6 +2135,13 @@ juce::ValueTree Edit::addInsert (int trackId, fx::ModuleType type, int index)
     if (! inserts.isValid())
         return {};
 
+    auto insert = createInsertTree (type);
+    inserts.addChild (insert, index, undoTarget);
+    return insert;
+}
+
+juce::ValueTree Edit::createInsertTree (fx::ModuleType type)
+{
     juce::ValueTree insert (ids::INSERT);
     insert.setProperty (ids::id, takeNextId(), nullptr);
     insert.setProperty (ids::type, fx::getModuleKey (type), nullptr);
@@ -2156,6 +2164,170 @@ juce::ValueTree Edit::addInsert (int trackId, fx::ModuleType type, int index)
         insert.setProperty (juce::Identifier (module->getValueId (v)), value, nullptr);
     }
 
+    return insert;
+}
+
+//==============================================================================
+juce::ValueTree Edit::getChannelOf (const juce::ValueTree& insert)
+{
+    for (auto tree = insert.getParent(); tree.isValid(); tree = tree.getParent())
+        if (tree.hasType (ids::TRACK) || tree.hasType (ids::RETURN) || tree.hasType (ids::MASTER))
+            return tree;
+    return {};
+}
+
+namespace
+{
+    void setRackChainValues (juce::ValueTree rack, int chain, juce::UndoManager* undo)
+    {
+        rack.setProperty (juce::Identifier (RackInsert::gainId (chain)), 0.0f, undo);
+        rack.setProperty (juce::Identifier (RackInsert::panId (chain)), 0.0f, undo);
+        rack.setProperty (juce::Identifier (RackInsert::onIdOf (chain)), 1.0f, undo);
+        rack.setProperty (juce::Identifier (RackInsert::soloId (chain)), 0.0f, undo);
+    }
+}
+
+juce::ValueTree Edit::groupInserts (const juce::Array<int>& insertIds)
+{
+    juce::Array<juce::ValueTree> members;
+    for (const auto insertId : insertIds)
+        if (const auto insert = getInsert (insertId); insert.isValid() && ! members.contains (insert))
+            members.add (insert);
+    if (members.isEmpty())
+        return {};
+
+    // In the first one's chain, at its place; the others join from wherever they are on
+    // the same channel (inserts from another channel stay where they are).
+    auto parent = members.getFirst().getParent();
+    const auto channel = getChannelOf (members.getFirst());
+    const auto at = parent.indexOf (members.getFirst());
+
+    juce::ValueTree rack (ids::INSERT);
+    rack.setProperty (ids::id, takeNextId(), nullptr);
+    rack.setProperty (ids::type, fx::getModuleKey (fx::ModuleType::rack), nullptr);
+    rack.setProperty (juce::Identifier (RackInsert::onId), 1.0f, nullptr);
+    rack.setProperty ("rackInGain", 0.0f, nullptr);
+    rack.setProperty ("rackOutGain", 0.0f, nullptr);
+    juce::ValueTree chain (ids::CHAIN);
+    chain.setProperty (ids::name, "Chain 1", nullptr);
+    chain.appendChild (juce::ValueTree (ids::INSERTS), nullptr);
+    rack.appendChild (chain, nullptr);
+    setRackChainValues (rack, 0, nullptr);
+
+    parent.addChild (rack, at, undoTarget);
+    auto chainInserts = rack.getChild (0).getChild (0);
+    for (auto insert : members)
+        if (getChannelOf (insert) == channel && insert != rack)
+        {
+            insert.getParent().removeChild (insert, undoTarget);
+            chainInserts.addChild (insert, -1, undoTarget);
+        }
+    return rack;
+}
+
+void Edit::ungroupInsert (int rackId)
+{
+    auto rack = getInsert (rackId);
+    if (! rack.isValid() || ! isRackInsert (rack))
+        return;
+    auto parent = rack.getParent();
+    auto at = parent.indexOf (rack);
+    // Macros mapped to the rack's own values go; its effects keep theirs.
+    if (auto macros = getMacros (getChannelOf (rack)); macros.isValid())
+        for (auto macro : macros)
+            for (int i = macro.getNumChildren(); --i >= 0;)
+                if ((int) macro.getChild (i)[ids::insert] == rackId)
+                    macro.removeChild (i, undoTarget);
+    for (int c = 0; c < rack.getNumChildren(); ++c)
+    {
+        auto inserts = rack.getChild (c).getChildWithName (ids::INSERTS);
+        while (inserts.getNumChildren() > 0)
+        {
+            auto insert = inserts.getChild (0);
+            inserts.removeChild (0, undoTarget);
+            parent.addChild (insert, at++, undoTarget);
+        }
+    }
+    parent.removeChild (rack, undoTarget);
+}
+
+int Edit::addRackChain (int rackId, const juce::String& name)
+{
+    auto rack = getInsert (rackId);
+    if (! rack.isValid() || ! isRackInsert (rack) || rack.getNumChildren() >= RackInsert::maxChains)
+        return -1;
+    const auto index = rack.getNumChildren();
+    juce::ValueTree chain (ids::CHAIN);
+    chain.setProperty (ids::name, name.isNotEmpty() ? name : "Chain " + juce::String (index + 1), nullptr);
+    chain.appendChild (juce::ValueTree (ids::INSERTS), nullptr);
+    setRackChainValues (rack, index, undoTarget);
+    rack.appendChild (chain, undoTarget);
+    return index;
+}
+
+void Edit::removeRackChain (int rackId, int chainIndex)
+{
+    auto rack = getInsert (rackId);
+    if (! rack.isValid() || ! isRackInsert (rack) || ! juce::isPositiveAndBelow (chainIndex, rack.getNumChildren()))
+        return;
+    for (const auto& insert : rack.getChild (chainIndex).getChildWithName (ids::INSERTS))
+        unmapInsert (insert); // its effects' macro mappings go with them
+
+    // The values of the chains after it move down one.
+    const auto count = rack.getNumChildren();
+    for (int c = chainIndex; c < count - 1; ++c)
+        for (const auto& id : { RackInsert::gainId, RackInsert::panId, RackInsert::onIdOf, RackInsert::soloId })
+            rack.setProperty (juce::Identifier (id (c)), rack[juce::Identifier (id (c + 1))], undoTarget);
+    for (const auto& id : { RackInsert::gainId, RackInsert::panId, RackInsert::onIdOf, RackInsert::soloId })
+        rack.removeProperty (juce::Identifier (id (count - 1)), undoTarget);
+    rack.removeChild (chainIndex, undoTarget);
+}
+
+void Edit::renameRackChain (int rackId, int chainIndex, const juce::String& name)
+{
+    auto inserts = getRackChainInserts (rackId, chainIndex);
+    if (inserts.isValid())
+        inserts.getParent().setProperty (ids::name, name.trim().substring (0, 40), undoTarget);
+}
+
+juce::ValueTree Edit::getRackChainInserts (int rackId, int chainIndex) const
+{
+    const auto rack = getInsert (rackId);
+    if (! rack.isValid() || ! isRackInsert (rack) || ! juce::isPositiveAndBelow (chainIndex, rack.getNumChildren()))
+        return {};
+    return rack.getChild (chainIndex).getChildWithName (ids::INSERTS);
+}
+
+bool Edit::moveInsertToRack (int insertId, int rackId, int chainIndex, int index)
+{
+    auto insert = getInsert (insertId);
+    auto target = getRackChainInserts (rackId, chainIndex);
+    if (! insert.isValid() || ! target.isValid() || insertId == rackId)
+        return false;
+    for (auto tree = target; tree.isValid(); tree = tree.getParent())
+        if (tree == insert)
+            return false; // a rack into itself
+    if (getChannelOf (insert) != getChannelOf (target))
+        unmapInsert (insert);
+
+    auto source = insert.getParent();
+    if (source == target)
+    {
+        const auto last = source.getNumChildren() - 1;
+        source.moveChild (source.indexOf (insert), index < 0 ? last : juce::jlimit (0, last, index), undoTarget);
+        return true;
+    }
+    source.removeChild (insert, undoTarget);
+    target.addChild (insert, index < 0 ? -1 : juce::jmin (index, target.getNumChildren()), undoTarget);
+    return true;
+}
+
+juce::ValueTree Edit::addRackInsert (int rackId, int chainIndex, fx::ModuleType type, int index)
+{
+    auto inserts = getRackChainInserts (rackId, chainIndex);
+    if (! inserts.isValid())
+        return {};
+    auto insert = createInsertTree (type);
     inserts.addChild (insert, index, undoTarget);
     return insert;
 }
@@ -2186,6 +2358,17 @@ juce::StringArray Edit::getInsertValueIds (const juce::ValueTree& insert)
         return result;
     }
 
+    if (isRackInsert (insert))
+    {
+        juce::StringArray rackIds { RackInsert::onId, "rackInGain", "rackOutGain" };
+        for (int c = 0; c < insert.getNumChildren(); ++c)
+            rackIds.addArray ({ RackInsert::gainId (c), RackInsert::panId (c), RackInsert::onIdOf (c), RackInsert::soloId (c) });
+        for (const auto& id : rackIds)
+            if (insert.hasProperty (juce::Identifier (id)))
+                result.add (id);
+        return result;
+    }
+
     if (const auto type = moduleTypeFromKey (insert[ids::type].toString()))
     {
         const auto module = fx::createModule (*type);
@@ -2206,6 +2389,7 @@ juce::ValueTree Edit::copyInsertTo (int insertId, int channelId, int index)
 
     auto copy = insert.createCopy();
     copy.setProperty (ids::id, takeNextId(), nullptr);
+    for (auto child : copy) renumber (child); // a rack's effects too
     inserts.addChild (copy, index, undoTarget);
     return copy;
 }
@@ -2219,6 +2403,7 @@ juce::ValueTree Edit::duplicateInsert (int insertId)
     auto inserts = insert.getParent();
     auto copy = insert.createCopy();
     copy.setProperty (ids::id, takeNextId(), nullptr);
+    for (auto child : copy) renumber (child); // a rack's effects too
     inserts.addChild (copy, inserts.indexOf (insert) + 1, undoTarget);
     return copy;
 }
@@ -2238,7 +2423,8 @@ bool Edit::moveInsertTo (int insertId, int channelId, int index)
         return true;
     }
 
-    unmapInsert (insert); // macros turn values of their own chain only
+    if (getChannelOf (insert) != getChannelOf (target))
+        unmapInsert (insert); // macros turn values of their own channel only
     source.removeChild (insert, undoTarget);
     target.addChild (insert, index < 0 ? -1 : juce::jmin (index, target.getNumChildren()), undoTarget);
     return true;
@@ -2270,6 +2456,7 @@ juce::Array<juce::ValueTree> Edit::pasteInsertTrees (const juce::Array<juce::Val
     for (auto copy : sources)
     {
         copy.setProperty (ids::id, takeNextId(), nullptr);
+        for (auto child : copy) renumber (child); // a rack's effects too
         inserts.addChild (copy, at++, undoTarget);
         copies.add (copy);
     }
@@ -2430,7 +2617,7 @@ bool Edit::mapMacro (int channelId, int index, int insertId, const juce::String&
     const auto channel = getChannel (channelId);
     const auto insert = getInsert (insertId);
     if (! channel.isValid() || ! insert.isValid() || ! insert.hasProperty (juce::Identifier (param))
-        || insert.getParent().getParent() != channel || index < 0 || index >= numMacros)
+        || getChannelOf (insert) != channel || index < 0 || index >= numMacros)
         return false;
 
     // A value follows one macro: off the others first.
@@ -2454,11 +2641,14 @@ bool Edit::mapMacro (int channelId, int index, int insertId, const juce::String&
 void Edit::unmapInsert (const juce::ValueTree& insert)
 {
     const auto insertId = (int) insert[ids::id];
-    if (auto macros = getMacros (insert.getParent().getParent()); macros.isValid())
+    if (auto macros = getMacros (getChannelOf (insert)); macros.isValid())
         for (auto macro : macros)
             for (int i = macro.getNumChildren(); --i >= 0;)
                 if ((int) macro.getChild (i)[ids::insert] == insertId)
                     macro.removeChild (i, undoTarget);
+    for (const auto& chain : insert) // a rack's effects too
+        for (const auto& member : chain.getChildWithName (ids::INSERTS))
+            unmapInsert (member);
 }
 
 juce::ValueTree Edit::getChainMacros (int channelId) const
