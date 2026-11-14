@@ -225,6 +225,83 @@ const std::vector<Chain>& getChains()
     return chains;
 }
 
+//==============================================================================
+// The eight macros, the same names in every chain so they land on the same pedals. Each
+// turns the values below that the chain has, by about `span` across the knob, from
+// `least` towards `most` (both inside the value's range). The knob starts where the
+// chain's own settings are (the middle, unless a value sits near the end of its range),
+// so loading a chain sounds as designed.
+namespace
+{
+    struct MacroMap { const char* type; const char* param; float least, most, span; };
+    struct MacroDef { const char* name; std::vector<MacroMap> maps; };
+
+    const std::vector<MacroDef>& getMacroDefs()
+    {
+        static const std::vector<MacroDef> defs {
+            { "Tune",     { { "pitch", "tuneAmount", 0.0f, 100.0f, 60.0f }, { "pitch", "tuneSpeed", 200.0f, 0.0f, 60.0f } } },
+            { "Body",     { { "paraEq", "peqLowGain", -18.0f, 18.0f, 8.0f } } },
+            { "Presence", { { "paraEq", "peqBell3Gain", -18.0f, 18.0f, 8.0f }, { "exciter", "exciterAmount", 0.0f, 100.0f, 40.0f } } },
+            { "Squeeze",  { { "compressor", "compThreshold", 0.0f, -60.0f, 16.0f }, { "opto", "optoAmount", 0.0f, 100.0f, 50.0f } } },
+            { "De-ess",   { { "deEsser", "deessAmount", 0.0f, 100.0f, 60.0f } } },
+            { "Drive",    { { "saturation", "satDrive", 0.0f, 30.0f, 12.0f } } },
+            { "Delay",    { { "echo", "delayMix", 0.0f, 100.0f, 30.0f } } },
+            { "Reverb",   { { "plate", "plateMix", 0.0f, 100.0f, 30.0f }, { "irReverb", "irvMix", 0.0f, 100.0f, 30.0f },
+                            { "reverb", "reverbMix", 0.0f, 100.0f, 30.0f } } },
+        };
+        return defs;
+    }
+
+    // MACROS for a chain's INSERT list: MACRO index name value, MAP slot param min max
+    // (Edit::setChainMacros' format), where min + (max - min) * value is the chain's setting.
+    juce::ValueTree makeMacros (const juce::ValueTree& inserts)
+    {
+        juce::ValueTree macros ("MACROS");
+        const auto& defs = getMacroDefs();
+        for (int m = 0; m < (int) defs.size(); ++m)
+        {
+            juce::ValueTree macro ("MACRO");
+            macro.setProperty ("index", m, nullptr);
+            macro.setProperty ("name", juce::String (defs[(size_t) m].name), nullptr);
+
+            std::optional<float> knob; // where the macro starts (0..1), set by its first map
+            for (const auto& map : defs[(size_t) m].maps)
+                for (int slot = 0; slot < inserts.getNumChildren(); ++slot)
+                {
+                    const auto insert = inserts.getChild (slot);
+                    if (insert["type"].toString() != map.type || ! insert.hasProperty (map.param))
+                        continue;
+
+                    const auto current = (float) insert[map.param];
+                    const auto direction = map.most >= map.least ? 1.0f : -1.0f;
+                    const auto towardLeast = std::abs (current - map.least), towardMost = std::abs (map.most - current);
+                    auto span = juce::jmin (map.span, towardLeast + towardMost);
+                    if (! knob.has_value())
+                    {
+                        if (towardLeast >= span * 0.5f && towardMost >= span * 0.5f)
+                            knob = 0.5f;
+                        else
+                            knob = span <= 0.0f ? 0.5f : towardLeast >= span * 0.5f ? 1.0f - towardMost / span : towardLeast / span;
+                    }
+                    const auto k = *knob;
+                    if (k > 0.0f) span = juce::jmin (span, towardLeast / k);
+                    if (k < 1.0f) span = juce::jmin (span, towardMost / (1.0f - k));
+
+                    juce::ValueTree entry ("MAP");
+                    entry.setProperty ("slot", slot, nullptr);
+                    entry.setProperty ("param", juce::String (map.param), nullptr);
+                    entry.setProperty ("min", current - direction * k * span, nullptr);
+                    entry.setProperty ("max", current + direction * (1.0f - k) * span, nullptr);
+                    macro.appendChild (entry, nullptr);
+                }
+
+            macro.setProperty ("value", knob.value_or (0.5f), nullptr);
+            macros.appendChild (macro, nullptr);
+        }
+        return macros;
+    }
+}
+
 juce::ValueTree makeInserts (const juce::String& name)
 {
     for (const auto& chain : getChains())
@@ -267,6 +344,7 @@ juce::ValueTree makeInserts (const juce::String& name)
             inserts.appendChild (insert, nullptr);
         }
 
+        inserts.appendChild (makeMacros (inserts), nullptr);
         return inserts;
     }
 
@@ -282,7 +360,8 @@ juce::var listChains()
         const auto inserts = makeInserts (chain.name);
         juce::Array<juce::var> effects;
         for (const auto& insert : inserts)
-            effects.add (insert["type"]);
+            if (insert.hasType ("INSERT"))
+                effects.add (insert["type"]);
 
         auto* entry = new juce::DynamicObject();
         entry->setProperty ("name", juce::String (chain.name));

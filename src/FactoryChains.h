@@ -35,7 +35,9 @@ const std::vector<Chain>& getChains();
 
 // The chain as the library's INSERTS node: one INSERT per device, in order, each with
 // every value of its effect (the effect's defaults, then the chain's settings, switched
-// on). Invalid if there is no chain with that name.
+// on), then its MACROS: the same eight knobs in every chain (Tune, Body, Presence, Squeeze,
+// De-ess, Drive, Delay, Reverb), each mapped to what the chain has and starting where the
+// chain's settings are. Invalid if there is no chain with that name.
 juce::ValueTree makeInserts (const juce::String& name);
 
 // [{ name, folder, description, effects: [type...], live, factory: true }], in order.
