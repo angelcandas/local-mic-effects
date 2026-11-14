@@ -63,7 +63,7 @@ export class MacroPanel {
       event.preventDefault();
       event.stopPropagation();
       const id = card.dataset.insert;
-      this.toggleMap(/^\d+$/.test(id) ? Number(id) : id, control.dataset.param); // DAW inserts have numbers, Live cards module ids
+      this.toggleMap(/^\d+$/.test(id) ? Number(id) : id, control.dataset.param, control); // DAW inserts have numbers, Live cards module ids
     };
     this.update(owner);
   }
@@ -152,11 +152,13 @@ export class MacroPanel {
     this.update(this.owner);
   }
 
-  async toggleMap(insert, param) {
+  async toggleMap(insert, param, control = null) {
     const index = this.selected;
     const mapped = this.macros[index]?.maps.some((m) => m.insert === insert && m.param === param);
     if (mapped) return this.kit.daw("unmapMacro", { track: this.owner.id, index, insert, param });
-    const info = this.kit.parameterInfo()[param];
+    // (A control that isn't an effect value, e.g. a rack chain's gain, carries its range.)
+    const info = this.kit.parameterInfo()[param]
+      ?? (control?.dataset.min != null ? { min: Number(control.dataset.min), max: Number(control.dataset.max) } : null);
     if (!info) return this.kit.toast("That control can't follow a macro.");
     // Its full range, so the macro sweeps all of it (type a narrower range below).
     const result = await this.kit.daw("mapMacro", { track: this.owner.id, index, insert, param, min: info.min ?? 0, max: info.max ?? 1 });

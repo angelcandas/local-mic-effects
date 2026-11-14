@@ -715,6 +715,8 @@ public:
     juce::Array<juce::ValueTree> pasteInserts (const juce::Array<int>& insertIds, int channelId, int index);
     // The same from INSERT trees kept aside (the effect clipboard): each goes in as a new copy.
     juce::Array<juce::ValueTree> pasteInsertTrees (const juce::Array<juce::ValueTree>& inserts, int channelId, int index);
+    // The same into any chain's INSERTS (a rack's chain too).
+    juce::Array<juce::ValueTree> pasteInsertTreesInto (const juce::Array<juce::ValueTree>& inserts, juce::ValueTree target, int index);
     // A different effect (from its defaults) or plug-in in the same place. The old one goes.
     juce::ValueTree replaceInsert (int insertId, fx::ModuleType);
     juce::ValueTree replaceInsertWithPlugin (int insertId, const InstrumentInfo&);

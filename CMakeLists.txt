@@ -68,6 +68,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/setlist.js
         ui/daw.css
         ui/devices.js
+        ui/racks.js
         ui/devices.css
         ui/macros.js
         ui/livemacros.js

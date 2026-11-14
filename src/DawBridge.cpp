@@ -4300,11 +4300,15 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             return;
         }
 
+        // { rack, chain } in place of `to`: into a rack's chain.
+        const auto pasteTarget = args.hasProperty ("rack") ? edit.getRackChainInserts (arg (args, "rack", -1), arg (args, "chain", 0))
+                                                           : daw::Edit::getInserts (edit.getChannel (to));
+
         // clipboard: what copyDevices kept.
         if ((bool) args.getProperty ("clipboard", false))
         {
             juce::Array<juce::var> copies;
-            for (const auto& copy : edit.pasteInsertTrees (deviceClipboard, to, arg (args, "index", -1)))
+            for (const auto& copy : edit.pasteInsertTreesInto (deviceClipboard, pasteTarget, arg (args, "index", -1)))
                 copies.add ((int) copy[ids::id]);
             complete (object ({ { "ok", ! copies.isEmpty() }, { "error", copies.isEmpty() ? juce::String ("Copy an effect first") : juce::String() },
                                 { "inserts", copies } }));
@@ -4320,7 +4324,11 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                 insertIds.add ((int) insert[ids::id]);
 
         juce::Array<juce::var> copies;
-        for (const auto& copy : edit.pasteInserts (insertIds, to, arg (args, "index", -1)))
+        juce::Array<juce::ValueTree> sources; // all copied first, so a chain pasted into itself copies what was there
+        for (const auto insertId : insertIds)
+            if (const auto insert = edit.getInsert (insertId); insert.isValid())
+                sources.add (insert);
+        for (const auto& copy : edit.pasteInsertTreesInto (sources, pasteTarget, arg (args, "index", -1)))
             copies.add ((int) copy[ids::id]);
         complete (object ({ { "ok", true }, { "error", juce::String() }, { "inserts", copies } }));
         return;

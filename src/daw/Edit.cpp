@@ -2442,9 +2442,13 @@ juce::Array<juce::ValueTree> Edit::pasteInserts (const juce::Array<int>& insertI
 
 juce::Array<juce::ValueTree> Edit::pasteInsertTrees (const juce::Array<juce::ValueTree>& trees, int channelId, int index)
 {
+    return pasteInsertTreesInto (trees, getInserts (getChannel (channelId)), index);
+}
+
+juce::Array<juce::ValueTree> Edit::pasteInsertTreesInto (const juce::Array<juce::ValueTree>& trees, juce::ValueTree inserts, int index)
+{
     juce::Array<juce::ValueTree> copies;
-    auto inserts = getInserts (getChannel (channelId));
-    if (! inserts.isValid())
+    if (! inserts.isValid() || ! inserts.hasType (ids::INSERTS))
         return copies;
 
     juce::Array<juce::ValueTree> sources;
