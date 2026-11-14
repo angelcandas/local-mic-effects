@@ -2149,6 +2149,56 @@ body:not(.is-daw) .daw-project-actions { display: none; }
 }
 .arrange-inner.tempo-varies .take-lane { background-image: var(--grid-image); background-size: var(--grid-width) 100%; background-repeat: no-repeat; }
 
+/* ---------- Automation lanes (ui/automation.js) ---------- */
+
+.tt-lanes { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
+/* A lane with points: a dot in the corner. */
+.tt-lanes.has-lanes { position: relative; color: color-mix(in srgb, var(--track-color) 70%, var(--text)); }
+.tt-lanes.has-lanes::after { content: ""; position: absolute; top: 2px; right: 2px; width: 4px; height: 4px; border-radius: 50%; background: var(--track-color); }
+.tt-lanes[aria-pressed="true"] { border-color: var(--track-color); color: var(--track-color); }
+/* The read-only curves over the clips give way to the lanes while they're shown. */
+.track-row.has-lanes .lane-ride-wrap { display: none; }
+
+.lane-row { background: color-mix(in srgb, var(--track-color) 2%, #090b10); }
+.lane-head { gap: 3px; }
+.lane-target {
+  min-width: 0;
+  flex: 1;
+  height: 22px;
+  padding: 0 4px;
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+.lane-readout { flex: none; max-width: 64px; overflow: hidden; color: var(--faint); font-size: 10px; font-variant-numeric: tabular-nums; text-overflow: ellipsis; white-space: nowrap; }
+.lane-clear, .lane-add, .lane-hide { flex: none; width: 20px; padding: 0; font-size: 11px; }
+.lane-clear:disabled { opacity: 0.4; cursor: default; }
+.lane-hide { visibility: hidden; }
+.lane-row:hover .lane-hide { visibility: visible; }
+
+.auto-lane { cursor: crosshair; overflow: hidden; }
+.arrange[data-tool="draw"] .auto-lane { cursor: cell; }
+.auto-curve { position: absolute; top: 0; left: 0; overflow: visible; pointer-events: none; }
+.auto-zero { stroke: rgba(255, 255, 255, 0.07); stroke-width: 1; }
+.auto-base { stroke: color-mix(in srgb, var(--track-color) 45%, transparent); stroke-width: 1.2; stroke-dasharray: 4 4; }
+.auto-line { fill: none; stroke: var(--track-color); stroke-width: 1.6; stroke-linejoin: round; }
+.auto-fill { fill: color-mix(in srgb, var(--track-color) 12%, transparent); stroke: none; }
+.auto-point { fill: #0b0d12; stroke: var(--track-color); stroke-width: 1.5; }
+.auto-point.is-selected { fill: var(--track-color); stroke: var(--text); }
+.auto-band { fill: rgba(255, 255, 255, 0.07); stroke: var(--text); stroke-width: 1; stroke-dasharray: 3 3; }
+.auto-tip {
+  position: absolute;
+  z-index: 4;
+  padding: 1px 6px;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  color: var(--text);
+  font-size: 10.5px;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 /* ---------- Track headers: sections, stereo meter, own height and fold ---------- */
 
 .track-row .track-head { flex-direction: row; align-items: stretch; justify-content: flex-start; gap: 6px; padding: 4px 4px 4px 0; }

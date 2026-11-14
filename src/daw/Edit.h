@@ -128,6 +128,7 @@ namespace ids
     MICFX_DAW_ID (muted) MICFX_DAW_ID (levels)
     MICFX_DAW_ID (MACROS) MICFX_DAW_ID (MACRO) MICFX_DAW_ID (MAP) MICFX_DAW_ID (insert) MICFX_DAW_ID (param) MICFX_DAW_ID (slot)
     MICFX_DAW_ID (min) MICFX_DAW_ID (max) MICFX_DAW_ID (value) MICFX_DAW_ID (index)
+    MICFX_DAW_ID (panAutomation) // a TRACK's pan over time, see setLane
     MICFX_DAW_ID (CHAIN) // a rack's chain (INSERT type "rack", see RackInsert.h)
 #undef MICFX_DAW_ID
 }
@@ -387,7 +388,32 @@ public:
     void setInsertAutomation (int insertId, const juce::String& valueId, const std::vector<AutomationPoint>&);
     static Automation getInsertAutomation (const juce::ValueTree& insert);
     static float getAutomationValueAt (const std::vector<AutomationPoint>&, double time);
-    void clearTrackAutomation (int trackId); // every insert's automation on the track
+    void clearTrackAutomation (int trackId); // every insert's automation on the track (its racks' effects too)
+    void clearLanes (int trackId);           // every lane of the track: ride, pan, sends, inserts, macros
+
+    // Automation lanes (the lanes under a track in the arrangement). A lane is named by
+    // its target:
+    //   "volume"                 the volume ride (dB on top of the fader, see RidePoint)
+    //   "pan"                    the pan, -1..1 (TRACK panAutomation), in place of the pan knob while playing
+    //   "send:<returnId>"        a send's level in dB (SEND automation; below minSendDb is off), in place of
+    //                            its knob while playing. Setting one on a missing send adds the send, off.
+    //   "insert:<id>:<valueId>"  an insert value (setInsertAutomation)
+    //   "macro:<index>"          one of the track's macros, 0..1 (MACRO automation): every value mapped to
+    //                            it follows (a value's own lane wins)
+    // Points are "time:value;..." text like a ride, straight lines between them, held before
+    // the first and after the last; when playback stops each target goes back to its own
+    // setting. setLane sorts and clamps the points; an empty list removes the lane. One
+    // undo step. False when the track or target doesn't exist.
+    static constexpr int maxLanePoints = 20000;
+    bool setLane (int trackId, const juce::String& target, const std::vector<AutomationPoint>&);
+    static std::vector<AutomationPoint> getLane (const juce::ValueTree& track, const juce::String& target);
+    static juce::StringArray getLaneTargets (const juce::ValueTree& track); // the lanes with points, in a steady order
+    static std::pair<float, float> getLaneRange (const juce::ValueTree& track, const juce::String& target); // clamp range (insert values: none)
+    static std::vector<AutomationPoint> parsePoints (const juce::String&);
+    static juce::String pointsToString (const std::vector<AutomationPoint>&, int valueDecimals = 3);
+    // Whether `param` of `insert` follows a macro that has a lane (so its value under the
+    // lane changes when the macro is turned).
+    static bool followsAutomatedMacro (const juce::ValueTree& insert, const juce::String& param);
     void setClipWarp (int clipId, const warp::Map&);
     static warp::Map getClipWarp (const juce::ValueTree& clip);
 
@@ -673,6 +699,8 @@ public:
     juce::ValueTree getInsert (int insertId) const;
 
     static juce::ValueTree getInserts (const juce::ValueTree& trackOrMaster);
+    // Every insert of a channel, its racks' effects too (after their rack), in chain order.
+    static juce::Array<juce::ValueTree> getAllInserts (const juce::ValueTree& channel);
 
     //==============================================================================
     // Macros: up to 8 knobs per channel (track, return, group, master), each turning any

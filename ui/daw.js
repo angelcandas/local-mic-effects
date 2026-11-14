@@ -11,6 +11,7 @@ import { LibraryBrowser, loopText } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { markLearnable } from "./midilearn.js";
 import { TakeLanes } from "./takes.js";
+import { AutomationLanes } from "./automation.js";
 import { BackingVocals } from "./backing.js";
 import { decorateAiPanels } from "./aiviews.js";
 import { MixCheckView } from "./mixcheck.js";
@@ -939,6 +940,8 @@ class DawScreen {
     this.buildHints();
 
     this.takes = new TakeLanes(this, { daw, toast: (...args) => toast(...args) });
+    this.automation = new AutomationLanes(this, { daw, toast: (...args) => toast(...args), popMenu, effectName, panText, dbText, button, returnLetter,
+                                                  parameterInfo: () => parameterInfo });
     window.__JUCE__.backend.addEventListener("dawSession", (session) => this.onSession(session));
     window.__JUCE__.backend.addEventListener("dawStatus", (status) => this.onStatus(status));
     window.__JUCE__.backend.addEventListener("dawExport", (progress) => this.onExport(progress));
@@ -2147,7 +2150,7 @@ class DawScreen {
       (session.groups ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
       session.patterns, session.patternClips, this.selectedPatternClip,
       session.master.volume, session.master.inserts.length, session.tempo, session.tempoMap, this.showTempo, session.loop, session.beatsPerBar, session.markers,
-      this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight, this.takes.version,
+      this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight, this.takes.version, this.automation.version,
       this.headWidth, [...this.trackHeights], [...this.folded],
       this.showRouting, this.showSends, this.pinnedFolded, session.master.pan,
     ]);
@@ -2225,15 +2228,22 @@ class DawScreen {
         row.takesKey = takesKey;
         row.takeRows = this.takes.createRows(track, trackColour(track, index));
       }
+      // And its automation lanes.
+      const lanesKey = this.automation.rowsKey(track) + JSON.stringify([this.timelineSeconds()]);
+      if (row.lanesKey !== lanesKey) {
+        row.lanesKey = lanesKey;
+        row.laneRows = this.automation.createRows(track, trackColour(track, index));
+      }
+      row.classList.toggle("has-lanes", row.laneRows.length > 0);
       // A track in a group sits under the group's header, indented; hidden while it is folded.
-      for (const r of [row, ...row.takeRows]) {
+      for (const r of [row, ...row.takeRows, ...row.laneRows]) {
         r.classList.toggle("in-group", Boolean(group));
         r.classList.toggle("in-folded-group", Boolean(group?.folded));
         if (group) r.style.setProperty("--group-color", returnColour(group, groups.indexOf(group)));
         else r.style.removeProperty("--group-color");
       }
       meterRows.push(row);
-      rows.push(row, ...row.takeRows);
+      rows.push(row, ...row.takeRows, ...row.laneRows);
     };
     // A group's header goes before its first track, then all its tracks together.
     const placed = new Set();
@@ -2416,7 +2426,7 @@ class DawScreen {
     const { volume, pan, mute, solo, arm, monitor, monitorMode, name, inserts, sends, output, ...rest } = track;
     const links = track.link ? this.session.tracks.filter((t) => t.link === track.link && t.id !== track.id).map((t) => t.name) : null;
     // The colour comes from the id, not the index.
-    return JSON.stringify([rest, inserts.length, links, this.trackHeight(track.id), this.folded.has(track.id)]);
+    return JSON.stringify([rest, inserts.length, links, this.trackHeight(track.id), this.folded.has(track.id), this.automation.isOpen(track.id)]);
   }
 
   // Which header lines fit a row of this height, in order: name, mix, routing, sends.
@@ -2500,6 +2510,7 @@ class DawScreen {
     toggles.append(monitor);
     const takesToggle = this.takes.createToggle(track);
     if (takesToggle) toggles.append(takesToggle);
+    toggles.append(this.automation.createToggle(track));
     row.classList.toggle("has-takes", Boolean(takesToggle && track.takesShown));
 
     const send = (key) => this.groupSetter(track.id, key);
@@ -3690,6 +3701,7 @@ class DawScreen {
       dock: { hidden: this.root.classList.contains("dock-hidden"), height: this.dockHeight, tab: this.dockTab },
       head: this.headWidth, heights: Object.fromEntries(this.trackHeights), folded: [...this.folded],
       routing: this.showRouting, sends: this.showSends, pinnedFolded: this.pinnedFolded, foldedFx: [...this.foldedInserts],
+      lanes: this.automation.saveState(),
     };
   }
 
@@ -3714,8 +3726,10 @@ class DawScreen {
     this.folded = new Set();
     this.foldedInserts = new Set();
     this.showRouting = this.showSends = this.pinnedFolded = false;
+    this.automation.restoreState(null);
     this.headSwitches.forEach((b) => b.setAttribute("aria-pressed", "false"));
     if (!state || typeof state !== "object") return null;
+    this.automation.restoreState(state.lanes);
     this.restoringView = true;
     const num = (value, fallback) => (Number.isFinite(Number(value)) ? Number(value) : fallback);
     this.zoom = clamp(num(state.zoom, this.zoom), MIN_ZOOM, MAX_ZOOM);
@@ -5998,6 +6012,9 @@ class DawScreen {
       item("Move down", () => daw("moveTrack", { id: track.id, index: index + 1 }), { disabled: index >= tracks.length - 1 });
       rule();
       item("Add effect…", () => this.select(track.id, null, true, true));
+      item(this.automation.isOpen(track.id) ? "Hide automation lanes" : "Show automation lanes", () => this.automation.setOpen(track, !this.automation.isOpen(track.id)));
+      item("Clear all automation", () => daw("clearLanes", { track: track.id }), { disabled: !track.lanes?.length,
+        hint: "Deletes every lane's points on this track: volume, pan, sends, effects and macros" });
       item("Clear volume ride", () => daw("setTrack", { id: track.id, clearRide: true }), { disabled: !track.ride?.length });
       item("Clear effect automation", () => daw("setTrack", { id: track.id, clearAutomation: true }), { disabled: !track.automation?.length });
       item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });

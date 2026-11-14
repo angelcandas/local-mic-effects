@@ -349,6 +349,17 @@ If a plug-in is missing when you open a project, the insert stays in place marke
 
 Under *Mastering* in Add effect and the library (DAW only): **Mastering EQ**, **Multiband Compressor** (three bands), **Stereo Imager** (width with mono bass and a correlation readout), **Limiter** (look-ahead brickwall) and a **Loudness Meter** (momentary, short-term and integrated LUFS against a target). Put them on the master.
 
+### Automation lanes
+
+Automation makes a setting move over time: the voice comes up in the chorus, the echo opens on the last word, the guitar pans across.
+
+- Click the **curve button** in a track's header (or **Show automation lanes** in the track's right-click menu) to unfold its lanes. A dot on the button means the track has automation.
+- Each lane moves one thing, picked in the menu at its left: **Volume** (a ride in dB on top of the fader), **Pan**, a **send** to a return, any **effect value** on the track (racks included) or one of the track's **macros** (every value mapped to the macro follows; a value's own lane wins).
+- **Click** in a lane to add a point; it snaps to the grid (hold **Alt** for free placement). **Drag a point** to move it, together with any other selected points (hold **Shift** while dragging to move only up and down). **Drag across empty space** to select the points in that range, **Shift+click** a point to add it to the selection, and press **Delete** to remove them. **Double-click** or **right-click** a point to delete it.
+- **Ctrl+drag**, or drag with the **Draw tool** (P), to draw a curve freehand over what was there. Straight stretches are kept as few points.
+- **+** adds a lane under the current one, **⌫** clears a lane, **×** hides it (its points still play). **Clear all automation** in the track menu empties every lane of the track.
+- Each gesture is one undo step. Automation plays while the song plays and in exports; when you stop, pan, sends, effect values and macros go back to their knobs.
+
 ## 4.6 Projects and export
 
 - A **project** is a folder (`My Song.micfx/`) with `project.xml`, the audio, autosave backups and exports. It moves and backs up as one thing. After a crash you are offered the newest autosave.

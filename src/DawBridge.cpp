@@ -268,6 +268,24 @@ namespace
         return points;
     }
 
+    // A track's automation lanes for the page: [{ target, points: [[seconds, value]...] }]
+    // (see Edit::setLane for the targets).
+    juce::var describeLanes (const juce::ValueTree& track)
+    {
+        juce::Array<juce::var> lanes;
+        for (const auto& target : daw::Edit::getLaneTargets (track))
+        {
+            juce::Array<juce::var> list;
+            for (const auto& point : daw::Edit::getLane (track, target))
+                list.add (juce::Array<juce::var> { point.time, (double) point.value });
+            auto* lane = new juce::DynamicObject();
+            lane->setProperty ("target", target);
+            lane->setProperty ("points", list);
+            lanes.add (juce::var (lane));
+        }
+        return lanes;
+    }
+
     // The tempo map for the page: [[beat, bpm, ramp], ...], the first at beat 0.
     juce::var describeTempo (const daw::TempoMap& tempo)
     {
@@ -792,6 +810,7 @@ juce::var DawBridge::describeSession()
                               { "arm", (bool) track[ids::arm] }, { "monitor", (bool) track[ids::monitor] },
                               { "monitorMode", daw::Edit::getTrackMonitorMode (track) },
                               { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) }, { "automation", describeAutomation (track) },
+                              { "lanes", describeLanes (track) },
                               { "link", daw::Edit::getLink (track) },
                               { "polarity", daw::Edit::getPolarity (track) }, { "nudge", daw::Edit::getNudge (track) },
                               { "inserts", describeInserts (track) }, { "macros", describeMacros (track) }, { "clips", clips },
@@ -4434,6 +4453,25 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         ok();
         return;
     }
+
+    // Automation lanes. { track, target, points: [[seconds, value]...] } replaces a lane
+    // (empty: removes it); one undo step, or with `continue` part of the gesture's.
+    if (command == "setLane")
+    {
+        std::vector<daw::Edit::AutomationPoint> points;
+        if (const auto* list = args["points"].getArray())
+            for (const auto& item : *list)
+                if (const auto* pair = item.getArray(); pair != nullptr && pair->size() >= 2)
+                    points.push_back ({ (double) pair->getReference (0), (float) (double) pair->getReference (1) });
+        if (! edit.setLane (arg (args, "track", -1), arg (args, "target", juce::String()), points))
+        {
+            complete (error ("That lane's target isn't on this track."));
+            return;
+        }
+        ok();
+        return;
+    }
+    if (command == "clearLanes") { edit.clearLanes (arg (args, "track", -1)); ok(); return; }
 
     if (command == "setOutput") { edit.setTrackOutput (id, arg (args, "output", (int) daw::Edit::masterId)); ok(); return; }
 
