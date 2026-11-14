@@ -647,6 +647,33 @@ void PluginProcessor::applyLiveChain (const juce::ValueTree& inserts)
     }
 
     setChainOrder (order);
+
+    // A chain with its own macros (the factory vocal chains) brings them: names, where the
+    // knobs start and what they turn (MAP slot: the effect's place in `inserts`). Without
+    // any, the macros stay as they were.
+    if (const auto macros = inserts.getChildWithName ("MACROS"); macros.isValid())
+    {
+        liveMacros->unmapAll();
+        liveMacros->names.fill ({});
+        for (const auto& macro : macros)
+        {
+            const auto index = (int) macro.getProperty ("index", -1);
+            if (index < 0 || index >= LiveMacros::numMacros)
+                continue;
+            liveMacros->names[(size_t) index] = macro.getProperty ("name").toString();
+            if (auto* knob = macroParams[(size_t) index])
+                knob->setValueNotifyingHost (knob->convertTo0to1 ((float) macro.getProperty ("value", 0.0f) * 100.0f));
+            for (const auto& map : macro)
+            {
+                const auto slot = inserts.getChild ((int) map.getProperty ("slot", -1));
+                if (! order.contains (slot["type"].toString()))
+                    continue; // an effect Live left out
+                if (const auto binding = findBinding (map.getProperty ("param").toString()); binding >= 0)
+                    liveMacros->map ((size_t) binding, index, (float) map.getProperty ("min"), (float) map.getProperty ("max"));
+            }
+        }
+        syncLiveMacros();
+    }
 }
 
 const juce::String PluginProcessor::getProgramName (int index)
