@@ -2,6 +2,7 @@
 
 #include "analysis/Beats.h"
 
+#include <algorithm>
 #include <cmath>
 #include <memory>
 
@@ -115,5 +116,51 @@ std::optional<Loop> findLoop (const juce::File& file, int beatsPerBar)
         reader->read (audio.get(), 0, (int) reader->lengthInSamples, 0, true, channels > 1);
     }
     return findLoop (file.getFileNameWithoutExtension(), reader->metadataValues, seconds, audio.get(), reader->sampleRate, beatsPerBar);
+}
+
+std::vector<double> chooseSliceStarts (const std::vector<analysis::rhythm::Onset>& hits, double from, double to, int maxSlices, double minGap)
+{
+    std::vector<double> starts { from };
+    if (! (to > from) || maxSlices <= 1)
+        return starts;
+
+    // Strongest first, so a weak hit next to a strong one is the one dropped.
+    auto inside = hits;
+    inside.erase (std::remove_if (inside.begin(), inside.end(), [&] (const analysis::rhythm::Onset& h)
+                                  { return h.time < from + minGap || h.time > to - minGap; }),
+                  inside.end());
+    std::stable_sort (inside.begin(), inside.end(), [] (const auto& a, const auto& b) { return a.strength > b.strength; });
+
+    for (const auto& hit : inside)
+    {
+        if ((int) starts.size() >= maxSlices)
+            break;
+        const auto near = std::any_of (starts.begin(), starts.end(), [&] (double s) { return std::abs (s - hit.time) < minGap; });
+        if (! near)
+            starts.push_back (hit.time);
+    }
+
+    std::sort (starts.begin(), starts.end());
+    return starts;
+}
+
+juce::AudioBuffer<float> cutSlice (const juce::AudioBuffer<float>& audio, int start, int end, double sampleRate)
+{
+    start = juce::jlimit (0, audio.getNumSamples(), start);
+    end = juce::jlimit (start, audio.getNumSamples(), end);
+    const auto channels = juce::jmin (2, audio.getNumChannels());
+    juce::AudioBuffer<float> slice (juce::jmax (1, channels), juce::jmax (1, end - start));
+    slice.clear();
+    for (int c = 0; c < channels; ++c)
+        slice.copyFrom (c, 0, audio, c, start, end - start);
+
+    const auto length = end - start;
+    const auto fadeIn = juce::jmin (length / 4, (int) std::lround (sampleRate * 0.001));
+    const auto fadeOut = juce::jmin (length / 4, (int) std::lround (sampleRate * 0.004));
+    if (fadeIn > 0)
+        slice.applyGainRamp (0, fadeIn, 0.0f, 1.0f);
+    if (fadeOut > 0)
+        slice.applyGainRamp (length - fadeOut, fadeOut, 1.0f, 0.0f);
+    return slice;
 }
 }

@@ -9,6 +9,7 @@
 #include "daw/ClipTools.h"
 #include "daw/Patterns.h"
 #include "daw/Loops.h"
+#include "CaptureRing.h"
 #include "instruments/InstrumentProcessor.h"
 #include "instruments/Kit.h"
 
@@ -5042,6 +5043,120 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             return;
         }
         complete (error ("Unknown hitpoint action: " + action));
+        return;
+    }
+
+    if (command == "sliceToKit")
+    {
+        // Slice a loop to the drum rack: {id (an audio clip)}. The clip is cut at
+        // its hits (at most 16 slices), each slice written to the project's audio folder ("Slice
+        // 3 - <clip>.wav", so the rack's rows read by number) and loaded on a pad of a new Kit
+        // track. A new pattern plays the slices where they were, a block of it goes where the
+        // clip is, and the clip is muted (one undo step).
+        // -> {track, pattern, block, slices}
+        const auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip)) { complete (error ("Pick an audio clip to slice.")); return; }
+        auto& pool = engine.getAudioPool();
+        // The clip's own hitpoints (its filter and hand edits, as the clip editor shows them).
+        auto find = daw::hitpoints::prepare (clip, pool);
+        const auto source = pool.loadNow (juce::File (clip[ids::file].toString()));
+        if (! find || source == nullptr) { complete (error ("This clip's audio can't be read.")); return; }
+
+        const auto map = daw::Edit::getEffectiveWarp (clip);
+        const auto offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+        const auto rate = pool.getSampleRate();
+        const auto folder = getRecordingFolder();
+        auto base = clip[ids::name].toString().trim();
+        if (base.isEmpty())
+            base = juce::File (clip[ids::file].toString()).getFileNameWithoutExtension();
+        base = juce::File::createLegalFileName (base).substring (0, 50);
+
+        struct Slice { double from = 0.0, to = 0.0; juce::File file; };
+        juce::Thread::launch ([this, find = std::move (find), source, map, offset, length, rate, folder, base, clipId = id, complete,
+                               weak = std::weak_ptr<bool> (alive)]
+        {
+            std::vector<analysis::rhythm::Onset> hits;
+            for (const auto& hit : find())
+                if (hit.isEnabled()) // hand-placed ones are kept first
+                    hits.push_back ({ map.toTarget (hit.time), hit.state == daw::hitpoints::State::automatic ? hit.strength : 2.0f });
+            const auto starts = daw::loops::chooseSliceStarts (hits, offset, offset + length, micfx::inst::KitSampler::numPads);
+            auto slices = std::make_shared<std::vector<Slice>>();
+            juce::String problem;
+            folder.createDirectory();
+            for (size_t i = 0; i < starts.size(); ++i)
+            {
+                const auto from = starts[i], to = i + 1 < starts.size() ? starts[i + 1] : offset + length;
+                const auto audio = daw::loops::cutSlice (*source, (int) std::lround (map.toSource (from) * rate),
+                                                         (int) std::lround (map.toSource (to) * rate), rate);
+                const auto file = folder.getNonexistentChildFile ("Slice " + juce::String ((int) i + 1) + " - " + base, ".wav", false);
+                problem = CaptureRing::writeWav (file, audio, 0, audio.getNumChannels(), rate);
+                if (problem.isNotEmpty())
+                    break;
+                slices->push_back ({ from, to, file });
+            }
+
+            juce::MessageManager::callAsync ([this, slices, problem, offset, base, clipId, complete, weak]
+            {
+                if (auto flag = weak.lock(); flag == nullptr || ! *flag)
+                    return;
+                const auto clip = edit.getClip (clipId);
+                if (problem.isNotEmpty() || slices->empty() || ! clip.isValid())
+                {
+                    complete (error (problem.isNotEmpty() ? "The slices couldn't be written: " + problem : "The clip is gone."));
+                    return;
+                }
+                const auto info = processor.getPluginHost().findInstrument ("builtin:kit");
+                if (! info.has_value()) { complete (error ("The Kit instrument isn't available.")); return; }
+
+                auto owner = clip.getParent();
+                while (owner.isValid() && ! owner.hasType (ids::TRACK))
+                    owner = owner.getParent();
+
+                edit.getUndoManager().beginNewTransaction ("Slice to drum rack");
+                const auto track = edit.addMidiTrack ((base + " slices").substring (0, 60), *info,
+                                                      owner.isValid() ? edit.getTracks().indexOf (owner) + 1 : -1);
+                const auto trackId = (int) track[ids::id];
+                engine.rebuildNow();
+                auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (trackId).get());
+                auto* kit = instrument != nullptr ? micfx::inst::asKit (instrument->getEngine()) : nullptr;
+                if (kit == nullptr)
+                {
+                    edit.getUndoManager().undo();
+                    complete (error ("The Kit couldn't be set up."));
+                    return;
+                }
+
+                // The slices in beats, from the clip's start (the pattern runs whole beats).
+                const auto tempo = edit.getTempoMap();
+                const auto clipStart = (double) clip[ids::start];
+                const auto beatOf = [&] (double contentTime) { return tempo.toBeats (clipStart + contentTime - offset); };
+                const auto startBeats = tempo.toBeats (clipStart);
+                const auto blockBeats = juce::jmax (daw::Edit::minPatternBeats, beatOf (slices->back().to) - startBeats);
+                const auto pattern = edit.addPattern (base, juce::jlimit (1.0, daw::Edit::maxPatternBeats, std::ceil (blockBeats - 1.0e-6)));
+                const auto patternId = (int) pattern[ids::id];
+                edit.setPatternStep (patternId, 0.25);
+                edit.ensurePart (patternId, trackId);
+                edit.setPartDrum (patternId, trackId, true);
+
+                juce::Array<int> rows;
+                juce::String loadProblem;
+                for (int i = 0; i < (int) slices->size(); ++i)
+                {
+                    const auto& slice = (*slices)[(size_t) i];
+                    const auto note = micfx::inst::KitSampler::noteForPad (i);
+                    if (! kit->loadSample (i, slice.file, loadProblem))
+                        continue;
+                    rows.add (note);
+                    const auto at = beatOf (slice.from) - startBeats;
+                    edit.addPatternNote (patternId, trackId, note, juce::jmax (0.0, at), juce::jmax (0.25, beatOf (slice.to) - startBeats - at), 100);
+                }
+                edit.setPartRows (patternId, trackId, rows);
+                const auto block = edit.addPatternClip (patternId, startBeats, blockBeats, edit.findFreePatternRow (startBeats, blockBeats));
+                edit.setClipMute (clipId, true);
+                sessionChanged = true;
+                complete (object ({ { "track", trackId }, { "pattern", patternId }, { "block", block[ids::id] }, { "slices", rows.size() } }));
+            });
+        });
         return;
     }
 

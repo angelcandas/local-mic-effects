@@ -14508,6 +14508,20 @@ static void testLoops()
                && daw::loops::wholeBars (0.5, 120.0, 4) == 0 && daw::loops::wholeBars (80.0, 120.0, 4) == 0,
            "a loop is a whole number of bars, 1 to 32, within 3 %");
 
+    {
+        std::vector<analysis::rhythm::Onset> hits;
+        for (int i = 1; i < 24; ++i)
+            hits.push_back ({ i * 0.25, i % 2 == 0 ? 1.0f : 0.2f }); // strong on the beats, weak between
+        hits.push_back ({ 2.01, 0.9f });                             // too close to the hit at 2.0
+        auto starts = daw::loops::chooseSliceStarts (hits, 0.0, 6.0, 16);
+        check (starts.size() == 12 + 4 && starts.front() == 0.0 && std::is_sorted (starts.begin(), starts.end())
+                   && std::count_if (starts.begin(), starts.end(), [] (double t) { return std::abs (t - 2.0) < 0.05; }) == 1,
+               "slices: the strongest hits first, at most 16, none closer than the gap (" + juce::String ((int) starts.size()) + ")");
+        starts = daw::loops::chooseSliceStarts (hits, 0.0, 6.0, 8);
+        check (starts.size() == 8 && std::all_of (starts.begin() + 1, starts.end(), [] (double t) { return std::abs (std::fmod (t, 0.5)) < 1.0e-9; }),
+               "past the most slices the weakest cuts go");
+    }
+
     juce::StringPairArray acid;
     acid.set (juce::WavAudioFormat::acidTempo, "90");
     acid.set (juce::WavAudioFormat::acidizerFlag, "1");
@@ -14587,6 +14601,51 @@ static void testLoops()
         result = run ("importFile", args ({ { "file", file.getFullPathName() }, { "track", -1 }, { "start", 2.3 } }));
         check (! result["loop"].isObject() && ! daw::Edit::isMusical (edit.getClip ((int) result["clip"])), "and off, loops are placed as they are");
         run ("matchLoops", args ({ { "on", true } }));
+
+        // Slice to the drum rack: a Kit track with a slice per hit on its pads, a pattern that
+        // replays them where they were, a block in the clip's place, the clip muted; one undo.
+        {
+            result = run ("importFile", args ({ { "file", file.getFullPathName() }, { "track", -1 }, { "start", 2.0 } }));
+            const auto loopClip = (int) result["clip"];
+            const auto tracksBefore = edit.getTracks().size();
+            juce::var sliced;
+            bridge.handle ("sliceToKit", args ({ { "id", loopClip } }), [&] (juce::var r) { sliced = r; });
+            for (int i = 0; i < 500 && sliced.isVoid(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            const auto trackId = (int) sliced["track"];
+            const auto pattern = edit.getPattern ((int) sliced["pattern"]);
+            const auto events = daw::patterns::getPatternEvents (pattern, trackId);
+            auto onHits = events.size() == 16;
+            for (size_t i = 0; onHits && i < events.size(); ++i)
+                onHits = near (events[i].on, 0.5 * (double) i, 0.05) && events[i].pitch == 36 + (int) i;
+            check ((int) sliced["slices"] == 16 && onHits && near (daw::Edit::getPatternLength (pattern), 8.0, 1e-9),
+                   "sliceToKit cuts the loop at its hits, a pad each, the pattern's notes on the hits ("
+                       + sliced["slices"].toString() + " slices)");
+            const auto block = edit.getPatternClip ((int) sliced["block"]);
+            check (edit.getTracks().size() == tracksBefore + 1 && (bool) edit.getClip (loopClip)[daw::ids::mute]
+                       && near ((double) block[daw::ids::start], 4.0, 1e-6) && near ((double) block[daw::ids::length], 8.0, 0.01)
+                       && edit.getUndoManager().getUndoDescription() == "Slice to drum rack",
+                   "a Kit track and a block in the clip's place, the clip muted (one undo step)");
+
+            auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (processor.getDawEngine().getInstrument (trackId).get());
+            auto* kit = instrument != nullptr ? micfx::inst::asKit (instrument->getEngine()) : nullptr;
+            double covered = 0.0;
+            juce::Array<juce::File> files;
+            for (int pad = 0; kit != nullptr && pad < micfx::inst::KitSampler::numPads; ++pad)
+                if (const auto sample = kit->getSample (pad))
+                {
+                    covered += sample->seconds();
+                    files.add (kit->getPadFile (pad));
+                }
+            check (kit != nullptr && files.size() == 16 && near (covered, 4.8, 0.01),
+                   "the slices cover the loop without gaps (" + juce::String (covered, 3) + " s of 4.8)");
+            run ("undo", args ({}));
+            check (edit.getTracks().size() == tracksBefore && ! (bool) edit.getClip (loopClip)[daw::ids::mute] && ! pattern.getParent().isValid(),
+                   "(undo takes it all back)");
+            check (! (bool) run ("sliceToKit", args ({ { "id", 9999 } }))["ok"], "(only an audio clip)");
+            for (const auto& f : files)
+                f.deleteFile();
+        }
     }
     folder.deleteRecursively();
 }
