@@ -159,7 +159,7 @@ export function buildRack(card, outer) {
     });
 
     // The shown chain's effects, as a chain of their own.
-    const owner = { id: outer?.owner?.id ?? 0, name: outer?.owner?.name, rack: rackId, chain: current, inserts: chains[current]?.inserts ?? [] };
+    const owner = { id: outer?.owner?.id ?? 0, name: outer?.owner?.name, lanes: outer?.owner?.lanes, rack: rackId, chain: current, inserts: chains[current]?.inserts ?? [] };
     if (!inner || innerIndex !== current) {
       innerIndex = current;
       devices.replaceChildren();

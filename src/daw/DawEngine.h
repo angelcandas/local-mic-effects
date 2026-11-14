@@ -170,6 +170,8 @@ public:
     // An effect plugin insert's running plugin (for its window), or null; and why it
     // didn't load (empty when it did, or when there's no such insert).
     InstrumentPtr getInsertPlugin (int insertId) const;
+    // Its insert module (for its panel's values), or null.
+    PluginInsert* getPluginInsert (int insertId) const;
     // The delay an insert adds right now, in samples (0 if it isn't playing).
     int getInsertLatencySamples (int insertId) const;
     juce::String getInsertPluginError (int insertId) const;

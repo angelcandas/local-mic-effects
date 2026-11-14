@@ -756,6 +756,25 @@ body.is-daw .chip--live { display: none; }
 .plugin-status[hidden] { display: none; }
 .plugin-open { padding: 0; font-size: 12px; }
 .plugin-open:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
+.plugin-configure { display: flex; gap: 12px; }
+.plugin-configure .text-button { padding: 0; font-size: 12px; }
+.plugin-configure .text-button:disabled { opacity: 0.5; cursor: default; text-decoration: none; }
+.plugin-configure-toggle[aria-pressed="true"] { color: var(--accent); font-weight: 650; }
+.insert.is-configuring .plugin-face { border-color: var(--accent); }
+.plugin-panel { flex-wrap: wrap; }
+.plugin-panel[hidden] { display: none; }
+/* The list of a plug-in's parameters ("Choose\2026"). */
+.plugin-picker {
+  position: fixed; z-index: 60; width: 290px; padding: 6px; border: 1px solid var(--line); border-radius: 9px;
+  background: var(--panel-raised); box-shadow: 0 10px 28px rgba(0, 0, 0, 0.5);
+}
+.plugin-picker-search { box-sizing: border-box; width: 100%; margin-bottom: 5px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: inherit; font: inherit; font-size: 12px; }
+.plugin-picker-list { max-height: 280px; overflow-y: auto; }
+.plugin-picker-row { display: flex; justify-content: space-between; gap: 8px; width: 100%; padding: 4px 7px; border: 0; border-radius: 5px; background: none; color: inherit; font: inherit; font-size: 12px; text-align: left; cursor: pointer; }
+.plugin-picker-row:hover { background: rgba(255, 255, 255, 0.06); }
+.plugin-picker-row.is-on { color: var(--accent); }
+.plugin-picker-row.is-on::before { content: "\2713"; margin-right: -2px; }
+.plugin-picker-text { color: var(--muted); white-space: nowrap; }
 .insert.is-missing { border-color: #c9922e; }
 .insert.is-missing .plugin-status { color: #e0b25c; }
 .insert-sub { display: flex; align-items: center; gap: 7px; margin: 8px 0 2px; color: var(--muted); font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: 0.6px; }
@@ -2693,7 +2712,9 @@ body.is-daw .library-hint { display: none; }
 .chain-macros-button[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
 /* Map mode: the controls a click maps; a mapped control wears its macro's colour. */
 .is-macro-mapping [data-param] { outline: 1px dashed color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 2px; border-radius: 6px; cursor: copy; }
-[data-param].is-macro-mapped { position: relative; }
+[data-param].is-macro-mapped, [data-param].is-automated { position: relative; }
+/* A control with an automation lane: a red dot at its top left. */
+[data-param].is-automated::before { content: ""; position: absolute; top: 2px; left: 2px; width: 6px; height: 6px; border-radius: 50%; background: #e2554f; box-shadow: 0 0 4px #e2554f; pointer-events: none; z-index: 1; }
 [data-param].is-macro-mapped::after { content: ""; position: absolute; top: 2px; right: 2px; width: 7px; height: 7px; border-radius: 50%; background: var(--macro); box-shadow: 0 0 5px var(--macro); pointer-events: none; }
 /* Live macros: the same panel, as one row of eight above the cards (folded to its title until opened). */
 .live-macros { margin: 0 0 12px; }

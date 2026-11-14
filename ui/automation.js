@@ -20,6 +20,7 @@ const SEND_RANGE = [-61, 6];
 
 export const laneRowHeight = (rowHeight) => Math.max(48, Math.round(rowHeight * 0.6));
 
+const isPanelParam = (insert, param) => insert?.type === "plugin" && /^p\d+$/.test(param);
 const controlLabel = (param) => MODULES.flatMap((m) => m.controls ?? []).find((c) => c.param === param)?.label;
 
 export class AutomationLanes {
@@ -57,6 +58,14 @@ export class AutomationLanes {
     } else {
       this.open.delete(track.id);
     }
+    this.changed();
+  }
+
+  // A target's lane under its track, unfolded (a control's "Show automation").
+  showLane(track, target) {
+    const picked = this.targets.get(track.id) ?? [];
+    if (!picked.includes(target)) this.targets.set(track.id, [...picked, target]);
+    this.open.add(track.id);
     this.changed();
   }
 
@@ -104,7 +113,7 @@ export class AutomationLanes {
       for (const insert of inserts ?? []) {
         const name = `${prefix}${insert.name || this.kit.effectName(insert)}`;
         const values = Object.keys(insert.values ?? {}).filter((param) => info[param] || insert.type === "plugin");
-        if (values.length) groups.push([name, values.map((param) => [`insert:${insert.id}:${param}`, this.valueName(param)])]);
+        if (values.length) groups.push([name, values.map((param) => [`insert:${insert.id}:${param}`, this.valueName(param, insert)])]);
         for (const chain of insert.chains ?? []) addInserts(chain.inserts, `${name} › ${chain.name || "Chain"} › `);
       }
     };
@@ -114,9 +123,11 @@ export class AutomationLanes {
     return groups;
   }
 
-  valueName(param) {
+  valueName(param, insert) {
     const known = { pluginOn: "On", pluginInGain: "Input gain", pluginOutGain: "Output gain" };
     if (known[param]) return known[param];
+    const panel = isPanelParam(insert, param) ? insert.plugin?.panel?.find((entry) => entry.param === param) : null;
+    if (panel) return panel.name;
     if (/InGain$/.test(param)) return "Input gain";
     if (/OutGain$/.test(param)) return "Output gain";
     if (MODULES.some((m) => m.power === param) || /On$/.test(param)) return "On / off";
@@ -163,16 +174,18 @@ export class AutomationLanes {
     if (kind === "insert") {
       const insert = this.findInsert(track, Number(a));
       if (!insert || !(b in (insert.values ?? {}))) return null;
-      const info = this.kit.parameterInfo()[b] ?? (b === "pluginOn" ? { min: 0, max: 1, step: 1 } : { min: -24, max: 24, label: "dB" });
+      // (A plug-in parameter on its card: the parameter's own 0..1.)
+      const info = this.kit.parameterInfo()[b] ?? (b === "pluginOn" ? { min: 0, max: 1, step: 1 } : isPanelParam(insert, b) ? { min: 0, max: 1, panel: true }
+        : { min: -24, max: 24, label: "dB" });
       const min = info.min ?? 0, max = info.max ?? 1, skew = info.skew ?? 1;
       const span = max - min || 1;
       const step = info.choices?.length ? 1 : info.step >= 1 ? info.step : 0;
       return {
-        name: `${insert.name || this.kit.effectName(insert)} · ${this.valueName(b)}`, min, max, step,
+        name: `${insert.name || this.kit.effectName(insert)} · ${this.valueName(b, insert)}`, min, max, step,
         toNorm: (v) => Math.pow(Math.min(1, Math.max(0, (v - min) / span)), skew),
         fromNorm: (n) => min + Math.pow(Math.min(1, Math.max(0, n)), 1 / skew) * span,
         base: insert.values[b],
-        format: (v) => (info.choices?.length ? info.choices[Math.round(v - min)] ?? String(v) : formatValue(v, info.label)),
+        format: (v) => (info.panel ? `${Math.round(v * 100)}%` : info.choices?.length ? info.choices[Math.round(v - min)] ?? String(v) : formatValue(v, info.label)),
       };
     }
     return null;

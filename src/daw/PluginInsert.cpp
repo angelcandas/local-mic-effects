@@ -2,11 +2,50 @@
 
 namespace daw
 {
-PluginInsert::PluginInsert (InstrumentPtr p, double rate, int block)
+PluginInsert::PluginInsert (InstrumentPtr p, double rate, int block, const juce::Array<int>& panelList)
     : fx::Module (fx::ModuleType::plugin), plugin (std::move (p)), on (addSwitch (onId, true)),
       preparedRate (rate), preparedBlock (block)
 {
     jassert (plugin != nullptr);
+    const auto& parameters = plugin->getParameters();
+    for (const auto index : panelList)
+        if (juce::isPositiveAndBelow (index, parameters.size()) && ! panelIndices.contains (index))
+        {
+            auto entry = std::make_unique<PanelValue>();
+            entry->index = index;
+            entry->parameter = parameters[index];
+            entry->value = &addValue (panelValueId (index).toRawUTF8(), entry->parameter->getValue());
+            entry->pushed.store (entry->parameter->getValue()); // where the plug-in is (the insert's value goes to it on the next block)
+            panelIndices.add (index);
+            panel.push_back (std::move (entry));
+        }
+}
+
+juce::Array<int> PluginInsert::getPanel (const juce::ValueTree& insert)
+{
+    juce::Array<int> indices;
+    for (const auto& token : juce::StringArray::fromTokens (insert.getProperty ("panel").toString(), ",", ""))
+        if (token.trim().containsOnly ("0123456789") && token.trim().isNotEmpty())
+            indices.addIfNotAlreadyThere (token.trim().getIntValue());
+    return indices;
+}
+
+float PluginInsert::getPushed (int parameterIndex) const noexcept
+{
+    for (const auto& entry : panel)
+        if (entry->index == parameterIndex)
+            return entry->pushed.load (std::memory_order_relaxed);
+    return std::numeric_limits<float>::quiet_NaN();
+}
+
+void PluginInsert::setPushed (int parameterIndex, float value) noexcept
+{
+    for (auto& entry : panel)
+        if (entry->index == parameterIndex)
+        {
+            entry->pushed.store (value, std::memory_order_relaxed);
+            entry->value->store (value);
+        }
 }
 
 std::unique_ptr<PluginInsert> PluginInsert::create (const juce::ValueTree& insert, double sampleRate, int blockSize,
@@ -16,12 +55,12 @@ std::unique_ptr<PluginInsert> PluginInsert::create (const juce::ValueTree& inser
     if (processor == nullptr)
         return {};
 
-    return std::unique_ptr<PluginInsert> (new PluginInsert (std::move (processor), sampleRate, blockSize));
+    return std::unique_ptr<PluginInsert> (new PluginInsert (std::move (processor), sampleRate, blockSize, getPanel (insert)));
 }
 
-std::unique_ptr<PluginInsert> PluginInsert::share (const PluginInsert& running)
+std::unique_ptr<PluginInsert> PluginInsert::share (const PluginInsert& running, const juce::Array<int>& panel)
 {
-    return std::unique_ptr<PluginInsert> (new PluginInsert (running.plugin, running.preparedRate, running.preparedBlock));
+    return std::unique_ptr<PluginInsert> (new PluginInsert (running.plugin, running.preparedRate, running.preparedBlock, panel));
 }
 
 void PluginInsert::prepareModule (const juce::dsp::ProcessSpec& spec)
@@ -66,6 +105,18 @@ void PluginInsert::render (const Context& context) noexcept
 
     auto* left = block.getChannelPointer (0);
     auto* right = block.getChannelPointer ((size_t) juce::jmin (1, numChannels - 1));
+
+    // Panel values (the card, automation, macros) that moved go to the plug-in.
+    for (auto& entry : panel)
+    {
+        const auto value = juce::jlimit (0.0f, 1.0f, get (*entry->value));
+        const auto pushed = entry->pushed.load (std::memory_order_relaxed);
+        if (std::isnan (pushed) || std::abs (value - pushed) > 1.0e-5f)
+        {
+            entry->parameter->setValue (value);
+            entry->pushed.store (value, std::memory_order_relaxed);
+        }
+    }
 
     // The signal goes into the delay line every block, so going round the plugin starts
     // with what came before.

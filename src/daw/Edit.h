@@ -717,6 +717,14 @@ public:
     // the value from the macro. False when the channel, insert or value doesn't exist.
     bool mapMacro (int channelId, int index, int insertId, const juce::String& param, float min, float max);
     void unmapMacro (int channelId, int index, int insertId, const juce::String& param);
+
+    // A plug-in insert's panel (PluginInsert): parameters shown as knobs on its card, each
+    // the insert value `p<index>` (0..1). Adding one starts it at `value` (the plug-in's
+    // own); removing one takes its value, lane and macro mappings with it. One undo step
+    // each; false when there's no such plug-in insert (or it's already there / not there).
+    static constexpr int maxPanelParameters = 16;
+    bool addPluginPanel (int insertId, int parameterIndex, float value);
+    bool removePluginPanel (int insertId, int parameterIndex);
     void nameMacro (int channelId, int index, const juce::String& name);
     // The value that macros of a channel write to an effect value (min + (max - min) * macro).
     static float macroTarget (const juce::ValueTree& map, float macroValue);
