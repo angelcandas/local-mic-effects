@@ -1182,11 +1182,16 @@ void DawBridge::updateInstrumentWindows()
 std::vector<std::pair<int, juce::ValueTree>> DawBridge::getPluginInserts() const
 {
     std::vector<std::pair<int, juce::ValueTree>> found;
-    const auto collect = [&] (const juce::ValueTree& owner)
+    std::function<void (const juce::ValueTree&)> collect = [&] (const juce::ValueTree& owner)
     {
         for (const auto& insert : daw::Edit::getInserts (owner))
+        {
             if (daw::Edit::isPluginInsert (insert))
                 found.emplace_back ((int) insert[ids::id], insert);
+            for (const auto& chain : insert) // inside racks too
+                if (chain.hasType (ids::CHAIN))
+                    collect (chain);
+        }
     };
 
     collect (edit.getMaster());
