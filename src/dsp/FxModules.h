@@ -9,6 +9,8 @@
 #include "PitchEngine.h"
 #include "SpectralDenoiser.h"
 #include "Smooth.h"
+#include "VocalDynamics.h"
+#include "Colour.h"
 #include "Cabinet.h"
 #include "GuitarAmp.h"
 #include "Convolver.h"
@@ -120,6 +122,23 @@ public:
 
     Value& on        = addSwitch ("gateOn", true);
     Value& threshold = addValue ("gateThreshold", -55.0f);
+    Value& range     = addValue ("gateRange", 80.0f);    // dB it turns down when closed
+    Value& hold      = addValue ("gateHold", 0.0f);      // ms
+    Value& release   = addValue ("gateRelease", 150.0f); // ms
+    Value& focus     = addChoice ("gateFocus", 0.0f);    // detector hears 150 Hz-4 kHz only
+
+    // At these defaults the gate is the original one (juce::dsp::NoiseGate), so saved
+    // sessions sound the same; any change moves it to vocal::ExpanderGate.
+    bool usesOriginal() const noexcept
+    {
+        return get (range) >= 79.95f && get (hold) < 0.5f && std::abs (get (release) - 150.0f) < 0.5f && ! flag (focus);
+    }
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        if (! original.load (std::memory_order_relaxed))
+            readings.setProperty ("reduction", std::round (expander.takeReductionDb() * 10.0f) / 10.0f);
+    }
 
 private:
     void prepareModule (const juce::dsp::ProcessSpec& spec) override
@@ -128,13 +147,41 @@ private:
         gate.setRatio (10.0f);
         gate.setAttack (1.0f);
         gate.setRelease (150.0f);
+        expander.prepare (spec.sampleRate);
     }
 
-    void resetModule() override                    { gate.reset(); }
-    void update() noexcept override                { gate.setThreshold (get (threshold)); }
-    void render (const Context& c) noexcept override { gate.process (c); }
+    void resetModule() override { gate.reset(); expander.reset(); }
+
+    void update() noexcept override
+    {
+        gate.setThreshold (get (threshold));
+        expander.setSettings ({ get (threshold), get (range), get (hold), get (release), flag (focus) });
+
+        const auto useOriginal = usesOriginal();
+        if (useOriginal != original.load (std::memory_order_relaxed))
+        {
+            // Switching engines: the one taking over starts clean.
+            if (useOriginal) gate.reset(); else expander.reset();
+            original.store (useOriginal, std::memory_order_relaxed);
+        }
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        if (original.load (std::memory_order_relaxed))
+        {
+            gate.process (c);
+        }
+        else
+        {
+            auto block = c.getOutputBlock();
+            expander.process (block);
+        }
+    }
 
     juce::dsp::NoiseGate<float> gate;
+    vocal::ExpanderGate expander;
+    std::atomic<bool> original { true };
 };
 
 // Autotune, pitch/formant shift and harmonizer share one pitch detector, so they are
@@ -319,17 +366,38 @@ class Compressor final : public Module
 public:
     Compressor() : Module (ModuleType::compressor) {}
 
-    Value& on        = addSwitch ("compOn", true);
-    Value& threshold = addValue ("compThreshold", -18.0f);
-    Value& ratio     = addValue ("compRatio", 3.0f);
-    Value& attack    = addValue ("compAttack", 10.0f);  // ms
-    Value& release   = addValue ("compRelease", 120.0f); // ms
-    Value& makeup    = addValue ("compMakeup", 0.0f);    // dB
+    Value& on         = addSwitch ("compOn", true);
+    Value& threshold  = addValue ("compThreshold", -18.0f);
+    Value& ratio      = addValue ("compRatio", 3.0f);
+    Value& attack     = addValue ("compAttack", 10.0f);  // ms
+    Value& release    = addValue ("compRelease", 120.0f); // ms
+    Value& makeup     = addValue ("compMakeup", 0.0f);    // dB
+    Value& style      = addChoice ("compStyle", 0.0f);    // vocal::VoiceCompressor::Style
+    Value& knee       = addValue ("compKnee", 0.0f);      // dB
+    Value& mix        = addValue ("compMix", 100.0f);     // %
+    Value& autoMakeup = addChoice ("compAutoMakeup", 0.0f);
+
+    // Clean with no knee, full mix and no auto make-up is the original compressor
+    // (juce::dsp::Compressor), so saved sessions sound the same.
+    bool usesOriginal() const noexcept
+    {
+        return index (style) == 0 && get (knee) < 0.01f && get (mix) >= 99.99f && ! flag (autoMakeup);
+    }
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        if (! original.load (std::memory_order_relaxed))
+            readings.setProperty ("reduction", std::round (voice.takeReductionDb() * 10.0f) / 10.0f);
+    }
 
 private:
-    void prepareModule (const juce::dsp::ProcessSpec& spec) override { compressor.prepare (spec); }
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override
+    {
+        compressor.prepare (spec);
+        voice.prepare (spec.sampleRate);
+    }
 
-    void resetModule() override { compressor.reset(); }
+    void resetModule() override { compressor.reset(); voice.reset(); }
 
     void update() noexcept override
     {
@@ -338,17 +406,83 @@ private:
         compressor.setAttack (juce::jmax (0.1f, get (attack)));
         compressor.setRelease (juce::jmax (1.0f, get (release)));
         makeupGain = juce::Decibels::decibelsToGain (get (makeup));
+
+        vocal::VoiceCompressor::Settings s;
+        s.style = (vocal::VoiceCompressor::Style) juce::jlimit (0, 2, index (style));
+        s.thresholdDb = get (threshold);
+        s.ratio = get (ratio);
+        s.attackMs = get (attack);
+        s.releaseMs = get (release);
+        s.kneeDb = get (knee);
+        s.mix = fraction (mix);
+        s.makeupDb = get (makeup);
+        s.autoMakeup = flag (autoMakeup);
+        voice.setSettings (s);
+
+        const auto useOriginal = usesOriginal();
+        if (useOriginal != original.load (std::memory_order_relaxed))
+        {
+            if (useOriginal) compressor.reset(); else voice.reset();
+            original.store (useOriginal, std::memory_order_relaxed);
+        }
     }
 
     void render (const Context& c) noexcept override
     {
-        compressor.process (c);
-        if (makeupGain != 1.0f)
-            c.getOutputBlock().multiplyBy (makeupGain);
+        if (original.load (std::memory_order_relaxed))
+        {
+            compressor.process (c);
+            if (makeupGain != 1.0f)
+                c.getOutputBlock().multiplyBy (makeupGain);
+        }
+        else
+        {
+            auto block = c.getOutputBlock();
+            voice.process (block);
+        }
     }
 
     juce::dsp::Compressor<float> compressor;
+    vocal::VoiceCompressor voice;
+    std::atomic<bool> original { true };
     float makeupGain = 1.0f;
+};
+
+// The slow, smooth second compressor (vocal::OptoCompressor): after the Compressor for
+// "fast one for the peaks, then a slow one for the level".
+class Opto final : public Module
+{
+public:
+    Opto() : Module (ModuleType::opto) {}
+
+    Value& on     = addSwitch ("optoOn");
+    Value& amount = addValue ("optoAmount", 30.0f);  // %
+    Value& output = addValue ("optoOutput", 0.0f);   // dB
+    Value& mode   = addChoice ("optoMode", 0.0f);    // vocal::OptoCompressor::Mode
+    Value& mix    = addValue ("optoMix", 100.0f);    // %
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        readings.setProperty ("reduction", std::round (opto.takeReductionDb() * 10.0f) / 10.0f);
+    }
+
+private:
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override { opto.prepare (spec.sampleRate); }
+    void resetModule() override { opto.reset(); }
+
+    void update() noexcept override
+    {
+        opto.setSettings ({ fraction (amount), index (mode) == 1 ? vocal::OptoCompressor::Mode::limit : vocal::OptoCompressor::Mode::compress,
+                            get (output), fraction (mix) });
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        auto block = c.getOutputBlock();
+        opto.process (block);
+    }
+
+    vocal::OptoCompressor opto;
 };
 
 class DeEsser final : public Module
@@ -359,14 +493,66 @@ public:
     Value& on        = addSwitch ("deessOn");
     Value& threshold = addValue ("deessThreshold", -30.0f);
     Value& freq      = addValue ("deessFreq", 6000.0f);
+    Value& mode      = addChoice ("deessMode", 0.0f);     // vocal::SmartDeEsser::Mode
+    Value& amount    = addValue ("deessAmount", 50.0f);   // %, Smart
+    Value& range     = addValue ("deessRange", 24.0f);    // dB, the most it cuts
+    Value& band      = addChoice ("deessBand", 0.0f);     // vocal::SmartDeEsser::Band
+    Value& listen    = addChoice ("deessListen", 0.0f);
+
+    // Classic, full range, Split and not listening is the original de-esser (fx::DeEsser).
+    bool usesOriginal() const noexcept
+    {
+        return index (mode) == 0 && get (range) >= 23.95f && index (band) == 0 && ! flag (listen);
+    }
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        if (! original.load (std::memory_order_relaxed))
+            readings.setProperty ("reduction", std::round (smart.takeReductionDb() * 10.0f) / 10.0f);
+    }
 
 private:
-    void prepareModule (const juce::dsp::ProcessSpec& spec) override { deEsser.prepare (spec); }
-    void resetModule() override                                      { deEsser.reset(); }
-    void update() noexcept override                  { deEsser.setParameters (get (threshold), get (freq)); }
-    void render (const Context& c) noexcept override { deEsser.process (c); }
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override { deEsser.prepare (spec); smart.prepare (spec.sampleRate); }
+    void resetModule() override                                      { deEsser.reset(); smart.reset(); }
+
+    void update() noexcept override
+    {
+        deEsser.setParameters (get (threshold), get (freq));
+
+        vocal::SmartDeEsser::Settings s;
+        s.mode = index (mode) == 1 ? vocal::SmartDeEsser::Mode::smart : vocal::SmartDeEsser::Mode::classic;
+        s.thresholdDb = get (threshold);
+        s.amount = fraction (amount);
+        s.frequency = get (freq);
+        s.rangeDb = get (range);
+        s.band = index (band) == 1 ? vocal::SmartDeEsser::Band::wide : vocal::SmartDeEsser::Band::split;
+        s.listen = flag (listen);
+        smart.setSettings (s);
+
+        const auto useOriginal = usesOriginal();
+        if (useOriginal != original.load (std::memory_order_relaxed))
+        {
+            if (useOriginal) deEsser.reset(); else smart.reset();
+            original.store (useOriginal, std::memory_order_relaxed);
+        }
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        if (original.load (std::memory_order_relaxed))
+        {
+            deEsser.process (c);
+        }
+        else
+        {
+            auto block = c.getOutputBlock();
+            smart.process (block);
+        }
+    }
 
     fx::DeEsser deEsser;
+    vocal::SmartDeEsser smart;
+    std::atomic<bool> original { true };
 };
 
 class Exciter final : public Module
@@ -395,14 +581,65 @@ public:
     Value& on    = addSwitch ("satOn");
     Value& drive = addValue ("satDrive", 12.0f);
     Value& mix   = addValue ("satMix", 100.0f);
+    Value& type  = addChoice ("satType", 0.0f);  // 0 Warm (the original), ColourSaturation::Type
+    Value& tone  = addValue ("satTone", 0.0f);   // -100..100 tilt
+
+    // Tape, Tube and Clip run oversampled: a few samples of delay while on.
+    int getLatencySamples() const noexcept override
+    {
+        return flag (on) && index (type) > 0 ? colour.getLatencySamples() : 0;
+    }
 
 private:
-    void prepareModule (const juce::dsp::ProcessSpec& spec) override { saturation.prepare (spec); }
-    void resetModule() override                                      { saturation.reset(); }
-    void update() noexcept override                  { saturation.setParameters (get (drive), fraction (mix)); }
-    void render (const Context& c) noexcept override { saturation.process (c); }
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override
+    {
+        saturation.prepare (spec);
+        colour.prepare (spec);
+        warmTilt.prepare (spec.sampleRate);
+    }
+
+    void resetModule() override { saturation.reset(); colour.reset(); warmTilt.reset(); }
+
+    void update() noexcept override
+    {
+        saturation.setParameters (get (drive), fraction (mix));
+        const auto t = juce::jlimit (0, 3, index (type));
+        if (t > 0)
+            colour.setSettings ({ (ColourSaturation::Type) t, get (drive), fraction (mix), fraction (tone) });
+        warmTilt.setTilt (fraction (tone));
+
+        if (t != lastType)
+        {
+            // Switching type: the one taking over starts clean.
+            if (t == 0) saturation.reset(); else colour.reset();
+            lastType = t;
+        }
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        if (lastType == 0)
+        {
+            saturation.process (c);
+
+            // Warm with Tone off its centre: the tilt after it (at 0 nothing changes).
+            auto& block = c.getOutputBlock();
+            if (std::abs (get (tone)) > 0.5f)
+                for (size_t ch = 0; ch < std::min<size_t> (2, block.getNumChannels()); ++ch)
+                    for (size_t i = 0; i < block.getNumSamples(); ++i)
+                        block.setSample ((int) ch, (int) i, warmTilt.process (ch, block.getSample ((int) ch, (int) i)));
+        }
+        else
+        {
+            auto block = c.getOutputBlock();
+            colour.process (block);
+        }
+    }
 
     fx::Saturation saturation;
+    ColourSaturation colour;
+    Tilt warmTilt;
+    int lastType = 0;
 };
 
 class Radio final : public Module
@@ -642,14 +879,43 @@ public:
     Value& on     = addSwitch ("doublerOn");
     Value& mix    = addValue ("doublerMix", 50.0f);
     Value& spread = addValue ("doublerSpread", 80.0f);
+    Value& mode   = addChoice ("doublerMode", 0.0f);     // 0 Classic (the original), VoiceDoubler::Mode
+    Value& detune = addValue ("doublerDetune", 8.0f);    // cents
+    Value& delay  = addValue ("doublerDelay", 12.0f);    // ms
 
 private:
-    void prepareModule (const juce::dsp::ProcessSpec& spec) override { doubler.prepare (spec); }
-    void resetModule() override                                      { doubler.reset(); }
-    void update() noexcept override                  { doubler.setParameters (fraction (mix), fraction (spread)); }
-    void render (const Context& c) noexcept override { doubler.process (c); }
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override { doubler.prepare (spec); voice.prepare (spec.sampleRate); }
+    void resetModule() override                                      { doubler.reset(); voice.reset(); }
+
+    void update() noexcept override
+    {
+        doubler.setParameters (fraction (mix), fraction (spread));
+        const auto m = juce::jlimit (0, 2, index (mode));
+        if (m > 0)
+            voice.setSettings ({ (VoiceDoubler::Mode) m, fraction (mix), fraction (spread), get (detune), get (delay) });
+        if (m != lastMode)
+        {
+            if (m == 0) doubler.reset(); else voice.reset();
+            lastMode = m;
+        }
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        if (lastMode == 0)
+        {
+            doubler.process (c);
+        }
+        else
+        {
+            auto block = c.getOutputBlock();
+            voice.process (block);
+        }
+    }
 
     fx::Doubler doubler;
+    VoiceDoubler voice;
+    int lastMode = 0;
 };
 
 class Echo final : public Module
@@ -662,6 +928,48 @@ public:
     Value& feedback = addValue ("delayFeedback", 35.0f);
     Value& mix      = addValue ("delayMix", 25.0f);
     Value& pingPong = addChoice ("delayPingPong", 0.0f);
+    Value& sync     = addChoice ("delaySync", 0.0f);      // 0 = off, else a note value (getSyncNames)
+    Value& duck     = addValue ("delayDuck", 0.0f);       // %
+    Value& lowCut   = addValue ("delayLowCut", fx::Echo::defaultLowCutHz);
+    Value& highCut  = addValue ("delayHighCut", fx::Echo::defaultHighCutHz);
+
+    static juce::StringArray getSyncNames()
+    {
+        return { "Off", "1/32", "1/16", "1/16 triplet", "1/8", "1/8 triplet", "Dotted 1/8", "1/4", "Dotted 1/4", "1/2" };
+    }
+
+    // The echo time for a synced note value at a tempo: halved while it is longer than
+    // 1.5 s (a slow song's half note), and no shorter than 20 ms. 0 when not synced or
+    // there is no tempo.
+    static float syncedMs (int note, double bpm) noexcept
+    {
+        static constexpr double beats[] = { 0.0, 0.125, 0.25, 1.0 / 6.0, 0.5, 1.0 / 3.0, 0.75, 1.0, 1.5, 2.0 };
+        if (note <= 0 || note >= (int) std::size (beats) || bpm <= 0.0)
+            return 0.0f;
+
+        auto ms = beats[note] * 60000.0 / bpm;
+        while (ms > 1500.0)
+            ms *= 0.5;
+        return (float) std::max (20.0, ms);
+    }
+
+    void setTempo (double bpm) noexcept override { tempo.store (bpm, std::memory_order_relaxed); }
+
+    // The echo time it is using now (ms), for the card.
+    float getEffectiveTimeMs() const noexcept
+    {
+        const auto synced = syncedMs (index (sync), tempo.load (std::memory_order_relaxed));
+        return synced > 0.0f ? synced : time.load (std::memory_order_relaxed);
+    }
+
+    void addReadings (juce::DynamicObject& readings) override
+    {
+        if (index (sync) > 0)
+        {
+            readings.setProperty ("timeMs", std::round (getEffectiveTimeMs()));
+            readings.setProperty ("bpm", std::round (tempo.load (std::memory_order_relaxed) * 10.0) / 10.0);
+        }
+    }
 
 private:
     void prepareModule (const juce::dsp::ProcessSpec& spec) override { echo.prepare (spec); }
@@ -669,12 +977,69 @@ private:
 
     void update() noexcept override
     {
-        echo.setParameters (get (time), fraction (feedback), fraction (mix), flag (pingPong));
+        const auto synced = syncedMs (index (sync), tempo.load (std::memory_order_relaxed));
+        echo.setParameters (synced > 0.0f ? synced : get (time), fraction (feedback), fraction (mix), flag (pingPong));
+        echo.setTone (get (lowCut), get (highCut));
+        echo.setDuck (fraction (duck));
     }
 
     void render (const Context& c) noexcept override { echo.process (c); }
 
     fx::Echo echo;
+    std::atomic<double> tempo { 0.0 };
+};
+
+// The vocal plate (Space.h). Always runs, like the reverb, so switching it off lets the
+// tail ring out instead of cutting it.
+class Plate final : public Module
+{
+public:
+    Plate() : Module (ModuleType::plate) {}
+
+    Value& on       = addSwitch ("plateOn");
+    Value& mix      = addValue ("plateMix", 20.0f);       // %
+    Value& decay    = addValue ("plateDecay", 1.8f);      // s
+    Value& preDelay = addValue ("platePreDelay", 20.0f);  // ms
+    Value& damping  = addValue ("plateDamping", 40.0f);   // %
+    Value& lowCut   = addValue ("plateLowCut", 150.0f);   // Hz
+    Value& highCut  = addValue ("plateHighCut", 9000.0f); // Hz
+    Value& mod      = addValue ("plateMod", 30.0f);       // %
+    Value& width    = addValue ("plateWidth", 100.0f);    // %
+    Value& duck     = addValue ("plateDuck", 0.0f);       // %
+
+private:
+    void prepareModule (const juce::dsp::ProcessSpec& spec) override { plate.prepare (spec.sampleRate); }
+    void resetModule() override { plate.reset(); }
+
+    void update() noexcept override
+    {
+        PlateReverb::Settings s;
+        s.mix = fraction (mix);
+        s.decaySeconds = get (decay);
+        s.preDelayMs = get (preDelay);
+        s.damping = fraction (damping);
+        s.lowCutHz = get (lowCut);
+        s.highCutHz = get (highCut);
+        s.modulation = fraction (mod);
+        s.width = fraction (width);
+        s.duck = fraction (duck);
+        s.feeding = flag (on);
+        plate.setSettings (s);
+    }
+
+    void render (const Context& c) noexcept override
+    {
+        // Off and rung out: nothing to add, skip the work.
+        if (! flag (on) && plate.isSilent())
+            return;
+
+        auto block = c.getOutputBlock();
+        plate.process (block);
+    }
+
+    bool alwaysProcesses() const noexcept override { return true; }
+
+    PlateReverb plate;
 };
 
 // Always runs: switching it off fades the wet signal out (juce::Reverb smooths gain
@@ -1146,6 +1511,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::paraEq:     return std::make_unique<modules::ParaEq>();
         case ModuleType::smooth:     return std::make_unique<modules::Smooth>();
         case ModuleType::compressor: return std::make_unique<modules::Compressor>();
+        case ModuleType::opto:       return std::make_unique<modules::Opto>();
         case ModuleType::autoLevel:  return std::make_unique<modules::AutoLevel>();
         case ModuleType::deEsser:    return std::make_unique<modules::DeEsser>();
         case ModuleType::exciter:    return std::make_unique<modules::Exciter>();
@@ -1165,6 +1531,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::doubler:    return std::make_unique<modules::Doubler>();
         case ModuleType::echo:       return std::make_unique<modules::Echo>();
         case ModuleType::reverb:     return std::make_unique<modules::Reverb>();
+        case ModuleType::plate:      return std::make_unique<modules::Plate>();
         case ModuleType::irReverb:   return std::make_unique<modules::IrReverb>();
         case ModuleType::width:      return std::make_unique<modules::Width>();
         case ModuleType::multiband:  return std::make_unique<modules::Multiband>();

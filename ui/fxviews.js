@@ -748,11 +748,47 @@ const views = {
   },
 
   compressor({ get, set, range }) {
-    return dynamics({ get, set, range, threshold: "compThreshold", ratio: () => get("compRatio"), above: true });
+    // Glue always has at least a 10 dB knee (src/dsp/VocalDynamics.h).
+    const knee = () => (Math.round(get("compStyle") ?? 0) === 2 ? Math.max(10, get("compKnee") ?? 0) : get("compKnee") ?? 0);
+    return dynamics({ get, set, range, threshold: "compThreshold", ratio: () => get("compRatio"), above: true, knee });
   },
 
   gate({ get, set, range }) {
-    return dynamics({ get, set, range, threshold: "gateThreshold", ratio: () => 10, above: false });
+    return dynamics({ get, set, range, threshold: "gateThreshold", ratio: () => 10, above: false, floor: () => get("gateRange") ?? 80 });
+  },
+
+  // The opto's curve: the threshold falls as Amount rises, and the ratio grows with
+  // level over a 12 dB knee (as vocal::OptoCompressor), plus its gain reduction.
+  opto({ get }) {
+    const FLOOR = -60;
+    const element = frame("is-dynamics");
+    const x = (db) => ((db - FLOOR) / -FLOOR) * W, y = (db) => H - ((db - FLOOR) / -FLOOR) * H;
+    for (const db of [-48, -36, -24, -12]) element.append(svg("line", { class: "grid", x1: x(db), x2: x(db), y1: 0, y2: H }));
+    element.append(svg("line", { class: "grid dashed", x1: 0, y1: H, x2: W, y2: 0 }));
+    const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
+    const reductionBar = svg("rect", { class: "fx-reduction", x: W - 5, width: 5, y: 0, height: 0 });
+    element.append(reductionBar);
+    let shown = 0;
+    return {
+      element,
+      update() {
+        const t = -4 - 34 * clamp((get("optoAmount") ?? 30) / 100), limit = Math.round(get("optoMode") ?? 0) === 1;
+        const points = [];
+        for (let db = FLOOR; db <= 0; db += 1) {
+          const over = clamp((db - t) / 20), ratio = limit ? 8 + 8 * over : 2.5 + 2 * over;
+          const out = db - kneeReduction(db, t, 1 - 1 / ratio, 12) + (get("optoOutput") ?? 0);
+          points.push(`${x(db).toFixed(1)},${clamp(y(out), 0, H + 40).toFixed(1)}`);
+        }
+        const d = `M${points.join(" L")}`;
+        curve.setAttribute("d", d);
+        fill.setAttribute("d", `${d} L${W},${H} L0,${H} Z`);
+      },
+      live(reading) {
+        shown = Math.max(reading?.reduction ?? 0, shown - 0.5);
+        reductionBar.setAttribute("height", clamp(shown / 12) * H);
+        return reading && shown >= 0.1 ? `−${shown.toFixed(1)} dB` : "";
+      },
+    };
   },
 
   saturation({ get }) {
@@ -762,9 +798,18 @@ const views = {
                    svg("line", { class: "grid dashed", x1: W / 2 - H / 2, y1: H, x2: W / 2 + H / 2, y2: 0 }));
     const curve = path(element, "fx-curve");
     const marker = dot(element);
+    // The curves of src/dsp/Colour.h (ColourSaturation::shape); Warm is fx::Saturation.
+    const curves = {
+      1: (x) => Math.tanh(x + 0.12) - Math.tanh(0.12),
+      2: (x) => (x >= 0 ? Math.tanh(1.3 * x) / 1.3 : Math.tanh(0.75 * x) / 0.75),
+      3: (x) => { const t = clamp(x / 1.5, -1, 1); return t - (t * t * t) / 3; },
+    };
     const shape = (x) => {
-      const drive = Math.pow(10, get("satDrive") / 20), makeup = 1 / Math.pow(drive, 0.7), mix = get("satMix") / 100;
-      return x + mix * (Math.tanh(drive * x) * makeup - x);
+      const drive = Math.pow(10, get("satDrive") / 20), mix = get("satMix") / 100;
+      const curve = curves[Math.round(get("satType") ?? 0)];
+      // The new types are level-matched: drawn with the gain that keeps a small signal level.
+      const wet = curve ? curve(drive * x) / Math.sqrt(drive) : Math.tanh(drive * x) / Math.pow(drive, 0.7);
+      return x + mix * (wet - x);
     };
     const at = (x) => [W / 2 + x * (H / 2 - 4), H / 2 - clamp(shape(x), -1.1, 1.1) * (H / 2 - 4)];
     let peak = 0;
@@ -921,7 +966,14 @@ for (const [key, rate, depth] of [["tremolo", "tremoloRate", "tremoloDepth"], ["
   };
 }
 
-function dynamics({ get, set, range, threshold, ratio, above }) {
+// Gain reduction (dB) of a soft-knee curve, as reductionFor in src/dsp/VocalDynamics.h.
+function kneeReduction(db, threshold, slope, knee) {
+  const over = db - threshold;
+  if (knee > 0 && 2 * Math.abs(over) < knee) return (slope * (over + knee / 2) ** 2) / (2 * knee);
+  return over > 0 ? slope * over : 0;
+}
+
+function dynamics({ get, set, range, threshold, ratio, above, knee = () => 0, floor = () => 120 }) {
   const FLOOR = -60;
   const element = frame("is-dynamics");
   const x = (db) => ((db - FLOOR) / -FLOOR) * W, y = (db) => H - ((db - FLOOR) / -FLOOR) * H;
@@ -951,7 +1003,8 @@ function dynamics({ get, set, range, threshold, ratio, above }) {
       // Fast attack, slower release, like the meters.
       shownIn = Math.max(reading.in, shownIn - 2);
       shownOut = Math.max(reading.out, shownOut - 2);
-      const reduction = Math.max(0, shownIn - shownOut);
+      // The effect's own reading when it has one (the new engines), else in minus out.
+      const reduction = reading.reduction ?? Math.max(0, shownIn - shownOut);
       shownReduction = Math.max(reduction, shownReduction - 1.5);
       reductionBar.setAttribute("height", clamp(shownReduction / 24) * H);
       const audible = shownIn > FLOOR + 1;
@@ -964,8 +1017,9 @@ function dynamics({ get, set, range, threshold, ratio, above }) {
       return shownReduction >= 0.5 ? `−${shownReduction.toFixed(1)} dB` : "";
     },
     update() {
-      const t = get(threshold), k = Math.max(1, ratio());
-      const out = (db) => (above ? (db > t ? t + (db - t) / k : db) : (db < t ? t + (db - t) * k : db));
+      const t = get(threshold), k = Math.max(1, ratio()), w = knee(), lowest = floor();
+      const out = (db) => (above ? db - kneeReduction(db, t, 1 - 1 / k, w)
+                                 : (db < t ? Math.max(db - lowest, t + (db - t) * k) : db));
       const points = [];
       for (let db = FLOOR; db <= 0; db += 1) points.push(`${x(db).toFixed(1)},${clamp(y(out(db)), 0, H + 40).toFixed(1)}`);
       const d = `M${points.join(" L")}`;

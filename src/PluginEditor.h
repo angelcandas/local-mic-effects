@@ -76,6 +76,7 @@ private:
 
     juce::File lastTakeOnTimeline;
     bool lastFullScreen = false;
+    juce::String lastChainOrder; // the Live chain order the page was last told
     fx::SpectrumAnalyser spectrumAnalyser; // for the effect cards' live spectra
 
     std::unique_ptr<juce::FileChooser> folderChooser;

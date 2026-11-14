@@ -49,6 +49,11 @@ public:
     // { name, file, dirty, current, songs: [{ name, key, minor, tempo, backing, lyrics, notes, scenes }] }.
     juce::var describe() const;
 
+    // The Live chain's effect order (module keys joined by ","), kept with each song's
+    // sound. Set by the processor; a song saved before orders existed keeps the standard one.
+    std::function<juce::String()> getChainOrder;
+    std::function<void (const juce::String&)> setChainOrder;
+
 private:
     juce::ValueTree captureSong (const juce::String& name) const;
     juce::String captureSound() const;

@@ -14,8 +14,8 @@ namespace fx
 // The effects a chain can hold, in the order Live mode runs them.
 enum class ModuleType
 {
-    highPass, denoise, gate, pitch, eq, paraEq, smooth, compressor, autoLevel, deEsser, exciter, saturation, radio, bitcrusher,
-    robot, filter, autoWah, amp, cab, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, irReverb, width,
+    highPass, denoise, gate, pitch, eq, paraEq, smooth, compressor, opto, autoLevel, deEsser, exciter, saturation, radio, bitcrusher,
+    robot, filter, autoWah, amp, cab, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, plate, irReverb, width,
     multiband, limiter, masterEq, imager, loudness, // mastering (see Mastering.h)
     transient, dynamicEq,
 
@@ -34,8 +34,8 @@ inline const char* getModuleKey (ModuleType type)
         return "plugin";
 
     static constexpr const char* keys[] = {
-        "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "smooth", "compressor", "autoLevel", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
-        "robot", "filter", "autoWah", "amp", "cab", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "irReverb", "width",
+        "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "smooth", "compressor", "opto", "autoLevel", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
+        "robot", "filter", "autoWah", "amp", "cab", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "plate", "irReverb", "width",
         "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq"
     };
     static_assert (std::size (keys) == numModuleTypes);
@@ -117,6 +117,11 @@ public:
 
     // Delay this module adds to the signal, in samples.
     virtual int getLatencySamples() const noexcept { return 0; }
+
+    // The song's tempo, for effects that sync to it (the echo). Called with the current
+    // tempo (bpm, 0 when there is none) before each block or whenever it changes; any
+    // thread. Most effects ignore it.
+    virtual void setTempo (double /*bpm*/) noexcept {}
 
     // Extra live readings for the UI (gain reduction, loudness...), added to the module's
     // meter object. Message thread.

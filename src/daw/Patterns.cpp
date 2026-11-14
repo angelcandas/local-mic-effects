@@ -320,6 +320,67 @@ void Edit::setPatternClipMute (int clipId, bool mute)
         clip.setProperty (ids::mute, mute, undoTarget);
 }
 
+void Edit::setPatternClipPattern (int clipId, int patternId)
+{
+    if (auto clip = getPatternClip (clipId); clip.isValid() && getPattern (patternId).isValid())
+        clip.setProperty (ids::pattern, patternId, undoTarget);
+}
+
+static double wrapPatternOffset (double offset, double patternLength)
+{
+    if (patternLength <= 0.0 || ! std::isfinite (offset))
+        return 0.0;
+    auto wrapped = std::fmod (offset, patternLength);
+    if (wrapped < 0.0)
+        wrapped += patternLength;
+    return wrapped > patternLength - 1.0e-9 ? 0.0 : wrapped;
+}
+
+double Edit::getPatternClipOffset (const juce::ValueTree& clip, double patternLength)
+{
+    return wrapPatternOffset ((double) clip.getProperty (ids::offset, 0.0), patternLength);
+}
+
+void Edit::setPatternClipOffset (int clipId, double offsetBeats)
+{
+    auto clip = getPatternClip (clipId);
+    if (! clip.isValid())
+        return;
+
+    const auto pattern = getPattern ((int) clip[ids::pattern]);
+    const auto offset = wrapPatternOffset (offsetBeats, pattern.isValid() ? getPatternLength (pattern) : 0.0);
+    if (offset > 1.0e-9)
+        clip.setProperty (ids::offset, offset, undoTarget);
+    else if (clip.hasProperty (ids::offset))
+        clip.removeProperty (ids::offset, undoTarget);
+}
+
+int Edit::splitPatternClip (int clipId, double atBeats)
+{
+    auto clip = getPatternClip (clipId);
+    if (! clip.isValid())
+        return -1;
+
+    const auto start = (double) clip[ids::start], length = (double) clip[ids::length];
+    const auto left = atBeats - start;
+    if (left < 1.0e-3 || left > length - 1.0e-3)
+        return -1;
+
+    const auto pattern = getPattern ((int) clip[ids::pattern]);
+    const auto passLength = pattern.isValid() ? getPatternLength (pattern) : 0.0;
+    const auto offset = getPatternClipOffset (clip, passLength);
+
+    auto right = clip.createCopy();
+    right.setProperty (ids::id, takeNextId(), nullptr);
+    right.setProperty (ids::start, atBeats, nullptr);
+    right.setProperty (ids::length, length - left, nullptr);
+    right.removeProperty (ids::offset, nullptr);
+    clip.setProperty (ids::length, left, undoTarget);
+    state.addChild (right, state.indexOf (clip) + 1, undoTarget);
+    setPatternClipOffset ((int) right[ids::id], offset + left);
+    return (int) right[ids::id];
+}
+
 void Edit::removePatternClip (int clipId)
 {
     if (auto clip = getPatternClip (clipId); clip.isValid())
@@ -406,6 +467,8 @@ juce::Array<int> Edit::splitPatternByTrack (int patternId)
             auto added = addPatternClip (made[i], start, length, i == 0 ? row : findFreePatternRow (start, length));
             if (mute)
                 added.setProperty (ids::mute, true, undoTarget);
+            if (block.hasProperty (ids::offset))
+                added.setProperty (ids::offset, block[ids::offset], undoTarget);
         }
     }
     return made;
@@ -584,11 +647,13 @@ std::vector<Event> getBlockEvents (const juce::ValueTree& project, int trackId, 
         const auto passLength = Edit::getPatternLength (pattern);
         const auto start = juce::jmax (0.0, (double) block[ids::start]);
         const auto length = juce::jmax (0.0, (double) block[ids::length]);
+        // A block with an offset starts that far into the pattern, and repeats on its grid.
+        const auto offset = Edit::getPatternClipOffset (block, passLength);
 
-        for (double pass = 0.0; pass < length - 1.0e-9; pass += passLength)
+        for (double pass = -offset; pass < length - 1.0e-9; pass += passLength)
             for (const auto& e : events)
             {
-                if (pass + e.on >= length - 1.0e-9)
+                if (pass + e.on < -1.0e-9 || pass + e.on >= length - 1.0e-9)
                     continue;
 
                 const auto off = juce::jmin (length, pass + e.off);

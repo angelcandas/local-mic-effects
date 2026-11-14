@@ -61,6 +61,10 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
         if (count > 0)
             setCurrentProgram (((currentPreset.load() + delta) % count + count) % count);
     };
+    // Each setlist song keeps the order of its effects with its sound.
+    setlist.getChainOrder = [this] { return getChainOrder().joinIntoString (","); };
+    setlist.setChainOrder = [this] (const juce::String& keys) { setChainOrder (juce::StringArray::fromTokens (keys, ",", "")); };
+
     midiMap.onMuteToggle = [this] { outputMuted = ! outputMuted.load(); };
     midiMap.onScene = [this] (const juce::String& action)
     {
@@ -164,6 +168,21 @@ void PluginProcessor::updateDspParameters()
     }
 }
 
+double PluginProcessor::getLiveTempo() noexcept
+{
+    // The echo card's tap, else the host's tempo (in the plug-in), else the looper's,
+    // which follows the setlist song.
+    if (const auto tapped = echoTapTempo.load (std::memory_order_relaxed); tapped > 0.0)
+        return tapped;
+
+    if (auto* head = getPlayHead())
+        if (const auto position = head->getPosition())
+            if (const auto bpm = position->getBpm(); bpm.hasValue() && *bpm > 0.0)
+                return *bpm;
+
+    return looper.getBpm();
+}
+
 void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::MidiBuffer& midi)
 {
     juce::ScopedNoDenormals noDenormals;
@@ -181,6 +200,10 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             inputLevel = juce::jmax (inputLevel, buffer.getMagnitude (ch, 0, numSamples));
         updatePeak (inputPeak, inputLevel);
         inputChannels = numIn;
+
+        // Mapped controls (MIDI learn's "daw:" targets) drive the DAW and don't play notes.
+        midiMap.process (midi, false);
+        midiMap.removeMapped (midi);
 
         // The standalone app passes the MIDI input here (MIDI tracks play and record it).
         dawEngine.process (buffer, numOut, numSamples, buffer.getArrayOfReadPointers(), numIn, &midi);
@@ -229,6 +252,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     // The Practice view follows the singer's own pitch, before any effect touches it.
     pitchTap.process (buffer.getReadPointer (0), numSamples, multitrack.getPosition());
     soundCheck.capture (buffer.getReadPointer (0), numSamples); // the same raw mic, for Sound check
+
+    chain.setTempo (getLiveTempo());
 
     if (! dryCompare.load())
         chain.process (context);
@@ -410,6 +435,61 @@ void PluginProcessor::setCurrentProgram (int index)
         liveHistory.label (juce::String ("Load preset ") + presets[(size_t) index].name);
     currentPreset = index;
     applyPreset (*this, presets[(size_t) index]);
+
+    juce::StringArray order;
+    for (const auto* key : presets[(size_t) index].order)
+        order.add (key);
+    setChainOrder (order);
+}
+
+juce::StringArray PluginProcessor::getChainOrder() const
+{
+    auto& live = const_cast<fx::FxChain&> (chain);
+    juce::StringArray keys;
+    for (const auto index : live.getOrder())
+        keys.add (juce::String (fx::getModuleKey (live[index].getType())));
+    return keys;
+}
+
+void PluginProcessor::setChainOrder (const juce::StringArray& keys)
+{
+    std::vector<int> order;
+    std::vector<bool> placed ((size_t) chain.size(), false);
+
+    for (const auto& key : keys)
+        for (int i = 0; i < chain.size(); ++i)
+            if (! placed[(size_t) i] && key.trim() == fx::getModuleKey (chain[i].getType()))
+            {
+                order.push_back (i);
+                placed[(size_t) i] = true;
+            }
+
+    // A saved order names every effect there was when it was saved. An effect added
+    // since (the opto, the plate...) goes right after the effect before it in the standard
+    // order, so it lands where it belongs instead of at the end. A short list (a few keys
+    // to put first) keeps the rest after it in the standard order.
+    const auto savedWhole = (int) order.size() >= chain.size() - 4;
+
+    for (int i = 0; i < chain.size(); ++i)
+    {
+        if (placed[(size_t) i])
+            continue;
+
+        auto at = order.end();
+        if (savedWhole)
+            at = order.begin();
+        for (int before = i - 1; before >= 0 && savedWhole; --before)
+            if (const auto found = std::find (order.begin(), order.end(), before); found != order.end())
+            {
+                at = found + 1;
+                break;
+            }
+
+        order.insert (at, i);
+        placed[(size_t) i] = true;
+    }
+
+    chain.setOrder (order);
 }
 
 const juce::String PluginProcessor::getProgramName (int index)
@@ -453,6 +533,7 @@ void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
 {
     auto tree = state.copyState();
     tree.setProperty ("preset", currentPreset.load(), nullptr);
+    tree.setProperty ("chainOrder", getChainOrder().joinIntoString (","), nullptr);
 
     // The effects' files, by module key.
     juce::ValueTree files ("MODULE_FILES");
@@ -479,6 +560,9 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
         {
             auto tree = juce::ValueTree::fromXml (*xml);
             currentPreset = (int) tree.getProperty ("preset", 0);
+            // The effects' order (a state from before orders existed: the standard one).
+            setChainOrder (juce::StringArray::fromTokens (tree.getProperty ("chainOrder").toString(), ",", ""));
+            tree.removeProperty ("chainOrder", nullptr);
             if (const auto saved = tree.getChildWithName ("SETLIST"); saved.isValid())
             {
                 if (juce::JUCEApplicationBase::isStandaloneApp())

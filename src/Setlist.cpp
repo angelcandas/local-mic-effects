@@ -2,7 +2,7 @@
 
 namespace
 {
-    const juce::Identifier SONG { "SONG" }, SCENES { "SCENES" }, name { "name" }, sound { "sound" }, key { "key" },
+    const juce::Identifier SONG { "SONG" }, SCENES { "SCENES" }, name { "name" }, sound { "sound" }, order { "order" }, key { "key" },
                            isMinor { "minor" }, tempo { "tempo" }, backing { "backing" }, lyrics { "lyrics" },
                            notes { "notes" }, current { "current" },
                            filePath { "file" }, unsaved { "dirty" };
@@ -46,6 +46,8 @@ juce::ValueTree Setlist::captureSong (const juce::String& songName) const
     juce::ValueTree song (SONG);
     song.setProperty (name, songName, nullptr);
     song.setProperty (sound, captureSound(), nullptr);
+    if (getChainOrder != nullptr)
+        song.setProperty (order, getChainOrder(), nullptr);
     song.setProperty (tempo, looper.isTempoLocked() ? looper.getBpm() : 0.0, nullptr);
     song.setProperty (backing, getBackingFile().getFullPathName(), nullptr);
     song.appendChild (scenes.copyScenes(), nullptr);
@@ -69,6 +71,8 @@ void Setlist::updateSong (int index)
         return;
 
     song.setProperty (sound, captureSound(), nullptr);
+    if (getChainOrder != nullptr)
+        song.setProperty (order, getChainOrder(), nullptr);
     if (looper.isTempoLocked())
         song.setProperty (tempo, looper.getBpm(), nullptr);
     if (const auto backingFile = getBackingFile(); backingFile != juce::File())
@@ -150,6 +154,10 @@ bool Setlist::loadSong (int index, juce::String& warning)
         if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (p); ranged != nullptr && ranged->getParameterID() != "inputGain")
             if (const auto it = values.find (ranged->getParameterID()); it != values.end())
                 set (*ranged, ranged->convertTo0to1 (it->second));
+
+    // The order its effects play in (an older song: the standard order).
+    if (setChainOrder != nullptr)
+        setChainOrder (song[order].toString());
 
     // Its key pulls the autotune (a major or minor scale follows the song's mode).
     if (const auto songKey = (int) song.getProperty (key, -1); songKey >= 0)

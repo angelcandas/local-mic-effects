@@ -134,6 +134,13 @@ PluginEditor::PluginEditor (PluginProcessor& p)
             webView->emitEventIfBrowserIsVisible ("midiLearned", juce::var (learned));
         };
         map.onAction = [this] (const juce::String& action) { webView->emitEventIfBrowserIsVisible ("midiAction", action); };
+        map.onDaw = [this] (const juce::String& name, float value)
+        {
+            auto* event = new juce::DynamicObject();
+            event->setProperty ("action", name);
+            event->setProperty ("value", value);
+            webView->emitEventIfBrowserIsVisible ("dawMidi", juce::var (event));
+        };
     }
 
     // The looper's tempo, lock and volume are app preferences, like the recording folder.
@@ -168,6 +175,7 @@ PluginEditor::~PluginEditor()
     auto& map = processorRef.getMidiMap();
     map.onLearned = nullptr;
     map.onAction = nullptr;
+    map.onDaw = nullptr;
 
     // The processor (and its tracks) outlive the editor.
     auto& multitrack = processorRef.getMultitrack();
@@ -293,8 +301,50 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                                           args.size() > 1 ? args[1] : juce::var()));
                        })
 
+                       // (action, ...) -> the Live chain's order, module keys first to last. "get";
+                       // "set" (keys); "move" (key, index: its place among the keys); "last" (key):
+                       // to the end, as the sidebar does when it switches an effect on.
+                       .withNativeFunction ("chainOrder", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String ("get");
+                           auto keys = processorRef.getChainOrder();
+
+                           if (action == "set" && args.size() > 1)
+                           {
+                               keys.clear();
+                               if (const auto* list = args[1].getArray())
+                                   for (const auto& key : *list)
+                                       keys.add (key.toString());
+                           }
+                           else if ((action == "move" || action == "last") && args.size() > 1)
+                           {
+                               const auto key = args[1].toString();
+                               if (const auto from = keys.indexOf (key); from >= 0)
+                               {
+                                   keys.remove (from);
+                                   const auto to = action == "last" || args.size() < 3 ? keys.size()
+                                                                                     : juce::jlimit (0, keys.size(), (int) args[2]);
+                                   keys.insert (to, key);
+                               }
+                           }
+
+                           if (action != "get")
+                               processorRef.setChainOrder (keys);
+
+                           juce::Array<juce::var> result;
+                           for (const auto& key : processorRef.getChainOrder())
+                               result.add (key);
+                           complete (juce::var (result));
+                       })
                        // (moduleKey, action) -> { file, name, error?, cancelled? }. The file a Live effect plays
                        // through (cabinet, IR reverb): "get", "choose" (a file chooser) or "clear".
+                       // (bpm) -> null. The echo card's tap tempo, for a synced echo (0 forgets it).
+                       .withNativeFunction ("echoTapTempo", [this] (const auto& args, auto complete)
+                       {
+                           processorRef.setEchoTapTempo (args.size() > 0 ? juce::jlimit (0.0, 400.0, (double) args[0]) : 0.0);
+                           complete ({});
+                       })
+
                        .withNativeFunction ("moduleFile", [this] (const auto& args, auto complete)
                        {
                            const auto key = args.size() > 0 ? args[0].toString() : juce::String();
@@ -349,6 +399,42 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                            else
                                                                complete (describe (processorRef.setModuleFile (*type, file), false));
                                                        });
+                       })
+
+                       // (action) -> the audio setup, for the status strip and the first-run card (standalone app):
+                       // { available, device, rate, buffer, latencyMs, cpu, xruns, inputMuted }. "settings" opens the
+                       // audio settings, "headphones" unmutes the input (JUCE mutes it until you say you wear headphones).
+                       .withNativeFunction ("audioSetup", [] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           auto* result = new juce::DynamicObject();
+                           result->setProperty ("available", false);
+                          #if JucePlugin_Build_Standalone
+                           if (auto* holder = juce::JUCEApplicationBase::isStandaloneApp() ? juce::StandalonePluginHolder::getInstance() : nullptr)
+                           {
+                               if (action == "settings")   holder->showAudioSettingsDialog();
+                               if (action == "headphones") holder->getMuteInputValue().setValue (false);
+
+                               result->setProperty ("available", true);
+                               result->setProperty ("inputMuted", (bool) holder->getMuteInputValue().getValue());
+                               result->setProperty ("cpu", holder->deviceManager.getCpuUsage() * 100.0);
+                               if (auto* device = holder->deviceManager.getCurrentAudioDevice())
+                               {
+                                   const auto rate = device->getCurrentSampleRate();
+                                   const auto buffer = device->getCurrentBufferSizeSamples();
+                                   result->setProperty ("device", device->getName());
+                                   result->setProperty ("rate", rate);
+                                   result->setProperty ("buffer", buffer);
+                                   // Round trip: the interface's own latency both ways plus a buffer each way.
+                                   const auto samples = device->getInputLatencyInSamples() + device->getOutputLatencyInSamples() + 2 * buffer;
+                                   result->setProperty ("latencyMs", rate > 0.0 ? 1000.0 * samples / rate : 0.0);
+                                   result->setProperty ("xruns", device->getXRunCount());
+                               }
+                           }
+                          #else
+                           juce::ignoreUnused (action);
+                          #endif
+                           complete (juce::var (result));
                        })
 
                        // (action, name?) -> { undo, redo, preset }: undo for Live mode (LiveHistory).
@@ -920,6 +1006,14 @@ void PluginEditor::timerCallback()
         lastFullScreen = window->isFullScreen();
         webView->emitEventIfBrowserIsVisible ("window", describeWindow());
     }
+
+    // A preset, a setlist song or the host can reorder the Live chain; the page follows.
+    if (! processorRef.isDawMode())
+        if (const auto order = processorRef.getChainOrder().joinIntoString (","); order != lastChainOrder)
+        {
+            lastChainOrder = order;
+            webView->emitEventIfBrowserIsVisible ("chainOrder", order);
+        }
 
     const auto& pitch = processorRef.getPitchEngine();
 

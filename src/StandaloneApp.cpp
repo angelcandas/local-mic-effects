@@ -255,6 +255,7 @@ namespace
                 { "import",    "Import audio...",        "Ctrl+I",       true },
                 { "export",    "Export...",              "Ctrl+Shift+R", true },
                 { "", "", "", false },
+                { "settings",  "Settings...",            "Ctrl+,",       false },
                 { "app:audio", "Audio settings...",      "",             false },
                 { "app:favourites", "Audio device favourites...", "",    false },
                #if ! JUCE_MAC
@@ -746,10 +747,11 @@ namespace
             m.addItem (1, TRANS ("Audio/MIDI Settings..."));
             m.addItem (favouritesId, TRANS ("Audio device favourites..."));
             m.addSeparator();
-            m.addItem (2, TRANS ("Save current state..."));
-            m.addItem (3, TRANS ("Load a saved state..."));
+            // JUCE's state items, in our words: they save or load the whole Live sound.
+            m.addItem (2, TRANS ("Save the Live sound to a file..."));
+            m.addItem (3, TRANS ("Load a Live sound from a file..."));
             m.addSeparator();
-            m.addItem (4, TRANS ("Reset to default state"));
+            m.addItem (4, TRANS ("Reset the Live sound"));
             m.addSeparator();
             m.addItem (checkForUpdatesId, TRANS ("Check for updates..."));
 

@@ -13,6 +13,10 @@ struct Preset
     const char* name;
     const char* category;
     std::vector<std::pair<const char*, float>> values;
+    // The effects' order (module keys, "eq", "echo"...), first to last. Empty: the
+    // standard order (fx::ModuleType's). Keys left out keep their standard places after
+    // the listed ones.
+    std::vector<const char*> order {};
 };
 
 const std::vector<Preset>& getPresets();

@@ -73,7 +73,13 @@ public:
     // start < 0: at the playhead. trackId not a track: on a new track.
     // -> { ok, error, track, clip, start, loop? { from, to, bars } }. `match`: a loop (see
     // daw/Loops.h) starts on the nearest bar and plays at the project's tempo (musical mode).
-    juce::var importAudio (const juce::File& file, int trackId, double start = -1.0, bool match = false);
+    // `continueStep`: part of the previous command's undo step (the Draw tool's stroke).
+    juce::var importAudio (const juce::File& file, int trackId, double start = -1.0, bool match = false, bool continueStep = false);
+    // Missing audio files: `picked` is a file (it replaces `path` when given, and its folder
+    // is searched for the others) or a folder, searched with its subfolders for each missing
+    // file by name. Every clip and take on a found file is pointed at it, one undo step.
+    // Answers { ok, error, relinked, missing } (missing: how many are still lost).
+    juce::var relinkMissing (const juce::File& picked, const juce::String& path = {});
 
     // The library sidebar (ui/browser.js): the places it shows, and one folder's
     // subfolders and audio files.
@@ -137,6 +143,20 @@ private:
     // Split into stems (src/stems/StemSplitter.h): downloads the model the first time,
     // then separates on background threads.
     juce::var handleStems (const juce::var& args);
+public:
+    // Commands on a time range (the arrangement's Range tool), one undo step each.
+    // { action, start, end, tracks? }: "split" cuts the covered tracks' clips at both ends,
+    // "delete" removes what lies inside, "duplicate" copies it to just after the range
+    // (over what was there), "deleteTime" removes the range from every track and pulls
+    // the rest of the song (clips, markers, pattern blocks) left, "insertSilence" pushes
+    // everything from the start right by the range's length. -> { ok, error, clips }
+    juce::var editTimeRange (const juce::var& args);
+    // Bounce to a new track: the file (a render of `sourceTrackId` alone, see
+    // Exporter::exportTrack) on a new audio track right under it from `startSeconds`, and the
+    // source muted, in one undo step. Answers { ok, error, track }.
+    juce::var addBouncedTrack (int sourceTrackId, const juce::File&, double startSeconds);
+
+private:
     juce::var handleRebalance (const juce::var& args);
 
     // Auto Mix (src/analysis/MixAssistant.h): analysis runs on a background thread;
@@ -230,6 +250,11 @@ private:
     // A running export (at most one).
     struct ExportJob;
     std::shared_ptr<ExportJob> exportJob;
+
+    // A running "Bounce to a new track" (at most one): the source track, where it starts.
+    std::shared_ptr<ExportJob> bounceJob;
+    int bounceTrack = -1;
+    double bounceStart = 0.0;
 
     // A running stem split (at most one).
     struct StemJob;

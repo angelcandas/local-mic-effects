@@ -13,6 +13,7 @@ import { SCENE_KEYS, SceneBar } from "./scenes.js";
 import { SETLIST_KEYS, SetlistPanel } from "./setlist.js";
 import { CapturePanel } from "./capture.js";
 import { SoundCheckPanel } from "./soundcheck.js";
+import { initSetup } from "./setup.js";
 
 // Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
 // builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
@@ -679,7 +680,9 @@ class PresetBar {
 
 //==============================================================================
 // Builds the sidebar (every effect, grouped) and the chain (cards for effects that
-// are switched on, in processing order).
+// are switched on, in processing order). The order is the singer's: drag a card by its
+// number (or focus the number and press ←/→) to move it; an effect switched on from
+// the list goes to the end, as in Live.
 class Rack {
   constructor({ sidebar, grid, empty, count, onUserChange }) {
     this.grid = grid;
@@ -687,6 +690,7 @@ class Rack {
     this.count = count;
     this.onUserChange = onUserChange;
     this.entries = [];
+    this.chainOrder = Juce.getNativeFunction("chainOrder");
 
     const groups = {};
     const liveModules = MODULES.filter((m) => !m.dawOnly); // mastering effects are DAW-only
@@ -712,6 +716,99 @@ class Rack {
     }
 
     this.refresh();
+
+    // A preset, a setlist song or the host can reorder the chain too.
+    this.chainOrder("get").then((keys) => this.applyOrder(keys)).catch(() => {});
+    window.__JUCE__.backend.addEventListener("chainOrder", (keys) => this.applyOrder(String(keys).split(",")));
+  }
+
+  // Puts the cards in the chain's order (moving only the ones out of place, so the rest
+  // don't replay their entrance).
+  // Autotune, pitch shift and harmonizer are one effect in the chain ("pitch"), so they
+  // move together.
+  applyOrder(keys) {
+    if (!Array.isArray(keys)) return;
+    const ordered = keys.flatMap((key) => this.entries.filter((entry) => MODULE_KEYS[entry.module.id] === key));
+    for (const entry of this.entries) if (!ordered.includes(entry)) ordered.push(entry);
+    this.entries = ordered;
+
+    ordered.forEach(({ card }, index) => {
+      if (this.grid.children[index] !== card) this.grid.insertBefore(card, this.grid.children[index] ?? null);
+    });
+    this.refresh();
+  }
+
+  // Moves an effect to a place among all the effects (on or off), then shows the order
+  // the processor took.
+  moveTo(module, index) {
+    this.chainOrder("move", MODULE_KEYS[module.id], index).then((keys) => {
+      this.applyOrder(keys);
+      this.onUserChange();
+    });
+  }
+
+  // Moves an effect before (or after) another card.
+  moveNextTo(module, target, after) {
+    const moving = MODULE_KEYS[module.id];
+    const keys = [...new Set(this.entries.map((entry) => MODULE_KEYS[entry.module.id]))].filter((key) => key !== moving);
+    const index = keys.indexOf(MODULE_KEYS[target.id]);
+    if (index >= 0) this.moveTo(module, index + (after ? 1 : 0));
+  }
+
+  // ←/→ on a card's number: past the next card that's on (and not part of the same effect).
+  nudge(module, direction) {
+    const key = MODULE_KEYS[module.id];
+    const visible = this.entries.filter((entry) => !entry.card.hidden);
+    const at = visible.findIndex((entry) => entry.module === module);
+    let next = at + direction;
+    while (visible[next] && MODULE_KEYS[visible[next].module.id] === key) next += direction;
+    const target = visible[next];
+    if (target) this.moveNextTo(module, target.module, direction > 0);
+  }
+
+  // Dragging a card by its number onto another card (pointer events: WebKitGTK's
+  // HTML drag and drop is unreliable).
+  enableReorder(module, card, handle) {
+    handle.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0) return;
+      const startX = event.clientX, startY = event.clientY;
+      let dragging = false, target = null, after = false;
+      handle.setPointerCapture(event.pointerId);
+
+      const clear = () => this.grid.querySelectorAll(".drop-before, .drop-after").forEach((c) => c.classList.remove("drop-before", "drop-after"));
+      const move = (moveEvent) => {
+        if (!dragging && Math.hypot(moveEvent.clientX - startX, moveEvent.clientY - startY) < 5) return;
+        dragging = true;
+        card.classList.add("is-dragging");
+        const over = document.elementFromPoint(moveEvent.clientX, moveEvent.clientY)?.closest(".card");
+        const entry = this.entries.find((e) => e.card === over && !e.card.hidden && MODULE_KEYS[e.module.id] !== MODULE_KEYS[module.id]);
+        clear();
+        target = entry?.module ?? null;
+        if (!entry) return;
+        const box = over.getBoundingClientRect();
+        after = moveEvent.clientX > box.left + box.width / 2;
+        over.classList.add(after ? "drop-after" : "drop-before");
+      };
+      const up = () => {
+        handle.removeEventListener("pointermove", move);
+        handle.removeEventListener("pointerup", up);
+        handle.removeEventListener("pointercancel", up);
+        card.classList.remove("is-dragging");
+        clear();
+        if (dragging && target) this.moveNextTo(module, target, after);
+      };
+      handle.addEventListener("pointermove", move);
+      handle.addEventListener("pointerup", up);
+      handle.addEventListener("pointercancel", up);
+    });
+    handle.addEventListener("click", () => handle.focus()); // WebKit doesn't focus the number on click
+    handle.addEventListener("keydown", (event) => {
+      if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+      event.preventDefault();
+      event.stopPropagation(); // ←/→ elsewhere step through presets
+      this.nudge(module, event.key === "ArrowRight" ? 1 : -1);
+      requestAnimationFrame(() => handle.focus());
+    });
   }
 
   buildCard(module, power) {
@@ -739,10 +836,17 @@ class Rack {
     // Live: in/out level bars, and the picture (below) animates from the signal.
     const activity = createActivity();
     card.live = { activity, view: null };
-    header.append(html("span", "step"), html("h2", "", module.name), activity.element);
+    const step = html("span", "step");
+    step.tabIndex = 0;
+    step.title = "Drag to move this effect in the chain (or press ← / →)";
+    step.setAttribute("role", "button");
+    step.setAttribute("aria-label", `Move ${module.name} in the chain`);
+    this.enableReorder(module, card, step);
+    card.addEventListener("animationend", () => card.classList.add("is-settled"));
+    header.append(step, html("h2", "", module.name), activity.element);
     if (module.id === "echo") {
       const tap = html("button", "card-tap", "Tap");
-      tap.title = "Tap the beat a few times to set the echo time";
+      tap.title = "Tap the beat a few times to set the echo time (with Sync on, the tempo the echo follows)";
       tap.addEventListener("click", () => this.tapEcho(tap));
       header.append(tap);
     }
@@ -864,11 +968,19 @@ class Rack {
     if (this.echoTaps.length < 2) return;
     const gaps = this.echoTaps.slice(1).map((t, i) => t - this.echoTaps[i]);
     const ms = clamp(gaps.reduce((a, b) => a + b, 0) / gaps.length, 20, 1500);
-    const state = Juce.getSliderState("delayTime");
-    state.sliderDragStarted();
-    state.setNormalisedValue(toNormalised(state, ms));
-    state.sliderDragEnded();
-    button.textContent = `${Math.round(ms)} ms`;
+    // The tapped beat is also the tempo a synced echo follows.
+    const bpm = Math.round((60000 / ms) * 10) / 10;
+    Juce.getNativeFunction("echoTapTempo")(bpm).catch(() => {});
+    const synced = Math.round(Juce.getComboBoxState("delaySync")?.getChoiceIndex?.() ?? 0) > 0;
+    if (synced) {
+      button.textContent = `${Math.round(bpm)} bpm`;
+    } else {
+      const state = Juce.getSliderState("delayTime");
+      state.sliderDragStarted();
+      state.setNormalisedValue(toNormalised(state, ms));
+      state.sliderDragEnded();
+      button.textContent = `${Math.round(ms)} ms`;
+    }
     clearTimeout(this.tapLabelTimer);
     this.tapLabelTimer = setTimeout(() => { button.textContent = "Tap"; }, 2500);
     this.onUserChange();
@@ -953,6 +1065,11 @@ class Rack {
       this.refresh();
 
       if (on) {
+        // Switched on from the list: it goes to the end of the chain (unless another part
+        // of the same effect, like the harmonizer for autotune, is already playing).
+        const key = MODULE_KEYS[module.id];
+        const playing = this.entries.some((entry) => entry.module !== module && MODULE_KEYS[entry.module.id] === key && !entry.card.hidden);
+        if (!playing) this.chainOrder("last", key).then((keys) => this.applyOrder(keys)).catch(() => {});
         card.scrollIntoView({ behavior: "smooth", block: "nearest" });
         card.classList.remove("is-flashing");
         void card.offsetWidth; // restart the animation
@@ -968,6 +1085,7 @@ class Rack {
 
     for (const { power, card, item } of this.entries) {
       const on = Boolean(power.getValue());
+      if (!on) card.classList.remove("is-settled"); // shown again: it makes its entrance
       card.hidden = !on;
       item.classList.toggle("is-on", on);
       item.setAttribute("aria-pressed", String(on));
@@ -1387,7 +1505,7 @@ const loopPanel = new LoopPanel(document.querySelector(".looper"), document.quer
 markLearnable(document.querySelector('[data-preset-step="-1"]'), "action:preset.previous", "Previous preset");
 markLearnable(document.querySelector('[data-preset-step="1"]'), "action:preset.next", "Next preset");
 markLearnable(document.querySelector(".panic-button"), "action:mute", "Mute (panic)");
-markLearnable(document.querySelector(".record-button"), "action:record", "Record");
+markLearnable(document.querySelector(".recorder .record-button"), "action:record", "Record");
 const sceneBar = new SceneBar(document.querySelector(".scene-bar"));
 const midiLearn = new MidiLearn(document.querySelector(".midi-button"));
 const setlistPanel = new SetlistPanel(document.querySelector(".setlist-button"), (text) => recorderBar.setStatus(text));
@@ -1491,7 +1609,7 @@ new SoundCheckPanel(document.querySelector(".sound-check"));
 const LIVE_KEYS = [["Space", "Play / pause the backing track"], ["R", "Record"], ["Ctrl+← / →", "Previous / next preset"],
                    ["1 – 9", "Load favourite preset 1 to 9 (star presets in the preset menu)"],
                    ["Ctrl+Z / Ctrl+Shift+Z", "Undo / redo any change to the sound (presets, knobs, scenes, resets)"], ["M", "Mute output (panic)"],
-                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["F1", "The user manual"], ["Esc", "Close"]];
+                   ["Hold D", "Hear your voice without effects"], ...LOOPER_KEYS, ...SCENE_KEYS, ...SETLIST_KEYS, ["?", "This list"], ["F1", "The user manual"], ["Ctrl+,", "Settings"], ["Esc", "Close"]];
 function toggleLiveKeys(show) {
   let overlay = document.querySelector(".live-keys");
   if (!overlay) {
@@ -1543,3 +1661,4 @@ Juce.getNativeFunction("getParameterDefaults")().then((defaults) => {
 });
 
 initDaw();
+initSetup(); // after initDaw: the status strip goes into both hint lines
