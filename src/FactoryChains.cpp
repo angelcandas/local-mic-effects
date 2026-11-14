@@ -202,6 +202,22 @@ const std::vector<Chain>& getChains()
               { eq ({ .lowCut = 80.0f, .b1Hz = 300.0f, .b1Db = -1.0f }), smoothGentle(), comp (glue, -20.0f, 2.0f, 30.0f, 200.0f, 1.0f),
                 deEss (30.0f, true), saturation (1.0f, 1.5f, 100.0f), trimmed ({ "limiter", { { "limCeiling", -1.0f } } }, 2.1f) }, true },
 
+            // Rack versions (DAW only): the classic parallel tricks as two chains side by side.
+            { "Pop lead: parallel squash", "Vocals/Racks", "The pop lead with New York compression: a clean chain and a hard-squashed one blended under it, for density without losing the peaks",
+              { highPass (90.0f), tune (25.0f, 90.0f), eq ({ .b1Db = -2.0f, .b3Hz = 3000.0f, .b3Db = 1.5f, .highShelfDb = 3.0f }), smoothHarsh (5.0f),
+                { "rack", { { "chain2Gain", -9.0f } },
+                  { { "Clean", { comp (punch, -20.0f, 4.0f, 3.0f, 80.0f, 3.0f) } },
+                    { "Squash", { comp (punch, -36.0f, 10.0f, 1.0f, 60.0f, 14.0f), saturation (1.0f, 6.0f, 100.0f) } } } },
+                opto (25.0f, 1.0f), deEss (50.0f, false), saturation (1.0f, 3.0f, 30.0f), microShift (8.0f, 15.0f),
+                echo (4.0f, 250.0f, 20.0f, 15.0f, 60.0f, 300.0f, 5000.0f), trimmed (plate (1.8f, 40.0f, 16.0f, 30.0f), 0.6f) }, true },
+
+            { "Rap lead: dry + wet space", "Vocals/Racks", "The rap lead kept dry in front, with its slap and booth on a parallel chain you can turn up or down",
+              { highPass (100.0f), eq ({ .b1Hz = 300.0f, .b1Db = -3.0f, .b3Db = 2.0f, .highShelfDb = 2.0f }),
+                comp (punch, -21.0f, 6.0f, 1.0f, 60.0f, 4.0f), opto (25.0f, 1.0f), deEss (55.0f, false), saturation (3.0f, 4.0f, 40.0f),
+                trimmed ({ "rack", { { "chain2Gain", -12.0f } },
+                           { { "Dry", {} },
+                             { "Space", { echo (0.0f, 90.0f, 10.0f, 100.0f, 0.0f, 250.0f, 6000.0f), irReverb (0.0f, 100.0f) } } } }, 3.6f) }, true },
+
             { "Vocal plate return", "Vocals/Returns", "A return track's plate: fully wet, 2 s, lows cut",
               { { "plate", { { "plateMix", 100.0f }, { "plateDecay", 2.0f }, { "platePreDelay", 40.0f }, { "plateLowCut", 250.0f } } } }, true },
 
@@ -302,17 +318,41 @@ namespace
     }
 }
 
-juce::ValueTree makeInserts (const juce::String& name)
+namespace
 {
-    for (const auto& chain : getChains())
+    // One device as an INSERT: the effect's defaults, the first switch on, then its settings.
+    // A rack: its switch, gains and per-chain values, and a CHAIN (name, INSERTS) per chain.
+    juce::ValueTree makeInsert (const Device& device)
     {
-        if (name != chain.name)
-            continue;
+        juce::ValueTree insert ("INSERT");
+        insert.setProperty ("type", juce::String (device.type), nullptr);
 
-        juce::ValueTree inserts ("INSERTS");
-        inserts.setProperty ("name", juce::String (chain.name), nullptr);
+        if (juce::String (device.type) == "rack")
+        {
+            insert.setProperty ("rackOn", 1.0f, nullptr);
+            insert.setProperty ("rackInGain", 0.0f, nullptr);
+            insert.setProperty ("rackOutGain", 0.0f, nullptr);
+            for (size_t c = 0; c < device.chains.size(); ++c)
+            {
+                const auto n = juce::String ((int) c + 1);
+                insert.setProperty ("chain" + n + "Gain", 0.0f, nullptr);
+                insert.setProperty ("chain" + n + "Pan", 0.0f, nullptr);
+                insert.setProperty ("chain" + n + "On", 1.0f, nullptr);
+                insert.setProperty ("chain" + n + "Solo", 0.0f, nullptr);
 
-        for (const auto& device : chain.devices)
+                juce::ValueTree chain ("CHAIN"), inserts ("INSERTS");
+                chain.setProperty ("name", juce::String (device.chains[c].first), nullptr);
+                for (const auto& inner : device.chains[c].second)
+                    if (auto child = makeInsert (inner); child.isValid())
+                    {
+                        child.setProperty ("id", 0, nullptr); // numbered when pasted (Edit::renumber numbers what has an id)
+                        inserts.appendChild (child, nullptr);
+                    }
+                chain.appendChild (inserts, nullptr);
+                insert.appendChild (chain, nullptr);
+            }
+        }
+        else
         {
             std::optional<fx::ModuleType> type;
             for (int t = 0; t < fx::numModuleTypes; ++t)
@@ -321,12 +361,8 @@ juce::ValueTree makeInserts (const juce::String& name)
 
             auto module = type.has_value() ? fx::createModule (*type) : nullptr;
             if (module == nullptr)
-                continue;
+                return {};
 
-            juce::ValueTree insert ("INSERT");
-            insert.setProperty ("type", juce::String (device.type), nullptr);
-
-            // Defaults first, the first switch on, then the chain's settings.
             bool switched = false;
             for (int v = 0; v < module->getNumValues(); ++v)
             {
@@ -338,11 +374,27 @@ juce::ValueTree makeInserts (const juce::String& name)
                 }
                 insert.setProperty (juce::Identifier (module->getValueId (v)), value, nullptr);
             }
-            for (const auto& [id, value] : device.values)
-                insert.setProperty (juce::Identifier (id), value, nullptr);
-
-            inserts.appendChild (insert, nullptr);
         }
+
+        for (const auto& [id, value] : device.values)
+            insert.setProperty (juce::Identifier (id), value, nullptr);
+        return insert;
+    }
+}
+
+juce::ValueTree makeInserts (const juce::String& name)
+{
+    for (const auto& chain : getChains())
+    {
+        if (name != chain.name)
+            continue;
+
+        juce::ValueTree inserts ("INSERTS");
+        inserts.setProperty ("name", juce::String (chain.name), nullptr);
+
+        for (const auto& device : chain.devices)
+            if (const auto insert = makeInsert (device); insert.isValid())
+                inserts.appendChild (insert, nullptr);
 
         inserts.appendChild (makeMacros (inserts), nullptr);
         return inserts;

@@ -20,12 +20,15 @@ struct Device
 {
     const char* type; // module key ("compressor", "plate"...)
     std::vector<std::pair<const char*, float>> values; // anything left out is the effect's default
+    // type "rack" (DAW only): its parallel chains, each a name and its devices; the rack's
+    // values (chain<n>Gain...) go in `values`.
+    std::vector<std::pair<const char*, std::vector<Device>>> chains = {};
 };
 
 struct Chain
 {
     const char* name;
-    const char* folder;      // "Vocals", "Vocals/Returns"
+    const char* folder;      // "Vocals", "Vocals/Racks", "Vocals/Returns"
     const char* description; // one line
     std::vector<Device> devices;
     bool dawOnly = false;    // a bus or a return: not offered in Live
