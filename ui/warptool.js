@@ -31,6 +31,40 @@ const GRAB_PX = 6, SNAP_PX = 8, HANDLE_PX = 18;
 // Copied tabs, as timeline places: [[where the audio is on the timeline unwarped, where it plays]].
 let clipboard = null;
 
+// For the arrangement's clip menu: copy a clip's tabs, and what pasting them onto another
+// clip gives (its tabs plus the copied ones at the same timeline places), or null.
+export function copyWarpTabs(clip) {
+  const markers = clip.warp ?? [];
+  if (markers.length < 2) return 0;
+  const anchor = clip.start - clip.offset;
+  clipboard = { from: clip.id, tabs: markers.map(([s, t]) => [s + anchor, t + anchor]) };
+  return markers.length;
+}
+export const canPasteWarpTabs = (clip) => Boolean(clipboard) && clipboard.from !== clip.id && !clip.midi;
+export function pastedWarpTabs(clip) {
+  if (!canPasteWarpTabs(clip)) return null;
+  const anchor = clip.start - clip.offset, map = clip.timeMap ?? clip.warp ?? [];
+  const markers = (clip.warp ?? []).length ? clip.warp.map((m) => [...m])
+    : [[toSource(map, clip.offset), clip.offset], [toSource(map, clip.offset + clip.length), clip.offset + clip.length]];
+  for (const [sTime, tTime] of clipboard.tabs) {
+    const t = tTime - anchor, source = sTime - anchor;
+    if (t < clip.offset - 1e-6 || t > clip.offset + clip.length + 1e-6) continue;
+    if (markers.some(([, mt]) => Math.abs(mt - t) < 0.002)) continue;
+    markers.push([source, t]);
+  }
+  markers.sort((x, y) => x[0] - y[0]);
+  const clean = [];
+  for (const m of markers) {
+    const last = clean[clean.length - 1];
+    if (last) {
+      const ds = m[0] - last[0], dt = m[1] - last[1];
+      if (ds < 1e-4 || dt < 1e-4 || dt / ds > MAX_STRETCH || ds / dt > MAX_STRETCH) continue;
+    }
+    clean.push(m);
+  }
+  return clean;
+}
+
 export function createWarpTool(ctx) {
   const { screen, daw, RULER } = ctx;
   let selected = []; // sources (file seconds) of the selected tabs of the active lane

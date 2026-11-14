@@ -6,14 +6,15 @@
 //    the playhead;
 //  - the waveform, as a list of lanes: the selected clip, and every other audio clip
 //    selected with it, stacked on one timeline (Edit: Active clip | All clips);
-//  - on the left, one section per job: Pitch, Warp, Hitpoints, Quantize. The open section
+//  - on the left, one section per job: Pitch, Warp, Hitpoints, Tempo, Quantize. The open section
 //    is the active tool. With no tool open (or Pitch) the pointer only locates, scrolls and
 //    zooms, so nothing in the audio changes by accident.
-// The Notes view is ui/pitchedit.js; the tools' gestures are ui/warptool.js and ui/hitpointtool.js.
+// The Notes view is ui/pitchedit.js; the tools' gestures are ui/warptool.js, ui/hitpointtool.js and ui/tempotool.js.
 import { clamp, html } from "./widgets.js";
 import { createNoteEditor } from "./pitchedit.js";
 import { createWarpTool } from "./warptool.js";
 import { createHitpointTool } from "./hitpointtool.js";
+import { createTempoTool } from "./tempotool.js";
 import { algorithmControls, createQuantizeControls, keyCaption, pitchKnobs, prefs, semitoneText } from "./rhythm.js";
 
 export const RULER = 20; // px: the ruler lane at the top of the waveform (bars, tab handles)
@@ -23,6 +24,7 @@ const SECTIONS = [
   ["pitch", "Pitch", "", false],
   ["warp", "Warp", "1", true],
   ["hits", "Hitpoints", "2", true],
+  ["tempo", "Tempo", "3", true],
   ["quantize", "Quantize", "4", false],
 ];
 
@@ -106,12 +108,13 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
     previewFilter: (filter) => { clearTimeout(hitsTimer); hitsTimer = setTimeout(() => fetchHits(active(), filter), 60); },
   };
   let hitsTimer = 0;
-  const tools = { warp: createWarpTool(ctx), hits: createHitpointTool(ctx) };
+  const tools = { warp: createWarpTool(ctx), hits: createHitpointTool(ctx), tempo: createTempoTool(ctx) };
 
   const bodies = {
     pitch: [knobs, keyInfo, algorithmInfo],
     warp: [tools.warp.body],
     hits: [tools.hits.body],
+    tempo: [tools.tempo.body],
     quantize: quantize.elements,
   };
   let open = prefs.get("tool", "pitch");
@@ -506,6 +509,7 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
     }
     tools.warp.draw(open === "warp" && !active().clip.timeBypass);
     tools.hits.draw(open === "hits");
+    tools.tempo.draw(open === "tempo");
     drawLaneLabels();
     drawLoop();
     movePlayhead();
@@ -696,9 +700,10 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
     notesTab.classList.toggle("has-edits", Boolean(c.pitchEdited));
     tools.warp.update();
     tools.hits.update();
+    tools.tempo.update();
     hint.textContent = tool()?.hint?.() ?? HINTS[open ?? "none"];
     if (mode === "notes") notesView.update();
-    const shape = lanes.map((l) => { const x = l.clip; return `${x.audioKey}|${x.start}|${x.offset}|${x.length}|${x.gain}|${JSON.stringify(x.warp ?? [])}|${x.timeBypass}|${x.hitsKey}`; }).join("/");
+    const shape = lanes.map((l) => { const x = l.clip; return `${x.audioKey}|${x.start}|${x.offset}|${x.length}|${x.gain}|${JSON.stringify(x.warp ?? [])}|${x.timeBypass}|${x.hitsKey}|${JSON.stringify(x.beatMap ?? null)}|${x.musical}|${x.clipTempo}`; }).join("/");
     if (shape !== lastShape) {
       lastShape = shape;
       draw();
@@ -737,6 +742,7 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
       resize.disconnect();
       tools.warp.dispose?.();
       tools.hits.dispose?.();
+      tools.tempo.dispose?.();
       quantize.dispose();
       notesView?.dispose();
     },
