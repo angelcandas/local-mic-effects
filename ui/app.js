@@ -3,7 +3,7 @@
 import * as Juce from "./juce/index.js";
 import { CATEGORIES, MODULE_KEYS, MODULES, NOTE_NAMES, SCALES, isControlShown } from "./modules.js";
 import { createActivity, createFxView } from "./fxviews.js";
-import { createPresetPicker, presetParams } from "./fxpresets.js";
+import { createPresetPicker, effectPresets, presetParams } from "./fxpresets.js";
 import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, keyText, polar, releaseFocus, svg } from "./widgets.js";
 import { deviceKit, initDaw } from "./daw.js";
 import { DeviceCard } from "./devices.js";
@@ -756,7 +756,7 @@ class Rack {
       const card = this.buildCard(module, power);
       const item = this.buildSidebarItem(module, power, card);
 
-      groups[module.category].append(item);
+      groups[module.category].append(this.buildSidebarRow(module, item, card));
       grid.append(card);
       this.entries.push({ module, power, card, item });
 
@@ -764,6 +764,7 @@ class Rack {
     }
 
     this.refresh();
+    this.buildSearch(sidebar);
 
     // A preset, a setlist song or the host can reorder the chain too.
     this.chainOrder("get").then((keys) => this.applyOrder(keys)).catch(() => {});
@@ -1085,6 +1086,63 @@ class Rack {
     clearTimeout(this.tapLabelTimer);
     this.tapLabelTimer = setTimeout(() => { button.textContent = "Tap"; }, 2500);
     this.onUserChange();
+  }
+
+  // The library in Live: each effect's presets fold out under it (a click loads one and
+  // switches the effect on), and a search box finds effects and presets by name.
+  buildSidebarRow(module, item, card) {
+    const row = html("div", "effect-row");
+    row.dataset.name = module.name.toLowerCase();
+    const unfold = html("button", "effect-unfold", "▸");
+    Object.assign(unfold, { type: "button", title: `Show ${module.name}'s presets` });
+    const list = html("div", "effect-presets");
+    list.hidden = true;
+    const fill = () => effectPresets(Juce.getNativeFunction, module.id).then((presets) => {
+      list.replaceChildren(...presets.map((preset) => {
+        const b = html("button", `effect-preset${preset.factory ? "" : " is-yours"}`, preset.name);
+        b.type = "button";
+        b.title = `${module.name} with the "${preset.name}" preset`;
+        b.addEventListener("click", () => this.loadPreset(module, card, preset));
+        return b;
+      }));
+      if (!presets.length) list.append(html("div", "effect-preset-none", "No presets yet"));
+      row.dataset.presets = presets.map((p) => p.name.toLowerCase()).join("\n");
+    });
+    row.open = (open) => {
+      list.hidden = !open;
+      unfold.textContent = open ? "▾" : "▸";
+      unfold.setAttribute("aria-expanded", String(open));
+    };
+    unfold.addEventListener("click", () => { const open = list.hidden; row.open(open); if (open) fill(); });
+    row.append(item, unfold, list);
+    fill();
+    return row;
+  }
+
+  loadPreset(module, card, preset) {
+    const entry = this.entries.find((e) => e.module === module);
+    if (entry && !entry.power.getValue()) entry.item.click(); // on, at the end of the chain
+    card.device?.presetPicker?.load(preset, preset.factory);
+  }
+
+  buildSearch(sidebar) {
+    const search = html("input", "sidebar-search");
+    Object.assign(search, { type: "search", placeholder: "Find an effect or preset", spellcheck: false });
+    search.addEventListener("keydown", (event) => {
+      event.stopPropagation(); // typing mustn't fire the stage keys
+      if (event.key === "Escape") { search.value = ""; search.dispatchEvent(new Event("input")); search.blur(); }
+    });
+    search.addEventListener("input", () => {
+      const query = search.value.trim().toLowerCase();
+      for (const row of sidebar.querySelectorAll(".effect-row")) {
+        const presetHit = query.length > 1 && (row.dataset.presets ?? "").split("\n").some((name) => name.includes(query));
+        row.hidden = Boolean(query) && !row.dataset.name.includes(query) && !presetHit;
+        row.open(presetHit && !row.dataset.name.includes(query));
+        for (const b of row.querySelectorAll(".effect-preset")) b.hidden = presetHit && !row.dataset.name.includes(query) && !b.textContent.toLowerCase().includes(query);
+      }
+      for (const group of sidebar.querySelectorAll(".sidebar-group")) group.hidden = ![...group.querySelectorAll(".effect-row")].some((row) => !row.hidden);
+    });
+    sidebar.before(search);
   }
 
   buildSidebarItem(module, power, card) {

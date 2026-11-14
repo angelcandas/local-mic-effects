@@ -1637,3 +1637,17 @@ body.is-daw .setlist-drawer, body.is-daw .stage-view { display: none; }
 .setup-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .setup-check { display: flex; align-items: center; gap: 6px; }
 .open-in-daw[hidden] { display: none; }
+
+/* The library in Live: search, and each effect's presets folded under it. */
+.sidebar-search { margin: 0 14px 6px; padding: 6px 9px; border: 1px solid var(--line); border-radius: 8px; background: rgba(0, 0, 0, 0.25); color: var(--text); font: inherit; font-size: 12px; }
+.sidebar-search:focus { outline: none; border-color: var(--accent); }
+.effect-row { position: relative; }
+.effect-row > .effect-item { padding-right: 28px; }
+.effect-unfold { position: absolute; top: 3px; right: 2px; width: 24px; height: 24px; padding: 0; border: 0; border-radius: 6px; background: none; color: var(--faint); font-size: 10px; cursor: pointer; }
+.effect-unfold:hover { background: rgba(255, 255, 255, 0.06); color: var(--text); }
+.effect-presets { display: flex; flex-direction: column; margin: 0 0 4px 26px; }
+.effect-preset { padding: 3px 8px; border: 0; border-radius: 6px; background: none; color: var(--muted); font-size: 12px; text-align: left; cursor: pointer; }
+.effect-preset:hover { background: rgba(255, 255, 255, 0.04); color: var(--text); }
+.effect-preset.is-yours::after { content: " ·  yours"; color: var(--faint); font-size: 10.5px; }
+.effect-preset-none { padding: 3px 8px; color: var(--faint); font-size: 11.5px; }
+.effect-presets[hidden], .effect-row[hidden], .effect-preset[hidden] { display: none; }
