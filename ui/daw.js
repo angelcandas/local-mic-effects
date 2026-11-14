@@ -2848,6 +2848,7 @@ class DawScreen {
 
     if (!kept) this.drawWaveform(canvas);
     if (!clip.midi) drawWarpMarkers(element, clip, this.zoom);
+    if (!clip.midi && clip.id === this.selectedClip) this.drawClipHits(element, clip);
     element.classList.toggle("is-warped", Boolean(clip.warp?.length) || Math.abs(clip.transpose || 0) > 1e-4);
 
     element.addEventListener("contextmenu", (event) => {
@@ -5398,13 +5399,17 @@ class DawScreen {
                ["V (1) / 2 / B / G / P", "Select, range, cut, gain and draw tools"], ["Range tool", "Drag across tracks to mark time (Shift+click: move an end)"], ["Draw tool", "Click places the picked pattern or sound, drag paints copies, right-click (or right-drag) erases"], ["Pattern blocks", "Shift+click picks several (Ctrl+A all); Delete, Ctrl+C / X / V / D act on them; drag the left edge to trim; the Cut tool (B) cuts a block"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Ctrl+L", "Loop this clip (sets the loop range to it)"], ["Alt+drag", "Move or trim without snapping"],
                ["Ctrl+1 / Ctrl+2", "Narrower / wider grid"], ["Ctrl+3", "Triplet grid on / off"], ["Ctrl+4", "Snap on / off"],
-               ["Snap", "Clips also snap to other clips' edges, markers, the playhead and the loop range"]]],
+               ["Snap", "Clips also snap to other clips' edges, markers, the playhead and the loop range"],
+               ["Alt+N / Alt+B", "Playhead to the selected clip's next / previous hitpoint"]]],
     ["Clip editor (Wave, W)", [["1 / 2 / 4", "Open the Warp, Hitpoints or Quantize section (the open one is the tool); Esc closes it"],
                                ["Click / drag (no tool open)", "Move the playhead / scroll; in the ruler, drag to mark a loop range"],
                                ["Warp: click", "Pin a warp tab where the audio plays now"], ["Warp: drag", "Move that moment of the audio; it stretches between the tabs either side"],
                                ["Warp: drag a handle (ruler)", "Slide a tab along the audio"], ["Warp: Alt+click / double-click", "Remove a tab (Delete: the selected ones)"],
                                ["Warp: ← / → (Shift)", "Nudge the selected tabs 1 ms (10 ms)"], ["Warp: Tab / Shift+Tab", "Select the next / previous tab"],
-                               ["Warp: Ctrl/Cmd at the press", "Flip Hold neighbours for one drag"], ["Ctrl/Cmd + scroll", "Zoom (or drag the overview box's edges)"]]],
+                               ["Warp: Ctrl/Cmd at the press", "Flip Hold neighbours for one drag"],
+                               ["Hitpoints: click between two / Tab", "Hear that slice / the next one (Shift+Tab: the previous)"],
+                               ["Hitpoints: click / Shift+click", "Lock / disable a hitpoint"], ["Hitpoints: Alt+click / drag", "Add one / move one"],
+                               ["Hitpoints: Ctrl/Cmd+Alt+click", "Back to automatic"], ["Ctrl/Cmd + scroll", "Zoom (or drag the overview box's edges)"]]],
     ["Range (after marking one with the Range tool)", [["Delete", "Delete what's inside"], ["Ctrl+Shift+Delete", "Delete time: the rest of the song moves left"],
                   ["Ctrl+E", "Split at both ends"], ["Ctrl+D", "Duplicate it after itself"], ["Ctrl+L", "Loop the range"], ["Z", "Zoom to the range"],
                   ["Right-click", "Insert silence, export the range, and the rest"], ["Esc", "Clear the range"]]],
@@ -5880,6 +5885,47 @@ class DawScreen {
     });
   }
 
+  // The selected clip's hitpoints (as the clip editor's Hitpoints tool keeps them), once a
+  // beat is wide enough to tell them apart.
+  async clipHits(clip) {
+    const key = `${clip.id}|${clip.audioKey}|${clip.offset}|${clip.length}|${JSON.stringify(clip.warp ?? [])}|${clip.hitsKey}`;
+    this.hitsCache ??= new Map();
+    if (this.hitsCache.has(key)) return this.hitsCache.get(key);
+    const result = await daw("hitpoints", { id: clip.id });
+    const times = result?.ok ? result.hits.filter((h) => h[2] !== "disabled").map((h) => h[0]) : null;
+    if (times?.length) {
+      if (this.hitsCache.size > 20) this.hitsCache.clear();
+      this.hitsCache.set(key, times);
+    }
+    return times ?? [];
+  }
+
+  async drawClipHits(element, clip) {
+    const beatPx = 60 / Math.max(1, this.session?.tempo || 120) * this.zoom;
+    if (beatPx < 40) return;
+    const times = await this.clipHits(clip);
+    if (!element.isConnected) return;
+    element.querySelectorAll(".clip-hit").forEach((e) => e.remove());
+    for (const t of times) {
+      const x = (t - clip.offset) * this.zoom;
+      if (x < 0 || x > clip.length * this.zoom) continue;
+      const line = html("div", "clip-hit");
+      line.style.left = `${x}px`;
+      element.append(line);
+    }
+  }
+
+  // Alt+N / Alt+B: the playhead to the selected clip's next / previous hitpoint.
+  async seekHitpoint(direction) {
+    const found = this.findClip(this.selectedClip);
+    if (!found || found.clip.midi) return toast("Select an audio clip to move between its hitpoints.");
+    const clip = found.clip;
+    const times = (await this.clipHits(clip)).map((t) => clip.start + t - clip.offset).sort((a, b) => a - b);
+    const now = this.status?.position ?? 0;
+    const next = direction > 0 ? times.find((t) => t > now + 0.001) : [...times].reverse().find((t) => t < now - 0.001);
+    if (next != null) this.seek(next);
+  }
+
   // A clip's right-click menu: editing, then the Audio processes (the same as the menu
   // bar's Audio menu, which the plug-in doesn't have).
   openClipMenu(clip, x, y) {
@@ -5903,6 +5949,7 @@ class DawScreen {
         const next = this.nextClipTouching(clip);
         item("Crossfade with the next clip", () => this.crossfade(clip, next, 0.05), { disabled: !next,
              hint: next ? "Both clips reach into each other by 25 ms and fade across (50 ms in all), so the join can't click" : "Only when another clip starts where this one ends" });
+        item("Split at hitpoints", () => daw("hitpointAction", { id: clip.id, action: "split" }), { hint: "Cut the clip at every note start (as the clip editor's Hitpoints tool shows them), with short fades" });
         item("Keep as a take", () => daw("takes", { action: "fromClip", clip: clip.id }), { hint: "Copy this clip into a new take lane, so you can record over it and still pick parts of it" });
         heading("Audio");
         for (const [label, command, hint] of AUDIO_PROCESSES)
@@ -6161,6 +6208,7 @@ class DawScreen {
       else if (event.key === "Delete" || event.key === "Backspace") command("deleteTrack");
     }
     else if (event.altKey && (event.key === "ArrowLeft" || event.key === "ArrowRight")) { handled(); this.nudgeSelected(event.key === "ArrowLeft" ? -step : step); }
+    else if (event.altKey && (code === "KeyN" || code === "KeyB")) { handled(); this.seekHitpoint(code === "KeyN" ? 1 : -1); }
     else if (event.altKey) return;
     else if (code === "Numpad0") command("stop");
     else if (code === "NumpadMultiply") command("record");

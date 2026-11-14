@@ -701,6 +701,8 @@ juce::var DawBridge::describeSession()
                            { "transpose", number (clip, ids::transpose) }, { "warp", markers }, { "warpBypass", (bool) clip.getProperty (ids::warpBypass, false) },
                            { "timeBypass", (bool) clip.getProperty (ids::timeBypass, false) },
                            { "hitsEdited", daw::hitpoints::hasStored (clip) },
+                           // Changes whenever its stored hitpoints do (the editor asks for them again).
+                           { "hitsKey", juce::String::toHexString ((clip[ids::hitFilter].toString() + "/" + clip[ids::hitpoints].toString()).hashCode64()) },
                            // Musical clips: the whole map (file -> rendered time, with the bend) and the free warp
                            // alone (file -> straight time), for the editor's tabs and stretch factors.
                            { "timeMap", daw::Edit::isMusical (clip) ? describeMarkers (daw::Edit::getEffectiveWarp (clip), number (clip, ids::offset), number (clip, ids::length)) : juce::var() },

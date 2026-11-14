@@ -9,11 +9,12 @@
 //  - on the left, one section per job: Pitch, Warp, Hitpoints, Quantize. The open section
 //    is the active tool. With no tool open (or Pitch) the pointer only locates, scrolls and
 //    zooms, so nothing in the audio changes by accident.
-// The Notes view is ui/pitchedit.js; the Warp tool's gestures are ui/warptool.js.
+// The Notes view is ui/pitchedit.js; the tools' gestures are ui/warptool.js and ui/hitpointtool.js.
 import { clamp, html } from "./widgets.js";
 import { createNoteEditor } from "./pitchedit.js";
 import { createWarpTool } from "./warptool.js";
-import { algorithmControls, keyCaption, pitchKnobs, prefs, savedQuantizeArgs, semitoneText } from "./rhythm.js";
+import { createHitpointTool } from "./hitpointtool.js";
+import { algorithmControls, createQuantizeControls, keyCaption, pitchKnobs, prefs, semitoneText } from "./rhythm.js";
 
 export const RULER = 20; // px: the ruler lane at the top of the waveform (bars, tab handles)
 
@@ -21,14 +22,13 @@ export const RULER = 20; // px: the ruler lane at the top of the waveform (bars,
 const SECTIONS = [
   ["pitch", "Pitch", "", false],
   ["warp", "Warp", "1", true],
-  ["hits", "Hitpoints", "2", false],
+  ["hits", "Hitpoints", "2", true],
   ["quantize", "Quantize", "4", false],
 ];
 
 const HINTS = {
   none: "Click to move the playhead, drag to scroll, Ctrl/Cmd + scroll to zoom. Open Warp (1) to change the timing.",
   pitch: "Click to move the playhead, drag to scroll, Ctrl/Cmd + scroll to zoom. Open Warp (1) to change the timing.",
-  hits: "The faint lines are note starts found in the audio: the Warp tool snaps to them.",
   quantize: "Quantize warps the clip so its note starts land on the grid.",
 };
 
@@ -84,45 +84,35 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
   const algorithm = algorithmControls(daw, () => [current]);
   const [algorithmRow, algorithmInfo] = algorithm.elements;
 
-  // Hitpoints (read-only for now: where notes start, the Warp tool's snap targets).
-  const hitsCount = html("p", "panel-caption");
-  const sensitivity = new ValueKnob({ label: "Detect", min: 0, max: 100, step: 1, value: prefs.get("sensitivity", 50), defaultValue: 50,
-                                      format: (v) => `${Math.round(v)}%`,
-                                      onChange: (v) => { prefs.set("sensitivity", Math.round(v)); clearTimeout(hitsTimer); hitsTimer = setTimeout(() => lanes.forEach(fetchHits), 200); } });
-  sensitivity.element.title = "How soft a note start still counts (also what Quantize uses)";
-  let hitsTimer = 0;
-  const hitsKnobs = html("div", "insert-controls rhythm-knobs");
-  hitsKnobs.append(sensitivity.element);
-
-  // Quantize (its settings are in the track's Pitch & time card).
-  const report = (result) => {
-    if (!result?.ok) return;
-    toast(result.onsets ? `Quantize: ${result.moved} of ${result.onsets} notes moved onto the grid.` : "Quantize: no clear note starts found.");
-  };
-  const quantizeRow = html("div", "panel-actions");
-  const resetTime = button("tool", "Reset", "Put the clip's timing back as recorded: every warp tab goes (its pitch stays)", () => daw("clearWarp", { clips: [id] }));
-  quantizeRow.append(
-    button("tool", "Quantize", "Warp this clip so its notes start on the grid (Q)",
-      async () => report(await daw("quantize", { clips: [id], ...savedQuantizeArgs(screen.session, owner.id) }))),
-    resetTime);
+  // Quantize: the same controls as the track's Pitch & time card, on this clip (or every
+  // lane's clip with Edit: All clips).
+  const quantize = createQuantizeControls(screen, ui, {
+    target: () => ({ clips: editAll && lanes.length > 1 ? lanes.map((l) => l.clip.id) : [id] }),
+    trackId: () => owner.id,
+    name: () => (editAll && lanes.length > 1 ? `${lanes.length} clips` : current.name || "clip"),
+    quantizeText: "Quantize", quantizeTitle: "Warp the clip so its hitpoints land on the grid (Q)",
+    resetText: "Reset", resetTitle: "Put the clip's timing back as recorded: every warp tab goes (its pitch stays)",
+  });
 
   // The Warp tool (its own section body, gestures and drawing).
   const toolLayer = html("div", "clip-editor-tools");
   const ctx = {
-    screen, daw, toast, lanes, active, RULER,
+    screen, daw, toast, lanes, active, RULER, ValueKnob, button,
     span: () => span(), width: () => width(), xOf: (time) => xOf(time), timeAt: (clientX) => timeAt(clientX),
     perPx: () => { const [a, b] = span(); return (b - a) / width(); },
     laneAt: (clientY) => laneAt(clientY), layer: toolLayer, wave: null,
     editAll: () => editAll && lanes.length > 1,
     paintSoon: () => paintSoon(), redraw: () => drawOverlay(), setStatus: (text) => setStatus(text),
+    previewFilter: (filter) => { clearTimeout(hitsTimer); hitsTimer = setTimeout(() => fetchHits(active(), filter), 60); },
   };
-  const tools = { warp: createWarpTool(ctx) };
+  let hitsTimer = 0;
+  const tools = { warp: createWarpTool(ctx), hits: createHitpointTool(ctx) };
 
   const bodies = {
     pitch: [knobs, keyInfo, algorithmInfo],
     warp: [tools.warp.body],
-    hits: [hitsKnobs, hitsCount, html("p", "panel-caption", "Note starts found in the audio. The Warp tool snaps to them; Tabs at hitpoints (Warp) pins them all.")],
-    quantize: [quantizeRow, html("p", "panel-caption", "Grid, strength and swing: the track's Pitch & time card. Reset puts the timing back as recorded.")],
+    hits: [tools.hits.body],
+    quantize: quantize.elements,
   };
   let open = prefs.get("tool", "pitch");
   if (!SECTIONS.some(([key]) => key === open)) open = null;
@@ -475,23 +465,24 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
   };
   const paintSoon = () => { if (!frame) frame = requestAnimationFrame(() => { frame = 0; paint(); }); };
 
-  //================================================================ hitpoints (read-only)
-  const fetchHits = async (lane) => {
+  //================================================================ hitpoints
+  // The clip's hitpoints as stored (or, while a filter knob moves, with that filter).
+  const fetchHits = async (lane, filter = null) => {
     const c = lane.clip;
-    const level = prefs.get("sensitivity", 50) / 100;
-    const key = `${c.audioKey}|${c.offset}|${c.length}|${JSON.stringify(c.warp ?? [])}|${level}`;
+    const key = `${c.audioKey}|${c.offset}|${c.length}|${JSON.stringify(c.warp ?? [])}|${c.hitsKey}|${filter ? JSON.stringify(filter) : ""}`;
     if (key === lane.hitsKey) return;
     lane.hitsKey = key;
-    const result = await daw("hitpoints", { id: c.id, sensitivity: level });
+    const result = await daw("hitpoints", { id: c.id, ...(filter ?? {}) });
     if (disposed || lane.hitsKey !== key) return;
     if (!result?.ok || !result.hits.length) {
       // Perhaps the take is still loading: ask again in a moment (a few times).
       lane.hitsTries = (lane.hitsTries ?? 0) + 1;
-      if (lane.hitsTries < 6) setTimeout(() => { if (!disposed && lane.hitsKey === key) { lane.hitsKey = ""; fetchHits(lane); } }, 1000 * lane.hitsTries);
+      if (lane.hitsTries < 6) setTimeout(() => { if (!disposed && lane.hitsKey === key) { lane.hitsKey = ""; fetchHits(lane, filter); } }, 1000 * lane.hitsTries);
     } else lane.hitsTries = 0;
     lane.hits = result?.hits ?? [];
-    if (lane === active()) hitsCount.textContent = `${lane.hits.length} note starts in the clip.`;
+    lane.hitFilter = result?.filter ?? null;
     tools.warp.update();
+    tools.hits.update();
     drawOverlay();
   };
 
@@ -501,9 +492,11 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
   const drawOverlay = () => {
     hitLayer.replaceChildren();
     const w = width();
-    const strong = open === "hits" || open === "warp";
+    const strong = open === "warp";
     for (const lane of lanes) {
-      for (const [time, strength] of lane.hits) {
+      if (open === "hits" && lane === active()) continue; // the Hitpoints tool draws its own
+      for (const [time, strength, state] of lane.hits) {
+        if (state === "disabled") continue;
         const x = xOf(lane.toTimeline(time));
         if (x < 0 || x > w) continue;
         const line = html("div", "hitpoint");
@@ -512,6 +505,7 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
       }
     }
     tools.warp.draw(open === "warp" && !active().clip.timeBypass);
+    tools.hits.draw(open === "hits");
     drawLaneLabels();
     drawLoop();
     movePlayhead();
@@ -685,7 +679,8 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
     musical.setAttribute("aria-pressed", String(Boolean(c.musical)));
     clipTempoLabel.hidden = !c.musical || mode === "notes";
     if (document.activeElement !== clipTempo) clipTempo.value = c.clipTempo ? String(Math.round(c.clipTempo * 100) / 100) : "";
-    resetTime.disabled = !(c.warp?.length);
+    quantize.reset.disabled = !lanes.some((l) => l.clip.warp?.length);
+    quantize.update();
 
     const changesPitch = Math.abs((c.transpose || 0) + (t.transpose || 0)) > 1e-4 || Boolean(c.pitchEdited);
     comparePitch.classList.toggle("is-selected", Boolean(c.warpBypass));
@@ -700,9 +695,10 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
     if (t.colour) element.style.setProperty("--wave", t.colour);
     notesTab.classList.toggle("has-edits", Boolean(c.pitchEdited));
     tools.warp.update();
+    tools.hits.update();
     hint.textContent = tool()?.hint?.() ?? HINTS[open ?? "none"];
     if (mode === "notes") notesView.update();
-    const shape = lanes.map((l) => { const x = l.clip; return `${x.audioKey}|${x.start}|${x.offset}|${x.length}|${x.gain}|${JSON.stringify(x.warp ?? [])}|${x.timeBypass}`; }).join("/");
+    const shape = lanes.map((l) => { const x = l.clip; return `${x.audioKey}|${x.start}|${x.offset}|${x.length}|${x.gain}|${JSON.stringify(x.warp ?? [])}|${x.timeBypass}|${x.hitsKey}`; }).join("/");
     if (shape !== lastShape) {
       lastShape = shape;
       draw();
@@ -740,6 +736,8 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
       cancelAnimationFrame(frame);
       resize.disconnect();
       tools.warp.dispose?.();
+      tools.hits.dispose?.();
+      quantize.dispose();
       notesView?.dispose();
     },
   };
