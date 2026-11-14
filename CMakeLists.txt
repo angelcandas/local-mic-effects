@@ -108,6 +108,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/Chords.h
     src/analysis/MixAssistant.cpp
     src/analysis/MixAssistant.h
+    src/analysis/VoiceFit.cpp
+    src/analysis/VoiceFit.h
     src/analysis/MixCheck.cpp
     src/analysis/MixCheck.h
     src/analysis/Beats.cpp

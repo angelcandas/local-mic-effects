@@ -359,7 +359,7 @@ export class LibraryBrowser {
   keyOf(payload) {
     switch (payload.kind) {
       case "effect": return payload.preset ? `fxp:${payload.id}:${payload.preset}` : `fx:${payload.id}`;
-      case "preset": return payload.chain ? `chain:${payload.chain}` : `preset:${payload.name}`;
+      case "preset": return payload.chain ? `${payload.factory ? "vchain" : "chain"}:${payload.chain}` : `preset:${payload.name}`;
       case "instrument": return `inst:${payload.id}`;
       case "audio": return `file:${payload.file}`;
       case "pattern": return `pattern:${payload.id}`;
@@ -423,6 +423,9 @@ export class LibraryBrowser {
     const presets = [
       ...(this.screen.chains ?? []).filter((chain) => this.matches(chain.name))
         .map((chain) => this.item({ key: `chain:${chain.name}`, name: chain.name, detail: "yours", payload: { kind: "preset", chain: chain.name, name: chain.name } })),
+      ...(this.screen.factoryChains ?? []).filter((chain) => this.matches(chain.name) || this.matches(chain.description ?? ""))
+        .map((chain) => this.item({ key: `vchain:${chain.name}`, name: chain.name, detail: "vocal chain", title: chain.description,
+                                    payload: { kind: "preset", chain: chain.name, factory: true, name: chain.name } })),
       ...(this.screen.presets ?? []).map((preset, index) => ({ preset, index }))
         .filter(({ preset }) => this.matches(preset.name) || this.matches(preset.category))
         .map(({ preset, index }) => this.item({ key: `preset:${index}`, name: preset.name, detail: preset.category, payload: { kind: "preset", index, name: preset.name } })),
@@ -625,7 +628,10 @@ export class LibraryBrowser {
     const yours = (this.screen.chains ?? []).filter((chain) => this.matches(chain.name))
       .map((chain) => this.item({ key: `chain:${chain.name}`, name: chain.name, title: chain.effects.join(" → "),
                                  payload: { kind: "preset", chain: chain.name, name: chain.name } }));
-    const byCategory = new Map([["Your chains", yours]]);
+    const vocal = (this.screen.factoryChains ?? []).filter((chain) => this.matches(chain.name) || this.matches(chain.description ?? ""))
+      .map((chain) => this.item({ key: `vchain:${chain.name}`, name: chain.name, title: `${chain.description}\n${chain.effects.join(" → ")}`,
+                                 payload: { kind: "preset", chain: chain.name, factory: true, name: chain.name } }));
+    const byCategory = new Map([["Your chains", yours], ["Vocal chains", vocal]]);
     presets.forEach((preset, index) => {
       if (!this.matches(preset.name) && !this.matches(preset.category)) return;
       if (!byCategory.has(preset.category)) byCategory.set(preset.category, []);
@@ -798,7 +804,7 @@ export class LibraryBrowser {
       if (id >= 0 && payload.preset) await screen.applyEffectPreset(id, payload.id, payload.preset);
     }
     if (payload.kind === "preset" && payload.chain) {
-      if ((await screen.loadChain(track, payload.chain, target.index))?.ok === false) return;
+      if ((await screen.loadChain(track, payload.chain, target.index, payload.factory))?.ok === false) return;
     } else if (payload.kind === "preset") await this.run("loadPreset", { track, preset: payload.index });
     this.addRecent(payload);
     screen.select(track, null);

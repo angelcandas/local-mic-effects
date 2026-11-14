@@ -16721,6 +16721,204 @@ static float stereoLoudness (const std::vector<float>& left, const std::vector<f
     return meter.getIntegrated();
 }
 
+// Fit to the voice (vocal effects V5): only the input gain and the level-dependent thresholds move.
+static void testVoiceFit()
+{
+    std::cout << "\nFit a chain to the voice\n";
+
+    const auto lufsAfter = [] (const std::vector<float>& mic, float gainDb)
+    {
+        auto copy = mic;
+        for (auto& sample : copy)
+            sample *= juce::Decibels::decibelsToGain (gainDb);
+        float* channels[] = { copy.data() };
+        return analysis::analyse (juce::AudioBuffer<float> (channels, 1, (int) copy.size()), sampleRate).getLoudnessOver() + 3.01f; // played on both sides
+    };
+
+    analysis::fit::Chain full;
+    full.gate = full.classicDeEsser = full.denoise = true;
+
+    for (const auto peakDb : { -10.0f, -30.0f, -3.0f })
+    {
+        auto mic = makeSoundCheckVoice (15.0, juce::Decibels::decibelsToGain (peakDb), juce::Decibels::decibelsToGain (peakDb - 42.0f));
+        juce::Random random (5);
+        for (auto& sample : mic) // breath and S's: noise that follows the voice
+            sample += sample * (random.nextFloat() * 2.0f - 1.0f) * 0.5f;
+        const auto plan = SoundCheck::makeFitPlan (mic.data(), (int) mic.size(), sampleRate, full, 100.0f);
+        const auto label = " (peaks at " + juce::String (peakDb, 0) + " dBFS)";
+        for (const auto& change : plan.changes)
+            std::cout << "        " << change.module << ": " << change.text << "\n";
+
+        check (plan.error.isEmpty(), "a sung voice is fitted" + label);
+        const auto gain = soundCheckValue (plan, "inputGain");
+        const auto after = lufsAfter (mic, gain);
+        check (std::abs (after - analysis::fit::targetLufs) <= 1.0f,
+               "the input gain brings the voice to -18 LUFS (" + juce::String (after, 1) + " LUFS with " + juce::String (gain, 1) + " dB)" + label);
+
+        const auto noiseAfter = peakDb - 42.0f - 3.0f + gain; // the hiss's RMS after the trim, about
+        const auto gate = soundCheckValue (plan, "gateThreshold");
+        check (gate > noiseAfter && gate < after, "the gate sits between the room and the voice (" + juce::String (gate) + " dB)" + label);
+        const auto deess = soundCheckValue (plan, "deessThreshold");
+        check (deess > -60.0f && deess < 0.0f, "the Classic de-esser gets a threshold (" + juce::String (deess) + " dB)" + label);
+        check (! plan.noiseProfile.empty(), "the denoiser learns the room" + label);
+
+        bool onlyLevels = true;
+        for (const auto& [id, value] : plan.values)
+            onlyLevels = onlyLevels && (id == "inputGain" || id == "gateThreshold" || id == "deessThreshold");
+        check (onlyLevels && plan.values.size() == 3, "nothing but the levels changes" + label);
+    }
+
+    {
+        // A chain with no gate, a Smart de-esser and no denoiser: only the input gain.
+        const auto mic = makeSoundCheckVoice (15.0, 0.1f, 0.0005f);
+        const auto plan = SoundCheck::makeFitPlan (mic.data(), (int) mic.size(), sampleRate, {}, 0.0f);
+        check (plan.values.size() == 1 && soundCheckValue (plan, "inputGain") != -999.0f && plan.noiseProfile.empty(),
+               "a chain without a gate or Classic de-esser gets only its input gain");
+
+        // Already fitted: nothing moves.
+        analysis::fit::Chain fitted;
+        fitted.inputGainDb = soundCheckValue (plan, "inputGain");
+        auto copy = mic;
+        for (auto& sample : copy)
+            sample *= juce::Decibels::decibelsToGain (fitted.inputGainDb);
+        float* channels[] = { copy.data() };
+        const auto again = analysis::fit::plan (analysis::analyse (juce::AudioBuffer<float> (channels, 1, (int) copy.size()), sampleRate), {});
+        check (std::abs (again.trimDb) <= 0.5f, "a voice that already arrives at -18 LUFS keeps its input gain (" + juce::String (again.trimDb, 1) + " dB)");
+
+        // Out of range: the gain stops at its limit and says so.
+        analysis::fit::Chain limited;
+        limited.maxInputDb = 3.0f;
+        float* micChannels[] = { const_cast<float*> (mic.data()) };
+        const auto quiet = analysis::fit::plan (analysis::analyse (juce::AudioBuffer<float> (micChannels, 1, (int) mic.size()), sampleRate), limited);
+        check (juce::approximatelyEqual (quiet.inputGainDb, 3.0f) && quiet.notes.joinIntoString (" ").contains ("limit"),
+               "the input gain stops at its limit and says so");
+    }
+
+    {
+        const auto shortVoice = makeSoundCheckVoice (10.0, 0.3f, 0.0005f, 10.0, 2.5);
+        const auto plan = SoundCheck::makeFitPlan (shortVoice.data(), (int) shortVoice.size(), sampleRate, full, 0.0f);
+        check (plan.error.isNotEmpty() && plan.values.empty(), "too little voice is refused");
+    }
+
+    {
+        // Live: the sound check's fit mode keeps every other value of the chain.
+        PluginProcessor processor;
+        processor.applyLiveChain (factory::makeInserts ("Podcast and spoken word"));
+        auto& state = processor.getState();
+        const auto valueOf = [&state] (const juce::String& id) { auto* p = state.getParameter (id); return p->convertFrom0to1 (p->getValue()); };
+        std::map<juce::String, float> before;
+        for (auto* parameter : processor.getParameters())
+            if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (parameter))
+                before[ranged->getParameterID()] = ranged->convertFrom0to1 (ranged->getValue());
+
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& soundCheck = processor.getSoundCheck();
+        soundCheck.handle ("start", juce::JSON::parse ("{\"seconds\": 15, \"fit\": true}"));
+        const auto mic = makeSoundCheckVoice (15.0, 0.05f, 0.0005f);
+        for (size_t done = 0; done < mic.size(); done += (size_t) blockSize)
+            soundCheck.capture (mic.data() + done, (int) juce::jmin ((size_t) blockSize, mic.size() - done));
+        soundCheck.capture (mic.data(), 1); // the capture notices it's full
+        soundCheck.waitForAnalysis();
+
+        const auto described = soundCheck.describe();
+        check ((bool) described["fit"] && described["phase"].toString() == "done", "Live's sound check fits the levels");
+        juce::StringArray moved;
+        for (const auto& [id, value] : before)
+            if (! juce::approximatelyEqual (value, valueOf (id)) && std::abs (value - valueOf (id)) > 1.0e-3f)
+                moved.add (id);
+        check (moved.contains ("inputGain") && moved.size() <= 3 && ! moved.contains ("compThreshold") && ! moved.contains ("hpfFreq"),
+               "only the input gain and thresholds moved (" + moved.joinIntoString (", ") + ")");
+        soundCheck.handle ("revert", {});
+        check (juce::approximatelyEqual (valueOf ("inputGain"), before["inputGain"]), "Revert brings the input gain back");
+        processor.releaseResources();
+    }
+}
+
+// The DAW's "Fit to this track": a factory vocal chain loaded onto a quiet voice, then fitted.
+static void testDawFit()
+{
+    std::cout << "\nFit to this track (DAW)\n";
+
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-fit", {});
+    folder.createDirectory();
+    juce::PropertiesFile::Options options;
+    options.applicationName = "MicFXTests";
+    options.filenameSuffix = ".settings";
+    juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+
+    PluginProcessor processor;
+    processor.prepareToPlay (sampleRate, blockSize);
+    auto& edit = processor.getDawEdit();
+
+    std::vector<std::pair<juce::String, juce::var>> events;
+    DawBridge::availableForTesting = true;
+    DawBridge bridge (processor, settings,
+                      [&] (const juce::Identifier& event, const juce::var& payload) { events.emplace_back (event.toString(), payload); },
+                      [] { return (juce::int64) 0; });
+    const auto run = [&] (const juce::String& command, std::initializer_list<std::pair<const char*, juce::var>> properties = {})
+    {
+        auto* object = new juce::DynamicObject();
+        for (const auto& [name, value] : properties)
+            object->setProperty (name, value);
+        juce::var result;
+        bridge.handle (command, juce::var (object), [&] (juce::var r) { result = r; });
+        return result;
+    };
+    run ("mode", { { "daw", true } });
+
+    // A voice 20 dB quieter than the chain expects, in a hissy room.
+    const auto mic = makeSoundCheckVoice (15.0, juce::Decibels::decibelsToGain (-30.0f), juce::Decibels::decibelsToGain (-72.0f));
+    const auto file = folder.getChildFile ("voice.wav");
+    {
+        juce::AudioBuffer<float> audio (1, (int) mic.size());
+        audio.copyFrom (0, 0, mic.data(), (int) mic.size());
+        writeWav (file, audio, sampleRate);
+    }
+    const auto track = (int) edit.getTracks()[0][daw::ids::id];
+    check (! (bool) run ("fitChain", { { "action", "analyse" }, { "track", track } })["ok"], "an empty track can't be fitted");
+    bridge.importAudio (file, track);
+
+    check ((bool) run ("loadChain", { { "track", track }, { "name", "Podcast and spoken word" }, { "factory", true } })["ok"],
+           "a factory vocal chain loads onto a DAW track");
+    const auto inserts = daw::Edit::getInserts (edit.getTrack (track));
+    check (inserts.getNumChildren() == (int) factory::makeInserts ("Podcast and spoken word").getNumChildren(), "with all its effects");
+    juce::ValueTree gate;
+    for (const auto& insert : inserts)
+        if (insert[daw::ids::type].toString() == "gate")
+            gate = insert;
+    const auto gateBefore = (float) gate["gateThreshold"];
+    const auto compBefore = inserts.getChildWithProperty (daw::ids::type, "compressor")["compThreshold"];
+    check (! (bool) run ("loadChain", { { "track", track }, { "name", "No such chain" }, { "factory", true } })["ok"], "an unknown name is refused");
+
+    check ((bool) run ("fitChain", { { "action", "analyse" }, { "track", track } })["ok"], "fit starts");
+    juce::var result;
+    for (int i = 0; i < 1000 && ! result.isObject(); ++i)
+    {
+        events.clear();
+        bridge.tick();
+        for (const auto& [name, payload] : events)
+            if (name == "dawFit" && (payload["state"].toString() == "done" || payload["state"].toString() == "error"))
+                result = payload;
+        if (! result.isObject())
+            juce::Thread::sleep (10);
+    }
+
+    const auto inGain = (float) edit.getTrack (track).getProperty (daw::ids::inGain, 0.0f);
+    check (result["state"].toString() == "done" && inGain > 15.0f && inGain < 24.0f,
+           "the chain's input gain brings the voice up (" + juce::String (inGain, 1) + " dB)");
+    check (! juce::approximatelyEqual ((float) gate["gateThreshold"], gateBefore), "the gate's threshold follows the room ("
+               + juce::String ((float) gate["gateThreshold"]) + " dB)");
+    check (inserts.getChildWithProperty (daw::ids::type, "compressor")["compThreshold"] == compBefore, "the compressor stays as it was");
+
+    edit.getUndoManager().undo();
+    check (juce::approximatelyEqual ((float) edit.getTrack (track).getProperty (daw::ids::inGain, 0.0f), 0.0f)
+               && juce::approximatelyEqual ((float) gate["gateThreshold"], gateBefore),
+           "one undo step takes the fit back");
+
+    processor.releaseResources();
+    folder.deleteRecursively();
+}
+
 static void testFactoryChains()
 {
     std::cout << "\nFactory vocal chains\n";
@@ -16891,6 +17089,8 @@ int main()
     testSpace();
     testColour();
     testFactoryChains();
+    testVoiceFit();
+    testDawFit();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -17136,6 +17336,8 @@ int main()
     testSpace();
     testColour();
     testFactoryChains();
+    testVoiceFit();
+    testDawFit();
     testEffectAutomation();
     testAnalysisSpeed();
     testLatency();

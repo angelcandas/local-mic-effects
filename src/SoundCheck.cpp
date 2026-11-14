@@ -49,11 +49,13 @@ namespace
 
     // The room's noise profile for the denoiser, from a stretch with no voice in it: through
     // the same low cut the chain has before the denoiser, then learnt like its Learn button.
-    std::vector<float> learnNoise (const float* mono, int start, int length, double sampleRate, float lowCutHz)
+    std::vector<float> learnNoise (const float* mono, int start, int length, double sampleRate, float lowCutHz, float gain = 1.0f)
     {
         const auto preRoll = juce::jmin (start, (int) (sampleRate * 0.05));
         std::vector<float> filtered ((size_t) (length + preRoll));
         std::copy (mono + start - preRoll, mono + start + length, filtered.begin());
+        for (auto& sample : filtered)
+            sample *= gain; // as it will arrive after an input gain change
 
         if (lowCutHz > 0.0f)
         {
@@ -92,6 +94,22 @@ namespace
             profile.clear();
         return profile;
     }
+
+    // The interface's gain: peaks near -12 dBFS leave room for the loudest notes.
+    juce::String adviseInput (float peak)
+    {
+        const auto by = juce::roundToInt (std::abs (peak + 12.0f));
+        if (peak >= -0.5f)
+            return "Your loudest notes clip (peaks hit 0 dBFS): turn the mic gain on your audio interface down about "
+                 + juce::String (by) + " dB, so peaks sit near -12 dBFS.";
+        if (peak > -6.0f)
+            return "Peaks reach " + formatDbfs (peak) + ": turn the mic gain on your audio interface down about "
+                 + juce::String (by) + " dB, so the loudest notes have room (aim for peaks near -12 dBFS).";
+        if (peak < -24.0f)
+            return "Peaks only reach " + formatDbfs (peak) + ": turn the mic gain on your audio interface up about "
+                 + juce::String (by) + " dB (aim for peaks near -12 dBFS), so the voice stays well above the noise.";
+        return "Input level is good: peaks at " + formatDbfs (peak) + " (around -12 dBFS is ideal).";
+    }
 }
 
 //==============================================================================
@@ -120,22 +138,7 @@ SoundCheck::Plan SoundCheck::makePlan (const float* mono, int numSamples, double
         return result;
     }
 
-    // The interface's gain: peaks near -12 dBFS leave room for the loudest notes.
-    {
-        const auto peak = result.peakDb;
-        const auto by = juce::roundToInt (std::abs (peak + 12.0f));
-        if (peak >= -0.5f)
-            result.inputAdvice = "Your loudest notes clip (peaks hit 0 dBFS): turn the mic gain on your audio interface down about "
-                               + juce::String (by) + " dB, so peaks sit near -12 dBFS.";
-        else if (peak > -6.0f)
-            result.inputAdvice = "Peaks reach " + formatDbfs (peak) + ": turn the mic gain on your audio interface down about "
-                               + juce::String (by) + " dB, so the loudest notes have room (aim for peaks near -12 dBFS).";
-        else if (peak < -24.0f)
-            result.inputAdvice = "Peaks only reach " + formatDbfs (peak) + ": turn the mic gain on your audio interface up about "
-                               + juce::String (by) + " dB (aim for peaks near -12 dBFS), so the voice stays well above the noise.";
-        else
-            result.inputAdvice = "Input level is good: peaks at " + formatDbfs (peak) + " (around -12 dBFS is ideal).";
-    }
+    result.inputAdvice = adviseInput (result.peakDb);
 
     // The room between phrases, and the voice.
     std::vector<float> quiet, loud;
@@ -339,6 +342,58 @@ SoundCheck::Plan SoundCheck::makePlan (const float* mono, int numSamples, double
 }
 
 //==============================================================================
+SoundCheck::Plan SoundCheck::makeFitPlan (const float* mono, int numSamples, double sampleRate,
+                                          const analysis::fit::Chain& current, float lowCutHz)
+{
+    Plan result;
+    if (mono == nullptr || numSamples <= 0)
+    {
+        result.error = "Nothing was heard from the mic.";
+        return result;
+    }
+
+    float* channels[] = { const_cast<float*> (mono) };
+    const juce::AudioBuffer<float> audio (channels, 1, numSamples);
+    const auto profile = analysis::analyse (audio, sampleRate);
+
+    result.peakDb = profile.peakDb;
+    result.voiceSeconds = profile.getActiveSeconds();
+    result.voiceLufs = profile.getLoudnessOver();
+
+    const auto fitted = analysis::fit::plan (profile, current, minVoiceSeconds);
+    if (fitted.error.isNotEmpty())
+    {
+        result.error = "Heard only " + juce::String (result.voiceSeconds, 1) + " s of singing. Sing for at least "
+                     + juce::String ((int) minVoiceSeconds) + " seconds (a verse, or a scale up and down), close to the mic.";
+        return result;
+    }
+
+    result.inputAdvice = adviseInput (result.peakDb);
+    result.noiseDb = fitted.noiseDb;
+    result.values.emplace_back ("inputGain", fitted.inputGainDb);
+    for (const auto& value : fitted.values)
+        result.values.push_back (value);
+    for (const auto& [module, text] : fitted.changes)
+        result.changes.push_back ({ module, text });
+    result.notes = fitted.notes;
+
+    if (current.denoise && fitted.noiseFrame >= 0)
+    {
+        const auto hop = (int) std::lround (sampleRate * analysis::Profile::hopSeconds);
+        const auto start = fitted.noiseFrame * hop, length = analysis::fit::noiseFrames * hop;
+        if (start + length <= numSamples)
+            result.noiseProfile = learnNoise (mono, start, length, sampleRate, lowCutHz, juce::Decibels::decibelsToGain (fitted.trimDb));
+        if (! result.noiseProfile.empty())
+            result.changes.push_back ({ "Denoise", "Learnt your room from the quietest half second between phrases" });
+    }
+
+    if (result.changes.empty())
+        result.notes.add ("The chain already fits your voice.");
+    result.notes.add ("Everything else in the chain stays as it was.");
+    return result;
+}
+
+//==============================================================================
 SoundCheck::SoundCheck (juce::AudioProcessorValueTreeState& s, fx::FxChain& liveChain, Scenes& sc)
     : state (s), chain (liveChain), scenes (sc)
 {
@@ -394,6 +449,7 @@ juce::var SoundCheck::handle (const juce::String& action, const juce::var& optio
             handle ("keep", {});
 
         const auto seconds = juce::jlimit (minSeconds, maxSeconds, (double) options.getProperty ("seconds", defaultSeconds));
+        fitMode = (bool) options.getProperty ("fit", false);
         const auto styleIndex = (int) options.getProperty ("style", (int) style);
         if (juce::isPositiveAndBelow (styleIndex, (int) std::size (analysis::allStyles)))
             style = analysis::allStyles[(size_t) styleIndex];
@@ -535,8 +591,32 @@ void SoundCheck::startAnalysis()
     const auto* samples = buffer.getReadPointer (0);
     const auto rate = sampleRate;
     const auto chosen = style;
-    pending = std::async (std::launch::async, [samples, length, rate, chosen]
-                          { return makePlan (samples, length, rate, chosen); });
+
+    if (fitMode)
+    {
+        // What the chain has now (message thread), for the fit.
+        const auto value = [this] (const char* id, float fallback)
+        {
+            if (auto* parameter = state.getParameter (id))
+                return parameter->convertFrom0to1 (parameter->getValue());
+            return fallback;
+        };
+        analysis::fit::Chain current;
+        current.inputGainDb = value ("inputGain", 0.0f);
+        if (auto* parameter = dynamic_cast<juce::RangedAudioParameter*> (state.getParameter ("inputGain")))
+            current.minInputDb = parameter->getNormalisableRange().start, current.maxInputDb = parameter->getNormalisableRange().end;
+        current.gate = value ("gateOn", 0.0f) >= 0.5f;
+        current.classicDeEsser = value ("deessOn", 0.0f) >= 0.5f && value ("deessMode", 0.0f) < 0.5f;
+        current.denoise = value ("denoiseOn", 0.0f) >= 0.5f;
+        const auto lowCutHz = value ("hpfOn", 0.0f) >= 0.5f ? value ("hpfFreq", 80.0f) : 0.0f;
+        pending = std::async (std::launch::async, [samples, length, rate, current, lowCutHz]
+                              { return makeFitPlan (samples, length, rate, current, lowCutHz); });
+    }
+    else
+    {
+        pending = std::async (std::launch::async, [samples, length, rate, chosen]
+                              { return makePlan (samples, length, rate, chosen); });
+    }
     if (onChange)
         onChange (describe());
 }
@@ -614,6 +694,7 @@ juce::var SoundCheck::describe() const
     result->setProperty ("minVoiceSeconds", minVoiceSeconds);
     result->setProperty ("error", error);
     result->setProperty ("scene", sceneName);
+    result->setProperty ("fit", fitMode);
 
     int styleIndex = 0;
     juce::Array<juce::var> styles;
