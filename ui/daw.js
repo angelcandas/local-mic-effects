@@ -18,7 +18,8 @@ import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createPatternsPanel } from "./patterns.js";
 import { createPatternLane, drawGhosts } from "./patternlane.js";
 import { createDrawTool } from "./drawtool.js";
-import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs } from "./rhythm.js";
+import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs, toSource } from "./rhythm.js";
+import { canPasteWarpTabs, copyWarpTabs, pastedWarpTabs } from "./warptool.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, releaseFocus, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
@@ -1332,7 +1333,8 @@ class DawScreen {
                                        ["range", "Range", "Range tool: drag across tracks to mark a stretch of time, then delete, split, duplicate or loop it (2). Right-click it for more."],
                                        ["cut", "Cut", "Cut tool: click a clip to split it there (B)"],
                                        ["gain", "Gain", "Gain tool: drag a clip up or down to change its gain (G)"],
-                                       ["draw", "Draw", "Draw tool: click to place the picked pattern or sound, drag to paint copies, right-click to erase (P)"]]) {
+                                       ["draw", "Draw", "Draw tool: click to place the picked pattern or sound, drag to paint copies, right-click to erase (P)"],
+                                       ["warp", "Warp", "Warp tool: on the selected clips, press to pin a warp tab and drag to move that moment of the audio (J). Click a clip first to select it"]]) {
       const b = iconButton("", tool, title, () => this.setTool(tool));
       b.dataset.tool = tool;
       this.tools.append(b);
@@ -2861,6 +2863,20 @@ class DawScreen {
     element.addEventListener("pointerdown", (event) => {
       if (event.button !== 0) return;
       event.stopPropagation();
+      // The Warp tool works on the selected clips only: the first click selects.
+      if (this.tool === "warp" && !clip.midi) {
+        event.preventDefault();
+        if (!this.isClipSelected(clip.id)) return this.select(track.id, clip.id, false);
+        return this.warpPress(event, clip);
+      }
+      // Ctrl/Cmd on a trim handle: stretch the clip by its edge instead of trimming it.
+      const stretchEdge = this.tool === "select" && !clip.midi && (event.ctrlKey || event.metaKey)
+        && ["trim-start", "trim-end"].find((c) => event.target.classList.contains(c));
+      if (stretchEdge) {
+        event.preventDefault();
+        this.select(track.id, clip.id, false);
+        return this.stretchPress(event, clip, element, canvas, label, stretchEdge);
+      }
       // Shift+click: add the clip to the selection, or take it out. Ctrl+click does the
       // same, and Ctrl+drag copies (the clip, or the group it's in).
       const ctrl = (event.ctrlKey || event.metaKey) && this.tool === "select";
@@ -5396,12 +5412,13 @@ class DawScreen {
                ["Ctrl+A", "Select every clip"], [", / .", "Select the previous / next clip on the track"], ["Ctrl+E", "Split the selected clip at the playhead"],
                ["Alt+← / →", "Nudge the selected clip a beat (Shift: a bar)"], ["Ctrl+D", "Duplicate"],
                ["Ctrl+X / C / V", "Cut, copy, paste (pastes at the playhead on the selected track)"], ["Delete", "Delete the clip"],
-               ["V (1) / 2 / B / G / P", "Select, range, cut, gain and draw tools"], ["Range tool", "Drag across tracks to mark time (Shift+click: move an end)"], ["Draw tool", "Click places the picked pattern or sound, drag paints copies, right-click (or right-drag) erases"], ["Pattern blocks", "Shift+click picks several (Ctrl+A all); Delete, Ctrl+C / X / V / D act on them; drag the left edge to trim; the Cut tool (B) cuts a block"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
+               ["V (1) / 2 / B / G / P / J", "Select, range, cut, gain, draw and warp tools"], ["Warp tool", "On the selected clips, press pins a warp tab and drag moves it"], ["Ctrl/Cmd + drag a clip's edge", "Stretch the clip (0.25x to 4x) instead of trimming it"], ["Range tool", "Drag across tracks to mark time (Shift+click: move an end)"], ["Draw tool", "Click places the picked pattern or sound, drag paints copies, right-click (or right-drag) erases"], ["Pattern blocks", "Shift+click picks several (Ctrl+A all); Delete, Ctrl+C / X / V / D act on them; drag the left edge to trim; the Cut tool (B) cuts a block"], ["W", "Edit the selected clip's pitch and timing"], ["Shift+M", "Mute / unmute the selected clip"],
                ["Ctrl+L", "Loop this clip (sets the loop range to it)"], ["Alt+drag", "Move or trim without snapping"],
                ["Ctrl+1 / Ctrl+2", "Narrower / wider grid"], ["Ctrl+3", "Triplet grid on / off"], ["Ctrl+4", "Snap on / off"],
                ["Snap", "Clips also snap to other clips' edges, markers, the playhead and the loop range"],
                ["Alt+N / Alt+B", "Playhead to the selected clip's next / previous hitpoint"]]],
-    ["Clip editor (Wave, W)", [["1 / 2 / 4", "Open the Warp, Hitpoints or Quantize section (the open one is the tool); Esc closes it"],
+    ["Clip editor (Wave, W)", [["1 / 2 / 3 / 4", "Open the Warp, Hitpoints, Tempo or Quantize section (the open one is the tool); Esc closes it"],
+                               ["Tempo: drag a line", "The first bar line moves the downbeat, another line changes the clip's tempo; Ctrl/Cmd-drag pins one beat"],
                                ["Click / drag (no tool open)", "Move the playhead / scroll; in the ruler, drag to mark a loop range"],
                                ["Warp: click", "Pin a warp tab where the audio plays now"], ["Warp: drag", "Move that moment of the audio; it stretches between the tabs either side"],
                                ["Warp: drag a handle (ruler)", "Slide a tab along the audio"], ["Warp: Alt+click / double-click", "Remove a tab (Delete: the selected ones)"],
@@ -5885,6 +5902,83 @@ class DawScreen {
     });
   }
 
+  // Stretch by an edge (Ctrl/Cmd + a trim handle): the picture scales live, the factor shows,
+  // 0.25x to 4x; a musical clip changes its own tempo instead of getting a warp.
+  stretchPress(event, clip, element, canvas, label, edge) {
+    const end = clip.start + clip.length;
+    let start = clip.start, length = clip.length;
+    this.dragging = true;
+    element.classList.add("is-dragging", "is-stretching");
+    const text = label.textContent;
+    drag(event, (dx, dy, e) => {
+      const dt = dx / this.zoom;
+      if (edge === "trim-end") {
+        length = clamp(this.snapTime(end + dt, e) - clip.start, clip.length * 0.25, clip.length * 4);
+        start = clip.start;
+      } else {
+        start = clamp(this.snapTime(clip.start + dt, e), Math.max(0, end - clip.length * 4), end - clip.length * 0.25);
+        length = end - start;
+      }
+      element.style.left = `${start * this.zoom}px`;
+      element.style.width = `${Math.max(2, length * this.zoom)}px`;
+      canvas.style.transformOrigin = "0 0";
+      canvas.style.transform = `scaleX(${length / clip.length})`;
+      label.textContent = `${clip.name}  ×${(length / clip.length).toFixed(2)}`;
+    }, (moved) => {
+      this.dragging = false;
+      element.classList.remove("is-dragging", "is-stretching");
+      canvas.style.transform = "";
+      label.textContent = text;
+      if (moved && Math.abs(length - clip.length) > 1e-4) daw("stretchClip", { id: clip.id, start, length });
+      this.flushSession();
+    });
+  }
+
+  // The Warp tool in the arrangement: press on a selected clip pins a warp tab there (in every
+  // selected clip playing at that moment), drag moves that moment; the audio stretches between
+  // each clip's neighbouring tabs. One undo step.
+  warpPress(event, clip) {
+    const box = this.inner.getBoundingClientRect();
+    const timeAt = (e) => (e.clientX - box.left - this.headWidth) / this.zoom;
+    const at = timeAt(event);
+    const MAX = 7.9;
+    const plans = this.selectedClipIds().map((id) => this.findClip(id)?.clip)
+      .filter((c) => c && !c.midi && !c.timeBypass && at > c.start && at < c.start + c.length)
+      .map((c) => {
+        const map = c.timeMap ?? c.warp ?? [];
+        let markers = (c.warp ?? []).map((m) => [...m]);
+        if (!markers.length) markers = [[toSource(map, c.offset), c.offset], [toSource(map, c.offset + c.length), c.offset + c.length]];
+        const t = c.offset + at - c.start;
+        let i = markers.findIndex(([, mt]) => Math.abs(mt - t) < 5 / this.zoom);
+        if (i < 0) {
+          const source = toSource(map, t);
+          markers.push([source, t]);
+          markers.sort((a, b) => a[0] - b[0]);
+          i = markers.findIndex(([ms]) => ms === source);
+        }
+        const [s] = markers[i];
+        let low = -Infinity, high = Infinity;
+        if (i > 0) { const [ps, pt] = markers[i - 1]; low = pt + Math.max(0.01, (s - ps) / MAX); high = Math.min(high, pt + (s - ps) * MAX); }
+        if (i < markers.length - 1) { const [ns, nt] = markers[i + 1]; high = Math.min(high, nt - Math.max(0.01, (ns - s) / MAX)); low = Math.max(low, nt - (ns - s) * MAX); }
+        return { c, markers, i, from: markers[i][1], low, high };
+      });
+    if (!plans.length) return;
+    this.dragging = true;
+    const guide = this.cutGuide;
+    drag(event, (dx, dy, e) => {
+      const time = this.snapTime(at + dx / this.zoom, e);
+      for (const p of plans) p.markers[p.i][1] = clamp(p.from + time - at, p.low, p.high);
+      guide.hidden = false;
+      guide.style.left = `${this.headWidth + time * this.zoom}px`;
+    }, () => {
+      this.dragging = false;
+      guide.hidden = true;
+      const clips = plans.map((p) => ({ id: p.c.id, markers: p.markers }));
+      daw("setWarp", { id: clips[0].id, clips });
+      this.flushSession();
+    });
+  }
+
   // The selected clip's hitpoints (as the clip editor's Hitpoints tool keeps them), once a
   // beat is wide enough to tell them apart.
   async clipHits(clip) {
@@ -5950,6 +6044,18 @@ class DawScreen {
         item("Crossfade with the next clip", () => this.crossfade(clip, next, 0.05), { disabled: !next,
              hint: next ? "Both clips reach into each other by 25 ms and fade across (50 ms in all), so the join can't click" : "Only when another clip starts where this one ends" });
         item("Split at hitpoints", () => daw("hitpointAction", { id: clip.id, action: "split" }), { hint: "Cut the clip at every note start (as the clip editor's Hitpoints tool shows them), with short fades" });
+        item("Stretch to project tempo", () => daw("setClip", { id: clip.id, musical: true }), { checked: Boolean(clip.musical), hint: "Musical mode: the clip follows bars and beats (its tempo is found from its beat the first time)" });
+        item("Copy warp tabs", () => { const n = copyWarpTabs(clip); toast(n ? `${n} warp tabs copied.` : "This clip has no warp tabs to copy."); }, { hint: "Its warp tabs, as places on the timeline, to paste on other clips" });
+        if (canPasteWarpTabs(clip)) item("Paste warp tabs", () => {
+          const ids = this.selectedClipIds().filter((id) => canPasteWarpTabs(this.findClip(id)?.clip ?? {}));
+          const clips = (ids.length ? ids : [clip.id]).map((id) => ({ id, markers: pastedWarpTabs(this.findClip(id).clip) })).filter((x) => x.markers);
+          if (clips.length) daw("setWarp", { id: clips[0].id, clips });
+        }, { hint: "The copied tabs on the selected clips, at the same places on the timeline" });
+        item("Make warp permanent", async () => {
+          toast("Rendering the clip's timing and pitch into a new file…");
+          const result = await daw("flattenClip", { id: clip.id });
+          if (result?.ok) toast("Done: the clip plays a new file with its warp built in (undo puts it back; the original file stays).", "", "undo");
+        }, { hint: "Write what the clip plays (warp, tempo, pitch edits) to a new audio file and use that; the original stays" });
         item("Keep as a take", () => daw("takes", { action: "fromClip", clip: clip.id }), { hint: "Copy this clip into a new take lane, so you can record over it and still pick parts of it" });
         heading("Audio");
         for (const [label, command, hint] of AUDIO_PROCESSES)
@@ -6273,6 +6379,7 @@ class DawScreen {
     else if (key === "b") { handled(); this.setTool("cut"); }
     else if (key === "g") { handled(); this.setTool("gain"); }
     else if (key === "p") { handled(); this.setTool("draw"); }
+    else if (key === "j") { handled(); this.setTool("warp"); }
     else if (key === "w") { handled(); this.openClipEditor(); }
     else if (key === "e") command("toggleDock");
   }
