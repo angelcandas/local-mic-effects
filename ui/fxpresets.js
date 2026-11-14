@@ -185,6 +185,14 @@ function deleteUserPreset(getNativeFunction, key, name) {
   return getNativeFunction("library")("deleteEffect", key, name).catch(() => ({ ok: false }));
 }
 
+// One effect's presets for a list ([{ name, values, factory }]: factory ones first, then yours).
+export function effectPresets(getNativeFunction, id) {
+  return loadUserPresets(getNativeFunction).then(() => [
+    ...(FX_PRESETS[id] ?? []).map((preset) => ({ ...preset, factory: true })),
+    ...(userPresets[id] ?? []).map((preset) => ({ ...preset, factory: false })),
+  ]);
+}
+
 // A preset menu for one effect card.
 //   getNativeFunction: Juce.getNativeFunction
 //   ids: the effect ids it covers (the DAW's pitch insert covers autotune, pitch and harmony)
@@ -273,11 +281,16 @@ export function createPresetPicker({ getNativeFunction, ids, read, apply, defaul
       return build();
     }
     const preset = value.startsWith("f") ? factory[Number(value.slice(1))] : (userPresets[key] ?? [])[Number(value.slice(1))];
-    if (!preset) return;
-    if (!value.startsWith("f")) return apply({ ...preset.values }, null);
-    const defaults = Object.fromEntries(presetParams(preset.id).map((param) => [param, defaultOf(param)]).filter(([, v]) => v !== undefined));
-    apply({ ...defaults, ...preset.values }, preset.id);
+    if (preset) load(preset, value.startsWith("f"));
   });
+
+  // A factory preset fills in what it doesn't list with the defaults; yours are complete.
+  function load(preset, isFactory) {
+    if (!isFactory) return apply({ ...preset.values }, null);
+    const id = preset.id ?? ids[0];
+    const defaults = Object.fromEntries(presetParams(id).map((param) => [param, defaultOf(param)]).filter(([, v]) => v !== undefined));
+    apply({ ...defaults, ...preset.values }, id);
+  }
 
   const commit = () => {
     const name = nameInput.value.trim();
@@ -300,6 +313,6 @@ export function createPresetPicker({ getNativeFunction, ids, read, apply, defaul
     getNativeFunction("library")("getDefault", defaultKey)
       .then((values) => { savedDefaults[defaultKey] = Boolean(values && typeof values === "object"); ++version; build(); })
       .catch(() => {});
-  return { element, refresh: build, saveAs: showName };
+  return { element, refresh: build, saveAs: showName, load: (preset, isFactory) => load({ ...preset }, isFactory) };
 }
 
