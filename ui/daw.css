@@ -2585,3 +2585,5 @@ body.is-daw .library-hint { display: none; }
 .rhythm-grid-row { flex-wrap: wrap; }
 .rhythm-grid-row .rhythm-groove { flex: 1 1 100%; min-width: 0; }
 .rhythm-grid-row select { min-width: 0; }
+
+.name-entry { text-align: left; padding: 0 8px; }

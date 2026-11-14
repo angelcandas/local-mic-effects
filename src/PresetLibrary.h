@@ -23,6 +23,7 @@ public:
     explicit PresetLibrary (juce::File root);   // somewhere else (tests)
 
     const juce::File& getRoot() const noexcept { return root; }
+    void setRoot (const juce::File& folder)        { root = folder; } // tests
 
     //==============================================================================
     // Effect presets: { kind: [{ name, values: { id: value } }] }, names sorted.
@@ -43,6 +44,11 @@ public:
     juce::ValueTree loadChain (const juce::String& name) const; // invalid if there's no such chain
     bool deleteChain (const juce::String& name);
     juce::String renameChain (const juce::String& name, const juce::String& newName);
+
+    // The chain a new audio track starts with (an INSERTS node; invalid when there is none).
+    juce::ValueTree getDefaultChain() const;
+    juce::String setDefaultChain (const juce::ValueTree& inserts);
+    bool clearDefaultChain();
 
     // A chain Live can play: built-in effects only, at most one of each.
     static bool isLiveChain (const juce::ValueTree& inserts);

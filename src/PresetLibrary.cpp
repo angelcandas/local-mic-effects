@@ -274,6 +274,32 @@ juce::ValueTree PresetLibrary::loadChain (const juce::String& name) const
     return tree.hasType (INSERTS) ? tree : juce::ValueTree();
 }
 
+juce::ValueTree PresetLibrary::getDefaultChain() const
+{
+    auto tree = readTree (root.getChildFile ("Defaults").getChildFile (juce::String ("Audio track") + chainExtension));
+    return tree.hasType (INSERTS) ? tree : juce::ValueTree();
+}
+
+juce::String PresetLibrary::setDefaultChain (const juce::ValueTree& inserts)
+{
+    juce::ValueTree chain (INSERTS);
+    chain.setProperty (nameId, "Audio track", nullptr);
+    for (const auto& insert : inserts)
+        if (insert.hasType (INSERT))
+        {
+            auto copy = insert.createCopy();
+            copy.removeProperty (idId, nullptr);
+            chain.appendChild (copy, nullptr);
+        }
+    return writeTree (root.getChildFile ("Defaults").getChildFile (juce::String ("Audio track") + chainExtension), chain);
+}
+
+bool PresetLibrary::clearDefaultChain()
+{
+    const auto file = root.getChildFile ("Defaults").getChildFile (juce::String ("Audio track") + chainExtension);
+    return file.existsAsFile() && file.deleteFile();
+}
+
 bool PresetLibrary::deleteChain (const juce::String& name)
 {
     const auto file = chainFile (name);

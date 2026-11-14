@@ -159,6 +159,7 @@ export function presetParams(id) {
 let userPresets = {};
 let loaded = null;
 let version = 0; // bumped on every change, so other cards' menus catch up
+const savedDefaults = {}; // DAW effect type -> whether you saved a default for new ones
 
 function loadUserPresets(getNativeFunction) {
   const library = getNativeFunction("library");
@@ -191,7 +192,9 @@ function deleteUserPreset(getNativeFunction, key, name) {
 //   apply (values, id): set them; id is the effect a factory preset belongs to (its other
 //     controls are filled in with their defaults), or null for one of yours
 //   defaultOf (param): a parameter's default
-export function createPresetPicker({ getNativeFunction, ids, read, apply, defaultOf }) {
+//   defaultKey (optional): the DAW effect type whose new copies start from a saved default;
+//     the menu then offers to save the current settings as that default, or clear it
+export function createPresetPicker({ getNativeFunction, ids, read, apply, defaultOf, defaultKey }) {
   const element = html("div", "fx-presets");
   const select = html("select", "dropdown fx-preset-select");
   select.title = "Presets for this effect";
@@ -235,6 +238,10 @@ export function createPresetPicker({ getNativeFunction, ids, read, apply, defaul
     actions.label = "Manage";
     actions.append(new Option("Save current as…", "save"));
     (userPresets[key] ?? []).forEach((preset, i) => actions.append(new Option(`Delete “${preset.name}”`, `d${i}`)));
+    if (defaultKey) {
+      actions.append(new Option("Use current as the default for new ones", "default"));
+      if (savedDefaults[defaultKey]) actions.append(new Option("Go back to the factory default", "nodefault"));
+    }
     select.append(actions);
   };
 
@@ -253,6 +260,13 @@ export function createPresetPicker({ getNativeFunction, ids, read, apply, defaul
     const value = select.value;
     select.value = "";
     if (value === "save") return showName();
+    if (value === "default" || value === "nodefault") {
+      const values = value === "default" ? read() : null;
+      savedDefaults[defaultKey] = Boolean(values);
+      ++version;
+      getNativeFunction("library")(values ? "setDefault" : "clearDefault", defaultKey, ...(values ? [values] : [])).catch(() => {});
+      return build();
+    }
     if (value.startsWith("d")) {
       const preset = (userPresets[key] ?? [])[Number(value.slice(1))];
       if (preset) deleteUserPreset(getNativeFunction, key, preset.name);
@@ -282,6 +296,10 @@ export function createPresetPicker({ getNativeFunction, ids, read, apply, defaul
 
   build();
   loadUserPresets(getNativeFunction).then(build);
+  if (defaultKey && !(defaultKey in savedDefaults))
+    getNativeFunction("library")("getDefault", defaultKey)
+      .then((values) => { savedDefaults[defaultKey] = Boolean(values && typeof values === "object"); ++version; build(); })
+      .catch(() => {});
   return { element, refresh: build };
 }
 

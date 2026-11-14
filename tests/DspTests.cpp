@@ -4593,6 +4593,53 @@ namespace
         check (library.renameChain ("Grit", "Grit 2").isEmpty() && library.loadChain ("Grit 2").isValid() && ! library.loadChain ("Grit").isValid(), "rename a chain");
         check (library.deleteChain ("Grit 2") && library.listChains().size() == 0, "delete a chain");
 
+        // The DAW: save a track's chain, load it onto another, defaults for new effects and tracks.
+        {
+            juce::PropertiesFile::Options options;
+            options.applicationName = "MicFXTests";
+            options.filenameSuffix = ".settings";
+            juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+            PluginProcessor daw;
+            daw.prepareToPlay (sampleRate, blockSize);
+            daw.getLibrary().setRoot (folder.getChildFile ("daw"));
+            DawBridge::availableForTesting = true;
+            DawBridge bridge (daw, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+            const auto run = [&] (const juce::String& command, std::initializer_list<std::pair<const char*, juce::var>> properties)
+            {
+                auto* object = new juce::DynamicObject();
+                for (const auto& [name, value] : properties)
+                    object->setProperty (name, value);
+                juce::var result;
+                bridge.handle (command, juce::var (object), [&] (juce::var r) { result = r; });
+                return result;
+            };
+            auto& edit = daw.getDawEdit();
+            const auto inserts = [&] (int track) { return daw::Edit::getInserts (edit.getChannel (track)); };
+
+            const int a = (int) run ("addTrack", {});
+            run ("addInsert", { { "track", a }, { "type", "compressor" } });
+            run ("addInsert", { { "track", a }, { "type", "echo" } });
+            run ("setInsert", { { "id", (int) inserts (a).getChild (0)["id"] }, { "param", "compRatio" }, { "value", 6.0 } });
+            check ((bool) run ("saveChain", { { "track", a }, { "name", "Lead" } })["ok"], "save a track's chain");
+
+            const int b = (int) run ("addTrack", {});
+            run ("addInsert", { { "track", b }, { "type", "reverb" } });
+            run ("loadChain", { { "track", b }, { "name", "Lead" } });
+            check (inserts (b).getNumChildren() == 2 && inserts (b).getChild (0)["type"].toString() == "compressor"
+                   && std::abs ((float) inserts (b).getChild (0)["compRatio"] - 6.0f) < 1.0e-4f, "loading it replaces the other track's chain");
+            run ("loadChain", { { "track", b }, { "name", "Lead" }, { "index", 1 } });
+            check (inserts (b).getNumChildren() == 4 && inserts (b).getChild (1)["type"].toString() == "compressor", "or goes in at a slot");
+            check (! (bool) run ("loadChain", { { "track", b }, { "name", "Nope" } })["ok"], "a missing chain says so");
+
+            daw.getLibrary().setDefault ("compressor", values ({ { "compRatio", 3.5 } }));
+            run ("addInsert", { { "track", b }, { "type", "compressor" } });
+            check (std::abs ((float) inserts (b).getChild (inserts (b).getNumChildren() - 1)["compRatio"] - 3.5f) < 1.0e-4f, "a new effect starts from your default");
+
+            run ("saveChain", { { "track", a }, { "default", true } });
+            const int c = (int) run ("addTrack", {});
+            check (inserts (c).getNumChildren() == 2 && inserts (c).getChild (1)["type"].toString() == "echo", "a new track starts with your default chain");
+        }
+
         folder.deleteRecursively();
     }
 
