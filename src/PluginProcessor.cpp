@@ -201,6 +201,10 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         updatePeak (inputPeak, inputLevel);
         inputChannels = numIn;
 
+        // Mapped controls (MIDI learn's "daw:" targets) drive the DAW and don't play notes.
+        midiMap.process (midi, false);
+        midiMap.removeMapped (midi);
+
         // The standalone app passes the MIDI input here (MIDI tracks play and record it).
         dawEngine.process (buffer, numOut, numSamples, buffer.getArrayOfReadPointers(), numIn, &midi);
         midi.clear();

@@ -4120,6 +4120,30 @@ namespace
         send ({ juce::MidiMessage::noteOn (1, 38, (juce::uint8) 90) });
         check (action == "record", "actions for the page are passed on");
 
+        // DAW mode: "daw:" targets act there (and the mapped messages don't reach the
+        // instruments); Live targets wait for Live mode.
+        {
+            map.setMappings ({ { Source::note, 1, 40, "daw:play" }, { Source::cc, 1, 7, "daw:volume" }, { Source::note, 1, 41, "action:record" } });
+            std::vector<std::pair<juce::String, float>> dawEvents;
+            map.onDaw = [&] (const juce::String& name, float v) { dawEvents.push_back ({ name, v }); };
+            action = {};
+            juce::MidiBuffer midi;
+            midi.addEvent (juce::MidiMessage::noteOn (1, 40, (juce::uint8) 100), 0);
+            midi.addEvent (juce::MidiMessage::noteOff (1, 40), 10);
+            midi.addEvent (juce::MidiMessage::controllerEvent (1, 7, 127), 20);
+            midi.addEvent (juce::MidiMessage::noteOn (1, 41, (juce::uint8) 100), 30);
+            midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 100), 40);
+            map.process (midi, false);
+            map.removeMapped (midi);
+            map.drain();
+            check (dawEvents.size() == 2 && dawEvents[0].first == "play" && dawEvents[1].first == "volume" && dawEvents[1].second > 0.99f,
+                   "in DAW mode a pad plays and a fader sets the volume");
+            check (action.isEmpty(), "Live mode's mappings stay quiet in DAW mode");
+            check (midi.getNumEvents() == 2, "the mapped messages are taken out of what the instruments get");
+            map.onDaw = nullptr;
+            map.setMappings ({});
+        }
+
         // A looper footswitch acts on the audio thread, in the block it arrives in.
         auto& looper = processor.getLooper();
         map.setMappings ({ { Source::cc, 1, 80, "action:looper.main" }, { Source::cc, 1, 81, "action:looper.undo" } });
@@ -5790,6 +5814,41 @@ namespace
             check (! clips.empty() && (int) clips.front()[ids::take] == (int) takes[3][ids::id]
                        && (int) clips.back()[ids::take] == (int) takes[2][ids::id],
                    "the comp plays the newest pass, and the last full one after it");
+        }
+
+        // Punch: records only inside the loop range, from a pre-roll before it.
+        {
+            daw::Edit edit;
+            daw::DawEngine engine (edit);
+            engine.prepare (sampleRate, blockSize);
+            const auto vocal = (int) edit.addTrack ("Vocal")[ids::id];
+            edit.setTrackArm (vocal, true);
+            const auto bar = 4.0 * 60.0 / edit.getTempo();
+            edit.setLoop (false, 2.0 * bar, 3.0 * bar);
+            engine.setPunch (true);
+            engine.setPreRollBars (1);
+            engine.rebuildNow();
+            engine.seek ((juce::int64) (5.0 * bar * sampleRate)); // the playhead doesn't matter
+
+            const auto mic = makeVoice (200.0f, 4.0 * bar);
+            check (engine.startRecording (folder).isEmpty(), "records with Punch on");
+            check (std::abs ((double) engine.getPosition() / sampleRate - bar) < 0.01, "plays from one bar before the punch range");
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            bool punchedOutEarly = false, punchedOut = false;
+            for (size_t start = 0; start + blockSize <= mic.size() && ! punchedOut; start += blockSize)
+            {
+                buffer.copyFrom (0, 0, mic.data() + start, blockSize);
+                engine.process (buffer, 2, blockSize, buffer.getReadPointer (0));
+                punchedOut = engine.isPunchedOut();
+                punchedOutEarly = punchedOutEarly || (punchedOut && engine.getPosition() < (juce::int64) (3.0 * bar * sampleRate));
+            }
+            check (punchedOut && ! punchedOutEarly, "says when the playhead has passed the punch range");
+            engine.stopRecording();
+
+            const auto found = edit.getTrack (vocal).getChildWithName (ids::CLIP);
+            check (found.isValid() && std::abs ((double) found[ids::start] - 2.0 * bar) < 0.01
+                       && std::abs ((double) found[ids::length] - bar) < 0.02,
+                   "the take covers just the punch range");
         }
 
         // Auto Comp: two takes, each in tune where the other is off.
@@ -14590,6 +14649,41 @@ static void testPatterns()
                "a block shorter than its pattern plays only what fits");
         edit.setPatternClip (block, 4.0, 8.0, 0);
 
+        // An offset (left trim): the block starts a beat into the pattern and repeats on its grid.
+        {
+            const auto sorted = [&]
+            {
+                auto e = daw::patterns::getBlockEvents (edit.getState(), drums, tempo);
+                std::sort (e.begin(), e.end(), [] (const auto& a, const auto& b) { return a.on < b.on || (a.on == b.on && a.pitch < b.pitch); });
+                return e;
+            };
+            edit.setPatternClip (block, 4.0, 4.0, 0);
+            edit.setPatternClipOffset (block, 5.0); // wraps into one pass: 1 beat
+            timeline = sorted();
+            check (near ((double) edit.getPatternClip (block)[daw::ids::offset], 1.0) && timeline.size() == 6 && near (timeline.front().on, 2.0)
+                       && near (timeline.back().on, tempo.toSeconds (7.0)) && timeline.back().pitch == 36,
+                   "a block with an offset starts mid-pattern and repeats on its grid (" + juce::String ((int) timeline.size()) + " notes)");
+            edit.getPatternClip (block).setProperty (daw::ids::offset, "1", nullptr); // as a saved project reads it
+            check (sorted().size() == 6 && near (sorted().front().on, 2.0), "(a text-typed offset too)");
+
+            // Cutting a block plays the same notes as before.
+            edit.setPatternClip (block, 4.0, 8.0, 0);
+            const auto whole = sorted();
+            const auto right = edit.splitPatternClip (block, 6.5);
+            const auto cut = sorted();
+            auto same = whole.size() == cut.size();
+            for (size_t i = 0; same && i < whole.size(); ++i)
+                same = whole[i].pitch == cut[i].pitch && std::abs (whole[i].on - cut[i].on) < 1.0e-9;
+            check (right >= 0 && same && near ((double) edit.getPatternClip (right)[daw::ids::start], 6.5)
+                       && near ((double) edit.getPatternClip (right)[daw::ids::offset], 3.5) && near ((double) edit.getPatternClip (block)[daw::ids::length], 2.5),
+                   "cutting a block plays the same notes, the right half carrying on in the pattern");
+            check (edit.splitPatternClip (block, 4.0) < 0 && edit.splitPatternClip (block, 20.0) < 0, "(a cut at the edge or outside does nothing)");
+            edit.removePatternClip (right);
+            edit.setPatternClipOffset (block, 0.0);
+            edit.setPatternClip (block, 4.0, 8.0, 0);
+            check (! edit.getPatternClip (block).hasProperty (daw::ids::offset), "(no offset is stored as none)");
+        }
+
         // Swing moves only the odd steps, by swing x step / 3.
         edit.setSteps (patternId, drums, 42, { { 1, 80 }, { 2, 80 } });
         edit.setPatternSwing (patternId, 1.0);
@@ -15010,6 +15104,23 @@ static void testPatterns()
             run ("undo");
             run ("undo");
             check ((int) edit.getPatternClip (blockId)[daw::ids::pattern] == (int) patternId && edit.getPatterns().size() == 1, "(undo)");
+
+            // Block editing: an offset, and the Cut tool.
+            check ((bool) run ("setPatternClip", args ({ { "id", blockId }, { "offset", 1.0 } }))["ok"]
+                       && near ((double) lastSession()["patternClips"][0]["offset"], 1.0), "setPatternClip takes an offset, described");
+            const auto block = edit.getPatternClip (blockId);
+            const auto at = (double) block[daw::ids::start] + 1.5;
+            const auto half = run ("splitPatternClip", args ({ { "id", blockId }, { "at", at } }));
+            check (half.isInt() && edit.getPatternClips().size() == 2 && edit.getUndoManager().getUndoDescription() == "Cut pattern block",
+                   "splitPatternClip cuts a block in one undo step");
+            check (! (bool) run ("splitPatternClip", args ({ { "id", blockId }, { "at", -5.0 } }))["ok"], "(not outside it)");
+            const auto copy = run ("addPatternClip", args ({ { "pattern", patternId }, { "start", 64.0 }, { "length", 2.0 }, { "offset", 0.5 }, { "mute", true } }));
+            check (copy.isInt() && near ((double) edit.getPatternClip (copy)[daw::ids::offset], 0.5) && (bool) edit.getPatternClip (copy)[daw::ids::mute],
+                   "addPatternClip takes an offset and a mute (a pasted block)");
+            run ("undo");
+            run ("undo");
+            run ("undo");
+            check (edit.getPatternClips().size() == 1 && ! edit.getPatternClip (blockId).hasProperty (daw::ids::offset), "(undo)");
         }
         run ("setPartMutes", args ({ { "pattern", patternId }, { "parts", list ({ args ({ { "track", kit }, { "muted", list ({}) } }) }) } }));
         run ("setPart", args ({ { "pattern", patternId }, { "track", kit }, { "levels", args ({ { "36", 1.0 } }) } }));
@@ -15202,6 +15313,185 @@ static void testSingAlongSession()
         edit.getUndoManager().undo();
         check (edit.getTracks().size() == before, "one undo takes it back");
         check (! (bool) bridge.addSingAlongTracks ({})["ok"], "an empty list is an error");
+    }
+    DawBridge::availableForTesting = false;
+    folder.deleteRecursively();
+}
+
+static void testBounce()
+{
+    std::cout << "\nBounce to a new track\n";
+
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-bounce", {});
+    folder.createDirectory();
+    juce::AudioBuffer<float> tone (2, (int) (1.0 * sampleRate));
+    for (int i = 0; i < tone.getNumSamples(); ++i)
+        for (int ch = 0; ch < 2; ++ch)
+            tone.setSample (ch, i, 0.25f * (float) std::sin (juce::MathConstants<double>::twoPi * 330.0 * i / sampleRate));
+    const auto toneFile = folder.getChildFile ("tone.wav");
+    writeWav (toneFile, tone, sampleRate);
+
+    daw::Edit edit;
+    const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+    const auto other = (int) edit.addTrack ("Other")[daw::ids::id];
+    edit.addClip (vocal, toneFile, 0.5, 1.0);
+    edit.addClip (other, toneFile, 0.0, 1.0);
+    edit.setTrackVolume (vocal, -12.0f);
+
+    daw::Exporter::Settings settings;
+    settings.sampleRate = sampleRate;
+    settings.bitDepth = 32;
+    settings.tail = 0.0;
+    daw::Exporter exporter (edit, settings);
+    const auto file = folder.getChildFile ("bounced.wav");
+    const auto result = exporter.exportTrack (vocal, file);
+    check (result.error.isEmpty() && file.existsAsFile(), "renders the track to a file");
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    juce::AudioBuffer<float> audio (2, reader != nullptr ? (int) reader->lengthInSamples : 0);
+    if (reader != nullptr)
+        reader->read (&audio, 0, audio.getNumSamples(), 0, true, true);
+    const auto half = (int) (0.5 * sampleRate);
+    const auto before = audio.getNumSamples() > half ? audio.getMagnitude (0, half - 1000) : 1.0f;
+    const auto during = audio.getNumSamples() > half + 2000 ? audio.getMagnitude (half + 1000, juce::jmin (audio.getNumSamples() - half - 1000, (int) (0.5 * sampleRate))) : 0.0f;
+    check (before < 1.0e-4f, "without the other tracks (" + juce::String (before, 4) + ")");
+    check (std::abs (during - 0.25f) < 0.03f, "at 0 dB, not the track's fader (peak " + juce::String (during, 3) + ")");
+    check (! exporter.exportTrack (999, folder.getChildFile ("none.wav")).error.isEmpty(), "an unknown track is an error");
+
+    PluginProcessor processor;
+    processor.prepareToPlay (sampleRate, blockSize);
+    juce::PropertiesFile::Options options;
+    options.applicationName = "MicFXTests";
+    juce::PropertiesFile props (folder.getChildFile ("test.settings"), options);
+    DawBridge::availableForTesting = true;
+    {
+        DawBridge bridge (processor, props, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        auto& dawEdit = processor.getDawEdit();
+        const auto source = (int) dawEdit.addTrack ("Synth")[daw::ids::id];
+        dawEdit.addTrack ("Last");
+        const auto count = dawEdit.getTracks().size();
+        const auto added = bridge.addBouncedTrack (source, file, 2.0);
+        const auto tracks = dawEdit.getTracks();
+        int at = -1;
+        for (int i = 0; i < tracks.size(); ++i)
+            if ((int) tracks[i][daw::ids::id] == (int) added["track"])
+                at = i;
+        check ((bool) added["ok"] && tracks.size() == count + 1 && at >= 1 && (int) tracks[at - 1][daw::ids::id] == source
+                   && tracks[at][daw::ids::name].toString() == "Synth (bounced)",
+               "the bounce lands on a new track right under its source");
+        const auto clip = tracks[at].getChildWithName (daw::ids::CLIP);
+        check (clip.isValid() && std::abs ((double) clip[daw::ids::start] - 2.0) < 1e-9 && (bool) dawEdit.getTrack (source)[daw::ids::mute],
+               "from where the bounce started, with the source muted");
+        dawEdit.getUndoManager().undo();
+        check (dawEdit.getTracks().size() == count && ! (bool) dawEdit.getTrack (source)[daw::ids::mute], "one undo takes it back");
+
+        // Locate: a file moved into another folder comes back by name.
+        const auto moved = folder.getChildFile ("moved");
+        moved.createDirectory();
+        const auto lost = folder.getChildFile ("lost.wav");
+        writeWav (lost, tone, sampleRate);
+        const auto clipId = (int) dawEdit.addClip (source, lost, 0.0, 1.0)[daw::ids::id];
+        lost.moveFileTo (moved.getChildFile ("lost.wav"));
+        const auto relinked = bridge.relinkMissing (folder);
+        check ((bool) relinked["ok"] && (int) relinked["relinked"] == 1
+                   && dawEdit.getClip (clipId)[daw::ids::file].toString() == moved.getChildFile ("lost.wav").getFullPathName(),
+               "Locate finds a missing file in a subfolder by name");
+        check (! (bool) bridge.relinkMissing (folder)["relinked"], "nothing left to find");
+    }
+    DawBridge::availableForTesting = false;
+    folder.deleteRecursively();
+}
+
+static void testTimeRange()
+{
+    std::cout << "\nArrangement time range commands\n";
+
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-range", {});
+    folder.createDirectory();
+    juce::AudioBuffer<float> audio (1, (int) (8.0 * sampleRate));
+    audio.clear();
+    const auto file = folder.getChildFile ("a.wav");
+    writeWav (file, audio, sampleRate);
+
+    PluginProcessor processor;
+    juce::PropertiesFile::Options options;
+    options.applicationName = "MicFXTests";
+    juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+    DawBridge::availableForTesting = true;
+    {
+        DawBridge bridge (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        auto& edit = processor.getDawEdit();
+        const auto a = (int) edit.addTrack ("A")[daw::ids::id];
+        const auto b = (int) edit.addTrack ("B")[daw::ids::id];
+        edit.addClip (a, file, 0.0, 8.0);
+        edit.addClip (b, file, 1.0, 2.0);
+        edit.addClip (b, file, 5.0, 2.0);
+        const auto marker = (int) edit.addMarker (6.0, "Chorus")[daw::ids::id];
+
+        const auto clips = [&] (int track)
+        {
+            std::vector<std::pair<double, double>> out;
+            for (const auto& child : edit.getTrack (track))
+                if (child.hasType (daw::ids::CLIP))
+                    out.push_back ({ (double) child[daw::ids::start], (double) child[daw::ids::length] });
+            std::sort (out.begin(), out.end());
+            return out;
+        };
+        const auto near = [] (double x, double y) { return std::abs (x - y) < 1e-6; };
+        const auto markerTime = [&]
+        {
+            for (const auto& m : edit.getMarkers())
+                if ((int) m[daw::ids::id] == marker) return (double) m[daw::ids::time];
+            return -1.0;
+        };
+        const auto run = [&] (const juce::String& action, double from, double to, juce::Array<juce::var> tracks)
+        {
+            edit.getUndoManager().beginNewTransaction (action);
+            auto* args = new juce::DynamicObject();
+            args->setProperty ("action", action);
+            args->setProperty ("start", from);
+            args->setProperty ("end", to);
+            args->setProperty ("tracks", tracks);
+            return bridge.editTimeRange (juce::var (args));
+        };
+
+        run ("split", 2.0, 4.0, { a });
+        auto ca = clips (a);
+        check (ca.size() == 3 && near (ca[1].first, 2.0) && near (ca[1].second, 2.0) && clips (b).size() == 2,
+               "split cuts the covered track at both ends, and only that track");
+        edit.getUndoManager().undo();
+        check (clips (a).size() == 1, "one undo joins it again");
+
+        run ("delete", 2.0, 4.0, { a, b });
+        ca = clips (a);
+        const auto cb = clips (b);
+        check (ca.size() == 2 && near (ca[0].second, 2.0) && near (ca[1].first, 4.0)
+                   && cb.size() == 2 && near (cb[0].first, 1.0) && near (cb[0].second, 1.0),
+               "delete removes what's inside the range on every covered track");
+        edit.getUndoManager().undo();
+
+        run ("deleteTime", 2.0, 4.0, {});
+        ca = clips (a);
+        check (ca.size() == 2 && near (ca[1].first, 2.0) && near (ca[1].second, 4.0) && near (clips (b)[1].first, 3.0),
+               "delete time pulls the rest of the song left on every track");
+        check (near (markerTime(), 4.0), "markers after the range move too");
+        edit.getUndoManager().undo();
+
+        run ("insertSilence", 2.0, 3.0, {});
+        ca = clips (a);
+        check (ca.size() == 2 && near (ca[1].first, 3.0) && near (clips (b).back().first, 6.0)
+                   && near (markerTime(), 7.0),
+               "insert silence pushes everything from the start right");
+        edit.getUndoManager().undo();
+
+        const auto dup = run ("duplicate", 1.0, 3.0, { b });
+        const auto cb2 = clips (b);
+        check ((bool) dup["ok"] && cb2.size() == 3 && near (cb2[1].first, 3.0) && near (cb2[1].second, 2.0),
+               "duplicate copies the range to just after it");
+        edit.getUndoManager().undo();
+        check (! (bool) run ("delete", 2.0, 2.0, {})["ok"], "an empty range is an error");
     }
     DawBridge::availableForTesting = false;
     folder.deleteRecursively();
@@ -16051,6 +16341,16 @@ int main()
         testAutoLevel();
         testLiveHistory();
         testSingAlongSession();
+        testTimeRange();
+        testBounce();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=takes: just recording, take lanes and punch.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "takes")
+    {
+        testTakes();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -16185,6 +16485,8 @@ int main()
     testAutoLevel();
     testLiveHistory();
     testSingAlongSession();
+    testTimeRange();
+    testBounce();
     testSetlist();
     testDawEngine();
     testDeviceEdits();

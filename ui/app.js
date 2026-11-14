@@ -1426,7 +1426,7 @@ const loopPanel = new LoopPanel(document.querySelector(".looper"), document.quer
 markLearnable(document.querySelector('[data-preset-step="-1"]'), "action:preset.previous", "Previous preset");
 markLearnable(document.querySelector('[data-preset-step="1"]'), "action:preset.next", "Next preset");
 markLearnable(document.querySelector(".panic-button"), "action:mute", "Mute (panic)");
-markLearnable(document.querySelector(".record-button"), "action:record", "Record");
+markLearnable(document.querySelector(".recorder .record-button"), "action:record", "Record");
 const sceneBar = new SceneBar(document.querySelector(".scene-bar"));
 const midiLearn = new MidiLearn(document.querySelector(".midi-button"));
 const setlistPanel = new SetlistPanel(document.querySelector(".setlist-button"), (text) => recorderBar.setStatus(text));

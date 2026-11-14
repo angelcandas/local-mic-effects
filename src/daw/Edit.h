@@ -52,7 +52,8 @@
 //             stepNote (the note a one-row part's steps play), mute, muted ("38,42": drum rows
 //             muted in this pattern), levels ("36:0.8,38:1": a velocity scale per drum row)
 //         NOTE  id, pitch, time (BEATS from the pattern's start), length (beats), velocity
-//     PATTERNCLIP  id, pattern (a PATTERN id), start (beats), length (beats), row (0..15), mute
+//     PATTERNCLIP  id, pattern (a PATTERN id), start (beats), length (beats), row (0..15), mute,
+//                  offset (beats into the pattern where the block starts; 0 <= offset < its length)
 //     RETURN  id, name, colour, volume, pan, mute, solo, inGain, outGain,
 //             group (true: a group track, see below), folded (a group's tracks are hidden)
 //       INSERTS ...
@@ -559,6 +560,12 @@ public:
     void setPatternClip (int clipId, double startBeats, double lengthBeats, int row);
     void setPatternClipMute (int clipId, bool);
     void setPatternClipPattern (int clipId, int patternId); // "Use another pattern" for this block
+    // Where in its pattern the block starts (a left trim): kept within one pass of the pattern.
+    void setPatternClipOffset (int clipId, double offsetBeats);
+    static double getPatternClipOffset (const juce::ValueTree& clip, double patternLength);
+    // Cuts a block in two at `atBeats` (the right half carries on where the left stopped).
+    // Returns the right half's id, or -1 when the time isn't inside the block.
+    int splitPatternClip (int clipId, double atBeats);
     void removePatternClip (int clipId);
     juce::ValueTree getPatternClip (int clipId) const;
     juce::Array<juce::ValueTree> getPatternClips() const;
