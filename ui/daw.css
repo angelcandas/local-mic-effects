@@ -534,9 +534,12 @@ body.is-daw .chip--live { display: none; }
 .strip-inserts { display: flex; flex-direction: column; gap: 3px; flex: 0 1 112px; width: 100%; min-height: 46px; overflow-y: auto; }
 
 .strip-insert {
+  display: flex;
   flex: none;
+  align-items: center;
+  gap: 5px;
   width: 100%;
-  padding: 3px 6px;
+  padding: 3px 6px 3px 4px;
   overflow: hidden;
   border: 1px solid var(--line);
   border-radius: 6px;
@@ -544,12 +547,20 @@ body.is-daw .chip--live { display: none; }
   color: var(--text);
   font-size: 10.5px;
   text-align: left;
-  text-overflow: ellipsis;
   white-space: nowrap;
-  cursor: pointer;
+  cursor: grab;
+  touch-action: none;
 }
-
-.strip-insert.is-add { border-style: dashed; color: var(--faint); }
+.strip-insert-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.strip-insert-dot { flex: none; width: 8px; height: 8px; padding: 0; border: 1px solid var(--faint); border-radius: 50%; background: transparent; cursor: pointer; }
+.strip-insert-dot[aria-pressed="true"] { border-color: var(--track-color); background: var(--track-color); box-shadow: 0 0 4px var(--track-color); }
+.strip-insert-dot:disabled { visibility: hidden; }
+.strip-insert.is-off .strip-insert-name { color: var(--faint); }
+.strip-insert.is-dragging { opacity: 0.4; }
+.strip-insert.is-drop-before { box-shadow: 0 -2px 0 var(--accent); }
+.strip-insert.is-drop-after { box-shadow: 0 2px 0 var(--accent); }
+.strip-insert.is-drop-target { border-color: var(--accent); }
+.strip-insert.is-add { display: block; border-style: dashed; color: var(--faint); cursor: pointer; }
 .strip-insert:hover { border-color: var(--track-color); }
 .knob-spacer { height: 88px; }
 
