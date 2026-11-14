@@ -1663,10 +1663,11 @@ namespace
             return nullptr;
         };
 
-        const auto* reverb = find (plan, voice, fx::ModuleType::reverb);
-        check (reverb != nullptr && reverb->atEnd && juce::exactlyEqual (reverb->values.at ("reverbMix"), 20.0f),
-               "dry voice: a ballad-sized reverb");
-        check (find (plan, roomy, fx::ModuleType::reverb) == nullptr && find (plan, roomy, fx::ModuleType::paraEq) != nullptr,
+        const auto* reverb = find (plan, voice, fx::ModuleType::plate);
+        check (reverb != nullptr && reverb->atEnd && juce::exactlyEqual (reverb->values.at ("plateMix"), 20.0f)
+                   && reverb->values.at ("platePreDelay") >= 20.0f && reverb->values.at ("plateDuck") > 0.0f,
+               "dry voice: a ballad-sized plate, with a pre-delay and ducking");
+        check (find (plan, roomy, fx::ModuleType::plate) == nullptr && find (plan, roomy, fx::ModuleType::paraEq) != nullptr,
                "a voice that rings on already gets no reverb (but still its EQ)");
 
         const auto* guitarEq = find (plan, guitar, fx::ModuleType::paraEq);
@@ -1674,7 +1675,7 @@ namespace
                    && guitarEq->values.at ("peqLowCutFreq") >= 80.0f && guitarEq->values.at ("peqLowCutFreq") <= 150.0f,
                "guitar: low cut under its lowest note (196 Hz), leaving the low end to the bass");
         check (find (plan, guitar, fx::ModuleType::compressor) != nullptr, "instrument: compresses its loud and quiet bars");
-        check (find (plan, backing, fx::ModuleType::compressor) == nullptr && find (plan, backing, fx::ModuleType::reverb) == nullptr,
+        check (find (plan, backing, fx::ModuleType::compressor) == nullptr && find (plan, backing, fx::ModuleType::reverb) == nullptr && find (plan, backing, fx::ModuleType::plate) == nullptr,
                "a full backing gets no compressor or reverb");
 
         // Applied: the reverb goes after the track's own effects, the rest before them.
@@ -1682,7 +1683,7 @@ namespace
         analysis::applyMix (edit, plan);
         const auto voiceInserts = daw::Edit::getInserts (edit.getTrack (voice));
         const auto guitarInserts = daw::Edit::getInserts (edit.getTrack (guitar));
-        check (voiceInserts.getChild (voiceInserts.getNumChildren() - 1)[daw::ids::type].toString() == "reverb"
+        check (voiceInserts.getChild (voiceInserts.getNumChildren() - 1)[daw::ids::type].toString() == "plate"
                    && voiceInserts.getChild (voiceInserts.getNumChildren() - 2)[daw::ids::type].toString() == "chorus"
                    && voiceInserts.getChild (0)[daw::ids::type].toString() == "paraEq",
                "reverb goes at the end of the voice's chain, EQ at the start");
@@ -1696,7 +1697,7 @@ namespace
         analysis::applyMix (edit, plan, 0.5f);
         {
             const auto inserts = daw::Edit::getInserts (edit.getTrack (voice));
-            check (juce::exactlyEqual ((float) inserts.getChild (inserts.getNumChildren() - 1)["reverbMix"], 10.0f),
+            check (juce::exactlyEqual ((float) inserts.getChild (inserts.getNumChildren() - 1)["plateMix"], 10.0f),
                    "amount 50% halves the reverb");
         }
 
@@ -1720,7 +1721,7 @@ namespace
 
         // Coaching keeps the voice dry.
         const auto coaching = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::coaching, options);
-        check (find (coaching, voice, fx::ModuleType::reverb) == nullptr, "coaching: no reverb");
+        check (find (coaching, voice, fx::ModuleType::reverb) == nullptr && find (coaching, voice, fx::ModuleType::plate) == nullptr, "coaching: no reverb");
 
         folder.deleteRecursively();
     }
@@ -1938,14 +1939,14 @@ namespace
         check (value (bgv, fx::ModuleType::paraEq, "peqLowCutFreq") >= 100.0f
                    && value (bgv, fx::ModuleType::paraEq, "peqLowCutFreq") > value (voice, fx::ModuleType::paraEq, "peqLowCutFreq"),
                "background vocals: a higher low cut than the lead's");
-        check (value (bgv, fx::ModuleType::reverb, "reverbMix") > value (voice, fx::ModuleType::reverb, "reverbMix"),
+        check (value (bgv, fx::ModuleType::plate, "plateMix") > value (voice, fx::ModuleType::plate, "plateMix"),
                "background vocals: more reverb than the lead");
         check (juce::exactlyEqual (value (bass, fx::ModuleType::paraEq, "peqLowCutFreq"), 30.0f)
                    && juce::exactlyEqual (value (drums, fx::ModuleType::paraEq, "peqLowCutFreq"), 30.0f),
                "bass and drums: only a rumble cut (30 Hz)");
         check (find (bass, fx::ModuleType::compressor) != nullptr, "bass: a compressor keeps the low end even");
         check (value (guitar, fx::ModuleType::paraEq, "peqLowCutFreq") >= 80.0f, "guitar: low cut from 80 Hz up");
-        check (find (bass, fx::ModuleType::reverb) == nullptr && find (drums, fx::ModuleType::reverb) == nullptr,
+        check (find (bass, fx::ModuleType::reverb) == nullptr && find (drums, fx::ModuleType::reverb) == nullptr && find (bass, fx::ModuleType::plate) == nullptr && find (drums, fx::ModuleType::plate) == nullptr,
                "instruments get no reverb");
 
         // Applied: the background vocals land about the style's LU under the lead.
@@ -1985,6 +1986,27 @@ namespace
                    && electronicValue (voice, fx::ModuleType::echo, "delayMix") > 0.0f,
                "electronic: a dotted-eighth echo on the lead (450 ms at 100 BPM)");
         check (electronicValue (bgv, fx::ModuleType::echo, "delayMix") < -999.0f, "no echo on the background vocals");
+        check (juce::exactlyEqual (electronicValue (voice, fx::ModuleType::echo, "delaySync"), 6.0f)
+                   && electronicValue (voice, fx::ModuleType::echo, "delayDuck") > 0.0f,
+               "the echo follows the tempo (dotted 1/8) and ducks under the words");
+        check (electronicValue (voice, fx::ModuleType::compressor, "compStyle") < -999.0f
+                   || juce::exactlyEqual (electronicValue (voice, fx::ModuleType::compressor, "compStyle"), 1.0f),
+               "electronic: a compressor on the voice has the Punch character");
+        check (juce::exactlyEqual (electronicValue (bgv, fx::ModuleType::doubler, "doublerMode"), 1.0f)
+                   && electronicValue (voice, fx::ModuleType::doubler, "doublerMix") < -999.0f,
+               "background vocals get a micro-shift double, the lead doesn't");
+        const auto ballad = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, electronicOptions);
+        bool opto = false, punchInBallad = false;
+        for (const auto& move : ballad.moves)
+        {
+            opto = opto || (move.trackId == voice && move.insert == fx::ModuleType::opto && move.values.at ("optoAmount") > 0.0f);
+            punchInBallad = punchInBallad || (move.insert == fx::ModuleType::compressor && move.values.count ("compStyle") > 0);
+        }
+        check (opto && ! punchInBallad, "ballad: an opto levels the voice, no Punch");
+        for (const auto& move : electronic.moves)
+            if (move.insert == fx::ModuleType::deEsser)
+                check (juce::exactlyEqual (move.values.at ("deessMode"), 1.0f) && move.values.at ("deessAmount") >= 35.0f,
+                       "a de-esser Auto Mix adds is in Smart mode");
         check (electronicValue (voice, fx::ModuleType::saturation, "satDrive") > 0.0f
                    && electronicValue (bass, fx::ModuleType::saturation, "satDrive") > 0.0f,
                "electronic: saturation on the voice and the bass");
@@ -2513,7 +2535,7 @@ namespace
         {
             onlyVoice = onlyVoice && move.trackId == voice;
             levels = levels || ! move.insert.has_value();
-            space = space || move.insert == fx::ModuleType::reverb || move.insert == fx::ModuleType::echo;
+            space = space || move.insert == fx::ModuleType::reverb || move.insert == fx::ModuleType::plate || move.insert == fx::ModuleType::echo;
             if (move.insert == fx::ModuleType::paraEq && move.instance == 1) hum = &move;
             if (move.insert == fx::ModuleType::gate) gate = &move;
         }
@@ -2608,7 +2630,7 @@ namespace
             float duck = 0.0f, master = 0.0f;
             for (const auto& move : speech.moves)
             {
-                character = character || move.insert == fx::ModuleType::reverb || move.insert == fx::ModuleType::echo
+                character = character || move.insert == fx::ModuleType::reverb || move.insert == fx::ModuleType::plate || move.insert == fx::ModuleType::echo
                          || move.insert == fx::ModuleType::saturation || move.insert == fx::ModuleType::exciter;
                 if (move.trackId == backing && ! move.ride.empty())
                     for (const auto& point : move.ride) duck = juce::jmin (duck, point.second);
@@ -2798,7 +2820,7 @@ namespace
         for (const auto& move : plan.moves)
         {
             if (move.sendTo == reverb) sends[move.trackId] = move.values.at ("send");
-            reverbInsert = reverbInsert || (move.insert == fx::ModuleType::reverb && move.trackId != reverb);
+            reverbInsert = reverbInsert || ((move.insert == fx::ModuleType::reverb || move.insert == fx::ModuleType::plate) && move.trackId != reverb);
             room = room || (move.trackId == reverb && move.insert == fx::ModuleType::reverb);
             if (move.sendTo != 0 || move.trackId == reverb)
                 for (const auto& reason : move.reasons)
@@ -2839,8 +2861,8 @@ namespace
         options.sends = false;
         bool insert = false;
         for (const auto& move : analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::ballad, options).moves)
-            insert = insert || (move.trackId == voice && move.insert == fx::ModuleType::reverb);
-        check (insert, "shared reverb off: a reverb insert on the voice");
+            insert = insert || (move.trackId == voice && move.insert == fx::ModuleType::plate);
+        check (insert, "shared reverb off: a plate insert on the voice");
     }
 
     void testDynamics()

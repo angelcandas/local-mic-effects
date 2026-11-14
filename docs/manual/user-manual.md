@@ -445,7 +445,7 @@ Every smart tool is also in the **Assist** menu on the toolbar, grouped by what 
 2. Press **Listen**. It renders every track offline and measures loudness (EBU R128), tone, when each track plays, your lowest notes and where the backing covers your words.
 3. It guesses which track is the **voice** and which is the **backing**. Change a role and the plan updates.
 4. It shows every change with the reason, for example "Cut 3.5 dB at 315 Hz: muddy":
-   - **Voice**: a Parametric EQ (low cut, mud and harshness cuts or a presence lift, boom and air shelves), a **Smooth** resonance suppressor where it rings, a Compressor if your level swings, a De-esser if the S's stand out.
+   - **Voice**: a Parametric EQ (low cut, mud and harshness cuts or a presence lift, boom and air shelves), a **Smooth** resonance suppressor where it rings, a Compressor if your level swings (with the **Punch** character for Pop, Hip-hop, Rock and Electronic, and an **Opto** after it for Ballad, R&B, Acoustic and Jazz), a **Smart** De-esser if the S's stand out. On a dry voice the space is a **Plate** with its pre-delay set from the song's tempo and ducking while you sing, and an echo that follows the tempo and ducks too. Background vocals also get a micro-shift **Doubler**.
    - **Backing**: a small EQ dip where it covers your voice.
    - **Balance**: your volume so the voice sits the style's amount over the backing.
    - **Pan**: tracks are placed left and right (centre for voice, bass, kick and snare, pairs of the same kind spread apart) while staying mono-safe.

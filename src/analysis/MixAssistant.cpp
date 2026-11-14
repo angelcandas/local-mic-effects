@@ -628,7 +628,7 @@ namespace
     //==========================================================================
     struct VoicePlan
     {
-        MixMove eq, smooth, dynEq, compressor, deEsser, saturation, exciter, echo, reverb, width, ride;
+        MixMove eq, smooth, dynEq, compressor, opto, deEsser, saturation, exciter, doubler, echo, reverb, width, ride;
         double eqChange = 0.0;       // what the EQ does to its loudness
         double loudnessChange = 0.0; // what the EQ and compressor do to its loudness
         double peakChange = 0.0;     // roughly, to the peak
@@ -638,7 +638,8 @@ namespace
                          const juce::String& name, bool background = false)
     {
         VoicePlan plan;
-        for (auto* move : { &plan.eq, &plan.smooth, &plan.dynEq, &plan.compressor, &plan.deEsser, &plan.saturation, &plan.exciter, &plan.echo, &plan.reverb, &plan.width })
+        for (auto* move : { &plan.eq, &plan.smooth, &plan.dynEq, &plan.compressor, &plan.opto, &plan.deEsser, &plan.saturation, &plan.exciter,
+                            &plan.doubler, &plan.echo, &plan.reverb, &plan.width })
             move->trackId = trackId;
         plan.eq.insert = fx::ModuleType::paraEq;
         plan.compressor.insert = fx::ModuleType::compressor;
@@ -795,10 +796,14 @@ namespace
                     }
 
                 const auto threshold = juce::jlimit (-60.0f, 0.0f, roundTo (percentile (levels, background ? 0.6 : 0.75), 1.0));
+                // Smart mode judges each S against the rest of the voice, so it cuts the same
+                // whispered or belted; the measured threshold stays for Classic.
+                const auto amount = (float) juce::jlimit (35.0f, 70.0f, roundTo (35.0 + excess * 4.0 + (background ? 10.0 : 0.0), 5.0));
                 plan.deEsser.values = { { "deessOn", 1.0f }, { "deessThreshold", threshold },
-                                        { "deessFreq", roundTo (juce::jlimit (3000.0, 10000.0, getBandCentre (band)), 10.0) } };
-                plan.deEsser.reasons.add ("De-esser from " + juce::String (threshold, 0) + " dB at " + formatHz (getBandCentre (band))
-                                          + ": the S's stand out by " + formatDb (excess));
+                                        { "deessFreq", roundTo (juce::jlimit (3000.0, 10000.0, getBandCentre (band)), 10.0) },
+                                        { "deessMode", 1.0f }, { "deessAmount", amount } };
+                plan.deEsser.reasons.add ("Smart de-esser at " + juce::String (amount, 0) + "% around " + formatHz (getBandCentre (band))
+                                          + ": the S's stand out by " + formatDb (excess) + ", and it softens them the same at any level");
             }
         }
 
@@ -819,6 +824,25 @@ namespace
             plan.compressor.trackId = trackId;
             compChange = planCompressor (plan.compressor, voice, eqChange, false, plan.peakChange);
             setCompressorTiming (plan.compressor, std::nullopt);
+
+            // The compressor's character by style: Punch grabs the peaks of a forward voice;
+            // the softer styles get an opto after it, levelling slowly like a studio LA-2A
+            // ("a fast one for peaks, then a slow one for level").
+            const auto style = targets.style;
+            const auto punchy = style == MixStyle::pop || style == MixStyle::hipHop || style == MixStyle::rock || style == MixStyle::electronic;
+            const auto smooth = style == MixStyle::ballad || style == MixStyle::rnb || style == MixStyle::acoustic || style == MixStyle::jazz;
+            if (! plan.compressor.values.empty() && punchy)
+            {
+                plan.compressor.values["compStyle"] = 1.0f; // Punch
+                plan.compressor.reasons.add ("Punch character: it grabs the peaks fast, for a voice that sits forward (" + getStyleName (style) + ")");
+            }
+            if (smooth && ! hasAny (options, trackId, { fx::ModuleType::opto }))
+            {
+                plan.opto.insert = fx::ModuleType::opto;
+                plan.opto.values = { { "optoOn", 1.0f }, { "optoAmount", background ? 20.0f : 30.0f }, { "optoOutput", 2.0f } };
+                plan.opto.reasons.add ("Opto " + juce::String (background ? 20 : 30) + "% after the compressor: a slow, smooth levelling of about 2 dB, its output "
+                                       "made up, so the voice sits evenly (" + getStyleName (style) + ")");
+            }
         }
 
         // Character the style asks for: saturation (warmth or grit, mixed in), and air from
@@ -845,7 +869,7 @@ namespace
         }
 
         // A tempo-synced echo on the lead, at the end of the chain.
-        const auto ownSpace = hasAny (options, trackId, { fx::ModuleType::reverb, fx::ModuleType::echo });
+        const auto ownSpace = hasAny (options, trackId, { fx::ModuleType::reverb, fx::ModuleType::plate, fx::ModuleType::echo });
         if (options.echo && targets.echoMix > 0.0f && ! background && ! ownSpace)
         {
             const auto beat = 60000.0 / juce::jlimit (40.0, 240.0, options.tempo);
@@ -855,10 +879,18 @@ namespace
                             : juce::approximatelyEqual (targets.echoBeats, 1.0f) ? "a quarter note" : "a beat fraction";
             plan.echo.insert = fx::ModuleType::echo;
             plan.echo.atEnd = true;
+            // Synced to the song's tempo (it follows tempo changes; the time is what it plays at
+            // the tempo measured), and ducked so the repeats bloom in the gaps, not over the words.
+            const auto sync = juce::approximatelyEqual (targets.echoBeats, 0.5f) ? 4.0f    // 1/8
+                            : juce::approximatelyEqual (targets.echoBeats, 0.75f) ? 6.0f   // dotted 1/8
+                            : juce::approximatelyEqual (targets.echoBeats, 1.0f) ? 7.0f    // 1/4
+                                                                                  : 0.0f;
+            const auto duck = targets.style == MixStyle::lofi ? 30.0f : 60.0f;
             plan.echo.values = { { "delayOn", 1.0f }, { "delayTime", ms }, { "delayFeedback", targets.echoFeedback },
-                                 { "delayMix", targets.echoMix }, { "delayPingPong", 1.0f } };
+                                 { "delayMix", targets.echoMix }, { "delayPingPong", 1.0f }, { "delaySync", sync }, { "delayDuck", duck } };
             plan.echo.reasons.add ("Echo " + juce::String (targets.echoMix, 0) + "%, " + juce::String (ms, 0) + " ms (" + note + " at "
-                                   + juce::String (options.tempo, 0) + " BPM), ping-pong: depth that moves with the song");
+                                   + juce::String (options.tempo, 0) + " BPM" + (sync > 0.0f ? ", following the tempo" : "")
+                                   + "), ping-pong, ducked " + juce::String (duck, 0) + "% while you sing: depth that moves with the song");
 
             // Throws: at the end of each phrase (a second or more of singing, then at least
             // 0.6 s of quiet), the echo's mix rises over the last word and holds through the
@@ -901,6 +933,16 @@ namespace
             }
         }
 
+        // Background vocals get a micro-shift double (two copies a few cents apart, clean in
+        // mono): a stack that sounds like more voices.
+        if (background && options.width && ! hasAny (options, trackId, { fx::ModuleType::doubler }))
+        {
+            plan.doubler.insert = fx::ModuleType::doubler;
+            plan.doubler.atEnd = true;
+            plan.doubler.values = { { "doublerOn", 1.0f }, { "doublerMode", 1.0f }, { "doublerDetune", 12.0f }, { "doublerMix", 30.0f } };
+            plan.doubler.reasons.add ("Micro-shift double, 12 cents at 30%: the background vocals sound like a bigger stack");
+        }
+
         // Background vocals spread wider than the lead, which stays in the middle.
         if (background && options.width && targets.widthAmount > 100.0f)
         {
@@ -916,7 +958,7 @@ namespace
         {
             const auto ring = measureRingSeconds (voice);
 
-            if (hasAny (options, trackId, { fx::ModuleType::reverb, fx::ModuleType::echo }))
+            if (hasAny (options, trackId, { fx::ModuleType::reverb, fx::ModuleType::plate, fx::ModuleType::echo }))
                 notes.add (name + " already has its own reverb or echo: no reverb added.");
             else if (ring.has_value() && *ring > 0.4)
                 notes.add (name + " already sounds roomy (it rings on " + juce::String (*ring, 1) + " s after each note): no reverb added.");
@@ -937,14 +979,23 @@ namespace
                 }
                 else
                 {
-                    plan.reverb.insert = fx::ModuleType::reverb;
+                    // A plate, the classic vocal reverb: its pre-delay a 1/32 note at the song's
+                    // tempo keeps the words clear, and it ducks while the voice sings by the style.
+                    const auto decay = roundTo (juce::jlimit (0.8f, 3.5f, 0.6f + size * 0.03f), 0.1);
+                    const auto preDelay = background ? 10.0f : (float) roundTo (juce::jlimit (20.0, 80.0, 60000.0 / juce::jlimit (40.0, 240.0, options.tempo) / 8.0), 1.0);
+                    const auto style = targets.style;
+                    const auto duck = background ? 0.0f
+                                    : (style == MixStyle::pop || style == MixStyle::hipHop || style == MixStyle::electronic || style == MixStyle::rock) ? 30.0f
+                                    : style == MixStyle::ballad ? 20.0f : 15.0f;
+                    plan.reverb.insert = fx::ModuleType::plate;
                     plan.reverb.atEnd = true;
-                    plan.reverb.values = { { "reverbOn", 1.0f }, { "reverbMix", mix }, { "reverbSize", size },
-                                           { "reverbDamping", 55.0f }, { "reverbWidth", 100.0f } };
-                    plan.reverb.reasons.add ("Reverb " + juce::String (mix, 0) + "%, "
-                                             + (size >= 60.0f ? "large" : size >= 45.0f ? "medium" : "small")
-                                             + (background ? " room: puts the background vocals behind the lead"
-                                                           : " room: the recording is dry and gives the voice some space"));
+                    plan.reverb.values = { { "plateOn", 1.0f }, { "plateMix", mix }, { "plateDecay", decay }, { "platePreDelay", preDelay },
+                                           { "plateDuck", duck }, { "plateLowCut", 200.0f } };
+                    plan.reverb.reasons.add ("Plate " + juce::String (mix, 0) + "%, " + juce::String (decay, 1) + " s"
+                                             + (background ? ": puts the background vocals behind the lead"
+                                                           : ", pre-delay " + juce::String (preDelay, 0) + " ms (a 1/32 note)"
+                                                             + (duck > 0.0f ? ", ducked " + juce::String (duck, 0) + "% while you sing" : juce::String())
+                                                             + ": the recording is dry and gives the voice some space"));
                 }
             }
         }
@@ -1131,7 +1182,7 @@ namespace
             auto cleanOptions = options;
             cleanOptions.reverb = cleanOptions.echo = cleanOptions.exciter = cleanOptions.saturation = cleanOptions.width = false;
             auto vp = planVoice (id, profile, targets, cleanOptions, plan.notes, name, role == Role::backingVocal);
-            for (auto* move : { &vp.eq, &vp.smooth, &vp.dynEq, &vp.deEsser, &vp.compressor })
+            for (auto* move : { &vp.eq, &vp.smooth, &vp.dynEq, &vp.deEsser, &vp.compressor, &vp.opto })
                 if (! move->values.empty())
                     plan.moves.push_back (*move);
             firstEq = ! vp.eq.values.empty();
@@ -2425,7 +2476,7 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
                 if (options.saturation)
                     add (fx::ModuleType::saturation, false, { { "satOn", 1.0f }, { "satDrive", 4.0f }, { "satMix", 30.0f } },
                          "Saturation 4 dB drive, mixed in at 30%: edge so the lead cuts through");
-                if (options.echo && ! hasAny (options, id, { fx::ModuleType::echo, fx::ModuleType::reverb }))
+                if (options.echo && ! hasAny (options, id, { fx::ModuleType::echo, fx::ModuleType::reverb, fx::ModuleType::plate }))
                 {
                     const auto ms = roundTo (juce::jlimit (20.0, 1500.0, 0.75 * 60000.0 / juce::jlimit (40.0, 240.0, options.tempo)), 1.0);
                     add (fx::ModuleType::echo, true, { { "delayOn", 1.0f }, { "delayTime", ms }, { "delayFeedback", 30.0f },
@@ -2654,7 +2705,8 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
 
     for (const auto& [id, vp] : voicePlans)
     {
-        for (auto* move : { &vp.eq, &vp.smooth, &vp.dynEq, &vp.compressor, &vp.deEsser, &vp.saturation, &vp.exciter, &vp.echo, &vp.reverb, &vp.width, &vp.ride })
+        for (auto* move : { &vp.eq, &vp.smooth, &vp.dynEq, &vp.compressor, &vp.opto, &vp.deEsser, &vp.saturation, &vp.exciter, &vp.doubler, &vp.echo,
+                            &vp.reverb, &vp.width, &vp.ride })
             if (! move->values.empty() || ! move->ride.empty())
                 plan.moves.push_back (*move);
     }
