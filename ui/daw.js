@@ -5345,13 +5345,31 @@ class DawScreen {
       this.scrollTo(scroll.left);
       this.restoringView = false;
     }
-    for (const [id, resolve] of this.trackWaiters) if (tracks.some((t) => t.id === id)) { this.trackWaiters.delete(id); resolve(); }
+    const ready = [...tracks, ...(this.session.returns ?? []), ...(this.session.groups ?? [])];
+    for (const [id, resolve] of this.trackWaiters) if (ready.some((t) => t.id === id)) { this.trackWaiters.delete(id); resolve(); }
   }
 
   // Resolves once a session holding the track has arrived (a command's reply comes
   // before the session that shows its result).
+  // Where an effect card dragged out of the effects panel lands (devices.js): a track,
+  // return, group or the master (the end of its chain), or the library (save it as a
+  // preset). -> { track, element, label } or { library: true, element, label }, or null.
+  deviceDropTarget(x, y) {
+    const under = document.elementFromPoint(x, y);
+    if (!under || under.closest(".inspector")) return null;
+    const library = under.closest(".daw-library");
+    if (library) return { library: true, element: library, label: "Save as a preset" };
+    if (under.closest(".master-row, .strip.is-master")) return { track: 0, element: under.closest(".master-row, .strip.is-master"), label: "Master" };
+    const row = under.closest(".track-row[data-track], .return-row[data-track], .strip[data-track]");
+    if (!row) return null;
+    const track = Number(row.dataset.track);
+    const owner = [...this.session.tracks, ...(this.session.returns ?? []), ...(this.session.groups ?? [])].find((t) => t.id === track);
+    return owner ? { track, element: row, label: owner.name } : null;
+  }
+
+  // A track, return or group (just made) in the session.
   waitForTrack(id) {
-    if (this.session?.tracks.some((t) => t.id === id)) return Promise.resolve();
+    if ([...(this.session?.tracks ?? []), ...(this.session?.returns ?? []), ...(this.session?.groups ?? [])].some((t) => t.id === id)) return Promise.resolve();
     return new Promise((resolve) => {
       this.trackWaiters.set(id, resolve);
       setTimeout(() => { if (this.trackWaiters.get(id) === resolve) { this.trackWaiters.delete(id); resolve(); } }, 2000);
@@ -5410,12 +5428,16 @@ class DawScreen {
 
   // Loads one of an effect's factory presets (fxpresets.js) into a new insert; what the
   // preset doesn't list goes to its default. Joins the add's undo step.
-  async applyEffectPreset(insertId, moduleId, presetName) {
+  // With `own`, it's an undo step of its own (an effect that was already there).
+  async applyEffectPreset(insertId, moduleId, presetName, own = false) {
     const preset = (FX_PRESETS[moduleId] ?? []).find((p) => p.name === presetName);
     if (!preset) return;
+    let first = own;
     for (const param of presetParams(moduleId)) {
       const value = preset.values[param] ?? parameterInfo[param]?.default;
-      if (value !== undefined) await daw("setInsert", { id: insertId, param, value, continue: true });
+      if (value === undefined) continue;
+      await daw("setInsert", { id: insertId, param, value, continue: !first });
+      first = false;
     }
   }
 
