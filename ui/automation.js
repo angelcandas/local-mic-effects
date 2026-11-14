@@ -495,9 +495,19 @@ export class AutomationLanes {
     this.kit.popMenu(event.clientX, event.clientY, ({ item, rule }) => {
       if (selected?.size) item(`Delete ${selected.size} selected point${selected.size === 1 ? "" : "s"}`, () => this.deletePoints(state, selected), { shortcut: "Delete" });
       item("Select all points", () => this.select(state, new Set(state.points.map((p) => p.t))), { disabled: !state.points.length });
+      item("Thin points", () => this.thin(state), { disabled: state.points.length < 3, hint: "Fewer points for the same curve" });
+      rule();
+      const follow = this.screen.session?.lanesFollowClips !== false;
+      item("Automation follows clips", () => this.kit.daw("lanesFollowClips", { on: !follow }), { checked: follow,
+        hint: "Moving, duplicating, copying and pasting a clip takes the automation under it along" });
       rule();
       item("Clear lane", () => this.commit(state.track, state.target, []), { disabled: !state.points.length, danger: true });
     });
+  }
+
+  async thin(state) {
+    const result = await this.kit.daw("thinLane", { track: state.track.id, target: state.target });
+    if (result?.ok) this.kit.toast(result.after < result.before ? `${result.before} points → ${result.after}, same curve. Ctrl+Z undoes it.` : "Nothing to thin: every point shapes the curve.");
   }
 
   deletePoints(state, times) {

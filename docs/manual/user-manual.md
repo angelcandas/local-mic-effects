@@ -359,6 +359,9 @@ Automation makes a setting move over time: the voice comes up in the chorus, the
 - **Ctrl+drag**, or drag with the **Draw tool** (P), to draw a curve freehand over what was there. Straight stretches are kept as few points.
 - **+** adds a lane under the current one, **⌫** clears a lane, **×** hides it (its points still play). **Clear all automation** in the track menu empties every lane of the track.
 - Each gesture is one undo step. Automation plays while the song plays and in exports; when you stop, pan, sends, effect values and macros go back to their knobs.
+- **Write automation** by moving knobs while the song plays: the automation button next to Loop and Punch cycles **Off → Touch → Latch**. In **Touch**, moving a track's volume, pan, a send, an effect value or a macro writes its lane while you move it; let go and the lane carries on as it was. In **Latch**, the last value keeps writing until you stop. While you write, you hear the knob; when the pass ends the knob goes back to where it was, the moves are thinned to a few points, and each pass is one undo step. A volume move adds to the ride already there.
+- **Thin points** (right-click a lane) keeps the same curve with fewer points.
+- **Automation follows clips** (right-click a lane; on by default): moving a clip takes the automation under it along, and duplicating, Ctrl+dragging, copying and pasting a clip brings a copy. Effect lanes stay on their own track.
 
 ## 4.6 Projects and export
 

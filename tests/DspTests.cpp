@@ -4492,6 +4492,88 @@ namespace
         folder.deleteRecursively();
     }
 
+    // Recording automation (touch/latch), thinning, and lanes following clips (item 6, PR 2).
+    void testAutomationRecording()
+    {
+        std::cout << "\nRecording automation\n";
+
+        daw::Edit edit;
+        const auto track = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto bus = (int) edit.getReturns()[0][daw::ids::id];
+        edit.setTrackPan (track, 0.25f);
+
+        // Thinning: a straight run of points is two; a corner stays.
+        std::vector<daw::Edit::AutomationPoint> line;
+        for (int i = 0; i <= 20; ++i)
+            line.push_back ({ i * 0.1, i < 10 ? i * 0.1f : 1.0f });
+        const auto thinned = daw::Edit::thinPoints (line, 0.01f);
+        check (thinned.size() == 3 && juce::approximatelyEqual (thinned[1].value, 0.9f) == false && thinned[1].time > 0.85 && thinned[1].time < 1.05,
+               "thinning keeps the ends and the corner (" + juce::String ((int) thinned.size()) + " points)");
+
+        // Latch: writes from the first move to the stop, then the knob goes back.
+        daw::AutomationRecorder recorder (edit, nullptr);
+        recorder.setMode (daw::AutomationRecorder::Mode::latch);
+        check (! recorder.moved (track + 999, "pan", 0.0f, 1.0), "only tracks record");
+        for (int i = 0; i <= 10; ++i)
+        {
+            const auto pan = -1.0f + i * 0.1f;
+            recorder.moved (track, "pan", pan, 2.0 + i * 0.1);
+            edit.setTrackPan (track, pan);
+        }
+        recorder.update (5.0, true);
+        check (recorder.isWriting(), "latch keeps writing after the knob stops");
+        recorder.update (6.0, false);
+        auto pan = daw::Edit::getLane (edit.getTrack (track), "pan");
+        const auto at = [&] (double t) { return daw::Edit::getAutomationValueAt (pan, t); };
+        check (! recorder.isWriting() && std::abs (at (1.0) - 0.25f) < 1.0e-3f && std::abs (at (2.5) + 0.5f) < 0.02f
+                   && std::abs (at (5.5)) < 1.0e-3f && std::abs (at (7.0) - 0.25f) < 1.0e-3f,
+               "latch: the old setting before, the moves, the last value held to the stop, the old setting after");
+        check (pan.size() <= 6, "the recorded ramp is thinned (" + juce::String ((int) pan.size()) + " points)");
+        check (juce::approximatelyEqual ((float) edit.getTrack (track)[daw::ids::pan], 0.25f), "the pan knob goes back to where it was");
+        edit.getUndoManager().undo();
+        check (daw::Edit::getLane (edit.getTrack (track), "pan").empty(), "a recorded pass is one undo step");
+
+        // Touch over an existing lane: only the touched stretch changes.
+        edit.setLane (track, "send:" + juce::String (bus), { { 0.0, -20.0f }, { 10.0, -20.0f } });
+        edit.setSend (track, bus, -20.0f);
+        recorder.setMode (daw::AutomationRecorder::Mode::touch);
+        recorder.moved (track, "send:" + juce::String (bus), -6.0f, 3.0);
+        recorder.moved (track, "send:" + juce::String (bus), -6.0f, 4.0);
+        recorder.update (4.1, true);
+        check (recorder.isWriting(), "touch writes while the knob moves");
+        juce::Thread::sleep ((int) (daw::AutomationRecorder::releaseSeconds * 1000) + 100);
+        recorder.update (4.5, true);
+        const auto send = daw::Edit::getLane (edit.getTrack (track), "send:" + juce::String (bus));
+        const auto sendAt = [&] (double t) { return daw::Edit::getAutomationValueAt (send, t); };
+        check (! recorder.isWriting() && std::abs (sendAt (2.0) + 20.0f) < 0.01f && std::abs (sendAt (3.5) + 6.0f) < 0.01f && std::abs (sendAt (6.0) + 20.0f) < 0.01f,
+               "touch: let go and the lane carries on as it was");
+
+        // Volume: a fader move adds to the ride.
+        edit.setVolumeRide (track, { { 0.0, -3.0f } });
+        recorder.moved (track, "volume", 2.0f, 1.0);
+        edit.setTrackVolume (track, 2.0f);
+        recorder.finishAll (1.5);
+        const auto ride = daw::Edit::getLane (edit.getTrack (track), "volume");
+        check (std::abs (daw::Edit::getAutomationValueAt (ride, 1.0) + 1.0f) < 0.01f && juce::approximatelyEqual ((float) edit.getTrack (track)[daw::ids::volume], 0.0f),
+               "a fader move writes the ride (+2 dB on -3 dB) and the fader goes back");
+
+        // Lanes follow clips: a copy brings its stretch, a move takes it along.
+        daw::Edit lanes;
+        const auto a = (int) lanes.addTrack ("A")[daw::ids::id];
+        const auto b = (int) lanes.addTrack ("B")[daw::ids::id];
+        lanes.setLane (a, "pan", { { 0.0, 0.0f }, { 1.0, -1.0f }, { 2.0, 1.0f }, { 3.0, 0.0f } });
+        lanes.copyLaneRange (a, 1.0, 2.0, b, 5.0, false);
+        const auto copied = daw::Edit::getLane (lanes.getTrack (b), "pan");
+        check (std::abs (daw::Edit::getAutomationValueAt (copied, 5.0) + 1.0f) < 1.0e-3f && std::abs (daw::Edit::getAutomationValueAt (copied, 6.0) - 1.0f) < 1.0e-3f
+                   && std::abs (daw::Edit::getAutomationValueAt (copied, 3.0)) < 1.0e-3f && std::abs (daw::Edit::getAutomationValueAt (copied, 8.0)) < 1.0e-3f,
+               "a copy lands at its new place; the other track's knob setting holds around it");
+        lanes.copyLaneRange (a, 1.0, 2.0, a, 4.0, true);
+        const auto moved = daw::Edit::getLane (lanes.getTrack (a), "pan");
+        check (std::abs (daw::Edit::getAutomationValueAt (moved, 4.5)) < 1.0e-3f && std::abs (daw::Edit::getAutomationValueAt (moved, 1.5)) < 1.0e-3f
+                   && std::abs (daw::Edit::getAutomationValueAt (moved, 5.0) - 1.0f) < 1.0e-3f,
+               "a move takes the stretch along and leaves a straight line behind");
+    }
+
     // Ableton-style chain edits: adding, removing or moving an effect doesn't restart the
     // others (a reverb tail rings on), and the single-effect commands.
     void testChainOrder()
@@ -17806,6 +17888,7 @@ int main()
     testDawFit();
     testEffectAutomation();
     testAutomationLanes();
+    testAutomationRecording();
     testAnalysisSpeed();
     testLatency();
     testDenoise();
