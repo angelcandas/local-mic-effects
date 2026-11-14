@@ -26,6 +26,7 @@
 #include "analysis/MixCheck.h"
 #include "analysis/TakeComp.h"
 #include "Presets.h"
+#include "FactoryChains.h"
 #include "daw/DawEngine.h"
 #include "daw/ClipTools.h"
 #include "daw/Exporter.h"
@@ -16616,6 +16617,160 @@ static void printCrash (int signal)
     std::raise (signal);
 }
 
+//==============================================================================
+// Factory vocal chains (src/FactoryChains.h): every chain loads, keeps a -18 LUFS voice
+// near its level without clipping, compresses within a sensible range, cuts the S, and
+// the stage chains add no delay. Live-marked chains load in Live as written.
+static std::vector<float> makeVocalPhrase (bool spoken)
+{
+    // Syllables (a few per second) of a buzzy voice gliding in pitch, with an S every
+    // so often and short gaps, scaled to about -18 LUFS.
+    std::vector<float> samples ((size_t) (8.0 * sampleRate));
+    juce::Random random (5);
+    fx::Biquad hiss;
+    hiss.setup (fx::Biquad::Type::highPass, sampleRate, 5000.0, 0.707);
+    const auto twoPi = juce::MathConstants<double>::twoPi;
+    const auto syllable = spoken ? 0.18 : 0.42;
+    double phase = 0.0;
+    for (size_t i = 0; i < samples.size(); ++i)
+    {
+        const auto t = (double) i / sampleRate;
+        const auto inSyllable = std::fmod (t, syllable) / syllable;
+        const auto word = (int) (t / syllable);
+        const auto gap = (word % 7) == 6; // a breath now and then
+        const auto hz = spoken ? 130.0 + 25.0 * std::sin (twoPi * 0.7 * t) : 220.0 + 80.0 * std::sin (twoPi * 0.3 * t) + 3.0 * std::sin (twoPi * 5.5 * t);
+        phase += twoPi * hz / sampleRate;
+        double value = 0.0;
+        for (int h = 1; h <= 16; ++h)
+            value += std::sin (phase * h) / h;
+        // Loud and soft syllables, each with an attack and a fall.
+        const auto accent = 0.5 + 0.5 * std::abs (std::sin (word * 1.7));
+        auto envelope = std::min (1.0, inSyllable / 0.08) * (1.0 - 0.6 * inSyllable) * accent;
+        if (gap) envelope = 0.0;
+        auto x = (float) (value * envelope * 0.25);
+        const auto sibilant = (word % 4) == 1 && inSyllable < 0.25 && ! gap;
+        const auto noise = hiss.process (0, random.nextFloat() * 2.0f - 1.0f);
+        if (sibilant)
+            x = 0.3f * x + 0.35f * noise;
+        samples[i] = x;
+    }
+
+    // To -18 LUFS (integrated, played on both sides).
+    const auto loudness = autoLevelLoudness (samples, 0.0, 8.0) + 3.01f;
+    const auto gain = juce::Decibels::decibelsToGain (-18.0f - loudness);
+    for (auto& x : samples)
+        x *= gain;
+    return samples;
+}
+
+static float stereoLoudness (const std::vector<float>& left, const std::vector<float>& right, double fromSeconds)
+{
+    const auto from = (size_t) (fromSeconds * sampleRate);
+    std::vector<float> l (left.begin() + (long) from, left.end()), r (right.begin() + (long) from, right.end());
+    fx::LoudnessMeter meter;
+    meter.prepare (sampleRate);
+    float* channels[] = { l.data(), r.data() };
+    meter.process (juce::dsp::AudioBlock<float> (channels, 2, l.size()));
+    return meter.getIntegrated();
+}
+
+static void testFactoryChains()
+{
+    std::cout << "\nFactory vocal chains\n";
+
+    const auto list = factory::listChains();
+    check (list.size() == 18, "16 vocal chains and 2 returns are listed (" + juce::String (list.size()) + ")");
+    int live = 0;
+    for (const auto& entry : *list.getArray())
+        live += (bool) entry["live"] ? 1 : 0;
+    check (live == 15, "15 of them play in Live (" + juce::String (live) + ")");
+
+    const auto sung = makeVocalPhrase (false), spoken = makeVocalPhrase (true);
+
+    for (const auto& chain : factory::getChains())
+    {
+        const auto inserts = factory::makeInserts (chain.name);
+        const juce::String name (chain.name);
+        const auto isReturn = juce::String (chain.folder).contains ("Returns");
+
+        // Build it as a DAW track would: one module per insert, its values set.
+        std::vector<fx::ModuleType> types;
+        for (const auto& insert : inserts)
+            if (const auto type = daw::Edit::moduleTypeFromKey (insert["type"].toString()))
+                types.push_back (*type);
+        check ((int) types.size() == (int) chain.devices.size() && inserts.getNumChildren() == (int) chain.devices.size(),
+               name + ": every device is a known effect");
+
+        fx::FxChain fxChain (types);
+        for (int m = 0; m < fxChain.size(); ++m)
+        {
+            const auto insert = inserts.getChild (m);
+            for (int v = 0; v < fxChain[m].getNumValues(); ++v)
+                if (const juce::Identifier id (fxChain[m].getValueId (v)); insert.hasProperty (id))
+                    fxChain[m].getValue (v).store ((float) insert[id]);
+        }
+        fxChain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+        fxChain.setTempo (100.0);
+
+        if (name.startsWith ("Live stage"))
+            check (fxChain.getLatencySamples() == 0, name + ": adds no delay");
+
+        if (isReturn)
+            continue; // fully wet: not level-matched
+
+        for (const auto* input : { &sung, &spoken })
+        {
+            std::vector<float> left, right;
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            float peak = 0.0f, deepestComp = 0.0f;
+            for (size_t start = 0; start + blockSize <= input->size(); start += blockSize)
+            {
+                for (int ch = 0; ch < 2; ++ch)
+                    buffer.copyFrom (ch, 0, input->data() + start, blockSize);
+                juce::dsp::AudioBlock<float> block (buffer);
+                fxChain.process (fx::Module::Context (block));
+                peak = std::max (peak, buffer.getMagnitude (0, blockSize));
+                left.insert (left.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+                right.insert (right.end(), buffer.getReadPointer (1), buffer.getReadPointer (1) + blockSize);
+                if (start > (size_t) sampleRate)
+                    for (int m = 0; m < fxChain.size(); ++m)
+                        if (fxChain[m].getType() == fx::ModuleType::compressor || fxChain[m].getType() == fx::ModuleType::opto)
+                        {
+                            juce::DynamicObject readings;
+                            fxChain[m].addReadings (readings);
+                            deepestComp = std::max (deepestComp, (float) readings.getProperty ("reduction"));
+                        }
+            }
+
+            std::vector<float> inL (input->begin(), input->begin() + (long) left.size());
+            const auto in = stereoLoudness (inL, inL, 1.0), out = stereoLoudness (left, right, 1.0);
+            const auto what = name + (input == &sung ? " (sung)" : " (spoken)");
+            std::cout << "        " << what << ": " << juce::String (out - in, 2) << " LU, peak "
+                      << juce::String (juce::Decibels::gainToDecibels (peak), 1) << " dBFS, deepest compression "
+                      << juce::String (deepestComp, 1) << " dB\n";
+            check (peak < 1.0f, what + ": no clipping");
+            check (std::abs (out - in) <= 1.0f, what + ": comes out within 1 LU of what went in (" + juce::String (out - in, 2) + ")");
+            if (input == &sung && std::any_of (types.begin(), types.end(), [] (auto t) { return t == fx::ModuleType::compressor || t == fx::ModuleType::opto; }))
+                check (deepestComp > 1.5f && deepestComp < 16.0f, what + ": the compressors work (" + juce::String (deepestComp, 1) + " dB)");
+        }
+
+        // Live-marked chains play in Live as written: the same effects in the same order.
+        if (! chain.dawOnly)
+        {
+            PluginProcessor processor;
+            processor.applyLiveChain (inserts);
+            const auto captured = processor.captureLiveChain();
+            juce::StringArray want, got;
+            for (const auto& insert : inserts) want.add (insert["type"].toString());
+            for (const auto& insert : captured) got.add (insert["type"].toString());
+            check (want == got, name + ": loads in Live as written (" + got.joinIntoString (", ") + ")");
+        }
+    }
+
+    check (! factory::makeInserts ("No such chain").isValid(), "an unknown name gives no chain");
+}
+
+
 int main()
 {
     std::cout << std::unitbuf;
@@ -16688,6 +16843,7 @@ int main()
         testVocalDynamics();
     testSpace();
     testColour();
+    testFactoryChains();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -16932,6 +17088,7 @@ int main()
     testVocalDynamics();
     testSpace();
     testColour();
+    testFactoryChains();
     testEffectAutomation();
     testAnalysisSpeed();
     testLatency();
