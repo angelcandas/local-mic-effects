@@ -10,7 +10,7 @@
 // The folders come from the native side (DawBridge: places, browse, addPlace,
 // removePlace, importFile); instruments from "instruments" / "addInstrument"; the
 // preview from "preview". Favourites and Recent are kept in the app's settings (pref).
-import { CATEGORIES, MODULES } from "./modules.js";
+import { CATEGORIES, MODULES, MODULE_KEYS } from "./modules.js";
 import { FX_PRESETS } from "./fxpresets.js";
 import { html, keyText } from "./widgets.js";
 
@@ -322,6 +322,7 @@ export class LibraryBrowser {
       element.payload = payload;
       element.addEventListener("pointerdown", (event) => this.pressItem(event, element, payload));
       element.addEventListener("dblclick", () => this.activate(payload));
+      if (payload.kind === "effect") element.addEventListener("focus", () => { if (this.swap && !this.swapFocusing) this.swapTo(payload); });
       if (payload.kind === "audio") element.addEventListener("focus", () => this.pickPreview(payload));
       // What the Draw tool places (FL's picked clip).
       if (payload.kind === "audio" || payload.kind === "pattern") element.addEventListener("focus", () => this.screen.drawTool?.pick(payload));
@@ -715,6 +716,11 @@ export class LibraryBrowser {
   onItemsKey(event) {
     const item = event.target.closest(".library-item");
     if (!item) return;
+    if (this.swap && (event.key === "Enter" || event.key === "Escape")) {
+      event.preventDefault();
+      event.stopPropagation();
+      return this.endSwap(event.key === "Enter");
+    }
     const all = [...this.items.querySelectorAll(".library-item")];
     const index = all.indexOf(item);
     const go = (i) => { event.preventDefault(); all[Math.max(0, Math.min(all.length - 1, i))]?.focus(); };
@@ -775,26 +781,130 @@ export class LibraryBrowser {
       payload = { ...payload, index };
     }
 
+    if (payload.kind === "effect" && target.newReturn) return this.dropOnNewReturn(payload);
+    if (payload.kind === "effect" && target.replace) return this.dropInPlace(payload, target.replace);
+
     let track = target.track;
     if (track < 0) {
       track = await this.run("addTrack");
       if (typeof track !== "number") return;
       await screen.waitForTrack(track);
     }
+    const index = target.index ?? -1;
     if (payload.kind === "effect" && payload.plugin) {
-      if (await screen.addPluginEffect(track, payload.plugin) < 0) return;
+      if (await screen.addPluginEffect(track, payload.plugin, index) < 0) return;
     } else if (payload.kind === "effect") {
-      const id = await screen.addEffect(track, payload.id);
+      const id = await screen.addEffect(track, payload.id, index);
       if (id >= 0 && payload.preset) await screen.applyEffectPreset(id, payload.id, payload.preset);
     }
     if (payload.kind === "preset" && payload.chain) {
-      if ((await screen.loadChain(track, payload.chain))?.ok === false) return;
+      if ((await screen.loadChain(track, payload.chain, target.index))?.ok === false) return;
     } else if (payload.kind === "preset") await this.run("loadPreset", { track, preset: payload.index });
     this.addRecent(payload);
     screen.select(track, null);
     screen.setDockTab("effects"); // where the new effect shows
     screen.setDock(true);
   }
+
+  // An effect dropped on "+ Return": a new return with it, fully wet.
+  async dropOnNewReturn(payload) {
+    const module = MODULES.find((m) => m.id === payload.id);
+    if (!module) return;
+    const id = await this.run("addReturn", { effect: MODULE_KEYS[module.id], name: module.name });
+    if (typeof id !== "number" || id <= 0) return;
+    await this.screen.waitForTrack(id);
+    const insert = this.screen.session?.returns?.find((r) => r.id === id)?.inserts?.[0];
+    if (insert && payload.preset) await this.screen.applyEffectPreset(insert.id, payload.id, payload.preset);
+    this.addRecent(payload);
+    this.screen.select(id, null);
+    this.screen.setDockTab("effects");
+    this.screen.setDock(true);
+  }
+
+  // An effect dropped on the middle of a card: the same effect takes the preset; another
+  // effect (or a plug-in) takes the card's place.
+  // -> the effect's id afterwards (a swap makes a new one), or null when nothing changed.
+  async dropInPlace(payload, insert, quiet = false) {
+    const screen = this.screen;
+    const key = payload.plugin ? null : MODULE_KEYS[payload.id];
+    let id = insert.id;
+    if (key && key === insert.type && !insert.module) {
+      if (!payload.preset) return quiet ? null : this.toast("That effect is already there. Drop one of its presets to load it.");
+      // The pitch insert: the preset's part is switched on, in the same undo step.
+      const power = key === "pitch" ? MODULES.find((x) => x.id === payload.id)?.power : null;
+      if (power) await this.run("setInsert", { id, param: power, value: 1 });
+      await screen.applyEffectPreset(id, payload.id, payload.preset, !power);
+    } else {
+      const result = await this.run("replaceInsert", payload.plugin ? { id, plugin: payload.plugin } : { id, type: key });
+      if (!result?.ok) { this.toast(result?.error ?? "Couldn't swap the effect.", "is-error"); return null; }
+      id = result.insert;
+      if (payload.preset) await screen.applyEffectPreset(id, payload.id, payload.preset);
+    }
+    this.addRecent(payload);
+    return id;
+  }
+
+  //============================================================================ hot-swap
+  // The library linked to one effect: picking an effect or a preset (↑ ↓, a click) puts it
+  // in that effect's place at once, so you hear it. Enter keeps it, Esc puts back what was
+  // there (by undoing the swaps), ✕ stops and keeps what's there now.
+  startSwap({ insert, track, name, trackName }) {
+    if (this.swap) this.endSwap(true);
+    const module = MODULES.find((m) => MODULE_KEYS[m.id] === insert.type && (!m.power || insert.values?.[m.power] >= 0.5))
+                ?? MODULES.find((m) => MODULE_KEYS[m.id] === insert.type);
+    this.swap = { insertId: insert.id, track, steps: 0, busy: Promise.resolve() };
+    const bar = (this.swapBar = html("div", "library-swap"));
+    const keep = html("button", "mini", "✕");
+    Object.assign(keep, { type: "button", title: "Stop swapping and keep it (Enter)" });
+    keep.addEventListener("click", () => this.endSwap(true));
+    const back = html("button", "text-button", "Put back");
+    Object.assign(back, { type: "button", title: `Back to ${name} as it was (Esc)` });
+    back.addEventListener("click", () => this.endSwap(false));
+    bar.append(html("span", "library-swap-text", `Swapping ${name}${trackName ? ` on ${trackName}` : ""}`), back, keep);
+    this.panel.querySelector(".library-head").after(bar);
+    this.element.classList.add("is-swapping");
+    this.setCollapsed(false);
+    this.search.value = ""; this.query = "";
+    if (module) this.openFx.add(module.id);
+    this.setSection("effects");
+    const item = this.items.querySelector(`.library-item[data-key="${module ? `fx:${module.id}` : ""}"]`) ?? this.items.querySelector(".library-item");
+    item?.scrollIntoView({ block: "center" });
+    this.swapFocusing = true;
+    item?.focus();
+    this.swapFocusing = false;
+  }
+
+  // An item picked while swapping: in the effect's place now (one after another).
+  swapTo(payload) {
+    const swap = this.swap;
+    if (!swap || payload.kind !== "effect") return;
+    swap.busy = swap.busy.then(async () => {
+      if (this.swap !== swap) return;
+      const owner = swap.track === 0 ? this.screen.session?.master
+        : [...(this.screen.session?.tracks ?? []), ...(this.screen.session?.returns ?? []), ...(this.screen.session?.groups ?? [])].find((t) => t.id === swap.track);
+      const insert = owner?.inserts.find((x) => x.id === swap.insertId);
+      if (!insert) return this.endSwap(true);
+      const id = await this.dropInPlace(payload, insert, true);
+      if (id == null) return;
+      swap.insertId = id;
+      ++swap.steps;
+      await new Promise((resolve) => setTimeout(resolve, 60)); // the session catches up
+    });
+  }
+
+  async endSwap(keep) {
+    const swap = this.swap;
+    if (!swap) return;
+    this.swap = null;
+    this.swapBar?.remove();
+    this.swapBar = null;
+    this.element.classList.remove("is-swapping");
+    await swap.busy;
+    if (!keep) for (let i = 0; i < swap.steps; ++i) await this.run("undo");
+    this.screen.inspector?.querySelector(`.device-chain > .insert[data-insert="${keep ? swap.insertId : ""}"]`)?.focus?.({ preventScroll: true });
+  }
+
+  //============================================================================ dragging
 
   //============================================================================ dragging
   pressItem(event, element, payload) {
@@ -843,10 +953,11 @@ export class LibraryBrowser {
     const target = this.findTarget(event);
     drag.target = target;
 
-    if (drag.highlight !== target?.element) {
+    const highlight = target?.slot ? null : target?.element ?? null;
+    if (drag.highlight !== highlight) {
       drag.highlight?.classList.remove("is-drop-target");
-      target?.element?.classList.add("is-drop-target");
-      drag.highlight = target?.element ?? null;
+      highlight?.classList.add("is-drop-target");
+      drag.highlight = highlight;
     }
     drag.ghost.classList.toggle("is-refused", !target);
     drag.ghost.dataset.where = target?.label ?? "";
@@ -859,17 +970,50 @@ export class LibraryBrowser {
     } else {
       drag.line?.remove();
     }
+
+    // Where in the chain the effect will go.
+    if (target?.slot) {
+      if (!drag.slotLine) drag.slotLine = html("div", "device-drop-line");
+      if (!drag.slotLine.isConnected) document.body.append(drag.slotLine);
+      Object.assign(drag.slotLine.style, { left: `${target.slot.x - 2}px`, top: `${target.slot.top}px`, height: `${target.slot.height}px` });
+    } else {
+      drag.slotLine?.remove();
+    }
   }
 
   endDrag(event, dropped) {
-    const { payload, ghost, highlight, line } = this.drag;
+    const { payload, ghost, highlight, line, slotLine } = this.drag;
     const target = dropped ? this.findTarget(event) : null;
     ghost.remove();
     line?.remove();
+    slotLine?.remove();
     highlight?.classList.remove("is-drop-target");
     document.body.classList.remove("library-dragging");
     this.drag = null;
     if (target) this.drop(payload, target);
+  }
+
+  // A place in a device chain for an effect: { track, index, slot } between two cards, or
+  // { track, replace: insert } on the middle of a card.
+  chainTarget(event, chain, under, owner, track, name) {
+    const cards = [...chain.querySelectorAll(":scope > .insert")];
+    const rects = cards.map((card) => card.getBoundingClientRect());
+    const card = under.closest(".insert");
+    const i = cards.indexOf(card);
+    if (i >= 0) {
+      const f = (event.clientX - rects[i].left) / rects[i].width;
+      const insert = owner.inserts.find((x) => x.id === Number(card.dataset.insert));
+      if (insert && f > 0.25 && f < 0.75) {
+        const label = card.querySelector(".insert-name")?.textContent || insert.name || "";
+        return { track, replace: insert, element: card, label: `In place of ${label}` };
+      }
+    }
+    let index = i >= 0 ? i + ((event.clientX - rects[i].left) / rects[i].width >= 0.5 ? 1 : 0)
+                       : rects.findIndex((r) => event.clientX < r.left + r.width / 2);
+    if (index < 0) index = cards.length;
+    const box = chain.getBoundingClientRect();
+    const x = index < rects.length ? rects[index].left - 7 : rects.length ? rects.at(-1).right + 7 : box.left + 8;
+    return { track, index, element: chain, label: name, slot: { x, top: box.top + 4, height: box.height - 8 } };
   }
 
   // What's under the pointer: { track, start?, element (to highlight), lane?, label }
@@ -902,6 +1046,10 @@ export class LibraryBrowser {
                element: label ?? rack, label: label ? `Kit pad ${label.textContent}` : "Pattern rack: new row" };
     }
 
+    // "+ Return": a new return with the effect on it, fully wet.
+    if (kind === "effect" && !this.drag.payload.plugin && under.closest(".add-return, .strip.is-add-return"))
+      return { newReturn: true, element: under.closest(".strip.is-add-return") ?? under.closest(".add-return"), label: "New return" };
+
     // The master takes effects and presets; a file or an instrument dropped on it goes
     // on a new track (the master row is the space below the tracks).
     const master = under.closest(".master-row, .strip.is-master");
@@ -923,12 +1071,17 @@ export class LibraryBrowser {
       return { track, start: timeIn(lane), element: row, lane, label: name };
     }
 
-    // The effects panel: the track it shows.
+    // The effects panel: the chain it shows. An effect goes into the slot under the pointer
+    // (a line shows where), or on the middle of a card in place of that effect.
     if (under.closest(".inspector") && kind !== "audio" && kind !== "instrument") {
-      const owner = screen.selectedTrack;
-      if (owner === 0 || screen.session?.tracks.some((t) => t.id === owner))
-        return { track: owner, element: screen.inspector, label: owner === 0 ? "Master" : "" };
-      return null;
+      const id = screen.selectedTrack;
+      const owner = id === 0 ? screen.session?.master
+        : [...(screen.session?.tracks ?? []), ...(screen.session?.returns ?? []), ...(screen.session?.groups ?? [])].find((t) => t.id === id);
+      if (!owner) return null;
+      const name = id === 0 ? "Master" : owner.name ?? "";
+      const chain = screen.inspector.querySelector(".device-chain");
+      if (kind !== "effect" || !chain) return { track: id, element: screen.inspector, label: name };
+      return this.chainTarget(event, chain, under, owner, id, name);
     }
 
     // Anywhere else in the tracks (below the last one): a new track.
