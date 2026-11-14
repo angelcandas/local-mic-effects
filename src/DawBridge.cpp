@@ -326,6 +326,8 @@ namespace
             { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "insertFile", "Load effect file" }, { "pasteInserts", "Paste effects" },
             { "duplicateInsert", "Duplicate effect" }, { "copyInsert", "Copy effect" }, { "replaceInsert", "Replace effect" },
             { "renameInsert", "Rename effect" }, { "insertAB", "Effect A/B" }, { "loadChain", "Load chain" },
+            { "groupInserts", "Group into a rack" }, { "ungroupInsert", "Ungroup rack" }, { "addRackChain", "Add chain" },
+            { "removeRackChain", "Remove chain" }, { "renameRackChain", "Rename chain" },
             { "setMacro", "Macro" }, { "mapMacro", "Map to macro" }, { "unmapMacro", "Unmap from macro" }, { "nameMacro", "Name macro" },
             { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
             { "groupTracks", "Group tracks" }, { "ungroup", "Ungroup tracks" }, { "setGroup", "Move to group" },
@@ -564,6 +566,15 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
         }
         if (insert.hasProperty (ids::file))
             entry.getDynamicObject()->setProperty ("file", insert[ids::file].toString());
+        // A rack: its chains, each with its name and effects.
+        if (daw::Edit::isRackInsert (insert))
+        {
+            juce::Array<juce::var> chains;
+            for (const auto& chain : insert)
+                if (chain.hasType (ids::CHAIN))
+                    chains.add (object ({ { "name", chain[ids::name].toString() }, { "inserts", describeInserts (chain) } }));
+            entry.getDynamicObject()->setProperty ("chains", chains);
+        }
         list.add (entry);
     }
 
@@ -1171,11 +1182,16 @@ void DawBridge::updateInstrumentWindows()
 std::vector<std::pair<int, juce::ValueTree>> DawBridge::getPluginInserts() const
 {
     std::vector<std::pair<int, juce::ValueTree>> found;
-    const auto collect = [&] (const juce::ValueTree& owner)
+    std::function<void (const juce::ValueTree&)> collect = [&] (const juce::ValueTree& owner)
     {
         for (const auto& insert : daw::Edit::getInserts (owner))
+        {
             if (daw::Edit::isPluginInsert (insert))
                 found.emplace_back ((int) insert[ids::id], insert);
+            for (const auto& chain : insert) // inside racks too
+                if (chain.hasType (ids::CHAIN))
+                    collect (chain);
+        }
     };
 
     collect (edit.getMaster());
@@ -4289,11 +4305,15 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             return;
         }
 
+        // { rack, chain } in place of `to`: into a rack's chain.
+        const auto pasteTarget = args.hasProperty ("rack") ? edit.getRackChainInserts (arg (args, "rack", -1), arg (args, "chain", 0))
+                                                           : daw::Edit::getInserts (edit.getChannel (to));
+
         // clipboard: what copyDevices kept.
         if ((bool) args.getProperty ("clipboard", false))
         {
             juce::Array<juce::var> copies;
-            for (const auto& copy : edit.pasteInsertTrees (deviceClipboard, to, arg (args, "index", -1)))
+            for (const auto& copy : edit.pasteInsertTreesInto (deviceClipboard, pasteTarget, arg (args, "index", -1)))
                 copies.add ((int) copy[ids::id]);
             complete (object ({ { "ok", ! copies.isEmpty() }, { "error", copies.isEmpty() ? juce::String ("Copy an effect first") : juce::String() },
                                 { "inserts", copies } }));
@@ -4309,7 +4329,11 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                 insertIds.add ((int) insert[ids::id]);
 
         juce::Array<juce::var> copies;
-        for (const auto& copy : edit.pasteInserts (insertIds, to, arg (args, "index", -1)))
+        juce::Array<juce::ValueTree> sources; // all copied first, so a chain pasted into itself copies what was there
+        for (const auto insertId : insertIds)
+            if (const auto insert = edit.getInsert (insertId); insert.isValid())
+                sources.add (insert);
+        for (const auto& copy : edit.pasteInsertTreesInto (sources, pasteTarget, arg (args, "index", -1)))
             copies.add ((int) copy[ids::id]);
         complete (object ({ { "ok", true }, { "error", juce::String() }, { "inserts", copies } }));
         return;
@@ -4432,7 +4456,13 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                 if (value.isDouble() || value.isInt() || value.isInt64() || value.isBool())
                     values[name.toString()] = (float) value;
 
-        const auto insert = edit.addInsert (arg (args, "track", -1), *type, arg (args, "index", -1), values);
+        // { rack, chain }: into that chain of a rack instead of a track's chain.
+        auto insert = args.hasProperty ("rack") ? edit.addRackInsert (arg (args, "rack", -1), arg (args, "chain", 0), *type, arg (args, "index", -1))
+                                                : edit.addInsert (arg (args, "track", -1), *type, arg (args, "index", -1), values);
+        if (args.hasProperty ("rack") && insert.isValid())
+            for (const auto& [valueId, value] : values) // part of its adding (one undo step)
+                if (const juce::Identifier name (valueId); insert.hasProperty (name) && name != ids::id && name != ids::type && std::isfinite (value))
+                    insert.setProperty (name, value, nullptr);
 
         // A new autotune starts in the song's key, when the session knows it.
         if (insert.isValid() && *type == fx::ModuleType::pitch && edit.getKey() >= 0 && ! values.count ("tuneKey"))
@@ -4446,6 +4476,29 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     }
 
     if (command == "removeInsert") { edit.removeInsert (id); ok(); return; }
+
+    // Racks: parallel chains as one insert. { ids } -> { ok, insert } (the rack, in the
+    // first one's place); { id }: ungroup; { id, name? } -> { ok, chain }: a new chain;
+    // { id, chain }: removes one; { id, chain, name }: renames one.
+    if (command == "groupInserts")
+    {
+        juce::Array<int> insertIds;
+        if (const auto* list = args["ids"].getArray())
+            for (const auto& value : *list)
+                insertIds.add ((int) value);
+        const auto rack = edit.groupInserts (insertIds);
+        complete (rack.isValid() ? object ({ { "ok", true }, { "insert", (int) rack[ids::id] } }) : error ("Nothing to group"));
+        return;
+    }
+    if (command == "ungroupInsert") { edit.ungroupInsert (id); ok(); return; }
+    if (command == "addRackChain")
+    {
+        const auto chain = edit.addRackChain (id, args["name"].toString());
+        complete (chain >= 0 ? object ({ { "ok", true }, { "chain", chain } }) : error ("A rack holds up to 16 chains."));
+        return;
+    }
+    if (command == "removeRackChain") { edit.removeRackChain (id, arg (args, "chain", -1)); ok(); return; }
+    if (command == "renameRackChain") { edit.renameRackChain (id, arg (args, "chain", -1), args["name"].toString()); ok(); return; }
 
     // Macros. { track, index, value }: turns it (with `continue`, one undo step per gesture);
     // { track, index, insert, param, min, max }: maps a value to it (again: new range);
@@ -4517,7 +4570,11 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     // master, 0) into another one at that index (-1: the end). It keeps running.
     if (command == "moveInsert")
     {
-        if (args.hasProperty ("track"))
+        // { id, rack, chain, index }: into a rack's chain.
+        if (args.hasProperty ("rack"))
+            complete (error (edit.moveInsertToRack (id, arg (args, "rack", -1), arg (args, "chain", 0), arg (args, "index", -1))
+                                 ? juce::String() : juce::String ("Can't put that there")));
+        else if (args.hasProperty ("track"))
             complete (error (edit.moveInsertTo (id, arg (args, "track", -1), arg (args, "index", -1)) ? juce::String() : juce::String ("No such effect or track")));
         else
         {
@@ -6435,7 +6492,7 @@ void DawBridge::showPluginWindow (int insertId)
     if (plugin == nullptr)
         return;
 
-    const auto owner = edit.getInsert (insertId).getParent().getParent();
+    const auto owner = daw::Edit::getChannelOf (edit.getInsert (insertId));
     const auto ownerName = owner.hasType (ids::MASTER) ? juce::String ("Master") : owner[ids::name].toString();
     pluginWindows[insertId] = std::make_unique<InstrumentWindow> (ownerName + " - " + plugin->getName(), plugin, [this, insertId]
     {

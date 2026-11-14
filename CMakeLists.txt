@@ -68,6 +68,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/setlist.js
         ui/daw.css
         ui/devices.js
+        ui/racks.js
         ui/devices.css
         ui/macros.js
         ui/livemacros.js
@@ -168,6 +169,8 @@ set(MICFX_DSP_SOURCES
     src/daw/PluginHost.cpp
     src/daw/PluginInsert.cpp
     src/daw/PluginInsert.h
+    src/daw/RackInsert.cpp
+    src/daw/RackInsert.h
     src/daw/Project.cpp
     src/daw/Hitpoints.cpp
     src/daw/Hitpoints.h

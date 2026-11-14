@@ -1,5 +1,8 @@
 #include "DawEngine.h"
 #include "Patterns.h"
+#include "RackInsert.h"
+
+#include <functional>
 
 namespace daw
 {
@@ -382,7 +385,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         }
 
         // An insert value: straight into the running module, no rebuild.
-        const auto owner = tree.getParent().getParent();
+        const auto owner = Edit::getChannelOf (tree);
         if (const auto it = strips.find ((int) owner[ids::id]); it != strips.end())
         {
             const auto& modules = it->second->modulesByInsertId;
@@ -643,6 +646,28 @@ std::shared_ptr<fx::Module> DawEngine::takeRunningInsert (const juce::ValueTree&
     return module;
 }
 
+// An insert's type and id (a plug-in's too, a rack's chains and theirs): a different
+// layout needs new modules.
+juce::String DawEngine::describeLayout (const juce::ValueTree& insert)
+{
+    juce::String layout;
+    layout << insert[ids::type].toString() << ":" << (int) insert[ids::id] << " ";
+    if (Edit::isPluginInsert (insert))
+        layout << insert[ids::plugin].toString() << " ";
+    if (Edit::isRackInsert (insert))
+    {
+        layout << "[ ";
+        for (const auto& chain : insert)
+        {
+            for (const auto& member : chain.getChildWithName (ids::INSERTS))
+                layout << describeLayout (member);
+            layout << "| ";
+        }
+        layout << "] ";
+    }
+    return layout;
+}
+
 std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& trackOrMaster)
 {
     const auto id = (int) trackOrMaster[ids::id];
@@ -650,11 +675,7 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
 
     juce::String layout;
     for (const auto& insert : inserts)
-    {
-        layout << insert[ids::type].toString() << ":" << (int) insert[ids::id] << " ";
-        if (Edit::isPluginInsert (insert))
-            layout << insert[ids::plugin].toString() << " ";
-    }
+        layout << describeLayout (insert);
 
     const auto isMidi = trackOrMaster.hasType (ids::TRACK) && Edit::isMidiTrack (trackOrMaster);
     const auto instrumentTree = isMidi ? trackOrMaster.getChildWithName (ids::INSTRUMENT) : juce::ValueTree();
@@ -677,9 +698,64 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
     const auto previous = strips.find (id);
     const auto* previousModules = previous != strips.end() ? &previous->second->modulesByInsertId : nullptr;
 
-    for (const auto& insert : inserts)
+    // Each insert's module into a chain (a rack's chains too, recursively). `members`: the
+    // rack being built, which keeps its modules so a rebuild can keep the rack running.
+    std::function<void (fx::FxChain&, const juce::ValueTree&, RackInsert*)> addInserts;
+    const auto keep = [&] (int insertId, fx::FxChain& chain, fx::Module& module, const juce::ValueTree& insert, RackInsert* members)
+    {
+        strip->modulesByInsertId[insertId] = &module;
+        strip->insertTrees[insertId] = insert;
+        if (members != nullptr)
+            members->members.push_back ({ insertId, chain.share (module), insert });
+        if (auto* pitch = dynamic_cast<fx::modules::Pitch*> (&module))
+            strip->pitches.push_back (pitch);
+    };
+
+    addInserts = [&] (fx::FxChain& chain, const juce::ValueTree& list, RackInsert* members)
+    {
+    for (const auto& insert : list)
     {
         const auto insertId = (int) insert[ids::id];
+
+        if (Edit::isRackInsert (insert))
+        {
+            const auto rackLayout = describeLayout (insert);
+
+            // The same rack, nothing changed inside: it carries on, chains and all.
+            if (auto running = std::dynamic_pointer_cast<RackInsert> (takeRunningInsert (insert)); running != nullptr && running->layout == rackLayout)
+            {
+                auto& added = chain.add (running, true);
+                keep (insertId, chain, added, insert, members);
+                for (const auto& member : running->members)
+                {
+                    takeRunningInsert (member.tree); // it's spoken for
+                    strip->modulesByInsertId[member.insertId] = member.module.get();
+                    strip->insertTrees[member.insertId] = member.tree;
+                    if (auto* pitch = dynamic_cast<fx::modules::Pitch*> (member.module.get()))
+                        strip->pitches.push_back (pitch);
+                    if (auto* plugin = dynamic_cast<PluginInsert*> (member.module.get()))
+                        strip->plugins[member.insertId] = { plugin, member.tree, {} };
+                    if (members != nullptr)
+                        members->members.push_back (member);
+                }
+                continue;
+            }
+
+            auto rack = std::make_unique<RackInsert> (insert.getNumChildren());
+            for (int v = 0; v < rack->getNumValues(); ++v)
+                if (const auto& value = insert[juce::Identifier (rack->getValueId (v))]; ! value.isVoid())
+                    rack->getValue (v).store ((float) value);
+            rack->layout = rackLayout;
+            for (int c = 0; c < rack->getNumChains(); ++c)
+                addInserts (rack->getChain (c), insert.getChild (c).getChildWithName (ids::INSERTS), rack.get());
+            auto* built = rack.get();
+            auto& added = chain.add (std::move (rack));
+            keep (insertId, chain, added, insert, members);
+            if (members != nullptr)
+                for (const auto& member : built->members)
+                    members->members.push_back (member);
+            continue;
+        }
 
         if (Edit::isPluginInsert (insert))
         {
@@ -693,10 +769,9 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
             // so even its bypass delay goes on; else another module on the same plugin.
             if (auto running = std::dynamic_pointer_cast<PluginInsert> (takeRunningInsert (insert)); running != nullptr)
             {
-                auto& added = strip->chain.add (std::move (running), true);
+                auto& added = chain.add (std::move (running), true);
                 slot.module = static_cast<PluginInsert*> (&added);
-                strip->modulesByInsertId[insertId] = &added;
-                strip->insertTrees[insertId] = insert;
+                keep (insertId, chain, added, insert, members);
                 continue;
             }
 
@@ -715,14 +790,13 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
                 continue;
             }
 
-            auto& added = strip->chain.add (std::move (module));
+            auto& added = chain.add (std::move (module));
             for (int v = 0; v < added.getNumValues(); ++v)
                 if (const auto& value = insert[juce::Identifier (added.getValueId (v))]; ! value.isVoid())
                     added.getValue (v).store ((float) value);
 
             slot.module = static_cast<PluginInsert*> (&added);
-            strip->modulesByInsertId[insertId] = &added;
-            strip->insertTrees[insertId] = insert;
+            keep (insertId, chain, added, insert, members);
             continue;
         }
 
@@ -734,15 +808,12 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
         // values already in (they're written straight into running modules).
         if (auto running = takeRunningInsert (insert); running != nullptr && running->getType() == *type)
         {
-            auto& module = strip->chain.add (std::move (running), true);
-            strip->modulesByInsertId[insertId] = &module;
-            strip->insertTrees[insertId] = insert;
-            if (auto* pitch = dynamic_cast<fx::modules::Pitch*> (&module))
-                strip->pitches.push_back (pitch);
+            auto& module = chain.add (std::move (running), true);
+            keep (insertId, chain, module, insert, members);
             continue;
         }
 
-        auto& module = strip->chain.add (fx::createModule (*type));
+        auto& module = chain.add (fx::createModule (*type));
 
         for (int v = 0; v < module.getNumValues(); ++v)
             if (const auto& value = insert[juce::Identifier (module.getValueId (v))]; ! value.isVoid())
@@ -755,11 +826,11 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
         if (module.usesFile())
             loadInsertFile (module, insert); // before prepare, so it plays from the first block
 
-        strip->modulesByInsertId[insertId] = &module;
-        strip->insertTrees[insertId] = insert;
-        if (auto* pitch = dynamic_cast<fx::modules::Pitch*> (&module))
-            strip->pitches.push_back (pitch);
+        keep (insertId, chain, module, insert, members);
     }
+    };
+    addInserts (strip->chain, inserts, nullptr);
+
 
     strip->chain.setGains ((float) trackOrMaster.getProperty (ids::inGain, 0.0f), (float) trackOrMaster.getProperty (ids::outGain, 0.0f));
     strip->chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 }); // starts at those gains
@@ -808,10 +879,17 @@ void DawEngine::rebuild()
     // Every running insert module, for the new chains to take over (see getStrip).
     runningInserts.clear();
     for (const auto& [stripId, strip] : previous)
+    {
         for (const auto& [insertId, module] : strip->modulesByInsertId)
             if (const auto tree = strip->insertTrees.find (insertId); tree != strip->insertTrees.end())
                 if (auto shared = strip->chain.share (*module); shared != nullptr)
                     runningInserts[insertId] = { std::move (shared), tree->second };
+        // The modules inside racks (the strip's chain only holds the racks).
+        for (int m = 0; m < strip->chain.size(); ++m)
+            if (auto* rack = dynamic_cast<RackInsert*> (&strip->chain[m]))
+                for (const auto& member : rack->members)
+                    runningInserts[member.insertId] = { member.module, member.tree };
+    }
 
     // Keep the strips that still match (moved back from `previous` as they're found).
     const auto reuse = [&] (const juce::ValueTree& tree)
