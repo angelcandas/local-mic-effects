@@ -1,5 +1,6 @@
 #include "PluginEditor.h"
 #include "Presets.h"
+#include "FactoryChains.h"
 #include "analysis/Key.h"
 #include "WebUIData.h"
 
@@ -609,7 +610,9 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                        // name, newName), "getDefault" (kind) -> values, "setDefault" (kind, values), "clearDefault"
                        // (kind). Live sounds (chains): "saveSound" (name) saves the Live chain, "loadSound" (name)
                        // plays one, "deleteChain" (name), "renameChain" (name, newName). "import" (json): the old
-                       // presets from the app's settings, once. Changes answer { ok, error? }.
+                       // presets from the app's settings, once. Factory chains (src/FactoryChains.h), read-only:
+                       // "factoryChains" -> [{ name, folder, description, effects, live, factory }],
+                       // "loadFactorySound" (name) plays one in Live. Changes answer { ok, error? }.
                        .withNativeFunction ("library", [this] (const auto& args, auto complete)
                        {
                            auto& library = processorRef.getLibrary();
@@ -641,6 +644,14 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                answer (! chain.isValid() ? "There's no sound called " + text (1) + "."
                                        : PresetLibrary::isLiveChain (chain) ? juce::String()
                                        : "Live plays one of each built-in effect: the rest of this chain was left out.");
+                           }
+                           else if (action == "factoryChains") complete (factory::listChains());
+                           else if (action == "loadFactorySound")
+                           {
+                               const auto chain = factory::makeInserts (text (1));
+                               if (chain.isValid())
+                                   processorRef.applyLiveChain (chain);
+                               answer (chain.isValid() ? juce::String() : "There's no factory chain called " + text (1) + ".");
                            }
                            else if (action == "deleteChain")  answer (library.deleteChain (text (1)) ? juce::String() : "It's already gone.");
                            else if (action == "renameChain")  answer (library.renameChain (text (1), text (2)));

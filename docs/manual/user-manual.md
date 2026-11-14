@@ -66,15 +66,15 @@ The AU and VST3 builds give you the Live effects inside any DAW (the 24 voice pr
 
 ## 3.1 The effect chain
 
-Live mode runs 26 effects in a fixed order. Each can be switched on or off, and every effect has its own **In** and **Out** gain and a **Presets** menu (factory settings plus your own, saved with *Save current as…*).
+Live mode runs the effects below in one chain. Each can be switched on or off, and every effect has its own **In** and **Out** gain and a **Presets** menu (factory settings plus your own, saved with *Save current as…*).
 
 | Group | Effects |
 | --- | --- |
-| Clean-up | High-pass, Denoise, Noise Gate, EQ, Parametric EQ, Smooth, Auto Level, Compressor, De-esser |
+| Clean-up | High-pass, Denoise, Noise Gate, EQ, Parametric EQ, Smooth, Compressor, Opto Compressor, Auto Level, De-esser |
 | Pitch | Autotune, Pitch Shift (with formant), Harmonizer |
 | Character | Exciter, Saturation, Amp, Radio, Bitcrusher, Robot, Filter, Auto-wah |
 | Modulation | Tremolo, Vibrato, Chorus, Flanger, Phaser |
-| Space | Doubler, Echo (ping-pong), Cabinet, Reverb, IR Reverb, Stereo Width |
+| Space | Doubler, Echo (ping-pong), Cabinet, Reverb, Plate Reverb, IR Reverb, Stereo Width |
 
 The signal path is: mic → input gain → clean-up → pitch → character → modulation → space → output gain → a safety limiter at −1 dB.
 
@@ -83,6 +83,23 @@ The cards move with your voice: the spectrum behind the EQ and filter curves, a 
 ### Voice presets
 
 24 presets in five groups: **Clean** (Podcast, Radio Host…), **Tuned** (Pop Tune, Hard Tune, Choir…), **Characters** (Deep Voice, Chipmunk, Demon, Robot, Alien, Ghost, Wah Funk), **Lo-fi** (Telephone, Walkie-Talkie, Megaphone, 8-Bit, Underwater, Tape) and **Space** (Stadium, Cathedral, Astronaut). Click one to load it. **‹ / ›** beside the name (or **Ctrl+← / →**, Cmd on a Mac) step to the previous or next preset, and **1** to **9** load your starred favourites.
+
+### Vocal chains
+
+The preset menu also lists **Vocal chains**: complete vocal sounds by style, each a set of effects in a chosen order with their settings. They are: Pop lead, Pop ballad, Rap lead, Melodic trap, R&B and soul, Rock lead, Indie and lo-fi, Acoustic, Dance top line, Backing vocals, Ad-libs and throws, Podcast, Streamer, and two stage chains (**Live stage: lead** and **Live stage: ballad**) that add no delay. Hover a chain for a one-line description.
+
+Every chain is set up for a voice at about -18 LUFS with peaks near -8 dBFS, and comes out about as loud as it went in, so you can compare chains without the louder one winning. If your mic is much quieter or louder, set the input gain first (Mic check or Sound check helps). Chains are starting points: change anything, then keep the result with *Save this sound as…*. Three more are made for the DAW (a vocal bus, a plate return and a delay return) and appear there once the DAW library lists chains.
+
+### Vocal dynamics and space
+
+- **Compressor**: **Clean** (the original), **Punch** (grabs peaks fast, a touch of colour) or **Glue** (slow and even). **Knee** softens the onset, **Mix** below 100 % is parallel compression, **Auto makeup** brings the level back. The picture shows the gain reduction.
+- **Opto Compressor**: a slow, smooth leveller for after the Compressor ("a fast one for peaks, then a slow one for level"). Turn up **Amount** until it takes off about 3 dB, then set **Output**.
+- **Noise Gate**: **Range** turns down instead of muting (8-12 dB is a gentle expander for speech and stage mics), **Hold** and **Release** stop word endings being cut, **Focus** ignores kick drum and cymbal bleed.
+- **De-esser**: **Smart** mode judges the S against the rest of your voice, so it cuts the same whether you whisper or belt. **Range** limits the cut, **Wide** dips the whole voice (natural on dark voices), **Listen** plays only what is taken out.
+- **Saturation**: **Tape**, **Tube** and **Clip** keep your level steady as you turn up Drive; **Tone** tilts brighter or darker.
+- **Doubler**: **Micro shift** detunes two copies a few cents and stays clean in mono; **Double track** sounds like a second take.
+- **Echo**: **Sync** follows the tempo (in Live: the **Tap** button, else the host or the looper; in the DAW: the song's tempo). **Duck** lowers the repeats while you sing; **Low cut** and **High cut** shape them.
+- **Plate Reverb**: the classic vocal reverb. **Pre-delay** keeps the words clear, **Duck** lets the reverb bloom in the gaps.
 
 ### Autotune
 

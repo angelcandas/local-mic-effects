@@ -434,6 +434,11 @@ class PresetBar {
     this.loadPreset = Juce.getNativeFunction("loadPreset");
     this.library = Juce.getNativeFunction("library");
     this.sounds = [];     // your saved sounds (library chains): [{ name, live }]
+    this.factoryChains = []; // factory vocal chains (src/FactoryChains.h): [{ name, folder, description, live }]
+    this.library("factoryChains").then((chains) => {
+      this.factoryChains = (Array.isArray(chains) ? chains : []).filter((chain) => chain.live);
+      if (this.presets.length) this.buildMenu();
+    }).catch(() => {});
     this.soundName = "";  // the one playing, when it's one of yours
     this.refreshSounds();
 
@@ -488,6 +493,17 @@ class PresetBar {
   loadSound(name) {
     this.close();
     this.library("loadSound", name).then((result) => {
+      if (result?.ok === false) recorderBar.setStatus(result.error, "is-error");
+      this.soundName = name;
+      this.current = -1;
+      this.modified = false;
+      this.render();
+    });
+  }
+
+  loadFactorySound(name) {
+    this.close();
+    this.library("loadFactorySound", name).then((result) => {
       if (result?.ok === false) recorderBar.setStatus(result.error, "is-error");
       this.soundName = name;
       this.current = -1;
@@ -589,6 +605,22 @@ class PresetBar {
       yours.append(row);
     }
     this.menu.append(yours);
+
+    // Vocal chains: whole-voice sounds by style, level-matched for a voice at about -18 LUFS.
+    if (this.factoryChains.length) {
+      const chains = html("div", "preset-group is-chains");
+      chains.append(html("h3", "", "Vocal chains"));
+      for (const chain of this.factoryChains) {
+        const row = html("div", "preset-item");
+        row.dataset.search = `${chain.name} vocal chains ${chain.description}`.toLowerCase();
+        const load = html("button", "preset-load", chain.name);
+        load.title = chain.description;
+        load.addEventListener("click", () => this.loadFactorySound(chain.name));
+        row.append(load);
+        chains.append(row);
+      }
+      this.menu.append(chains);
+    }
 
     const favourites = this.favouriteIndices;
     if (favourites.length) {
