@@ -29,6 +29,7 @@
 #include "FactoryChains.h"
 #include "daw/DawEngine.h"
 #include "daw/RackInsert.h"
+#include <functional>
 #include "daw/ClipTools.h"
 #include "daw/Exporter.h"
 #include "daw/Instruments.h"
@@ -17222,7 +17223,7 @@ static void testFactoryChains()
     std::cout << "\nFactory vocal chains\n";
 
     const auto list = factory::listChains();
-    check (list.size() == 18, "16 vocal chains and 2 returns are listed (" + juce::String (list.size()) + ")");
+    check (list.size() == 20, "16 vocal chains, 2 rack versions and 2 returns are listed (" + juce::String (list.size()) + ")");
     int live = 0;
     for (const auto& entry : *list.getArray())
         live += (bool) entry["live"] ? 1 : 0;
@@ -17236,22 +17237,40 @@ static void testFactoryChains()
         const juce::String name (chain.name);
         const auto isReturn = juce::String (chain.folder).contains ("Returns");
 
-        // Build it as a DAW track would: one module per insert, its values set.
-        std::vector<fx::ModuleType> types;
-        for (const auto& insert : inserts)
-            if (const auto type = daw::Edit::moduleTypeFromKey (insert["type"].toString()))
-                types.push_back (*type);
-        check ((int) types.size() == (int) chain.devices.size() && inserts.getNumChildren() == (int) chain.devices.size() + 1,
-               name + ": every device is a known effect");
-
-        fx::FxChain fxChain (types);
-        for (int m = 0; m < fxChain.size(); ++m)
+        // Build it as a DAW track would: one module per insert (a rack with its chains), its values set.
+        bool known = true;
+        std::function<std::unique_ptr<fx::Module> (const juce::ValueTree&)> build = [&] (const juce::ValueTree& insert) -> std::unique_ptr<fx::Module>
         {
-            const auto insert = inserts.getChild (m);
-            for (int v = 0; v < fxChain[m].getNumValues(); ++v)
-                if (const juce::Identifier id (fxChain[m].getValueId (v)); insert.hasProperty (id))
-                    fxChain[m].getValue (v).store ((float) insert[id]);
-        }
+            std::unique_ptr<fx::Module> module;
+            if (insert["type"].toString() == "rack")
+            {
+                auto rack = std::make_unique<daw::RackInsert> (insert.getNumChildren());
+                for (int c = 0; c < insert.getNumChildren(); ++c)
+                    for (const auto& inner : insert.getChild (c).getChildWithName ("INSERTS"))
+                        if (auto child = build (inner))
+                            rack->getChain (c).add (std::move (child));
+                module = std::move (rack);
+            }
+            else if (const auto type = daw::Edit::moduleTypeFromKey (insert["type"].toString()))
+                module = fx::createModule (*type);
+            if (module == nullptr)
+                return known = false, nullptr;
+            for (int v = 0; v < module->getNumValues(); ++v)
+                if (const juce::Identifier id (module->getValueId (v)); insert.hasProperty (id))
+                    module->getValue (v).store ((float) insert[id]);
+            return module;
+        };
+        std::vector<fx::ModuleType> types;
+        fx::FxChain fxChain;
+        for (const auto& insert : inserts)
+            if (insert.hasType ("INSERT"))
+                if (auto module = build (insert))
+                {
+                    types.push_back (module->getType());
+                    fxChain.add (std::move (module));
+                }
+        check (known && (int) types.size() == (int) chain.devices.size() && inserts.getNumChildren() == (int) chain.devices.size() + 1,
+               name + ": every device is a known effect");
         fxChain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
         fxChain.setTempo (100.0);
 
@@ -17276,13 +17295,25 @@ static void testFactoryChains()
                 left.insert (left.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
                 right.insert (right.end(), buffer.getReadPointer (1), buffer.getReadPointer (1) + blockSize);
                 if (start > (size_t) sampleRate)
-                    for (int m = 0; m < fxChain.size(); ++m)
-                        if (fxChain[m].getType() == fx::ModuleType::compressor || fxChain[m].getType() == fx::ModuleType::opto)
+                {
+                    const auto read = [&deepestComp] (fx::Module& module)
+                    {
+                        if (module.getType() == fx::ModuleType::compressor || module.getType() == fx::ModuleType::opto)
                         {
                             juce::DynamicObject readings;
-                            fxChain[m].addReadings (readings);
+                            module.addReadings (readings);
                             deepestComp = std::max (deepestComp, (float) readings.getProperty ("reduction"));
                         }
+                    };
+                    for (int m = 0; m < fxChain.size(); ++m)
+                    {
+                        read (fxChain[m]);
+                        if (auto* rack = dynamic_cast<daw::RackInsert*> (&fxChain[m]))
+                            for (int c = 0; c < rack->getNumChains(); ++c)
+                                for (int k = 0; k < rack->getChain (c).size(); ++k)
+                                    read (rack->getChain (c)[k]);
+                    }
+                }
             }
 
             std::vector<float> inL (input->begin(), input->begin() + (long) left.size());
@@ -17294,7 +17325,8 @@ static void testFactoryChains()
             check (peak < 1.0f, what + ": no clipping");
             check (std::abs (out - in) <= 1.0f, what + ": comes out within 1 LU of what went in (" + juce::String (out - in, 2) + ")");
             if (input == &sung && std::any_of (types.begin(), types.end(), [] (auto t) { return t == fx::ModuleType::compressor || t == fx::ModuleType::opto; }))
-                check (deepestComp > 1.5f && deepestComp < 16.0f, what + ": the compressors work (" + juce::String (deepestComp, 1) + " dB)");
+                check (deepestComp > 1.5f && deepestComp < (juce::String (chain.folder).contains ("Racks") ? 30.0f : 16.0f), // a parallel squash is meant to be hard
+                       what + ": the compressors work (" + juce::String (deepestComp, 1) + " dB)");
         }
 
         // Live-marked chains play in Live as written: the same effects in the same order.
@@ -17378,6 +17410,22 @@ static void testFactoryChains()
         const auto threshold = (float) inserts.getChildWithProperty ("type", "compressor")["compThreshold"];
         check (macros.getNumChildren() == 8 && std::abs ((float) comp["compThreshold"] - threshold) < 1.0e-3f,
                "a DAW track gets the chain's macros, its settings as designed");
+        // A rack version: its chains come with their effects, each with its own id.
+        {
+            const auto racked = factory::makeInserts ("Pop lead: parallel squash");
+            juce::Array<juce::ValueTree> rackTrees;
+            for (const auto& insert : racked)
+                rackTrees.add (insert);
+            const auto other = (int) edit.addTrack ("Stack")[daw::ids::id];
+            juce::ValueTree rack;
+            for (const auto& copy : edit.pasteInsertTrees (rackTrees, other, -1))
+                if (copy["type"].toString() == "rack")
+                    rack = copy;
+            const auto squash = rack.getChild (1).getChildWithName ("INSERTS");
+            check (rack.getNumChildren() == 2 && rack.getChild (1)["name"].toString() == "Squash" && squash.getNumChildren() == 2
+                       && (int) squash.getChild (0)[daw::ids::id] > 0 && (int) squash.getChild (0)[daw::ids::id] != (int) rack[daw::ids::id],
+                   "a rack chain loads onto a DAW track: two chains, their effects numbered");
+        }
         edit.setMacro (track, 3, 1.0f); // Squeeze all the way
         check ((float) comp["compThreshold"] < threshold - 5.0f, "Squeeze turned up lowers the compressor's threshold ("
                    + juce::String ((float) comp["compThreshold"], 1) + " dB)");
