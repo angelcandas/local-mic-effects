@@ -2373,7 +2373,100 @@ juce::ValueTree Edit::addPluginInsert (int trackId, const InstrumentInfo& info, 
 void Edit::removeInsert (int insertId)
 {
     if (auto insert = getInsert (insertId); insert.isValid())
+    {
+        // Its macro mappings go with it.
+        if (auto macros = getMacros (insert.getParent().getParent()); macros.isValid())
+            for (auto macro : macros)
+                for (int i = macro.getNumChildren(); --i >= 0;)
+                    if ((int) macro.getChild (i)[ids::insert] == insertId)
+                        macro.removeChild (i, undoTarget);
         insert.getParent().removeChild (insert, undoTarget);
+    }
+}
+
+//==============================================================================
+namespace
+{
+    juce::ValueTree findMacro (juce::ValueTree channel, int index, juce::UndoManager* undo, bool create)
+    {
+        if (! channel.isValid() || index < 0 || index >= Edit::numMacros)
+            return {};
+        auto macros = Edit::getMacros (channel);
+        if (! macros.isValid())
+        {
+            if (! create)
+                return {};
+            macros = juce::ValueTree (ids::MACROS);
+            channel.appendChild (macros, undo);
+        }
+        for (auto macro : macros)
+            if ((int) macro[ids::index] == index)
+                return macro;
+        if (! create)
+            return {};
+        juce::ValueTree macro (ids::MACRO);
+        macro.setProperty (ids::index, index, nullptr);
+        macro.setProperty (ids::value, 0.0f, nullptr);
+        macros.appendChild (macro, undo);
+        return macro;
+    }
+}
+
+float Edit::macroTarget (const juce::ValueTree& map, float macroValue)
+{
+    const auto lo = (float) map[ids::min], hi = (float) map[ids::max];
+    return lo + (hi - lo) * juce::jlimit (0.0f, 1.0f, macroValue);
+}
+
+void Edit::setMacro (int channelId, int index, float value)
+{
+    auto macro = findMacro (getChannel (channelId), index, undoTarget, true);
+    if (! macro.isValid())
+        return;
+    value = juce::jlimit (0.0f, 1.0f, value);
+    macro.setProperty (ids::value, value, undoTarget);
+    for (const auto& map : macro)
+        setInsertValue ((int) map[ids::insert], map[ids::param].toString(), macroTarget (map, value));
+}
+
+bool Edit::mapMacro (int channelId, int index, int insertId, const juce::String& param, float min, float max)
+{
+    const auto channel = getChannel (channelId);
+    const auto insert = getInsert (insertId);
+    if (! channel.isValid() || ! insert.isValid() || ! insert.hasProperty (juce::Identifier (param))
+        || insert.getParent().getParent() != channel || index < 0 || index >= numMacros)
+        return false;
+
+    // A value follows one macro: off the others first.
+    if (auto macros = getMacros (channel); macros.isValid())
+        for (auto other : macros)
+            for (int i = other.getNumChildren(); --i >= 0;)
+                if ((int) other.getChild (i)[ids::insert] == insertId && other.getChild (i)[ids::param].toString() == param)
+                    other.removeChild (i, undoTarget);
+
+    auto macro = findMacro (channel, index, undoTarget, true);
+    juce::ValueTree map (ids::MAP);
+    map.setProperty (ids::insert, insertId, nullptr);
+    map.setProperty (ids::param, param, nullptr);
+    map.setProperty (ids::min, min, nullptr);
+    map.setProperty (ids::max, max, nullptr);
+    macro.appendChild (map, undoTarget);
+    setInsertValue (insertId, param, macroTarget (map, (float) macro[ids::value]));
+    return true;
+}
+
+void Edit::unmapMacro (int channelId, int index, int insertId, const juce::String& param)
+{
+    if (auto macro = findMacro (getChannel (channelId), index, undoTarget, false); macro.isValid())
+        for (int i = macro.getNumChildren(); --i >= 0;)
+            if ((int) macro.getChild (i)[ids::insert] == insertId && macro.getChild (i)[ids::param].toString() == param)
+                macro.removeChild (i, undoTarget);
+}
+
+void Edit::nameMacro (int channelId, int index, const juce::String& name)
+{
+    if (auto macro = findMacro (getChannel (channelId), index, undoTarget, true); macro.isValid())
+        macro.setProperty (ids::name, name.trim().substring (0, 30), undoTarget);
 }
 
 void Edit::moveInsert (int insertId, int newIndex)

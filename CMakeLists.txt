@@ -69,6 +69,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/daw.css
         ui/devices.js
         ui/devices.css
+        ui/macros.js
         ui/aiviews.css
         ui/aiviews.js
         ui/practice.js

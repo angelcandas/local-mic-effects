@@ -6,6 +6,7 @@ import * as Juce from "./juce/index.js";
 import { MODULE_KEYS, MODULES, NOTE_NAMES } from "./modules.js";
 import { FX_PRESETS, presetParams } from "./fxpresets.js";
 import { DeviceChain, effectName, insertSwitches } from "./devices.js";
+import { MacroPanel } from "./macros.js";
 import { LibraryBrowser, loopText } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
 import { markLearnable } from "./midilearn.js";
@@ -4128,6 +4129,7 @@ class DawScreen {
 
     if (found && this.clipPanel) this.clipPanel.update(found.clip, found.track);
     if (owner) this.rack?.update(owner);
+    if (owner && this.macroPanel?.owner.id === owner.id) this.macroPanel.update(owner);
     if (owner && this.panelInput?.id === owner.id) this.panelInput.update(owner);
     if (owner && this.chainGains?.id === owner.id) {
       this.chainGains.input.knob.update(owner.inGain ?? 0);
@@ -4226,7 +4228,16 @@ class DawScreen {
       : "Effects play on top of the take, which is recorded dry: change them any time.";
     const name = html("strong", "chain-title", isMaster ? "Master" : owner.name);
     const menuButton = button("tool chain-menu-button", "Chain", "Presets, copy and paste for this chain", (event) => this.openChainMenu(owner, event.currentTarget));
-    head.append(html("span", "chain-kind", isMaster ? "Mix effects" : isReturn ? "Return effects" : "Effects"), name, menuButton);
+    // Macros: shown while you want them, or while one is in use.
+    const macrosUsed = (owner.macros ?? []).some((m) => m.maps.length);
+    const macrosShown = this.macrosShown ?? macrosUsed;
+    const macroButton = button("tool chain-macros-button", "Macros", "Eight knobs that each turn several of this chain's controls at once", () => {
+      this.macrosShown = !macrosShown;
+      this.inspectorKey = "";
+      this.renderInspector();
+    });
+    macroButton.setAttribute("aria-pressed", String(macrosShown));
+    head.append(html("span", "chain-kind", isMaster ? "Mix effects" : isReturn ? "Return effects" : "Effects"), name, menuButton, macroButton);
     element.append(head);
 
     const list = html("div", "insert-list");
@@ -4261,10 +4272,17 @@ class DawScreen {
       box.append(html("span", "chain-gain-title", "Input"), picker.element);
       chain.append(box);
     }
+    this.macroPanel?.destroy();
+    this.macroPanel = null;
+    if (macrosShown) {
+      this.macroPanel = new MacroPanel(owner, { daw, ValueKnob, button, toast: (...a) => toast(...a), parameterInfo: () => parameterInfo }, () => list);
+      chain.prepend(this.macroPanel.element);
+    }
     chain.append(input.column, list, output.column);
 
     element.append(chain);
     this.rack.update(owner);
+    this.macroPanel?.update(owner);
     return element;
   }
 

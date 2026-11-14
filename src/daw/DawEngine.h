@@ -426,8 +426,10 @@ private:
     // ValueTree::Listener
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
     // Markers don't change what plays, so they don't need a new graph.
-    void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree& child) override        { if (! child.hasType (ids::MARKER)) requestRebuild(); }
-    void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree& child, int) override { if (child.hasType (ids::CLIP)) previews.erase ((int) child[ids::id]); if (! child.hasType (ids::MARKER)) requestRebuild(); }
+    // Markers and macros (MACROS, MACRO, MAP: they only write insert values) don't change the sound.
+    static bool isPlayed (const juce::ValueTree& child) { return ! (child.hasType (ids::MARKER) || child.hasType (ids::MACROS) || child.hasType (ids::MACRO) || child.hasType (ids::MAP)); }
+    void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree& child) override        { if (isPlayed (child)) requestRebuild(); }
+    void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree& child, int) override { if (child.hasType (ids::CLIP)) previews.erase ((int) child[ids::id]); if (isPlayed (child)) requestRebuild(); }
     void valueTreeChildOrderChanged (juce::ValueTree&, int, int) override         { requestRebuild(); }
     void valueTreeRedirected (juce::ValueTree&) override                          { previews.clear(); requestRebuild(); }
 

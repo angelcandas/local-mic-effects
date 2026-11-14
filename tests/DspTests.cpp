@@ -4644,6 +4644,41 @@ namespace
         folder.deleteRecursively();
     }
 
+    void testMacros()
+    {
+        std::cout << "\nMacros (DAW)\n";
+        daw::Edit edit;
+        const auto track = (int) edit.addTrack ("Voice")[daw::ids::id];
+        const auto other = (int) edit.addTrack ("Other")[daw::ids::id];
+        const auto comp = (int) edit.addInsert (track, fx::ModuleType::compressor)[daw::ids::id];
+        const auto reverb = (int) edit.addInsert (track, fx::ModuleType::reverb)[daw::ids::id];
+        const auto valueOf = [&] (int insert, const char* param) { return (float) edit.getInsert (insert)[juce::Identifier (param)]; };
+
+        check (edit.mapMacro (track, 0, reverb, "reverbMix", 10.0f, 50.0f), "a value maps to a macro");
+        check (juce::approximatelyEqual (valueOf (reverb, "reverbMix"), 10.0f), "mapping sets the value from the macro (0: its min)");
+        check (edit.mapMacro (track, 0, comp, "compThreshold", -10.0f, -40.0f), "a macro takes more than one value");
+        edit.setMacro (track, 0, 0.5f);
+        check (juce::approximatelyEqual (valueOf (reverb, "reverbMix"), 30.0f) && juce::approximatelyEqual (valueOf (comp, "compThreshold"), -25.0f),
+               "turning the macro moves every mapped value in its range (min above max turns the other way)");
+
+        check (! edit.mapMacro (other, 0, reverb, "reverbMix", 0.0f, 100.0f), "a macro only reaches its own channel's effects");
+        check (! edit.mapMacro (track, 0, reverb, "noSuchValue", 0.0f, 1.0f), "a value the effect doesn't have can't be mapped");
+
+        edit.mapMacro (track, 1, reverb, "reverbMix", 0.0f, 100.0f);
+        const auto macros = daw::Edit::getMacros (edit.getChannel (track));
+        check (macros.getChildWithProperty (daw::ids::index, 0).getNumChildren() == 1, "a value follows one macro: mapping it to another takes it off the first");
+
+        edit.nameMacro (track, 1, "  Space  ");
+        check (macros.getChildWithProperty (daw::ids::index, 1)[daw::ids::name].toString() == "Space", "macros have names");
+
+        edit.unmapMacro (track, 1, reverb, "reverbMix");
+        check (macros.getChildWithProperty (daw::ids::index, 1).getNumChildren() == 0, "a value can be unmapped");
+
+        edit.removeInsert (comp);
+        check (macros.getChildWithProperty (daw::ids::index, 0).getNumChildren() == 0, "removing an effect removes its mappings");
+        edit.setMacro (track, 0, 1.0f); // nothing mapped: no harm
+    }
+
     void testDeviceEdits()
     {
         std::cout << "\nEffect chain edits (seamless, duplicate, move, replace, rename, A/B)\n";
@@ -17229,6 +17264,7 @@ int main()
         testDeviceEdits();
         testChainOrder();
         testPresetLibrary();
+        testMacros();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -17272,6 +17308,7 @@ int main()
     testDeviceEdits();
     testChainOrder();
     testPresetLibrary();
+    testMacros();
     testReturns();
     testPreview();
     testGroups();

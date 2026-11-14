@@ -2620,3 +2620,28 @@ body.is-daw .library-hint { display: none; }
 .library-swap { display: flex; align-items: center; gap: 6px; margin: 0 8px 6px; padding: 4px 6px 4px 10px; border-radius: 6px;
                 background: color-mix(in srgb, var(--accent) 18%, transparent); border: 1px solid var(--accent); font-size: 12px; }
 .library-swap-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* Macros: eight knobs beside the chain, and Map mode. */
+.macro-panel { display: flex; flex: none; flex-direction: column; gap: 6px; width: 260px; padding: 8px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel-2, #12151c); overflow-y: auto; }
+.macro-head { display: flex; align-items: center; justify-content: space-between; }
+.macro-title { color: var(--muted); font-size: 10.5px; font-weight: 600; letter-spacing: 0.7px; text-transform: uppercase; }
+.macro-map[aria-pressed="true"] { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 25%, transparent); color: var(--text); }
+.macro-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 4px 2px; }
+.macro-cell { position: relative; border-radius: 8px; }
+.macro-cell .knob { --accent: var(--macro); --knob-size: 34px; min-width: 0; }
+.macro-cell .knob .value-arc { stroke: var(--macro); }
+.macro-cell .knob .name { max-width: 58px; letter-spacing: 0.2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.macro-cell:not(.is-used) .knob { opacity: 0.55; }
+.macro-cell.is-selected { box-shadow: inset 0 0 0 2px var(--macro); background: color-mix(in srgb, var(--macro) 12%, transparent); }
+.macro-name-entry { width: 58px; font-size: 10px; }
+.macro-ranges { display: flex; flex-direction: column; gap: 3px; font-size: 11px; }
+.macro-ranges-title { color: var(--muted); }
+.macro-range { display: grid; grid-template-columns: 1fr auto 1fr auto; align-items: center; gap: 3px; }
+.macro-range-name { grid-column: 1 / -1; overflow: hidden; color: var(--text); text-overflow: ellipsis; white-space: nowrap; }
+.macro-range-value { width: 100%; min-width: 0; padding: 1px 3px; border: 1px solid var(--line); border-radius: 4px; background: #0d1016; color: var(--text); font: inherit; }
+.macro-range-none { color: var(--faint); }
+.chain-macros-button[aria-pressed="true"] { border-color: var(--accent); color: var(--text); }
+/* Map mode: the controls a click maps; a mapped control wears its macro's colour. */
+.is-macro-mapping [data-param] { outline: 1px dashed color-mix(in srgb, var(--accent) 70%, transparent); outline-offset: 2px; border-radius: 6px; cursor: copy; }
+[data-param].is-macro-mapped { position: relative; }
+[data-param].is-macro-mapped::after { content: ""; position: absolute; top: 2px; right: 2px; width: 7px; height: 7px; border-radius: 50%; background: var(--macro); box-shadow: 0 0 5px var(--macro); pointer-events: none; }

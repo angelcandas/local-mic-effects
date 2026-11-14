@@ -556,6 +556,7 @@ export class DeviceCard {
         if (control.liveOnly && !this.kit.live) continue; // the DAW listens to the other tracks for chords
         const widget = this.createControl(control);
         if (!widget) continue;
+        if (control.param) widget.dataset.param = control.param; // macros map controls by it
         this.kit.decorateControl?.(control, widget);
         row.append(widget);
         if (control.when) this.conditional.push([control, widget]);
