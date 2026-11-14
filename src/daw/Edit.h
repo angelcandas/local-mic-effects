@@ -410,6 +410,23 @@ public:
     static juce::StringArray getLaneTargets (const juce::ValueTree& track); // the lanes with points, in a steady order
     static std::pair<float, float> getLaneRange (const juce::ValueTree& track, const juce::String& target); // clamp range (insert values: none)
     static std::vector<AutomationPoint> parsePoints (const juce::String&);
+    // What a target is set to without its lane (the knob): 0 dB for the ride.
+    static float getLaneBase (const juce::ValueTree& track, const juce::String& target);
+    // Fewer points for the same curve: drops points that lie within `tolerance` (in the lane's
+    // units) of the straight line their kept neighbours make. Keeps the first and last.
+    static std::vector<AutomationPoint> thinPoints (const std::vector<AutomationPoint>&, float tolerance);
+    // The tolerance thinning uses for a lane: half a percent of its range (of the points' own
+    // spread for effect values).
+    static float getThinTolerance (const juce::ValueTree& track, const juce::String& target, const std::vector<AutomationPoint>&);
+    // Writes `recorded` over the lane between `start` and `end` (seconds): what was there goes,
+    // the curve before and after stays, joined with short ramps. `base` is the value the lane
+    // stands for where it has no points (the knob's setting). One undo step with setLane.
+    bool writeLaneRange (int trackId, const juce::String& target, const std::vector<AutomationPoint>& recorded,
+                         double start, double end, float base);
+    // Copies the track's lanes between `start` and `end` onto `toTrack` at `to` (replacing what
+    // was there over that length); with `move`, the source range keeps only its edges' values.
+    // Lanes the other track can't have (another track's effects) are left out.
+    void copyLaneRange (int fromTrack, double start, double end, int toTrack, double to, bool move);
     static juce::String pointsToString (const std::vector<AutomationPoint>&, int valueDecimals = 3);
     // Whether `param` of `insert` follows a macro that has a lane (so its value under the
     // lane changes when the macro is turned).

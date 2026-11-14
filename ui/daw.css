@@ -2170,6 +2170,15 @@ body:not(.is-daw) .daw-project-actions { display: none; }
 
 /* ---------- Automation lanes (ui/automation.js) ---------- */
 
+/* Write mode: T or L in the corner, red while on. */
+.automate-mode { position: relative; }
+.automate-mode[aria-pressed="true"] { color: var(--hot); }
+.automate-mode[data-mode="touch"]::after, .automate-mode[data-mode="latch"]::after {
+  position: absolute; right: 1px; bottom: 0; font-size: 8px; font-weight: 800; line-height: 1;
+}
+.automate-mode[data-mode="touch"]::after { content: "T"; }
+.automate-mode[data-mode="latch"]::after { content: "L"; }
+
 .tt-lanes { display: inline-flex; align-items: center; justify-content: center; padding: 0; }
 /* A lane with points: a dot in the corner. */
 .tt-lanes.has-lanes { position: relative; color: color-mix(in srgb, var(--track-color) 70%, var(--text)); }

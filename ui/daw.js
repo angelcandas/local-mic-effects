@@ -157,6 +157,7 @@ const ICONS = {
   click: '<path d="M8 21h8l-2-16h-4zM12 17l4-9"/>',
   countin: '<path d="M4 8h3v8M12 8h4v3h-4v5h4M3 3h2M19 3h2"/><path d="M19 8v8"/>',
   punch: '<path d="M4 18V6M20 18V6"/><circle cx="12" cy="12" r="3.5" fill="currentColor"/>',
+  automate: '<path d="M3 17l5-7 4 4 5-8 4 5"/><circle cx="18" cy="18" r="3" fill="currentColor" stroke="none"/>',
   loop: '<path d="M17 2l3 3-3 3"/><path d="M4 11V9a4 4 0 0 1 4-4h12M7 22l-3-3 3-3"/><path d="M20 13v2a4 4 0 0 1-4 4H4"/>',
   snap: '<path d="M6 3v8a6 6 0 0 0 12 0V3h-4v8a2 2 0 0 1-4 0V3zM6 7h4M14 7h4"/>',
   returnstop: '<path d="M9 14L4 9l5-5"/><path d="M4 9h11a5 5 0 0 1 0 10h-4"/>',
@@ -1359,8 +1360,12 @@ class DawScreen {
                                             [this.recordButton, "daw:record", "Record"], [this.loopButton, "daw:loop", "Loop range"],
                                             [this.punchButton, "daw:punch", "Punch"], [this.metronomeButton, "daw:metronome", "Click"]])
       markLearnable(element, target, `DAW · ${label}`);
+    // Writing automation from knob moves while playing: Off → Touch → Latch.
+    this.automateButton = iconButton("toggle automate-mode", "automate",
+      "Write automation: Off. Click for Touch (moving a knob while playing writes its lane; let go and the lane carries on), again for Latch (keeps writing the last value until you stop)",
+      () => this.cycleAutomationMode());
     const loopPunch = html("div", "tb-joined");
-    loopPunch.append(this.loopButton, this.punchButton);
+    loopPunch.append(this.loopButton, this.punchButton, this.automateButton);
     const centre = zone("zone-transport", buttons, clock, loopPunch, this.modeSwitch, mic);
 
     //---------------------------------------------------------------- right: tools, features, view
@@ -1551,6 +1556,14 @@ class DawScreen {
     this.metronomeButton.setAttribute("aria-pressed", String(s.metronome));
     this.loopButton.setAttribute("aria-pressed", String(s.loop.on));
     this.punchButton.setAttribute("aria-pressed", String(Boolean(s.punch)));
+    const writeMode = s.automationMode ?? "off";
+    this.automateButton.setAttribute("aria-pressed", String(writeMode !== "off"));
+    this.automateButton.dataset.mode = writeMode;
+    this.automateButton.title = {
+      off: "Write automation: Off. Click for Touch: moving a track's volume, pan, send, effect or macro while playing writes its lane; let go and the lane carries on",
+      touch: "Write automation: Touch. Moves while playing write their lane until you let go. Click for Latch",
+      latch: "Write automation: Latch. Once you move a knob while playing, its last value keeps writing until you stop. Click to turn writing off",
+    }[writeMode];
     this.preRoll.value = String(s.preRoll ?? 1);
     this.clickOnlyRecording.checked = Boolean(s.clickOnlyRecording);
     const inPattern = (s.patternMode ?? -1) >= 0;
@@ -1660,6 +1673,13 @@ class DawScreen {
     const result = await daw("capture", this.captureSeconds > 0 ? { seconds: this.captureSeconds } : {});
     if (result?.ok) toast(`Captured ${formatDuration(result.seconds)} on ${result.tracks} track${result.tracks === 1 ? "" : "s"}`);
     else toast(result?.error || "Couldn't capture", "is-error");
+  }
+
+  cycleAutomationMode() {
+    const next = { off: "touch", touch: "latch", latch: "off" }[this.session?.automationMode ?? "off"];
+    daw("automationMode", { mode: next });
+    toast({ off: "Automation writing off.", touch: "Touch: move a knob while the song plays to write its automation. Let go and the lane carries on.",
+            latch: "Latch: move a knob while the song plays; it keeps writing its last value until you stop." }[next]);
   }
 
   // Punch needs a range: without one, it marks the next 4 bars from the playhead.
@@ -3029,9 +3049,11 @@ class DawScreen {
           const items = [[clip.id, clip.start, edit.args.track], ...group.map((g) => [g.found.clip.id, g.found.clip.start, undefined])];
           const made = [];
           await this.eachStep(items, async ([id, start, onTrack], more) => {
-            const copy = await daw("duplicate", { id, ...(more ? { continue: true } : {}) });
+            const copy = await daw("duplicate", { id, lanes: false, ...(more ? { continue: true } : {}) });
             if (!(copy >= 0)) return;
-            await daw("moveClip", { id: copy, start: start + delta, ...(onTrack != null ? { track: onTrack } : {}), continue: true });
+            const from = this.findClip(id);
+            await daw("moveClip", { id: copy, start: start + delta, ...(onTrack != null ? { track: onTrack } : {}), continue: true,
+                                    ...(from ? { copyFrom: { track: from.track.id, start } } : {}) });
             made.push(copy);
           });
           if (made.length > 1) this.selectClips(made, made[0]);
@@ -5947,13 +5969,15 @@ class DawScreen {
     const found = this.findClip(this.selectedClip);
     if (!found) return toast("Select a clip first.");
     const { clip } = found;
+    // Where it came from: its automation comes along when lanes follow clips.
+    const from = { fromTrack: found.track.id, fromStart: clip.start };
     if (clip.midi) {
-      this.clipboard = { midi: true, offset: clip.offset, length: clip.length, name: clip.name,
+      this.clipboard = { midi: true, ...from, offset: clip.offset, length: clip.length, name: clip.name,
                          notes: clip.notes.map(({ pitch, time, length, velocity }) => ({ pitch, time, length, velocity })) };
       if (cut) this.deleteSelected();
       return;
     }
-    this.clipboard = { file: clip.file, offset: clip.offset, length: clip.length, gain: clip.gain, fadeIn: clip.fadeIn, fadeOut: clip.fadeOut, name: clip.name };
+    this.clipboard = { ...from, file: clip.file, offset: clip.offset, length: clip.length, gain: clip.gain, fadeIn: clip.fadeIn, fadeOut: clip.fadeOut, name: clip.name };
     if (cut) this.deleteSelected();
   }
 

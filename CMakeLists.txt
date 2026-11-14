@@ -161,6 +161,8 @@ set(MICFX_DSP_SOURCES
     src/daw/BackingVocals.h
     src/daw/DawEngine.cpp
     src/daw/Edit.cpp
+    src/daw/AutomationRecorder.cpp
+    src/daw/AutomationRecorder.h
     src/daw/Patterns.cpp
     src/daw/Loops.cpp
     src/daw/Loops.h

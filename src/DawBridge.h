@@ -6,6 +6,7 @@
 
 #include <optional>
 #include "daw/Exporter.h"
+#include "daw/AutomationRecorder.h"
 #include "analysis/MixAssistant.h"
 #include "analysis/ToMidi.h"
 #include "analysis/MixCheck.h"
@@ -233,6 +234,11 @@ private:
     daw::Project& project;
     juce::PropertiesFile& settings;
     bool matchLoops = settings.getBoolValue ("dawMatchLoops", true); // the library's "Match loops to the tempo"
+    daw::AutomationRecorder automationRecorder { edit, &engine };   // writing automation from knob moves
+    bool lanesFollowClips = settings.getBoolValue ("dawLanesFollowClips", true); // moving/copying clips takes their automation along
+    // A knob of a track moved while the song plays: written to its lane when a write mode is on.
+    void recordMove (int trackId, const juce::String& target, float knob);
+    void pasteLanesWith (const juce::var& args, const juce::ValueTree& clip);
     Emit emit;
     std::function<juce::int64()> roundTripLatency;
 

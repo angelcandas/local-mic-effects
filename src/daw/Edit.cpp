@@ -1260,6 +1260,159 @@ juce::StringArray Edit::getLaneTargets (const juce::ValueTree& track)
     return targets;
 }
 
+float Edit::getLaneBase (const juce::ValueTree& track, const juce::String& target)
+{
+    const auto t = parseTarget (target);
+    if (t.kind == "pan")
+        return (float) track.getProperty (ids::pan, 0.0f);
+    if (t.kind == "send")
+        return (float) getSend (track, t.id).getProperty (ids::level, minSendDb - 1.0f);
+    if (t.kind == "macro")
+        return (float) findTrackMacro (track, t.id).getProperty (ids::value, 0.0f);
+    if (t.kind == "insert")
+        return (float) findTrackInsert (track, t.id).getProperty (juce::Identifier (t.value.isNotEmpty() ? t.value : "x"), 0.0f);
+    return 0.0f;
+}
+
+std::vector<Edit::AutomationPoint> Edit::thinPoints (const std::vector<AutomationPoint>& points, float tolerance)
+{
+    if (points.size() < 3)
+        return points;
+
+    // Ramer-Douglas-Peucker on the values over time.
+    std::vector<bool> keep (points.size(), false);
+    keep.front() = keep.back() = true;
+    std::vector<std::pair<size_t, size_t>> stack { { 0, points.size() - 1 } };
+    while (! stack.empty())
+    {
+        const auto [a, b] = stack.back();
+        stack.pop_back();
+        if (b <= a + 1)
+            continue;
+        const auto& p = points[a];
+        const auto& q = points[b];
+        float worst = -1.0f;
+        size_t at = a;
+        for (auto i = a + 1; i < b; ++i)
+        {
+            const auto span = q.time - p.time;
+            const auto x = span > 0.0 ? (points[i].time - p.time) / span : 0.0;
+            const auto line = (float) (p.value + x * (q.value - p.value));
+            const auto d = std::abs (points[i].value - line);
+            if (d > worst) { worst = d; at = i; }
+        }
+        if (worst > tolerance)
+        {
+            keep[at] = true;
+            stack.push_back ({ a, at });
+            stack.push_back ({ at, b });
+        }
+    }
+
+    std::vector<AutomationPoint> kept;
+    for (size_t i = 0; i < points.size(); ++i)
+        if (keep[i])
+            kept.push_back (points[i]);
+    return kept;
+}
+
+float Edit::getThinTolerance (const juce::ValueTree& track, const juce::String& target, const std::vector<AutomationPoint>& points)
+{
+    auto [lo, hi] = getLaneRange (track, target);
+    if (target.startsWith ("insert:") || target.startsWith ("volume"))
+    {
+        lo = std::numeric_limits<float>::max();
+        hi = -lo;
+        for (const auto& point : points)
+        {
+            lo = juce::jmin (lo, point.value);
+            hi = juce::jmax (hi, point.value);
+        }
+        if (target.startsWith ("volume"))
+            return 0.1f; // a tenth of a dB
+    }
+    return juce::jmax (1.0e-4f, (hi - lo) * 0.005f);
+}
+
+bool Edit::writeLaneRange (int trackId, const juce::String& target, const std::vector<AutomationPoint>& recorded,
+                           double start, double end, float base)
+{
+    const auto track = getTrack (trackId);
+    if (! track.isValid() || recorded.empty())
+        return false;
+
+    constexpr double ramp = 0.01; // seconds to get from the old curve onto the new one and back
+    const auto old = getLane (track, target);
+    const auto oldAt = [&] (double time) { return old.empty() ? base : getAutomationValueAt (old, time); };
+
+    std::vector<AutomationPoint> points;
+    for (const auto& point : old)
+        if (point.time < start - ramp)
+            points.push_back (point);
+    if (start - ramp > 0.0 || ! old.empty())
+        points.push_back ({ juce::jmax (0.0, start - ramp), oldAt (start - ramp) });
+    for (const auto& point : recorded)
+        if (point.time >= start && point.time <= end)
+            points.push_back (point);
+    points.push_back ({ end + ramp, oldAt (end + ramp) });
+    for (const auto& point : old)
+        if (point.time > end + ramp)
+            points.push_back (point);
+
+    std::stable_sort (points.begin(), points.end(), [] (const auto& a, const auto& b) { return a.time < b.time; });
+    return setLane (trackId, target, points);
+}
+
+void Edit::copyLaneRange (int fromTrack, double start, double end, int toTrack, double to, bool move)
+{
+    const auto source = getTrack (fromTrack);
+    if (! source.isValid() || ! getTrack (toTrack).isValid() || end <= start)
+        return;
+
+    const auto length = end - start;
+    for (const auto& target : getLaneTargets (source))
+    {
+        // Another track can't play this track's effect values.
+        if (fromTrack != toTrack && target.startsWith ("insert:"))
+            continue;
+
+        const auto points = getLane (source, target);
+        std::vector<AutomationPoint> piece { { start, getAutomationValueAt (points, start) } };
+        for (const auto& point : points)
+            if (point.time > start && point.time < end)
+                piece.push_back (point);
+        piece.push_back ({ end, getAutomationValueAt (points, end) });
+
+        // Lifting the piece out of a move: the source range keeps its edges, straight between.
+        if (move)
+        {
+            std::vector<AutomationPoint> rest;
+            for (const auto& point : points)
+                if (point.time < start || point.time > end)
+                    rest.push_back (point);
+            rest.push_back (piece.front());
+            rest.push_back (piece.back());
+            setLane (fromTrack, target, rest);
+        }
+
+        // Onto the destination: what it had there goes, its own curve around stays.
+        const auto destination = getLane (getTrack (toTrack), target);
+        std::vector<AutomationPoint> result;
+        for (const auto& point : destination)
+            if (point.time < to || point.time > to + length)
+                result.push_back (point);
+        const auto base = getLaneBase (getTrack (toTrack), target);
+        const auto destinationAt = [&] (double time) { return destination.empty() ? base : getAutomationValueAt (destination, time); };
+        if (to > 0.001)
+            result.push_back ({ to - 0.001, destinationAt (to) });
+        result.push_back ({ to + length + 0.001, destinationAt (to + length) });
+        for (const auto& point : piece)
+            result.push_back ({ point.time - start + to, point.value });
+        std::stable_sort (result.begin(), result.end(), [] (const auto& a, const auto& b) { return a.time < b.time; });
+        setLane (toTrack, target, result);
+    }
+}
+
 bool Edit::followsAutomatedMacro (const juce::ValueTree& insert, const juce::String& param)
 {
     const auto macros = getMacros (getChannelOf (insert));

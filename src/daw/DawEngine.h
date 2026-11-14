@@ -239,6 +239,10 @@ public:
     // before the range (the music and the click as a count-in), records only inside the
     // range, and isPunchedOut() turns true once the playhead passes its end (the caller
     // then stops). The take lands like any other (take lanes over audio already there).
+    // Holds a track's automation lane (Edit::setLane target) while a knob is touched to
+    // record over it: the knob is heard instead of the lane until it's let go. Message thread.
+    void holdLane (int trackId, const juce::String& target, bool held);
+
     void setPunch (bool on) noexcept          { punch = on; }
     bool getPunch() const noexcept            { return punch.load(); }
     void setPreRollBars (int bars) noexcept   { preRollBars = juce::jlimit (0, 4, bars); }
@@ -370,6 +374,7 @@ private:
         int bus = 0;     // index into Graph::returns
         bool pre = false;
         std::vector<std::pair<juce::int64, float>> points; // its level's automation: timeline sample, dB
+        std::shared_ptr<std::atomic<bool>> held;            // holdLane: the knob instead of the lane
     };
 
     struct Track
@@ -381,6 +386,7 @@ private:
         std::vector<MidiEvent> midiEvents; // MIDI tracks, in time order
         std::vector<std::pair<juce::int64, float>> ride; // volume automation: timeline sample, dB (Edit::RidePoint)
         std::vector<std::pair<juce::int64, float>> pan;  // pan automation: timeline sample, -1..1
+        std::shared_ptr<std::atomic<bool>> panHeld;
 
         // Effect automation (Edit::setInsertAutomation): each lane drives one value of one
         // of the strip's modules while playing, and puts back `base` when playback stops.
@@ -389,6 +395,7 @@ private:
             fx::Module::Value* value = nullptr;
             std::vector<std::pair<juce::int64, float>> points; // timeline sample, value
             float base = 0.0f;
+            std::shared_ptr<std::atomic<bool>> held;
         };
         std::vector<Lane> lanes;
         bool automating = false;
@@ -511,6 +518,9 @@ private:
         std::optional<std::vector<analysis::pitch::Note>> notes;
     };
     std::map<int, Preview> previews; // by clip id
+    std::map<std::pair<int, juce::String>, std::shared_ptr<std::atomic<bool>>> laneHolds; // message thread: holdLane flags
+    std::shared_ptr<std::atomic<bool>> getHold (int trackId, const juce::String& target);
+    static bool isHeld (const std::shared_ptr<std::atomic<bool>>& flag) noexcept { return flag != nullptr && flag->load (std::memory_order_relaxed); }
     std::map<std::pair<int, int>, std::shared_ptr<SendLevel>> sendLevels; // message thread: by (track id, return id) // message thread: what each clip played in the last graph
 
     std::atomic<Graph*> incoming { nullptr }; // built, not yet picked up by the audio thread

@@ -268,6 +268,15 @@ namespace
         return points;
     }
 
+    // The TRACK a clip is on (through a take lane), invalid for none.
+    juce::ValueTree trackOf (const juce::ValueTree& clip)
+    {
+        for (auto tree = clip.getParent(); tree.isValid(); tree = tree.getParent())
+            if (tree.hasType (daw::ids::TRACK))
+                return tree;
+        return {};
+    }
+
     // A track's automation lanes for the page: [{ target, points: [[seconds, value]...] }]
     // (see Edit::setLane for the targets).
     juce::var describeLanes (const juce::ValueTree& track)
@@ -956,6 +965,8 @@ juce::var DawBridge::describeSession()
         { "metronome", engine.getMetronome() },
         { "countIn", engine.getCountInBars() },
         { "punch", engine.getPunch() },
+        { "automationMode", daw::AutomationRecorder::modeKey (automationRecorder.getMode()) },
+        { "lanesFollowClips", lanesFollowClips },
         { "preRoll", engine.getPreRollBars() },
         { "clickOnlyRecording", engine.getClickOnlyRecording() },
         { "canUndo", undo.canUndo() },
@@ -1352,10 +1363,26 @@ juce::StringArray DawBridge::getInputNames() const
     return names;
 }
 
+// A pasted clip brings the automation that was under it when copied ({ fromTrack, fromStart }).
+void DawBridge::pasteLanesWith (const juce::var& args, const juce::ValueTree& clip)
+{
+    if (! lanesFollowClips || ! args.hasProperty ("fromTrack") || ! clip.isValid())
+        return;
+    const auto from = (double) args["fromStart"];
+    edit.copyLaneRange (args["fromTrack"], from, from + (double) clip[ids::length], trackOf (clip)[ids::id], clip[ids::start], false);
+}
+
+void DawBridge::recordMove (int trackId, const juce::String& target, float knob)
+{
+    if (engine.isPlaying() && edit.getTrack (trackId).isValid())
+        automationRecorder.moved (trackId, target, knob, (double) engine.getPosition() / juce::jmax (1.0, engine.getSampleRate()));
+}
+
 void DawBridge::tick()
 {
     updateInstrumentWindows();
     watchPluginParameters();
+    automationRecorder.update ((double) engine.getPosition() / juce::jmax (1.0, engine.getSampleRate()), engine.isPlaying());
 
     if (auto& host = processor.getPluginHost(); host.isScanning() && ++scanTicks % 10 == 0)
         emit ("dawPlugins", object ({ { "scanning", true }, { "progress", host.getScanProgress() },
@@ -4491,8 +4518,8 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         {
             if (args.hasProperty ("name"))    track.setProperty (ids::name, args["name"].toString().substring (0, 60), &undo);
             if (args.hasProperty ("colour"))  track.setProperty (ids::colour, args["colour"], &undo);
-            if (args.hasProperty ("volume"))  edit.setTrackVolume (id, args["volume"]);
-            if (args.hasProperty ("pan"))     edit.setTrackPan (id, args["pan"]);
+            if (args.hasProperty ("volume"))  { recordMove (id, "volume", args["volume"]); edit.setTrackVolume (id, args["volume"]); }
+            if (args.hasProperty ("pan"))     { recordMove (id, "pan", args["pan"]); edit.setTrackPan (id, args["pan"]); }
             if (args.hasProperty ("mute"))    edit.setTrackMute (id, args["mute"]);
             if (args.hasProperty ("solo"))    edit.setTrackSolo (id, args["solo"]);
             if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
@@ -4567,7 +4594,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "setSend")
     {
         const auto target = arg (args, "target", -1);
-        if (args.hasProperty ("level")) edit.setSend (id, target, args["level"]);
+        if (args.hasProperty ("level")) { recordMove (id, "send:" + juce::String (target), args["level"]); edit.setSend (id, target, args["level"]); }
         if (args.hasProperty ("pre"))   edit.setSendPre (id, target, args["pre"]);
         ok();
         return;
@@ -4591,6 +4618,35 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
     if (command == "clearLanes") { edit.clearLanes (arg (args, "track", -1)); ok(); return; }
+    // { track, target }: the lane with fewer points for the same curve.
+    if (command == "thinLane")
+    {
+        const auto trackId = arg (args, "track", -1);
+        const auto target = arg (args, "target", juce::String());
+        const auto track = edit.getTrack (trackId);
+        const auto points = daw::Edit::getLane (track, target);
+        const auto thinned = daw::Edit::thinPoints (points, daw::Edit::getThinTolerance (track, target, points));
+        if (thinned.size() < points.size())
+            edit.setLane (trackId, target, thinned);
+        complete (object ({ { "ok", true }, { "before", (int) points.size() }, { "after", (int) thinned.size() } }));
+        return;
+    }
+    // { mode: "off" | "touch" | "latch" }: writing automation from knob moves while playing.
+    if (command == "automationMode")
+    {
+        automationRecorder.setMode (daw::AutomationRecorder::modeFromKey (arg (args, "mode", juce::String ("off"))));
+        sessionChanged = true;
+        ok();
+        return;
+    }
+    if (command == "lanesFollowClips")
+    {
+        lanesFollowClips = arg (args, "on", true);
+        settings.setValue ("dawLanesFollowClips", lanesFollowClips);
+        sessionChanged = true;
+        ok();
+        return;
+    }
 
     if (command == "setOutput") { edit.setTrackOutput (id, arg (args, "output", (int) daw::Edit::masterId)); ok(); return; }
 
@@ -4660,7 +4716,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     // Macros. { track, index, value }: turns it (with `continue`, one undo step per gesture);
     // { track, index, insert, param, min, max }: maps a value to it (again: new range);
     // { track, index, insert, param }: unmaps; { track, index, name }: names it.
-    if (command == "setMacro")   { edit.setMacro (arg (args, "track", -1), arg (args, "index", -1), (float) (double) args["value"]); ok(); return; }
+    if (command == "setMacro")   { recordMove (arg (args, "track", -1), "macro:" + juce::String (arg (args, "index", -1)), (float) (double) args["value"]); edit.setMacro (arg (args, "track", -1), arg (args, "index", -1), (float) (double) args["value"]); ok(); return; }
     if (command == "mapMacro")
     {
         if (edit.mapMacro (arg (args, "track", -1), arg (args, "index", -1), arg (args, "insert", -1), args["param"].toString(),
@@ -4815,7 +4871,15 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
-    if (command == "setInsert")    { edit.setInsertValue (id, args["param"].toString(), args["value"]); ok(); return; }
+    if (command == "setInsert")
+    {
+        const auto param = args["param"].toString();
+        if (const auto owner = daw::Edit::getChannelOf (edit.getInsert (id)); owner.hasType (ids::TRACK))
+            recordMove (owner[ids::id], "insert:" + juce::String (id) + ":" + param, args["value"]);
+        edit.setInsertValue (id, param, args["value"]);
+        ok();
+        return;
+    }
 
     // { id, path? } -> { ok, file, error?, cancelled? }: the impulse response a cab or IR
     // reverb insert plays through. No path: a file chooser; path "": cleared. Loading one
@@ -4863,12 +4927,41 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "loadPreset")   { loadPresetInto (arg (args, "track", -1), arg (args, "preset", -1)); ok(); return; }
 
     //================================================================ clips
-    if (command == "moveClip")   { edit.moveClip (id, args["start"], arg (args, "track", -1)); ok(); return; }
+    // With lanes following clips (and `lanes` not false), a clip takes its stretch of the
+    // track's automation along; `copyFrom` { track, start } copies that stretch instead (a
+    // Ctrl+drag copy, made as a duplicate and then a move).
+    if (command == "moveClip")
+    {
+        const auto before = edit.getClip (id);
+        const auto fromTrack = (int) trackOf (before)[ids::id];
+        const auto fromStart = (double) before[ids::start], length = (double) before[ids::length];
+        edit.moveClip (id, args["start"], arg (args, "track", -1));
+        const auto after = edit.getClip (id);
+        if (lanesFollowClips && arg (args, "lanes", true) && after.isValid() && length > 0.0)
+        {
+            const auto toTrack = (int) trackOf (after)[ids::id];
+            if (const auto* from = args["copyFrom"].getDynamicObject())
+                edit.copyLaneRange (from->getProperty ("track"), from->getProperty ("start"), (double) from->getProperty ("start") + length,
+                                    toTrack, after[ids::start], false);
+            else if (std::abs ((double) after[ids::start] - fromStart) > 1.0e-6 || toTrack != fromTrack)
+                edit.copyLaneRange (fromTrack, fromStart, fromStart + length, toTrack, after[ids::start], true);
+        }
+        ok();
+        return;
+    }
     if (command == "trimStart")  { edit.trimClipStart (id, args["start"]); ok(); return; }
     if (command == "trimEnd")    { edit.trimClipEnd (id, args["end"]); ok(); return; }
     if (command == "split")      { complete (edit.splitClip (id, args["time"])); return; }
     if (command == "timeRange")  { complete (editTimeRange (args)); return; }
-    if (command == "duplicate")  { complete (edit.duplicateClip (id)); return; }
+    if (command == "duplicate")
+    {
+        const auto copy = edit.duplicateClip (id);
+        if (const auto source = edit.getClip (id), made = edit.getClip (copy); lanesFollowClips && arg (args, "lanes", true) && made.isValid())
+            edit.copyLaneRange (trackOf (source)[ids::id], source[ids::start], (double) source[ids::start] + (double) source[ids::length],
+                                trackOf (made)[ids::id], made[ids::start], false);
+        complete (copy);
+        return;
+    }
     if (command == "removeClip") { edit.removeClip (id); ok(); return; }
 
     // A copy of a clip (from copy/cut in the UI) at a new place: { track, start, file, offset,
@@ -4887,6 +4980,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         if (auto* notes = args["notes"].getArray())
             for (const auto& n : *notes)
                 edit.addNote (clipId, n["pitch"], n["time"], n["length"], arg (n, "velocity", 100));
+        pasteLanesWith (args, clip);
         complete (clipId);
         return;
     }
@@ -4906,6 +5000,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             clip.setProperty (ids::name, args["name"], &undo);
         edit.setClipGain ((int) clip[ids::id], arg (args, "gain", 0.0f));
         edit.setClipFades ((int) clip[ids::id], arg (args, "fadeIn", 0.0), arg (args, "fadeOut", 0.0));
+        pasteLanesWith (args, clip);
         complete (clip[ids::id]);
         return;
     }
