@@ -321,7 +321,8 @@ namespace
             { "addReturn", "Add return" }, { "removeReturn", "Delete return" }, { "moveReturn", "Move return" },
             { "tempo", "Tempo" }, { "tempoMap", "Tempo change" }, { "beatsPerBar", "Time signature" }, { "loop", "Loop range" },
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
-            { "quantize", "Quantize" }, { "setHitpoints", "Hitpoints" }, { "hitpointAction", "Hitpoints" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
+            { "defineTempo", "Tempo definition" }, { "tempoFromClip", "Project tempo from clip" }, { "stretchClip", "Stretch clip" },
+            { "flattenClip", "Make warp permanent" }, { "quantize", "Quantize" }, { "setHitpoints", "Hitpoints" }, { "hitpointAction", "Hitpoints" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
             { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
@@ -585,6 +586,43 @@ static juce::var describeMarkers (const daw::warp::Map& map, double offset, doub
     return list;
 }
 
+// A tempo definition as the page sends it: [[seconds, beat], ...] (anything else: none).
+static daw::Edit::BeatMap parseBeatMapArg (const juce::var& list)
+{
+    daw::Edit::BeatMap map;
+    if (const auto* points = list.getArray())
+        for (const auto& p : *points)
+            if (p.isArray() && p.size() >= 2)
+                map.push_back ({ (double) p[0], (double) p[1] });
+    return map;
+}
+
+// 32-bit float, so a flattened clip plays exactly what it played. Returns an error, empty on success.
+static juce::String writeFloatWav (const juce::File& file, const juce::AudioBuffer<float>& audio, double sampleRate)
+{
+    file.deleteFile();
+    std::unique_ptr<juce::OutputStream> stream = std::make_unique<juce::FileOutputStream> (file);
+    if (! static_cast<juce::FileOutputStream&> (*stream).openedOk())
+        return "Couldn't write " + file.getFullPathName() + ".";
+    auto writer = juce::WavAudioFormat().createWriterFor (stream, juce::AudioFormatWriterOptions{}
+                                                                      .withSampleRate (sampleRate)
+                                                                      .withNumChannels (audio.getNumChannels())
+                                                                      .withBitsPerSample (32));
+    if (writer == nullptr || ! writer->writeFromAudioSampleBuffer (audio, 0, audio.getNumSamples()))
+        return "Couldn't write " + file.getFullPathName() + ".";
+    return {};
+}
+
+static juce::var describeBeatMap (const daw::Edit::BeatMap& map)
+{
+    if (map.empty())
+        return {};
+    juce::Array<juce::var> list;
+    for (const auto& p : map)
+        list.add (juce::Array<juce::var> { p.seconds, p.beat });
+    return list;
+}
+
 juce::var DawBridge::describeRanges (const std::vector<std::pair<double, double>>& ranges)
 {
     juce::Array<juce::var> list;
@@ -669,6 +707,8 @@ juce::var DawBridge::describeSession()
                            { "freeWarp", daw::Edit::isMusical (clip) ? describeMarkers (daw::Edit::getClipWarp (clip), number (clip, ids::offset), number (clip, ids::length)) : juce::var() },
                            { "stretch", daw::warp::getAlgorithmKey (warpSettings.algorithm) }, { "formant", warpSettings.formant },
                            { "musical", daw::Edit::isMusical (clip) }, { "clipTempo", daw::Edit::getClipTempo (clip) },
+                           // Its tempo definition, [[seconds, beat], ...] in the file's own time (none: steady at clipTempo from 0).
+                           { "beatMap", describeBeatMap (daw::Edit::getBeatMap (clip)) },
                            { "pitchEdited", ! warpSettings.notes.empty() || ((bool) clip.getProperty (ids::warpBypass, false) && ! daw::Edit::getClipNotes (clip).empty()) },
                            // The audio the clip plays (its file, or a rendered copy): the page keys waveforms on it.
                            { "audioKey", warpSettings.isNeutral() ? file.getFullPathName() : daw::AudioPool::getWarpKey (file, warpSettings) },
@@ -4439,7 +4479,283 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
             edit.setClipMusical (id, on, bpm);
         }
+        if (args.hasProperty ("beatMap"))
+            edit.setBeatMap (id, parseBeatMapArg (args["beatMap"]));
         ok();
+        return;
+    }
+
+    // A clip's tempo definition (Edit::BeatMap). mode: steady | follow (found in its audio:
+    // one tempo and a downbeat, or every beat as played), project (the take was played to
+    // the project's click), half | double, bpm {bpm} (scales it), bars {bars} (the window is
+    // that many bars), clear.
+    if (command == "defineTempo")
+    {
+        const auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+        {
+            complete (error ("Select an audio clip first."));
+            return;
+        }
+
+        const auto mode = args["mode"].toString();
+        const auto bar = edit.getBeatsPerBar();
+        const auto free = daw::Edit::getClipWarp (clip); // file -> the straight time a definition is in
+        const auto offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+        const auto effective = daw::Edit::getEffectiveWarp (clip);
+        const auto windowFrom = free.toTarget (effective.toSource (offset)), windowTo = free.toTarget (effective.toSource (offset + length));
+        daw::Edit::BeatMap map;
+
+        if (mode == "half" || mode == "double")
+            map = daw::Edit::scaleBeatMap (daw::Edit::getDefinition (clip), mode == "half" ? 0.5 : 2.0);
+        else if (mode == "bpm")
+            map = daw::Edit::scaleBeatMap (daw::Edit::getDefinition (clip), arg (args, "bpm", 0.0) / daw::Edit::getClipTempo (clip));
+        else if (mode == "bars")
+        {
+            const auto beats = arg (args, "bars", 0.0) * bar;
+            if (beats <= 0.0 || windowTo - windowFrom < 0.01)
+            {
+                complete (error ("Give the clip's length in bars."));
+                return;
+            }
+            map = { { windowFrom, 0.0 }, { windowTo, beats } };
+        }
+        else if (mode == "project")
+        {
+            // Own beats = the project's beats where the audio plays now, from a bar line.
+            const auto tempo = edit.getTempoMap();
+            const auto anchor = (double) clip[ids::start] - offset;
+            const auto bend = daw::Edit::getMusicalMap (clip); // identity unless musical
+            const auto musical = daw::Edit::isMusical (clip);
+            const auto renderedOf = [&] (double x) { return musical ? bend.toTarget (x) : x; };
+            const auto straightOf = [&] (double rendered) { return musical ? bend.toSource (rendered) : rendered; };
+            const auto firstBar = bar * std::ceil (tempo.toBeats (anchor + renderedOf (juce::jmin (0.0, windowFrom))) / bar - 1.0e-6);
+            const auto beatOf = [&] (double x) { return tempo.toBeats (anchor + renderedOf (x)) - firstBar; };
+            const auto from = juce::jmin (0.0, windowFrom), to = windowTo;
+            map.push_back ({ from, beatOf (from) });
+            for (auto b = std::floor (beatOf (from)) + 1.0; b < beatOf (to); b += 1.0)
+                map.push_back ({ straightOf (tempo.toSeconds (b + firstBar) - anchor), b });
+            map.push_back ({ to, beatOf (to) });
+        }
+        else if (mode == "steady" || mode == "follow")
+        {
+            const auto audio = engine.getAudioPool().loadNow (juce::File (clip[ids::file].toString()));
+            if (audio == nullptr)
+            {
+                complete (error ("The clip's audio is still loading. Try again in a moment."));
+                return;
+            }
+            const auto rate = engine.getAudioPool().getSampleRate();
+            const auto found = analysis::rhythm::detectTempo (*audio, rate, bar);
+            if (found.bpm <= 0.0 || found.confidence < 0.2 || found.beats.size() < 2)
+            {
+                complete (error ("No steady beat found in the clip. It needs a few bars of rhythm."));
+                return;
+            }
+
+            const auto downbeat = (size_t) juce::jlimit (0, (int) found.beats.size() - 1, found.firstDownbeat);
+            std::vector<std::pair<double, double>> beats; // file seconds, own beat
+            if (mode == "steady")
+            {
+                const auto bpm = std::round (found.bpm * 100.0) / 100.0;
+                const auto spb = 60.0 / bpm;
+                const auto n = std::round ((found.beats[downbeat] - found.gridStart) / spb);
+                const auto first = found.gridStart + n * spb;
+                const auto fileLength = (double) audio->getNumSamples() / rate;
+                if (free.isIdentity())
+                    beats = { { first, 0.0 }, { first + 4.0 * spb, 4.0 } };
+                else // steady in the file: every beat, through the free warp
+                    for (auto b = std::floor (-first / spb); first + b * spb <= fileLength + spb; b += 1.0)
+                        beats.push_back ({ first + b * spb, b });
+            }
+            else
+            {
+                for (size_t i = 0; i < found.beats.size(); ++i)
+                    beats.push_back ({ found.beats[i], (double) i - (double) downbeat });
+            }
+
+            for (const auto& [seconds, beat] : beats)
+                map.push_back ({ free.toTarget (seconds), beat });
+
+            // Points on a straight line with their neighbours say nothing: thin them.
+            daw::Edit::BeatMap thin;
+            for (size_t i = 0; i < map.size(); ++i)
+            {
+                if (i > 0 && i + 1 < map.size())
+                {
+                    const auto& a = thin.back();
+                    const auto& c = map[i + 1];
+                    const auto guess = a.beat + (map[i].seconds - a.seconds) * (c.beat - a.beat) / (c.seconds - a.seconds);
+                    if (std::abs (guess - map[i].beat) < 0.005)
+                        continue;
+                }
+                thin.push_back (map[i]);
+            }
+            map = std::move (thin);
+        }
+        else if (mode != "clear")
+        {
+            complete (error ("Unknown tempo definition: " + mode));
+            return;
+        }
+
+        if (! map.empty())
+        {
+            map = daw::Edit::parseBeatMap (daw::Edit::beatMapToString (map));
+            const auto bpm = map.size() >= 2 ? 60.0 * (map[1].beat - map[0].beat) / (map[1].seconds - map[0].seconds) : 0.0;
+            if (map.empty() || bpm < daw::Edit::minClipTempo - 1.0e-6 || bpm > daw::Edit::maxClipTempo + 1.0e-6)
+            {
+                complete (error ("That makes the clip " + juce::String (bpm, 1) + " BPM; a clip's tempo goes from "
+                                 + juce::String (daw::Edit::minClipTempo, 0) + " to " + juce::String (daw::Edit::maxClipTempo, 0) + "."));
+                return;
+            }
+        }
+
+        edit.setBeatMap (id, map);
+        const auto updated = edit.getClip (id);
+        complete (object ({ { "ok", true }, { "clipTempo", daw::Edit::getClipTempo (updated) },
+                            { "beatMap", describeBeatMap (daw::Edit::getBeatMap (updated)) } }));
+        return;
+    }
+
+    // The project's tempo from a clip's tempo definition: its beats where they play now become
+    // the project's beats (a drifting clip gives a drifting tempo map). A musical clip stops
+    // being musical first, so it plays as it does now.
+    if (command == "tempoFromClip")
+    {
+        const auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip) || (! clip.hasProperty (ids::beatMap) && ! clip.hasProperty (ids::clipTempo)))
+        {
+            complete (error ("Define the clip's tempo first (Tempo: Detect)."));
+            return;
+        }
+        if (daw::Edit::isMusical (clip))
+            edit.setClipMusical (id, false);
+
+        const auto bar = edit.getBeatsPerBar();
+        const auto definition = daw::Edit::getDefinition (clip);
+
+        // Steady: just the tempo (the bar lines stay where they are).
+        auto steady = true;
+        for (size_t i = 2; i < definition.size(); ++i)
+            steady = steady && std::abs ((definition[i].beat - definition[i - 1].beat) / (definition[i].seconds - definition[i - 1].seconds)
+                                         - (definition[1].beat - definition[0].beat) / (definition[1].seconds - definition[0].seconds)) < 1.0e-4;
+        if (steady)
+        {
+            edit.setTempoMap (daw::TempoMap (std::round (daw::Edit::getClipTempo (clip) * 100.0) / 100.0));
+            complete (object ({ { "ok", true }, { "tempo", edit.getTempo() } }));
+            return;
+        }
+
+        const auto free = daw::Edit::getClipWarp (clip);
+        const auto offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+        const auto anchor = (double) clip[ids::start] - offset;
+        // Not musical now: rendered time is straight time.
+        const auto from = free.toTarget (free.toSource (offset)), to = free.toTarget (free.toSource (offset + length));
+        std::vector<double> times;
+        int firstDownbeat = -1;
+        // From the song's start (the first segment runs on back there), so the tempo map's
+        // lead-in is at most a bar, to the clip's end.
+        const auto songStart = juce::jmin (from, -anchor);
+        for (auto b = std::ceil (daw::Edit::beatAt (definition, songStart) - 1.0e-6); b <= daw::Edit::beatAt (definition, to) + 1.0e-6; b += 1.0)
+        {
+            if (firstDownbeat < 0 && std::fmod (std::fmod (b, (double) bar) + bar, (double) bar) < 1.0e-6)
+                firstDownbeat = (int) times.size();
+            times.push_back (anchor + daw::Edit::secondsAt (definition, b));
+        }
+        if (firstDownbeat < 0 || edit.setTempoMapFromBeats (times, firstDownbeat) < 0)
+        {
+            complete (error ("The clip needs at least two bars to set the project's tempo from."));
+            return;
+        }
+        complete (object ({ { "ok", true }, { "tempo", edit.getTempo() } }));
+        return;
+    }
+
+    if (command == "stretchClip")
+    {
+        edit.stretchClip (id, arg (args, "start", 0.0), arg (args, "length", 0.0));
+        ok();
+        return;
+    }
+
+    // Make warp permanent: renders what the clip plays (with its partners on linked tracks)
+    // to new files in the project's audio folder and swaps them in. Waits for the finished
+    // copy, never an interim one. One undo step; the original files stay.
+    if (command == "flattenClip")
+    {
+        const auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip))
+        {
+            complete (error ("Select an audio clip first."));
+            return;
+        }
+
+        struct Job { int clipId; juce::File file; daw::warp::Settings settings; };
+        auto jobs = std::make_shared<std::vector<Job>>();
+        auto all = daw::Edit::getLinkedClips (clip);
+        all.insert (0, clip);
+        for (const auto& c : all)
+            if (auto settings = daw::Edit::getFlattenSettings (c); ! settings.isNeutral())
+                jobs->push_back ({ (int) c[ids::id], juce::File (c[ids::file].toString()), std::move (settings) });
+        if (jobs->empty())
+        {
+            complete (error ("Nothing to make permanent: the clip plays its file as recorded."));
+            return;
+        }
+
+        auto attempt = std::make_shared<std::function<void (int)>>();
+        *attempt = [this, jobs, complete, attempt, weak = std::weak_ptr<bool> (alive)] (int tries)
+        {
+            if (auto flag = weak.lock(); flag == nullptr || ! *flag)
+                return;
+            auto& pool = engine.getAudioPool();
+            const auto finish = [&] (const juce::var& result) { complete (result); *attempt = nullptr; };
+
+            auto ready = true;
+            for (const auto& job : *jobs)
+                if (! pool.isReady (job.file, job.settings))
+                {
+                    pool.get (job.file, job.settings); // starts (or keeps) its render
+                    ready = false;
+                }
+            if (! ready)
+            {
+                if (tries > 3000) // five minutes
+                    finish (error ("The clip's copy is still rendering. Try again in a moment."));
+                else
+                    juce::Timer::callAfterDelay (100, [attempt, tries] { if (*attempt) (*attempt) (tries + 1); });
+                return;
+            }
+
+            const auto folder = getRecordingFolder();
+            folder.createDirectory();
+            std::vector<std::pair<int, juce::File>> written;
+            for (const auto& job : *jobs)
+            {
+                const auto audio = pool.get (job.file, job.settings);
+                const auto out = folder.getNonexistentChildFile (job.file.getFileNameWithoutExtension() + " flat", ".wav", false);
+                const auto problem = audio == nullptr ? juce::String ("The clip's copy went missing. Try again.") : writeFloatWav (out, *audio, pool.getSampleRate());
+                if (problem.isNotEmpty())
+                {
+                    for (const auto& [_, file] : written)
+                        file.deleteFile();
+                    finish (error (problem));
+                    return;
+                }
+                written.push_back ({ job.clipId, out });
+            }
+
+            edit.getUndoManager().beginNewTransaction ("Make warp permanent");
+            juce::Array<juce::var> files;
+            for (const auto& [clipId, file] : written)
+            {
+                edit.flattenClip (clipId, file);
+                files.add (file.getFullPathName());
+            }
+            finish (object ({ { "ok", true }, { "files", files } }));
+        };
+        (*attempt) (0);
         return;
     }
 

@@ -110,6 +110,7 @@ namespace ids
     MICFX_DAW_ID (beatsPerBar) MICFX_DAW_ID (MARKER) MICFX_DAW_ID (time)
     MICFX_DAW_ID (transpose) MICFX_DAW_ID (warp) MICFX_DAW_ID (warpBypass) MICFX_DAW_ID (timeBypass)
     MICFX_DAW_ID (hitpoints) MICFX_DAW_ID (hitFilter) MICFX_DAW_ID (grooves) // hitpoints: see Hitpoints.h
+    MICFX_DAW_ID (beatMap) // a clip's tempo definition, see Edit::BeatMap
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
@@ -398,6 +399,39 @@ public:
     // The tempo map of the project a clip belongs to.
     static TempoMap getTempoMapFor (const juce::ValueTree& clip);
 
+    // A clip's tempo definition (`beatMap`, text "seconds:beat;..."): where the audio's own
+    // beats fall, in the file's own time as the musical bend reads it (after the free warp),
+    // beat 0 being its first bar line. Two points are a steady tempo with a downbeat; more, a
+    // tempo that drifts (musical mode then straightens it onto the project's tempo map).
+    // Outside the points the first and last segments run on. Without one the clip is
+    // steady at clipTempo with beat 0 at the file's start, exactly as before beat maps.
+    struct BeatPoint { double seconds = 0.0, beat = 0.0; };
+    using BeatMap = std::vector<BeatPoint>;
+    static constexpr double minSegmentTempo = 10.0, maxSegmentTempo = 600.0; // a drifting map's segments
+    static BeatMap parseBeatMap (const juce::String&);   // drops points that don't move both ways
+    static juce::String beatMapToString (const BeatMap&);
+    static BeatMap getBeatMap (const juce::ValueTree& clip);   // the stored one (empty when none)
+    static BeatMap getDefinition (const juce::ValueTree& clip); // stored, or the steady clipTempo one
+    static BeatMap steadyBeatMap (double downbeatSeconds, double bpm);
+    static BeatMap scaleBeatMap (const BeatMap&, double factor); // beats x factor (tempo x factor)
+    static double beatAt (const BeatMap&, double seconds);
+    static double secondsAt (const BeatMap&, double beat);
+    // Stores a definition (empty removes it; clipTempo follows its first segment). Keeps the
+    // clip's start and the stretch of the file it shows, like setClipMusical. Partners too.
+    void setBeatMap (int clipId, const BeatMap&);
+
+    // Stretches a clip by an edge: the window shows the same part of the file, now `length`
+    // long from `start` (timeline seconds), within 0.25x to 4x of what it was. A musical
+    // clip's tempo definition changes instead of its warp. Partners follow.
+    static constexpr double minEdgeStretch = 0.25, maxEdgeStretch = 4.0;
+    void stretchClip (int clipId, double start, double length);
+
+    // Make warp permanent: the clip plays `file` (its rendered copy, written by the caller
+    // from getFlattenSettings) with its warp, tempo definition, musical mode, transpose and
+    // note edits cleared; window, fades and gain stay. The original file is left alone.
+    static warp::Settings getFlattenSettings (const juce::ValueTree& clip);
+    void flattenClip (int clipId, const juce::File& file);
+
     // A musical clip's bend: its file's own time (straight, at clipTempo) to its rendered
     // copy's time, through the tempo map. The identity for other clips.
     static warp::Map getMusicalMap (const juce::ValueTree& clip);
@@ -662,6 +696,9 @@ private:
     // Moves and resizes a clip so its window shows the same stretch of the file after its
     // effective map changes from `before`, keeping where the file's start sits.
     void keepWindow (juce::ValueTree& clip, const warp::Map& before);
+    // Puts a clip's window over file seconds [from, to] of its effective map, starting at `start`.
+    void placeWindow (juce::ValueTree& clip, double from, double to, double start);
+    static bool sameBend (const juce::ValueTree& a, const juce::ValueTree& b);
 
     // A musical clip placed by beats: its file's start at anchorBeat, its window from
     // startBeat to endBeat.
