@@ -492,6 +492,73 @@ void PluginProcessor::setChainOrder (const juce::StringArray& keys)
     chain.setOrder (order);
 }
 
+juce::ValueTree PluginProcessor::captureLiveChain() const
+{
+    juce::ValueTree inserts ("INSERTS");
+    auto& live = const_cast<fx::FxChain&> (chain);
+
+    for (const auto index : live.getOrder())
+    {
+        auto& module = live[index];
+        // On: any of its switches, read from the parameters (the module's own values
+        // only catch up in the next block).
+        bool on = false;
+        for (int v = 0; v < module.getNumValues() && ! on; ++v)
+            if (auto* parameter = state.getParameter (module.getValueId (v)); parameter != nullptr && module.isSwitch (v))
+                on = parameter->getValue() >= 0.5f;
+        if (! on)
+            continue;
+
+        juce::ValueTree insert ("INSERT");
+        insert.setProperty ("type", juce::String (fx::getModuleKey (module.getType())), nullptr);
+        for (int v = 0; v < module.getNumValues(); ++v)
+        {
+            const auto& id = module.getValueId (v);
+            if (auto* parameter = state.getParameter (id))
+                insert.setProperty (juce::Identifier (id), parameter->convertFrom0to1 (parameter->getValue()), nullptr);
+        }
+        inserts.appendChild (insert, nullptr);
+    }
+
+    return inserts;
+}
+
+void PluginProcessor::applyLiveChain (const juce::ValueTree& inserts)
+{
+    const auto set = [this] (const juce::String& id, float value)
+    {
+        if (auto* parameter = state.getParameter (id))
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+    };
+
+    for (int m = 0; m < chain.size(); ++m)
+        for (int v = 0; v < chain[m].getNumValues(); ++v)
+            if (chain[m].isSwitch (v))
+                set (chain[m].getValueId (v), 0.0f);
+
+    juce::StringArray order;
+    for (const auto& insert : inserts)
+    {
+        const auto key = insert["type"].toString();
+        auto* module = [&]() -> fx::Module*
+        {
+            for (int m = 0; m < chain.size(); ++m)
+                if (key == fx::getModuleKey (chain[m].getType()))
+                    return &chain[m];
+            return nullptr;
+        }();
+        if (module == nullptr || order.contains (key))
+            continue; // a plug-in, or a second one of an effect: Live has one of each
+
+        for (int v = 0; v < module->getNumValues(); ++v)
+            if (const juce::Identifier id (module->getValueId (v)); insert.hasProperty (id))
+                set (id.toString(), (float) insert[id]);
+        order.add (key);
+    }
+
+    setChainOrder (order);
+}
+
 const juce::String PluginProcessor::getProgramName (int index)
 {
     const auto& presets = getPresets();

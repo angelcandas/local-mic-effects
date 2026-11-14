@@ -4517,6 +4517,85 @@ namespace
         }
     }
 
+    void testPresetLibrary()
+    {
+        std::cout << "\nPreset library (effects, chains, defaults, Live sounds)\n";
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-library", {});
+        PresetLibrary library (folder);
+
+        const auto values = [] (std::initializer_list<std::pair<const char*, double>> pairs)
+        {
+            auto* object = new juce::DynamicObject();
+            for (const auto& [id, value] : pairs)
+                object->setProperty (id, value);
+            return juce::var (object);
+        };
+
+        check (library.saveEffect ("comp", "  Gentle  ", values ({ { "compThreshold", -12.0 }, { "compRatio", 2.0 } })).isEmpty(), "save an effect preset");
+        check (library.saveEffect ("comp", "", values ({ { "compRatio", 2.0 } })).isNotEmpty(), "a preset needs a name");
+        check (library.saveEffect ("comp", "a/b:c", values ({ { "compRatio", 4.0 } })).isEmpty(), "a name with slashes still saves");
+        {
+            const auto list = library.listEffects();
+            const auto* comp = list["comp"].getArray();
+            check (comp != nullptr && comp->size() == 2, "both are listed under their effect");
+            check (comp != nullptr && (*comp)[1]["name"].toString() == "Gentle" && std::abs ((double) (*comp)[1]["values"]["compThreshold"] + 12.0) < 1.0e-6,
+                   "a preset keeps its name and values");
+        }
+        check (library.renameEffect ("comp", "Gentle", "Soft").isEmpty() && library.listEffects()["comp"].getArray()->size() == 2
+               && library.listEffects()["comp"][1]["name"].toString() == "Soft", "rename");
+        check (library.deleteEffect ("comp", "Soft") && library.listEffects()["comp"].getArray()->size() == 1, "delete");
+
+        check (library.getDefault ("eq").isVoid(), "no default until one is set");
+        library.setDefault ("eq", values ({ { "eqLow", 3.0 } }));
+        check (std::abs ((double) library.getDefault ("eq")["eqLow"] - 3.0) < 1.0e-6, "a default is kept");
+        check (library.clearDefault ("eq") && library.getDefault ("eq").isVoid(), "and can be cleared");
+
+        // The old presets from the app's settings come over once.
+        const juce::String old = R"({"echo":[{"name":"Slap","values":{"delayTime":90}}],"comp":[{"name":"a-b-c","values":{"compRatio":9}}]})";
+        check (library.importOnce (old) == 1, "old presets are imported (one already there is kept)");
+        check (library.listEffects()["echo"][0]["name"].toString() == "Slap", "the imported preset is listed");
+        check (library.importOnce (old) == 0, "and only once");
+
+        // Chains: a Live sound saved and played back.
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& state = processor.getState();
+        const auto get = [&] (const char* id) { auto* p = state.getParameter (id); return p->convertFrom0to1 (p->getValue()); };
+        const auto set = [&] (const char* id, float v) { auto* p = state.getParameter (id); p->setValueNotifyingHost (p->convertTo0to1 (v)); };
+
+        processor.applyLiveChain (juce::ValueTree ("INSERTS")); // everything off
+        set ("satOn", 1.0f); set ("satDrive", 7.0f);
+        set ("delayOn", 1.0f);
+        processor.setChainOrder ({ "echo", "saturation" });
+        const auto captured = processor.captureLiveChain();
+        check (captured.getNumChildren() == 2 && captured.getChild (0)["type"].toString() == "echo"
+               && std::abs ((float) captured.getChild (1)["satDrive"] - 7.0f) < 1.0e-4f, "the Live chain is captured: effects that are on, in order");
+        check (PresetLibrary::isLiveChain (captured), "and Live can play it");
+
+        check (library.saveChain ("Grit", captured).isEmpty(), "save it as a sound");
+        check (library.listChains().size() == 1 && (bool) library.listChains()[0]["live"], "it's listed as playable in Live");
+
+        set ("satOn", 0.0f); set ("delayOn", 0.0f); set ("reverbOn", 1.0f);
+        processor.setChainOrder ({});
+        processor.applyLiveChain (library.loadChain ("Grit"));
+        check (get ("satOn") > 0.5f && get ("delayOn") > 0.5f && get ("reverbOn") < 0.5f && std::abs (get ("satDrive") - 7.0f) < 1.0e-3f,
+               "loading it switches on just its effects with their settings");
+        check (processor.getChainOrder()[0] == "echo" && processor.getChainOrder()[1] == "saturation", "and plays them in its order");
+
+        juce::ValueTree twice ("INSERTS");
+        twice.appendChild (juce::ValueTree ("INSERT").setProperty ("type", "echo", nullptr), nullptr);
+        twice.appendChild (juce::ValueTree ("INSERT").setProperty ("type", "echo", nullptr), nullptr);
+        juce::ValueTree plugin ("INSERTS");
+        plugin.appendChild (juce::ValueTree ("INSERT").setProperty ("type", "plugin", nullptr), nullptr);
+        check (! PresetLibrary::isLiveChain (twice) && ! PresetLibrary::isLiveChain (plugin), "two of one effect, or a plug-in, is DAW-only");
+
+        check (library.renameChain ("Grit", "Grit 2").isEmpty() && library.loadChain ("Grit 2").isValid() && ! library.loadChain ("Grit").isValid(), "rename a chain");
+        check (library.deleteChain ("Grit 2") && library.listChains().size() == 0, "delete a chain");
+
+        folder.deleteRecursively();
+    }
+
     void testDeviceEdits()
     {
         std::cout << "\nEffect chain edits (seamless, duplicate, move, replace, rename, A/B)\n";
@@ -16746,6 +16825,7 @@ int main()
     {
         testDeviceEdits();
         testChainOrder();
+        testPresetLibrary();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -16788,6 +16868,7 @@ int main()
     testDawEngine();
     testDeviceEdits();
     testChainOrder();
+    testPresetLibrary();
     testReturns();
     testPreview();
     testGroups();

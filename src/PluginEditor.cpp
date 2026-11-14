@@ -603,6 +603,51 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            complete (settings.getValue (key));
                        })
 
+                       // (action, ...) -> the preset library (src/PresetLibrary.h). Lists: "effects" ->
+                       // { kind: [{ name, values }] }, "chains" -> [{ name, effects, live }]. Effect presets:
+                       // "saveEffect" (kind, name, values), "deleteEffect" (kind, name), "renameEffect" (kind,
+                       // name, newName), "getDefault" (kind) -> values, "setDefault" (kind, values), "clearDefault"
+                       // (kind). Live sounds (chains): "saveSound" (name) saves the Live chain, "loadSound" (name)
+                       // plays one, "deleteChain" (name), "renameChain" (name, newName). "import" (json): the old
+                       // presets from the app's settings, once. Changes answer { ok, error? }.
+                       .withNativeFunction ("library", [this] (const auto& args, auto complete)
+                       {
+                           auto& library = processorRef.getLibrary();
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           const auto text = [&args] (int i) { return args.size() > i ? args[i].toString() : juce::String(); };
+                           const auto answer = [&complete] (const juce::String& error)
+                           {
+                               auto* result = new juce::DynamicObject();
+                               result->setProperty ("ok", error.isEmpty());
+                               if (error.isNotEmpty())
+                                   result->setProperty ("error", error);
+                               complete (juce::var (result));
+                           };
+
+                           if (action == "effects")           complete (library.listEffects());
+                           else if (action == "chains")       complete (library.listChains());
+                           else if (action == "saveEffect")   answer (library.saveEffect (text (1), text (2), args.size() > 3 ? args[3] : juce::var()));
+                           else if (action == "deleteEffect") answer (library.deleteEffect (text (1), text (2)) ? juce::String() : "It's already gone.");
+                           else if (action == "renameEffect") answer (library.renameEffect (text (1), text (2), text (3)));
+                           else if (action == "getDefault")   complete (library.getDefault (text (1)));
+                           else if (action == "setDefault")   answer (library.setDefault (text (1), args.size() > 2 ? args[2] : juce::var()));
+                           else if (action == "clearDefault") answer (library.clearDefault (text (1)) ? juce::String() : "There was no default.");
+                           else if (action == "saveSound")    answer (library.saveChain (text (1), processorRef.captureLiveChain()));
+                           else if (action == "loadSound")
+                           {
+                               const auto chain = library.loadChain (text (1));
+                               if (chain.isValid())
+                                   processorRef.applyLiveChain (chain);
+                               answer (! chain.isValid() ? "There's no sound called " + text (1) + "."
+                                       : PresetLibrary::isLiveChain (chain) ? juce::String()
+                                       : "Live plays one of each built-in effect: the rest of this chain was left out.");
+                           }
+                           else if (action == "deleteChain")  answer (library.deleteChain (text (1)) ? juce::String() : "It's already gone.");
+                           else if (action == "renameChain")  answer (library.renameChain (text (1), text (2)));
+                           else if (action == "import")       complete (library.importOnce (text (1)));
+                           else                               answer ("Unknown library action " + action);
+                       })
+
                        // (index) -> index
                        .withNativeFunction ("loadPreset", [this] (const auto& args, auto complete)
                        {

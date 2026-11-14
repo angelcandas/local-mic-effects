@@ -141,6 +141,7 @@ set(MICFX_DSP_SOURCES
     src/Scenes.cpp
     src/Scenes.h
     src/Setlist.cpp
+    src/PresetLibrary.cpp
     src/Setlist.h
     src/SoundCheck.cpp
     src/SoundCheck.h
