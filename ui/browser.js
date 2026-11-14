@@ -358,7 +358,7 @@ export class LibraryBrowser {
   keyOf(payload) {
     switch (payload.kind) {
       case "effect": return payload.preset ? `fxp:${payload.id}:${payload.preset}` : `fx:${payload.id}`;
-      case "preset": return `preset:${payload.name}`;
+      case "preset": return payload.chain ? `chain:${payload.chain}` : `preset:${payload.name}`;
       case "instrument": return `inst:${payload.id}`;
       case "audio": return `file:${payload.file}`;
       case "pattern": return `pattern:${payload.id}`;
@@ -419,9 +419,13 @@ export class LibraryBrowser {
     out.push(...this.group("Effects", null, effects.slice(0, 60)));
     out.push(...this.group("Plug-ins", null, this.pluginItems()));
 
-    const presets = (this.screen.presets ?? []).map((preset, index) => ({ preset, index }))
-      .filter(({ preset }) => this.matches(preset.name) || this.matches(preset.category))
-      .map(({ preset, index }) => this.item({ key: `preset:${index}`, name: preset.name, detail: preset.category, payload: { kind: "preset", index, name: preset.name } }));
+    const presets = [
+      ...(this.screen.chains ?? []).filter((chain) => this.matches(chain.name))
+        .map((chain) => this.item({ key: `chain:${chain.name}`, name: chain.name, detail: "yours", payload: { kind: "preset", chain: chain.name, name: chain.name } })),
+      ...(this.screen.presets ?? []).map((preset, index) => ({ preset, index }))
+        .filter(({ preset }) => this.matches(preset.name) || this.matches(preset.category))
+        .map(({ preset, index }) => this.item({ key: `preset:${index}`, name: preset.name, detail: preset.category, payload: { kind: "preset", index, name: preset.name } })),
+    ];
     out.push(...this.group("Chain presets", null, presets));
 
     const instruments = (this.instruments || []).filter((i) => this.matches(i.name) || this.matches(i.vendor ?? ""))
@@ -617,7 +621,10 @@ export class LibraryBrowser {
 
   presetItems() {
     const presets = this.screen.presets ?? [];
-    const byCategory = new Map();
+    const yours = (this.screen.chains ?? []).filter((chain) => this.matches(chain.name))
+      .map((chain) => this.item({ key: `chain:${chain.name}`, name: chain.name, title: chain.effects.join(" → "),
+                                 payload: { kind: "preset", chain: chain.name, name: chain.name } }));
+    const byCategory = new Map([["Your chains", yours]]);
     presets.forEach((preset, index) => {
       if (!this.matches(preset.name) && !this.matches(preset.category)) return;
       if (!byCategory.has(preset.category)) byCategory.set(preset.category, []);
@@ -625,7 +632,7 @@ export class LibraryBrowser {
                                                        payload: { kind: "preset", index, name: preset.name } }));
     });
     const list = [];
-    for (const [category, children] of byCategory) list.push(...this.group(category, null, children));
+    for (const [category, children] of byCategory) if (children.length) list.push(...this.group(category, null, children));
     if (presets.length === 0) list.push(html("div", "library-empty", "Loading presets…"));
     return list;
   }
@@ -762,7 +769,7 @@ export class LibraryBrowser {
       return;
     }
     // A chain preset saved in Favourites or Recent is found again by its name.
-    if (payload.kind === "preset") {
+    if (payload.kind === "preset" && !payload.chain) {
       const index = (screen.presets ?? []).findIndex((p) => p.name === payload.name);
       if (index < 0) return this.toast(`The "${payload.name}" preset isn't there any more.`, "is-error");
       payload = { ...payload, index };
@@ -780,7 +787,9 @@ export class LibraryBrowser {
       const id = await screen.addEffect(track, payload.id);
       if (id >= 0 && payload.preset) await screen.applyEffectPreset(id, payload.id, payload.preset);
     }
-    if (payload.kind === "preset") await this.run("loadPreset", { track, preset: payload.index });
+    if (payload.kind === "preset" && payload.chain) {
+      if ((await screen.loadChain(track, payload.chain))?.ok === false) return;
+    } else if (payload.kind === "preset") await this.run("loadPreset", { track, preset: payload.index });
     this.addRecent(payload);
     screen.select(track, null);
     screen.setDockTab("effects"); // where the new effect shows

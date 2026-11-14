@@ -315,7 +315,7 @@ namespace
             { "editNotes", "Edit notes" }, { "addInsert", "Add effect" }, { "addPluginInsert", "Add plug-in" }, { "removeInsert", "Remove effect" },
             { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "insertFile", "Load effect file" }, { "pasteInserts", "Paste effects" },
             { "duplicateInsert", "Duplicate effect" }, { "copyInsert", "Copy effect" }, { "replaceInsert", "Replace effect" },
-            { "renameInsert", "Rename effect" }, { "insertAB", "Effect A/B" },
+            { "renameInsert", "Rename effect" }, { "insertAB", "Effect A/B" }, { "loadChain", "Load chain" },
             { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
             { "groupTracks", "Group tracks" }, { "ungroup", "Ungroup tracks" }, { "setGroup", "Move to group" },
             { "addReturn", "Add return" }, { "removeReturn", "Delete return" }, { "moveReturn", "Move return" },
@@ -4098,6 +4098,14 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "addTrack")
     {
         const auto track = edit.addTrack (arg (args, "name", juce::String ("Track ") + juce::String (edit.getTracks().size() + 1)));
+        // It starts with your default chain for audio tracks, if you saved one.
+        if (const auto chain = processor.getLibrary().getDefaultChain(); chain.isValid() && track.isValid())
+        {
+            juce::Array<juce::ValueTree> trees;
+            for (const auto& insert : chain)
+                trees.add (insert);
+            edit.pasteInsertTrees (trees, track[ids::id], -1);
+        }
         complete (track[ids::id]);
         return;
     }
@@ -4254,8 +4262,10 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         }
 
         // `values` (optional, { valueId: number }): the settings it starts from, e.g. a preset.
+        // Without them, a new effect starts from your default for that effect, if you saved one.
         std::map<juce::String, float> values;
-        if (const auto* given = args["values"].getDynamicObject())
+        const auto defaults = args.hasProperty ("values") ? juce::var() : processor.getLibrary().getDefault (args["type"].toString());
+        if (const auto* given = (args.hasProperty ("values") ? args["values"] : defaults).getDynamicObject())
             for (const auto& [name, value] : given->getProperties())
                 if (value.isDouble() || value.isInt() || value.isInt64() || value.isBool())
                     values[name.toString()] = (float) value;
@@ -4274,6 +4284,48 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     }
 
     if (command == "removeInsert") { edit.removeInsert (id); ok(); return; }
+
+    // Chains in the preset library. { track, name }: this chain saved under a name;
+    // { track, default: true }: as the chain new audio tracks start with ({ track: -1,
+    // default: true } clears that).
+    if (command == "saveChain")
+    {
+        engine.captureInstrumentStates(); // plug-ins' current settings go with them
+        auto& library = processor.getLibrary();
+        const auto inserts = daw::Edit::getInserts (edit.getChannel (arg (args, "track", -1)));
+        juce::String problem;
+        if ((bool) args["default"])
+            problem = inserts.isValid() ? library.setDefaultChain (inserts) : (library.clearDefaultChain(), juce::String());
+        else
+            problem = inserts.isValid() ? library.saveChain (args["name"].toString(), inserts) : juce::String ("There's no such track.");
+        complete (problem.isEmpty() ? object ({ { "ok", true } }) : error (problem));
+        return;
+    }
+    // { track, name, index? }: a saved chain onto a track: in place of its chain, or with
+    // `index` (-1: the end) in among what's there. -> the new inserts' ids.
+    if (command == "loadChain")
+    {
+        const auto chain = processor.getLibrary().loadChain (args["name"].toString());
+        const auto track = arg (args, "track", -1);
+        if (! chain.isValid() || ! daw::Edit::getInserts (edit.getChannel (track)).isValid())
+        {
+            complete (error (! chain.isValid() ? "There's no chain called " + args["name"].toString() : juce::String ("There's no such track.")));
+            return;
+        }
+
+        if (! args.hasProperty ("index"))
+            for (const auto& insert : daw::Edit::getInserts (edit.getChannel (track)).createCopy())
+                edit.removeInsert (insert[ids::id]);
+
+        juce::Array<juce::ValueTree> trees;
+        for (const auto& insert : chain)
+            trees.add (insert);
+        juce::Array<juce::var> newIds;
+        for (const auto& copy : edit.pasteInsertTrees (trees, track, args.hasProperty ("index") ? arg (args, "index", -1) : -1))
+            newIds.add (copy[ids::id]);
+        complete (object ({ { "ok", true }, { "ids", newIds } }));
+        return;
+    }
 
     // { id, index, track? }: within its chain, or (track: a track, return, group or the
     // master, 0) into another one at that index (-1: the end). It keeps running.

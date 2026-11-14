@@ -586,6 +586,7 @@ export class DeviceCard {
         this.update(this.insert);
       },
       defaultOf: (param) => this.access.info(param)?.default,
+      defaultKey: this.kit.live ? undefined : this.insert.type,
     });
 
     this.gains = this.createGains(this.insert.type);

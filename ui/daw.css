@@ -2586,6 +2586,7 @@ body.is-daw .library-hint { display: none; }
 .rhythm-grid-row .rhythm-groove { flex: 1 1 100%; min-width: 0; }
 .rhythm-grid-row select { min-width: 0; }
 
+.name-entry { text-align: left; padding: 0 8px; }
 /* The clip editor's Tempo tool: the clip's own beats, in their own colour. */
 .own-beat { position: absolute; z-index: 2; width: 0; border-left: 1px solid rgba(255, 196, 92, 0.35); pointer-events: none; }
 .own-beat.is-bar { border-left: 1px solid rgba(255, 196, 92, 0.8); }

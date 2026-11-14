@@ -366,6 +366,35 @@ function typeValue(anchor, text, onCommit) {
   input.select();
 }
 
+// Ask for a name in a small box over `anchor`, kept on the page's body so a re-render of the
+// anchor doesn't take it away. Enter commits, Escape or clicking elsewhere cancels.
+function askName(anchor, { value = "", placeholder = "Name" }, onCommit) {
+  document.querySelector(".name-entry")?.remove();
+  const box = anchor.getBoundingClientRect();
+  const input = html("input", "value-entry name-entry");
+  Object.assign(input, { value, placeholder, spellcheck: false, maxLength: 60 });
+  input.setAttribute("aria-label", placeholder);
+  Object.assign(input.style, { position: "fixed", left: `${Math.max(4, Math.min(box.left, innerWidth - 244))}px`, top: `${box.top}px`,
+                               width: "240px", height: `${Math.max(26, box.height)}px`, zIndex: 1000 });
+  let done = false;
+  const finish = (commit) => {
+    if (done) return;
+    done = true;
+    const text = input.value.trim();
+    input.remove();
+    if (commit && text) onCommit(text);
+  };
+  input.addEventListener("keydown", (event) => {
+    event.stopPropagation();
+    if (event.key === "Enter") finish(true);
+    else if (event.key === "Escape") finish(false);
+  });
+  input.addEventListener("blur", () => finish(false));
+  document.body.append(input);
+  input.focus();
+  input.select();
+}
+
 class ValueKnob {
   constructor({ label, min, max, skew = 1, step = 0, unit = "", value, defaultValue, bipolar = false, format, parse = parseNumber, onChange }) {
     Object.assign(this, { min, max, skew, step, unit, bipolar, onChange, format, parse });
@@ -4125,11 +4154,24 @@ class DawScreen {
     return element;
   }
 
-  // The chain's menu: load a preset in place of the chain, copy it, paste another's.
-  openChainMenu(owner, anchor) {
+  // The chain's menu: save it to your library or load one of yours, load a factory preset
+  // in place of the chain, copy it, paste another's.
+  async openChainMenu(owner, anchor) {
+    // The session is newer than the header's, after the chain changed without a rebuild.
+    owner = owner.id === 0 ? this.session.master
+      : [...this.session.tracks, ...(this.session.returns ?? []), ...(this.session.groups ?? [])].find((t) => t.id === owner.id) ?? owner;
     const box = anchor.getBoundingClientRect();
     const clipboard = this.effectsClipboard;
+    const chains = await this.refreshChains();
     popMenu(box.left, box.bottom + 4, ({ item, rule, heading }) => {
+      item("Save this chain as…", () => this.saveChainAs(owner, anchor), { disabled: !owner.inserts.length, hint: "Keep these effects in your library, to load on any track" });
+      item("Use as the start for new audio tracks", () => this.saveDefaultChain(owner), { hint: "New audio tracks start with these effects (an empty chain clears it)" });
+      if (chains.length) {
+        heading("Your chains");
+        for (const chain of chains)
+          item(chain.name, () => this.loadChain(owner.id, chain.name), { indent: true, hint: `Replace this chain with ${chain.effects.length} effects: ${chain.effects.join(", ")}` });
+      }
+      rule();
       item("Copy the chain", () => this.copyEffects(owner.id), { disabled: !owner.inserts.length });
       item(clipboard ? `Paste from ${clipboard.name}` : "Paste a chain", () => this.pasteEffects(owner.id),
            { disabled: !clipboard || clipboard.id === owner.id, hint: clipboard ? `Replace this chain with the ${clipboard.count} effects copied from ${clipboard.name}` : "Copy a track's effects first" });
@@ -4141,6 +4183,34 @@ class DawScreen {
         for (const [p, i] of presets) item(p.name, () => daw("loadPreset", { track: owner.id, preset: i }), { indent: true, hint: "Replace this chain with the preset's effects" });
       }
     }, anchor);
+  }
+
+  // Your chains in the preset library ([{ name, effects, live }]), kept for the library sidebar.
+  async refreshChains() {
+    try { this.chains = (await Juce.getNativeFunction("library")("chains")) ?? []; } catch { this.chains ??= []; }
+    this.library?.renderItems?.();
+    return this.chains;
+  }
+
+  saveChainAs(owner, anchor) {
+    askName(anchor, { value: owner.id === 0 ? "Master" : owner.name ?? "", placeholder: "Chain name" }, async (name) => {
+      const result = await daw("saveChain", { track: owner.id, name });
+      if (result?.ok === false) return toast(result.error ?? "Couldn't save the chain.", "is-error");
+      toast(`Saved the chain "${name}" in your library.`);
+      this.refreshChains();
+    });
+  }
+
+  async saveDefaultChain(owner) {
+    const result = await daw("saveChain", { track: owner.id, default: true });
+    if (result?.ok === false) return toast(result.error ?? "Couldn't save the chain.", "is-error");
+    toast(owner.inserts.length ? "New audio tracks will start with this chain." : "New audio tracks start empty again.");
+  }
+
+  async loadChain(track, name, index) {
+    const result = await daw("loadChain", { track, name, ...(index === undefined ? {} : { index }) });
+    if (result?.ok === false) toast(result.error ?? "Couldn't load the chain.", "is-error");
+    return result;
   }
 
   //============================================================================ clip commands
@@ -6472,8 +6542,10 @@ export function initDaw() {
     screen.inspectorKey = ""; // rebuild the inserts with real ranges
     if (screen.active) screen.render();
   });
+  screen.refreshChains();
   Juce.getNativeFunction("getPresets")().then((presets) => {
     screen.presets = presets ?? [];
+    screen.library?.renderItems?.();
     screen.inspectorKey = "";
     if (screen.active) screen.render();
   });
