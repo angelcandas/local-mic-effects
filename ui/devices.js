@@ -203,10 +203,19 @@ export class DeviceChain {
     if (mod && key === "x") { done(); return this.cut(ids); }
     if (!mod && !event.altKey && event.key === "0") { done(); return this.toggleOn(ids); }
     if (event.key === "F2" && ids.length === 1) { done(); return this.rename(ids[0]); }
+    if (!mod && !event.altKey && key === "q" && ids.length === 1 && this.canSwap) { done(); return this.swap(ids[0]); }
     if (event.key === "Escape" && this.selected.size) { done(); return this.select(null); }
   }
 
   //============================================================================ verbs
+  // Hot-swap (DAW): the library browses effects to put in this one's place.
+  get canSwap() { return typeof this.screen.library?.startSwap === "function"; }
+  swap(id) {
+    const card = this.cards.get(id);
+    if (card) this.screen.library.startSwap({ insert: card.insert, track: this.owner.id, name: card.effectName,
+                                              trackName: this.owner.id === 0 ? "Master" : this.owner.name ?? "" });
+  }
+
   indexAfter(ids) {
     return Math.max(...ids.map((id) => this.owner.inserts.findIndex((insert) => insert.id === id))) + 1;
   }
@@ -309,6 +318,7 @@ export class DeviceChain {
       item(clipboard ? `Paste ${clipboard.name} after` : "Paste after", () => this.paste(this.indexAfter(ids)), { disabled: !clipboard, shortcut: `${MOD}+V` });
       item(clipboard ? `Paste ${clipboard.name} before` : "Paste before", () => this.paste(index), { disabled: !clipboard });
       if (!several) item("Rename", () => this.rename(id), { shortcut: "F2", hint: card.insert.name ? `Back to "${card.effectName}" by leaving it empty` : "" });
+      if (!several && this.canSwap) item("Swap from the library…", () => this.swap(id), { shortcut: "Q", hint: "Try other effects and presets in its place: ↑ ↓ to hear each, Enter to keep, Esc to put it back" });
       rule();
       if (!several) {
         item("Move earlier", () => daw("moveInsert", { id, index: index - 1 }), { disabled: index === 0 });

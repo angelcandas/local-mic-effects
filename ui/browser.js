@@ -322,6 +322,7 @@ export class LibraryBrowser {
       element.payload = payload;
       element.addEventListener("pointerdown", (event) => this.pressItem(event, element, payload));
       element.addEventListener("dblclick", () => this.activate(payload));
+      if (payload.kind === "effect") element.addEventListener("focus", () => { if (this.swap && !this.swapFocusing) this.swapTo(payload); });
       if (payload.kind === "audio") element.addEventListener("focus", () => this.pickPreview(payload));
       // What the Draw tool places (FL's picked clip).
       if (payload.kind === "audio" || payload.kind === "pattern") element.addEventListener("focus", () => this.screen.drawTool?.pick(payload));
@@ -715,6 +716,11 @@ export class LibraryBrowser {
   onItemsKey(event) {
     const item = event.target.closest(".library-item");
     if (!item) return;
+    if (this.swap && (event.key === "Enter" || event.key === "Escape")) {
+      event.preventDefault();
+      event.stopPropagation();
+      return this.endSwap(event.key === "Enter");
+    }
     const all = [...this.items.querySelectorAll(".library-item")];
     const index = all.indexOf(item);
     const go = (i) => { event.preventDefault(); all[Math.max(0, Math.min(all.length - 1, i))]?.focus(); };
@@ -817,24 +823,88 @@ export class LibraryBrowser {
 
   // An effect dropped on the middle of a card: the same effect takes the preset; another
   // effect (or a plug-in) takes the card's place.
-  async dropInPlace(payload, insert) {
+  // -> the effect's id afterwards (a swap makes a new one), or null when nothing changed.
+  async dropInPlace(payload, insert, quiet = false) {
     const screen = this.screen;
     const key = payload.plugin ? null : MODULE_KEYS[payload.id];
     let id = insert.id;
     if (key && key === insert.type && !insert.module) {
-      if (!payload.preset) return this.toast("That effect is already there. Drop one of its presets to load it.");
+      if (!payload.preset) return quiet ? null : this.toast("That effect is already there. Drop one of its presets to load it.");
       // The pitch insert: the preset's part is switched on, in the same undo step.
       const power = key === "pitch" ? MODULES.find((x) => x.id === payload.id)?.power : null;
       if (power) await this.run("setInsert", { id, param: power, value: 1 });
       await screen.applyEffectPreset(id, payload.id, payload.preset, !power);
     } else {
       const result = await this.run("replaceInsert", payload.plugin ? { id, plugin: payload.plugin } : { id, type: key });
-      if (!result?.ok) return this.toast(result?.error ?? "Couldn't swap the effect.", "is-error");
+      if (!result?.ok) { this.toast(result?.error ?? "Couldn't swap the effect.", "is-error"); return null; }
       id = result.insert;
       if (payload.preset) await screen.applyEffectPreset(id, payload.id, payload.preset);
     }
     this.addRecent(payload);
+    return id;
   }
+
+  //============================================================================ hot-swap
+  // The library linked to one effect: picking an effect or a preset (↑ ↓, a click) puts it
+  // in that effect's place at once, so you hear it. Enter keeps it, Esc puts back what was
+  // there (by undoing the swaps), ✕ stops and keeps what's there now.
+  startSwap({ insert, track, name, trackName }) {
+    if (this.swap) this.endSwap(true);
+    const module = MODULES.find((m) => MODULE_KEYS[m.id] === insert.type && (!m.power || insert.values?.[m.power] >= 0.5))
+                ?? MODULES.find((m) => MODULE_KEYS[m.id] === insert.type);
+    this.swap = { insertId: insert.id, track, steps: 0, busy: Promise.resolve() };
+    const bar = (this.swapBar = html("div", "library-swap"));
+    const keep = html("button", "mini", "✕");
+    Object.assign(keep, { type: "button", title: "Stop swapping and keep it (Enter)" });
+    keep.addEventListener("click", () => this.endSwap(true));
+    const back = html("button", "text-button", "Put back");
+    Object.assign(back, { type: "button", title: `Back to ${name} as it was (Esc)` });
+    back.addEventListener("click", () => this.endSwap(false));
+    bar.append(html("span", "library-swap-text", `Swapping ${name}${trackName ? ` on ${trackName}` : ""}`), back, keep);
+    this.panel.querySelector(".library-head").after(bar);
+    this.element.classList.add("is-swapping");
+    this.setCollapsed(false);
+    this.search.value = ""; this.query = "";
+    if (module) this.openFx.add(module.id);
+    this.setSection("effects");
+    const item = this.items.querySelector(`.library-item[data-key="${module ? `fx:${module.id}` : ""}"]`) ?? this.items.querySelector(".library-item");
+    item?.scrollIntoView({ block: "center" });
+    this.swapFocusing = true;
+    item?.focus();
+    this.swapFocusing = false;
+  }
+
+  // An item picked while swapping: in the effect's place now (one after another).
+  swapTo(payload) {
+    const swap = this.swap;
+    if (!swap || payload.kind !== "effect") return;
+    swap.busy = swap.busy.then(async () => {
+      if (this.swap !== swap) return;
+      const owner = swap.track === 0 ? this.screen.session?.master
+        : [...(this.screen.session?.tracks ?? []), ...(this.screen.session?.returns ?? []), ...(this.screen.session?.groups ?? [])].find((t) => t.id === swap.track);
+      const insert = owner?.inserts.find((x) => x.id === swap.insertId);
+      if (!insert) return this.endSwap(true);
+      const id = await this.dropInPlace(payload, insert, true);
+      if (id == null) return;
+      swap.insertId = id;
+      ++swap.steps;
+      await new Promise((resolve) => setTimeout(resolve, 60)); // the session catches up
+    });
+  }
+
+  async endSwap(keep) {
+    const swap = this.swap;
+    if (!swap) return;
+    this.swap = null;
+    this.swapBar?.remove();
+    this.swapBar = null;
+    this.element.classList.remove("is-swapping");
+    await swap.busy;
+    if (!keep) for (let i = 0; i < swap.steps; ++i) await this.run("undo");
+    this.screen.inspector?.querySelector(`.device-chain > .insert[data-insert="${keep ? swap.insertId : ""}"]`)?.focus?.({ preventScroll: true });
+  }
+
+  //============================================================================ dragging
 
   //============================================================================ dragging
   pressItem(event, element, payload) {
