@@ -17007,7 +17007,7 @@ static void testDawFit()
     check ((bool) run ("loadChain", { { "track", track }, { "name", "Podcast and spoken word" }, { "factory", true } })["ok"],
            "a factory vocal chain loads onto a DAW track");
     const auto inserts = daw::Edit::getInserts (edit.getTrack (track));
-    check (inserts.getNumChildren() == (int) factory::makeInserts ("Podcast and spoken word").getNumChildren(), "with all its effects");
+    check (inserts.getNumChildren() == (int) factory::makeInserts ("Podcast and spoken word").getNumChildren() - 1 && daw::Edit::getMacros (edit.getTrack (track)).getNumChildren() == 8, "with all its effects and its eight macros");
     juce::ValueTree gate;
     for (const auto& insert : inserts)
         if (insert[daw::ids::type].toString() == "gate")
@@ -17069,7 +17069,7 @@ static void testFactoryChains()
         for (const auto& insert : inserts)
             if (const auto type = daw::Edit::moduleTypeFromKey (insert["type"].toString()))
                 types.push_back (*type);
-        check ((int) types.size() == (int) chain.devices.size() && inserts.getNumChildren() == (int) chain.devices.size(),
+        check ((int) types.size() == (int) chain.devices.size() && inserts.getNumChildren() == (int) chain.devices.size() + 1,
                name + ": every device is a known effect");
 
         fx::FxChain fxChain (types);
@@ -17132,10 +17132,83 @@ static void testFactoryChains()
             processor.applyLiveChain (inserts);
             const auto captured = processor.captureLiveChain();
             juce::StringArray want, got;
-            for (const auto& insert : inserts) want.add (insert["type"].toString());
-            for (const auto& insert : captured) got.add (insert["type"].toString());
+            for (const auto& insert : inserts) if (insert.hasType ("INSERT")) want.add (insert["type"].toString());
+            for (const auto& insert : captured) if (insert.hasType ("INSERT")) got.add (insert["type"].toString());
             check (want == got, name + ": loads in Live as written (" + got.joinIntoString (", ") + ")");
+
+            // Its macros come too, and starting where they are leaves the sound as designed.
+            const auto macros = processor.describeLiveMacros();
+            bool named = true, unchanged = true;
+            int mapped = 0;
+            const auto expected = inserts.getChildWithName ("MACROS");
+            for (int m = 0; m < 8; ++m)
+            {
+                named = named && macros[m]["name"].toString() == expected.getChild (m)["name"].toString();
+                mapped += macros[m]["maps"].size();
+                for (const auto& map : *macros[m]["maps"].getArray())
+                {
+                    const auto id = map["param"].toString();
+                    for (const auto& insert : inserts)
+                        if (insert.hasProperty (id))
+                        {
+                            auto* parameter = processor.getState().getParameter (id);
+                            const auto now = parameter->convertFrom0to1 (parameter->getValue());
+                            unchanged = unchanged && std::abs (now - (float) insert[id]) < 0.15f;
+                        }
+                }
+            }
+            check (named && mapped > 0 && unchanged, name + ": Live gets the eight macros (" + juce::String (mapped) + " mapped), the sound unchanged");
         }
+
+        // The macros: the same eight names everywhere, each starting at the chain's own settings.
+        {
+            const auto macros = inserts.getChildWithName ("MACROS");
+            static const juce::StringArray names { "Tune", "Body", "Presence", "Squeeze", "De-ess", "Drive", "Delay", "Reverb" };
+            bool same = macros.getNumChildren() == 8, exact = true, squeeze = false;
+            int mapped = 0;
+            for (int m = 0; m < macros.getNumChildren(); ++m)
+            {
+                const auto macro = macros.getChild (m);
+                same = same && macro["name"].toString() == names[m] && (int) macro["index"] == m;
+                const auto knob = (float) macro["value"];
+                exact = exact && knob >= 0.0f && knob <= 1.0f;
+                for (const auto& map : macro)
+                {
+                    const auto insert = inserts.getChild ((int) map["slot"]);
+                    const auto at = (float) map["min"] + ((float) map["max"] - (float) map["min"]) * knob;
+                    exact = exact && std::abs (at - (float) insert[juce::Identifier (map["param"].toString())]) < 1.0e-3f;
+                    squeeze = squeeze || names[m] == "Squeeze";
+                    ++mapped;
+                }
+            }
+            check (same && exact && mapped > 0 && (isReturn || squeeze),
+                   name + ": eight macros, " + juce::String (mapped) + " values mapped, starting at the chain's settings");
+        }
+    }
+
+    {
+        // DAW: the chain's macros come onto the track, and turning one moves its values.
+        PluginProcessor processor;
+        auto& edit = processor.getDawEdit();
+        const auto track = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto inserts = factory::makeInserts ("Pop lead: modern");
+        juce::Array<juce::ValueTree> trees;
+        for (const auto& insert : inserts)
+            trees.add (insert);
+        const auto copies = edit.pasteInsertTrees (trees, track, -1);
+        edit.setChainMacros (track, inserts.getChildWithName ("MACROS"), copies);
+
+        const auto macros = daw::Edit::getMacros (edit.getTrack (track));
+        juce::ValueTree comp;
+        for (const auto& copy : copies)
+            if (copy["type"].toString() == "compressor")
+                comp = copy;
+        const auto threshold = (float) inserts.getChildWithProperty ("type", "compressor")["compThreshold"];
+        check (macros.getNumChildren() == 8 && std::abs ((float) comp["compThreshold"] - threshold) < 1.0e-3f,
+               "a DAW track gets the chain's macros, its settings as designed");
+        edit.setMacro (track, 3, 1.0f); // Squeeze all the way
+        check ((float) comp["compThreshold"] < threshold - 5.0f, "Squeeze turned up lowers the compressor's threshold ("
+                   + juce::String ((float) comp["compThreshold"], 1) + " dB)");
     }
 
     check (! factory::makeInserts ("No such chain").isValid(), "an unknown name gives no chain");
