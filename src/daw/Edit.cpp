@@ -1,5 +1,6 @@
 #include "Edit.h"
 #include "RackInsert.h"
+#include "PluginInsert.h"
 
 #include "dsp/FxModules.h"
 
@@ -2763,6 +2764,9 @@ juce::StringArray Edit::getInsertValueIds (const juce::ValueTree& insert)
         for (const auto* id : { "pluginOn", "pluginInGain", "pluginOutGain" })
             if (insert.hasProperty (id))
                 result.add (id);
+        for (const auto index : PluginInsert::getPanel (insert)) // its panel's parameters
+            if (insert.hasProperty (juce::Identifier (PluginInsert::panelValueId (index))))
+                result.add (PluginInsert::panelValueId (index));
         return result;
     }
 
@@ -3123,6 +3127,51 @@ void Edit::unmapMacro (int channelId, int index, int insertId, const juce::Strin
         for (int i = macro.getNumChildren(); --i >= 0;)
             if ((int) macro.getChild (i)[ids::insert] == insertId && macro.getChild (i)[ids::param].toString() == param)
                 macro.removeChild (i, undoTarget);
+}
+
+bool Edit::addPluginPanel (int insertId, int parameterIndex, float value)
+{
+    auto insert = getInsert (insertId);
+    if (! isPluginInsert (insert) || parameterIndex < 0)
+        return false;
+    auto panel = PluginInsert::getPanel (insert);
+    if (panel.contains (parameterIndex) || panel.size() >= maxPanelParameters)
+        return false;
+    panel.add (parameterIndex);
+
+    juce::StringArray text;
+    for (const auto index : panel)
+        text.add (juce::String (index));
+    insert.setProperty (juce::Identifier (PluginInsert::panelValueId (parameterIndex)), juce::jlimit (0.0f, 1.0f, value), undoTarget);
+    insert.setProperty ("panel", text.joinIntoString (","), undoTarget);
+    return true;
+}
+
+bool Edit::removePluginPanel (int insertId, int parameterIndex)
+{
+    auto insert = getInsert (insertId);
+    auto panel = PluginInsert::getPanel (insert);
+    if (! isPluginInsert (insert) || ! panel.contains (parameterIndex))
+        return false;
+    panel.removeFirstMatchingValue (parameterIndex);
+
+    const auto valueId = PluginInsert::panelValueId (parameterIndex);
+    if (auto macros = getMacros (getChannelOf (insert)); macros.isValid())
+        for (auto macro : macros)
+            for (int i = macro.getNumChildren(); --i >= 0;)
+                if ((int) macro.getChild (i)[ids::insert] == insertId && macro.getChild (i)[ids::param].toString() == valueId)
+                    macro.removeChild (i, undoTarget);
+    setInsertAutomation (insertId, valueId, {});
+    insert.removeProperty (juce::Identifier (valueId), undoTarget);
+
+    juce::StringArray text;
+    for (const auto index : panel)
+        text.add (juce::String (index));
+    if (text.isEmpty())
+        insert.removeProperty ("panel", undoTarget);
+    else
+        insert.setProperty ("panel", text.joinIntoString (","), undoTarget);
+    return true;
 }
 
 void Edit::nameMacro (int channelId, int index, const juce::String& name)

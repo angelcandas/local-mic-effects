@@ -132,6 +132,10 @@ private:
     void showPluginWindow (int insertId);
     std::vector<std::pair<int, juce::ValueTree>> getPluginInserts() const; // every effect plugin insert, by id
     void updateInstrumentWindows();
+    // Effect plug-ins' parameters: their panel values moved in the plug-in's own window come
+    // back into the inserts, and the parameter last moved there is noted (for "Configure").
+    void watchPluginParameters();
+    juce::var describePluginParameters (int insertId) const;
     juce::var getPeaks (const juce::File&, const daw::warp::Settings& = {});
     juce::var getDetailPeaks (const juce::File&, double start, double end, double seconds, const daw::warp::Settings& = {});
 
@@ -249,6 +253,8 @@ private:
     // were last tick (a change redraws the session and closes stale windows).
     std::map<int, std::unique_ptr<juce::Component>> instrumentWindows;
     std::map<int, std::unique_ptr<juce::Component>> pluginWindows; // effect plugin inserts', by insert id
+    struct TouchWatch;
+    std::map<int, std::unique_ptr<TouchWatch>> touchWatches;      // the same, each plug-in's last moved parameter
     juce::Array<juce::ValueTree> deviceClipboard; // effects copied with copyDevices (copies, not in the edit)
     juce::String instrumentsSeen;
     int scanTicks = 0, inputTicks = 0;

@@ -89,6 +89,47 @@ export class DeviceChain {
     }
 
     for (const insert of owner.inserts) this.cards.get(insert.id)?.update(insert);
+    this.markAutomated();
+  }
+
+  // The track's lanes for effect values ("insert:<id>:<param>"), by target.
+  get laneTargets() {
+    return new Set((this.owner.lanes ?? []).filter((lane) => lane.points?.length).map((lane) => lane.target));
+  }
+
+  // A dot on each control that has an automation lane.
+  markAutomated() {
+    const lanes = this.laneTargets;
+    for (const [id, card] of this.cards)
+      for (const control of card.element.querySelectorAll("[data-param]"))
+        if (control.closest(".insert") === card.element)
+          control.classList.toggle("is-automated", lanes.has(`insert:${id}:${control.dataset.param}`));
+  }
+
+  // Right-click on a control: its automation lane, and (on a plug-in's card) taking it off.
+  openControlMenu(card, param, x, y) {
+    const id = card.insert.id;
+    const target = `insert:${id}:${param}`;
+    const track = this.screen.session?.tracks?.find((t) => t.id === this.owner.id);
+    const automation = this.screen.automation;
+    const automated = this.laneTargets.has(target);
+    const panelEntry = card.insert.plugin?.panel?.find((entry) => entry.param === param);
+    this.kit.popMenu(x, y, ({ item, rule, heading }) => {
+      heading(panelEntry?.name ?? card.controlLabel(param) ?? "Control");
+      const noLanes = !track || !automation ? { disabled: true, hint: "Automation lanes are on tracks (not returns or the master)" } : {};
+      item("Show automation", () => automation.showLane(track, target), { hint: automated ? "Its lane under the track" : "Opens a lane under the track to draw how it moves", ...noLanes });
+      item("Delete automation", () => this.kit.daw("setLane", { track: this.owner.id, target, points: [] }),
+           { danger: true, disabled: !automated || Boolean(noLanes.disabled), hint: "It goes back to staying where the knob is" });
+      if (panelEntry) {
+        rule();
+        item("Take off the card", () => this.kit.daw("setPluginPanel", { id, remove: panelEntry.index }), { hint: "Its lane and macro mapping go too" });
+      }
+      rule();
+      item("Effect menu…", () => {
+        if (!this.selected.has(id)) this.select([id]);
+        this.openCardMenu(card, x, y);
+      });
+    });
   }
 
   // From "dawStatus": live readings by insert id ({ in, out, spectrum? }, null when off).
@@ -129,8 +170,11 @@ export class DeviceChain {
       card.element.querySelector(".insert-folded-name").addEventListener("click", () => this.toggleFold(insert.id));
       card.element.tabIndex = -1;
       card.element.addEventListener("contextmenu", (event) => {
-        if (event.target.closest("input, select")) return;
+        // (An effect in a rack opened its own menu already.)
+        if (event.defaultPrevented || event.target.closest("input, select")) return;
         event.preventDefault();
+        const control = event.target.closest("[data-param]");
+        if (control && control.closest(".insert") === card.element) return this.openControlMenu(card, control.dataset.param, event.clientX, event.clientY);
         if (!this.selected.has(insert.id)) this.select([insert.id]);
         this.openCardMenu(card, event.clientX, event.clientY);
       });
@@ -160,6 +204,7 @@ export class DeviceChain {
         clear: () => this.kit.daw("insertFile", { id: access.insert.id, path: "" }),
       },
       openPlugin: () => this.kit.daw("showPluginInsert", { id: access.insert.id }),
+      daw: (command, args) => this.kit.daw(command, args),
       rescan: () => { this.kit.daw("scanPlugins"); this.kit.toast("Looking for plug-ins…"); },
     };
     return access;
@@ -527,6 +572,12 @@ export class DeviceCard {
 
   get title() { return this.insert.name || this.effectName; }
 
+  // A control's name on this card (for menus).
+  controlLabel(param) {
+    const control = this.element.querySelector(`[data-param="${CSS.escape(param)}"]`);
+    return control?.querySelector(".name")?.textContent || control?.getAttribute("aria-label") || null;
+  }
+
   buildHead(power, withAB) {
     const { button } = this.kit;
     const head = html("header", "insert-head");
@@ -611,9 +662,18 @@ export class DeviceCard {
       if (this.insert.plugin?.error) this.access.rescan();
       else this.access.openPlugin();
     });
-    face.append(this.pluginBadge, this.pluginMaker, this.pluginStatus, this.pluginButton);
+    // Configure (as in Ableton): while it's on, each control moved in the plug-in's
+    // window comes onto the card as a knob. "Choose" picks them from a list instead.
+    const configure = html("div", "plugin-configure");
+    this.configureButton = button("text-button plugin-configure-toggle", "Configure", "Put the plug-in's controls on this card: switch on, then move them in its window", () => this.setConfiguring(!this.configuring));
+    this.chooseButton = button("text-button plugin-choose", "Choose\u2026", "Pick plug-in parameters to show as knobs on this card", (event) => this.openParameterPicker(event.currentTarget));
+    configure.append(this.configureButton, this.chooseButton);
+    face.append(this.pluginBadge, this.pluginMaker, this.pluginStatus, this.pluginButton, configure);
     face.addEventListener("dblclick", (event) => { if (!event.target.closest("button") && !this.insert.plugin?.error) this.access.openPlugin(); });
     this.body.append(face);
+    this.panelRow = html("div", "insert-controls plugin-panel");
+    this.panelKey = null;
+    this.body.append(this.panelRow);
 
     const footer = html("div", "insert-footer");
     const gainInfo = (suffix) => this.access.info(`eq${suffix}`) ?? { min: -24, max: 24, skew: 1, step: 0, label: "dB", default: 0 };
@@ -636,6 +696,111 @@ export class DeviceCard {
     this.pluginButton.textContent = missing ? "Rescan plug-ins" : plugin.windowOpen ? "Show its window" : "Open plug-in";
     this.pluginButton.disabled = !missing && !plugin.loaded;
     this.pluginButton.title = missing ? "Look for plug-ins again (after installing it)" : `Open ${plugin.name || "the plug-in"}'s own window`;
+    this.configureButton.disabled = this.chooseButton.disabled = !plugin.loaded;
+    if (!plugin.loaded && this.configuring) this.setConfiguring(false);
+    this.configureButton.setAttribute("aria-pressed", String(Boolean(this.configuring)));
+    this.element.classList.toggle("is-configuring", Boolean(this.configuring));
+    if (this.configuring) {
+      this.pluginStatus.textContent = "Move a control in the plug-in's window to put it here. Configure again when you're done.";
+      this.pluginStatus.hidden = false;
+      // A control moved since Configure was switched on: onto the card.
+      const touched = plugin.lastTouched;
+      if (touched && touched.index !== this.configureSeen) {
+        this.configureSeen = touched.index;
+        if (!(plugin.panel ?? []).some((entry) => entry.index === touched.index))
+          this.access.daw("setPluginPanel", { id: insert.id, add: touched.index }).then((r) => { if (r && r.ok === false && r.error) this.kit.toast(r.error); });
+      }
+    }
+    this.renderPanel(insert);
+  }
+
+  setConfiguring(on) {
+    this.configuring = on;
+    this.configureSeen = this.insert.plugin?.lastTouched?.index ?? -1;
+    if (on && !this.insert.plugin?.windowOpen) this.access.openPlugin();
+    this.updatePlugin(this.insert);
+  }
+
+  // The panel: the plug-in parameters chosen to show as knobs (insert values p<index>, so
+  // undo, macros and automation work on them as on any knob).
+  renderPanel(insert) {
+    const panel = insert.plugin?.panel ?? [];
+    const key = panel.map((entry) => `${entry.param}=${entry.name}`).join("|");
+    if (key !== this.panelKey) {
+      this.panelKey = key;
+      this.panelRow.replaceChildren();
+      this.controls = this.controls.filter((c) => !c.panel);
+      for (const entry of panel) {
+        const value = insert.values[entry.param] ?? 0;
+        const knob = new this.kit.ValueKnob({
+          label: entry.name.length > 12 ? `${entry.name.slice(0, 11)}\u2026` : entry.name, min: 0, max: 1, value, defaultValue: value,
+          format: (v) => this.panelText(entry.param, v),
+          parse: (text) => Number.parseFloat(text) / 100,
+          onChange: (v, first) => this.access.set(entry.param, v, first),
+        });
+        knob.element.dataset.param = entry.param;
+        knob.element.dataset.min = 0; // macros map it over this range
+        knob.element.dataset.max = 1;
+        knob.element.title = `${entry.name}. Drag or scroll \u00B7 Right-click for automation or to take it off the card`;
+        this.controls.push({ param: entry.param, widget: knob, panel: true });
+        this.panelRow.append(knob.element);
+      }
+      this.panelRow.hidden = !panel.length;
+      this.element.style.setProperty("--card", `${clamp(Math.min(panel.length, 4) * 62 + 28, 240, 290)}px`);
+    }
+    for (const control of this.controls) if (control.panel) control.widget.update(insert.values[control.param]);
+  }
+
+  // The plug-in's own text for a panel value while it's the one in the session; else a percentage.
+  panelText(param, value) {
+    const entry = this.insert.plugin?.panel?.find((e) => e.param === param);
+    const current = this.insert.values[param];
+    if (entry?.text && Math.abs((current ?? -1) - value) < 1e-4) return entry.text;
+    return `${Math.round(value * 100)}%`;
+  }
+
+  // A searchable list of the plug-in's parameters; a click puts one on the card.
+  async openParameterPicker(anchor) {
+    document.querySelector(".plugin-picker")?.remove();
+    const list = await this.access.daw("pluginParameters", { id: this.insert.id });
+    if (!Array.isArray(list) || !list.length) return this.kit.toast("This plug-in has no parameters to show.");
+    const popup = html("div", "plugin-picker");
+    const search = Object.assign(html("input", "plugin-picker-search"), { type: "search", placeholder: `Search ${list.length} parameters`, spellcheck: false });
+    const rows = html("div", "plugin-picker-list");
+    popup.append(search, rows);
+    const onPanel = () => new Set((this.insert.plugin?.panel ?? []).map((entry) => entry.index));
+    const render = () => {
+      const query = search.value.trim().toLowerCase();
+      const shown = onPanel();
+      rows.replaceChildren();
+      for (const parameter of list.filter((p) => !query || p.name.toLowerCase().includes(query)).slice(0, 300)) {
+        const row = html("button", "plugin-picker-row");
+        row.type = "button";
+        row.append(html("span", "", parameter.name), html("span", "plugin-picker-text", parameter.text));
+        row.classList.toggle("is-on", shown.has(parameter.index));
+        row.title = shown.has(parameter.index) ? "On the card: click to take it off" : "Click to put it on the card";
+        row.addEventListener("click", async () => {
+          const r = await this.access.daw("setPluginPanel", shown.has(parameter.index) ? { id: this.insert.id, remove: parameter.index } : { id: this.insert.id, add: parameter.index });
+          if (r && r.ok === false && r.error) this.kit.toast(r.error);
+          setTimeout(render, 120);
+        });
+        rows.append(row);
+      }
+    };
+    const close = () => {
+      popup.remove();
+      document.removeEventListener("pointerdown", outside, true);
+    };
+    const outside = (event) => { if (!popup.contains(event.target)) close(); };
+    search.addEventListener("input", render);
+    search.addEventListener("keydown", (event) => { event.stopPropagation(); if (event.key === "Escape") close(); });
+    document.body.append(popup);
+    const box = anchor.getBoundingClientRect();
+    popup.style.left = `${clamp(box.left, 8, window.innerWidth - 300)}px`;
+    popup.style.top = `${clamp(box.bottom + 4, 8, window.innerHeight - 340)}px`;
+    render();
+    search.focus();
+    setTimeout(() => document.addEventListener("pointerdown", outside, true));
   }
 
   createGains(prefix, infoOf = () => undefined) {
@@ -826,7 +991,7 @@ export class DeviceCard {
     this.access.insert = insert;
     for (const { param, element } of this.switches)
       element.setAttribute("aria-pressed", String((insert.values[param] ?? 0) >= 0.5));
-    for (const { param, widget } of this.controls) widget.update(insert.values[param]);
+    for (const { param, widget, panel } of this.controls) if (!panel) widget.update(insert.values[param]); // (the panel's: renderPanel)
     this.filePicker?.update(insert.file);
     this.view?.update();
     for (const { power, row } of this.parts) row.hidden = (insert.values[power] ?? 0) < 0.5;

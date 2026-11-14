@@ -7433,6 +7433,44 @@ namespace
             check (difference (trimmed, dry, added, 0.5f * juce::Decibels::decibelsToGain (-6.0f)) < 1.0e-5f, "the insert's out gain works as on any effect");
             edit.setInsertValue (insert, "pluginOutGain", 0.0f);
 
+            // Its panel: a parameter on the card is an insert value like any other.
+            {
+                check (edit.addPluginPanel (insert, 0, running->getParameters()[0]->getValue())
+                           && daw::Edit::getInsertValueIds (edit.getInsert (insert)).contains ("p0")
+                           && std::abs ((float) edit.getInsert (insert)["p0"] - 0.25f) < 1.0e-4f
+                           && ! edit.addPluginPanel (insert, 0, 0.5f),
+                       "a plug-in parameter goes on the card once, at the plug-in's own value");
+                engine.rebuildNow();
+                check (engine.getInsertPlugin (insert) == running, "the plug-in keeps running with its new panel");
+
+                edit.setInsertValue (insert, "p0", 0.5f);
+                const auto louder = play (0.9);
+                check (difference (louder, dry, added, 1.0f) < 1.0e-5f && std::abs (running->getParameters()[0]->getValue() - 0.5f) < 1.0e-4f,
+                       "turning its knob turns the plug-in's parameter");
+
+                edit.setInsertAutomation (insert, "p0", { { 0.0, 0.25f }, { 5.0, 0.25f } });
+                engine.rebuildNow();
+                const auto automated = play (0.9);
+                check (difference (automated, dry, added, 0.5f) < 1.0e-5f, "its automation lane moves the plug-in's parameter");
+
+                const auto channel = edit.getTracks()[0];
+                edit.mapMacro ((int) channel[daw::ids::id], 0, insert, "p0", 0.0f, 1.0f);
+                edit.getUndoManager().beginNewTransaction();
+                check (edit.removePluginPanel (insert, 0) && ! edit.getInsert (insert).hasProperty ("p0")
+                           && ! edit.getInsert (insert).hasProperty ("panel") && daw::Edit::getInsertAutomation (edit.getInsert (insert)).empty()
+                           && ! edit.getChainMacros ((int) channel[daw::ids::id]).isValid(),
+                       "taking it off the card takes its value, lane and macro mapping with it");
+                edit.getUndoManager().undo();
+                check (edit.getInsert (insert).hasProperty ("p0") && edit.getInsert (insert)["panel"].toString() == "0"
+                           && ! daw::Edit::getInsertAutomation (edit.getInsert (insert)).empty(),
+                       "and undo puts them back");
+
+                edit.removePluginPanel (insert, 0);
+                engine.rebuildNow();
+                running->getParameters()[0]->setValueNotifyingHost (0.25f);
+                check (engine.getInsertPlugin (insert) == running, "the plug-in keeps running without its panel");
+            }
+
             // Another insert on the track builds its chain again: the same plugin keeps running.
             const auto eq = (int) edit.addInsert (track, fx::ModuleType::eq, 0)[daw::ids::id];
             engine.rebuildNow();
@@ -17619,6 +17657,15 @@ int main()
     {
         testInstruments();
         testKit();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=plugins: hosting instrument and effect plugins.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "plugins")
+    {
+        testPluginHosting();
+        testEffectPlugins();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }

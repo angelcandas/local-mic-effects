@@ -354,7 +354,7 @@ namespace
             { "duplicateInsert", "Duplicate effect" }, { "copyInsert", "Copy effect" }, { "replaceInsert", "Replace effect" },
             { "renameInsert", "Rename effect" }, { "insertAB", "Effect A/B" }, { "loadChain", "Load chain" },
             { "groupInserts", "Group into a rack" }, { "ungroupInsert", "Ungroup rack" }, { "addRackChain", "Add chain" },
-            { "removeRackChain", "Remove chain" }, { "renameRackChain", "Rename chain" },
+            { "removeRackChain", "Remove chain" }, { "renameRackChain", "Rename chain" }, { "setPluginPanel", "Plug-in knobs" },
             { "setMacro", "Macro" }, { "mapMacro", "Map to macro" }, { "unmapMacro", "Unmap from macro" }, { "nameMacro", "Name macro" },
             { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
             { "groupTracks", "Group tracks" }, { "ungroup", "Ungroup tracks" }, { "setGroup", "Move to group" },
@@ -450,6 +450,7 @@ DawBridge::~DawBridge()
     processor.getPluginHost().onScanFinished = nullptr;
     instrumentWindows.clear();
     pluginWindows.clear();
+    touchWatches.clear();
 
     if (exportJob != nullptr)
         exportJob->cancel = true;
@@ -557,6 +558,24 @@ juce::var DawBridge::describeMacros (const juce::ValueTree& channel) const
     return list;
 }
 
+// Listens to one running plug-in: the parameter last moved in its own window (a plug-in
+// tells its host about the changes its window makes; the values the host sets aren't).
+struct DawBridge::TouchWatch final : private juce::AudioProcessorListener
+{
+    explicit TouchWatch (daw::InstrumentPtr p) : plugin (std::move (p)) { plugin->addListener (this); }
+    ~TouchWatch() override { plugin->removeListener (this); }
+
+    daw::InstrumentPtr plugin;
+    std::atomic<int> touched { -1 }; // any thread
+    int reported = -1;
+    std::map<int, float> moved;      // panel values seen away from what was handed over, once
+
+private:
+    void audioProcessorParameterChanged (juce::AudioProcessor*, int index, float) override { touched.store (index); }
+    void audioProcessorParameterChangeGestureBegin (juce::AudioProcessor*, int index) override { touched.store (index); }
+    void audioProcessorChanged (juce::AudioProcessor*, const ChangeDetails&) override {}
+};
+
 juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
 {
     juce::Array<juce::var> list;
@@ -568,7 +587,8 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
         for (int i = 0; i < insert.getNumProperties(); ++i)
             if (const auto name = insert.getPropertyName (i); name != ids::id && name != ids::type && name != ids::file
                 && name != ids::label && name != ids::ab && name != ids::abOther
-                && (! isPlugin || name.toString().startsWith ("plugin") && name != ids::plugin))
+                && (! isPlugin || (name.toString().startsWith ("plugin") && name != ids::plugin)
+                    || (name.toString().startsWith ("p") && name.toString().substring (1).containsOnly ("0123456789"))))
                 values->setProperty (name, number (insert, name));
 
         // Its own name ("" for the effect's), which value set plays ("a"/"b"; "" while it
@@ -590,6 +610,32 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
                 { "vendor", insert[ids::vendor].toString() }, { "format", insert[ids::format].toString() },
                 { "loaded", running }, { "error", error },
                 { "windowOpen", pluginWindows.count (insertId) > 0 } }));
+
+            // Its panel (the parameters shown as knobs on its card) and the parameter last
+            // moved in its window.
+            const auto plugin = engine.getInsertPlugin (insertId);
+            const auto parameterOf = [&] (int index) -> juce::AudioProcessorParameter*
+            {
+                if (plugin == nullptr || ! juce::isPositiveAndBelow (index, plugin->getParameters().size()))
+                    return nullptr;
+                return plugin->getParameters()[index];
+            };
+            juce::Array<juce::var> panel;
+            for (const auto index : daw::PluginInsert::getPanel (insert))
+            {
+                const auto valueId = daw::PluginInsert::panelValueId (index);
+                if (! insert.hasProperty (juce::Identifier (valueId)))
+                    continue;
+                auto* parameter = parameterOf (index);
+                panel.add (object ({ { "index", index }, { "param", valueId },
+                                     { "name", parameter != nullptr ? parameter->getName (40) : "Parameter " + juce::String (index + 1) },
+                                     { "text", parameter != nullptr ? parameter->getText ((float) insert[juce::Identifier (valueId)], 24) : juce::String() } }));
+            }
+            auto* plug = entry["plugin"].getDynamicObject();
+            plug->setProperty ("panel", panel);
+            if (const auto it = touchWatches.find (insertId); it != touchWatches.end() && it->second->reported >= 0)
+                if (auto* parameter = parameterOf (it->second->reported))
+                    plug->setProperty ("lastTouched", object ({ { "index", it->second->reported }, { "name", parameter->getName (40) } }));
         }
         if (insert.hasProperty (ids::file))
             entry.getDynamicObject()->setProperty ("file", insert[ids::file].toString());
@@ -1209,6 +1255,78 @@ void DawBridge::updateInstrumentWindows()
     }
 }
 
+void DawBridge::watchPluginParameters()
+{
+    std::set<int> running;
+    for (const auto& [insertId, tree] : getPluginInserts())
+    {
+        auto* module = engine.getPluginInsert (insertId);
+        const auto plugin = module != nullptr ? module->getPlugin() : nullptr;
+        if (plugin == nullptr)
+            continue;
+        running.insert (insertId);
+
+        auto& watch = touchWatches[insertId];
+        if (watch == nullptr || watch->plugin != plugin)
+            watch = std::make_unique<TouchWatch> (plugin);
+        if (const auto touched = watch->touched.load(); touched != watch->reported)
+        {
+            watch->reported = touched;
+            sessionChanged = true;
+        }
+
+        // A panel parameter the plug-in has somewhere else than it was handed (moved in its
+        // window, a preset of its own): the insert takes it, as it does the plug-in's
+        // settings (not an undo step).
+        const auto& parameters = plugin->getParameters();
+        for (const auto index : module->getPanel())
+        {
+            if (! juce::isPositiveAndBelow (index, parameters.size()))
+                continue;
+            const auto pushed = module->getPushed (index);
+            const auto value = parameters[index]->getValue();
+            if (std::isnan (pushed) || std::abs (value - pushed) <= 1.0e-4f)
+            {
+                watch->moved.erase (index);
+                continue;
+            }
+            // Twice in a row at the same value (so not a value the audio thread is handing
+            // over right now).
+            if (const auto seen = watch->moved.find (index); seen == watch->moved.end() || std::abs (seen->second - value) > 1.0e-6f)
+            {
+                watch->moved[index] = value;
+                continue;
+            }
+            watch->moved.erase (index);
+            module->setPushed (index, value);
+            auto insert = edit.getInsert (insertId);
+            insert.setProperty (juce::Identifier (daw::PluginInsert::panelValueId (index)), value, nullptr);
+        }
+    }
+
+    for (auto it = touchWatches.begin(); it != touchWatches.end();)
+        it = running.count (it->first) > 0 ? std::next (it) : touchWatches.erase (it);
+}
+
+juce::var DawBridge::describePluginParameters (int insertId) const
+{
+    juce::Array<juce::var> list;
+    if (const auto plugin = engine.getInsertPlugin (insertId))
+    {
+        const auto& parameters = plugin->getParameters();
+        for (int i = 0; i < juce::jmin (parameters.size(), 4096); ++i)
+        {
+            auto* parameter = parameters[i];
+            const auto name = parameter->getName (60).trim();
+            if (name.isEmpty() || ! parameter->isAutomatable())
+                continue;
+            list.add (object ({ { "index", i }, { "name", name }, { "text", parameter->getCurrentValueAsText() },
+                                { "value", (double) parameter->getValue() } }));
+        }
+    }
+    return list;
+}
+
 std::vector<std::pair<int, juce::ValueTree>> DawBridge::getPluginInserts() const
 {
     std::vector<std::pair<int, juce::ValueTree>> found;
@@ -1263,6 +1381,7 @@ void DawBridge::recordMove (int trackId, const juce::String& target, float knob)
 void DawBridge::tick()
 {
     updateInstrumentWindows();
+    watchPluginParameters();
     automationRecorder.update ((double) engine.getPosition() / juce::jmax (1.0, engine.getSampleRate()), engine.isPlaying());
 
     if (auto& host = processor.getPluginHost(); host.isScanning() && ++scanTicks % 10 == 0)
@@ -6701,6 +6820,9 @@ void DawBridge::showInstrumentWindow (int trackId)
 //                                    `effects`) into a track's (0: the master's) chain at
 //                                    index (-1: the end) -> { ok, insert }
 //   showPluginInsert {id}            opens an effect plugin insert's own window
+//   pluginParameters {id}            its parameters -> [{ index, name, text, value (0..1) }]
+//   setPluginPanel {id, add | remove: index}  a parameter shown as a knob on its card (the
+//                                    insert value p<index>), or taken off -> { ok, param }
 //   addMidiClip {track, start, length} -> the new clip's id
 //   editNotes {clip, add: [{pitch, time, length, velocity}], change: [{id, ...}], remove: [ids]}
 //                                    one undo step -> { ok, added: [ids] }
@@ -6769,6 +6891,38 @@ bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, 
     if (command == "addPluginInsert")
     {
         complete (addPluginInsert (arg (args, "track", -1), args["plugin"].toString(), arg (args, "index", -1)));
+        return true;
+    }
+
+    if (command == "pluginParameters")
+    {
+        complete (describePluginParameters (arg (args, "id", -1)));
+        return true;
+    }
+
+    if (command == "setPluginPanel")
+    {
+        const auto insertId = arg (args, "id", -1);
+        if (args.hasProperty ("remove"))
+        {
+            complete (edit.removePluginPanel (insertId, arg (args, "remove", -1)) ? error ({}) : error ("That knob isn't on the card."));
+            return true;
+        }
+        const auto index = arg (args, "add", -1);
+        const auto plugin = engine.getInsertPlugin (insertId);
+        if (plugin == nullptr || ! juce::isPositiveAndBelow (index, plugin->getParameters().size()))
+        {
+            complete (error ("The plug-in isn't running, or has no such parameter."));
+            return true;
+        }
+        if (daw::PluginInsert::getPanel (edit.getInsert (insertId)).size() >= daw::Edit::maxPanelParameters)
+        {
+            complete (error ("A card shows up to " + juce::String (daw::Edit::maxPanelParameters) + " of its parameters."));
+            return true;
+        }
+        complete (edit.addPluginPanel (insertId, index, plugin->getParameters()[index]->getValue())
+                      ? object ({ { "ok", true }, { "param", daw::PluginInsert::panelValueId (index) } })
+                      : error ("That parameter is on the card already."));
         return true;
     }
 

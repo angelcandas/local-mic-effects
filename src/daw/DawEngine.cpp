@@ -214,6 +214,14 @@ InstrumentPtr DawEngine::getInsertPlugin (int insertId) const
     return nullptr;
 }
 
+PluginInsert* DawEngine::getPluginInsert (int insertId) const
+{
+    for (const auto& [id, strip] : strips)
+        if (const auto it = strip->plugins.find (insertId); it != strip->plugins.end())
+            return it->second.module;
+    return nullptr;
+}
+
 int DawEngine::getInsertLatencySamples (int insertId) const
 {
     for (const auto& [id, strip] : strips)
@@ -376,7 +384,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         if (property == ids::state || property == ids::name || property == ids::vendor || property == ids::description
             || property == ids::label || property == ids::ab || property == ids::abOther)
             return;
-        if (property == ids::plugin)
+        if (property == ids::plugin || property.toString() == "panel")
         {
             requestRebuild();
             return;
@@ -680,7 +688,7 @@ juce::String DawEngine::describeLayout (const juce::ValueTree& insert)
     juce::String layout;
     layout << insert[ids::type].toString() << ":" << (int) insert[ids::id] << " ";
     if (Edit::isPluginInsert (insert))
-        layout << insert[ids::plugin].toString() << " ";
+        layout << insert[ids::plugin].toString() << " " << insert.getProperty ("panel").toString() << " ";
     if (Edit::isRackInsert (insert))
     {
         layout << "[ ";
@@ -794,7 +802,10 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
 
             // The very module running for this insert (on this track or, moved, on another),
             // so even its bypass delay goes on; else another module on the same plugin.
-            if (auto running = std::dynamic_pointer_cast<PluginInsert> (takeRunningInsert (insert)); running != nullptr)
+            // (A different panel needs a new module on it: its values are the panel's.)
+            const auto panel = PluginInsert::getPanel (insert);
+            auto running = std::dynamic_pointer_cast<PluginInsert> (takeRunningInsert (insert));
+            if (running != nullptr && running->getPanel() == panel)
             {
                 auto& added = chain.add (std::move (running), true);
                 slot.module = static_cast<PluginInsert*> (&added);
@@ -803,10 +814,13 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
             }
 
             std::unique_ptr<PluginInsert> module;
+            if (running != nullptr)
+                module = PluginInsert::share (*running, panel);
 
             if (previous != strips.end())
                 if (const auto it = previous->second->plugins.find (insertId); it != previous->second->plugins.end() && it->second.module != nullptr)
-                    module = PluginInsert::share (*it->second.module);
+                    if (module == nullptr)
+                        module = PluginInsert::share (*it->second.module, panel);
 
             if (module == nullptr)
                 module = PluginInsert::create (insert, sampleRate, blockSize, realtime, slot.error);
