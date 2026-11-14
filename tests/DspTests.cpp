@@ -355,7 +355,7 @@ namespace
         std::cout << "\nEffect chain (the building block for track inserts)\n";
 
         // Every module value is a plugin parameter with the same default, and every
-        // parameter except the input/output gains belongs to exactly one module.
+        // parameter except the input/output gains and the macros belongs to exactly one module.
         {
             PluginProcessor processor;
             std::map<juce::String, juce::RangedAudioParameter*> byId;
@@ -365,6 +365,8 @@ namespace
 
             fx::FxChain chain (fx::FxChain::getAllTypes());
             std::set<juce::String> covered { "inputGain", "outputGain" };
+            for (int m = 1; m <= LiveMacros::numMacros; ++m)
+                covered.insert ("macro" + juce::String (m)); // they turn module values (Macros.h)
             juce::StringArray problems;
 
             for (int m = 0; m < chain.size(); ++m)
