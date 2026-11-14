@@ -355,7 +355,7 @@ namespace
         std::cout << "\nEffect chain (the building block for track inserts)\n";
 
         // Every module value is a plugin parameter with the same default, and every
-        // parameter except the input/output gains belongs to exactly one module.
+        // parameter except the input/output gains and the macros belongs to exactly one module.
         {
             PluginProcessor processor;
             std::map<juce::String, juce::RangedAudioParameter*> byId;
@@ -365,6 +365,8 @@ namespace
 
             fx::FxChain chain (fx::FxChain::getAllTypes());
             std::set<juce::String> covered { "inputGain", "outputGain" };
+            for (int m = 1; m <= LiveMacros::numMacros; ++m)
+                covered.insert ("macro" + juce::String (m)); // they turn module values (Macros.h)
             juce::StringArray problems;
 
             for (int m = 0; m < chain.size(); ++m)
@@ -4642,6 +4644,130 @@ namespace
         }
 
         folder.deleteRecursively();
+    }
+
+    void testMacros()
+    {
+        std::cout << "\nMacros (DAW)\n";
+        daw::Edit edit;
+        const auto track = (int) edit.addTrack ("Voice")[daw::ids::id];
+        const auto other = (int) edit.addTrack ("Other")[daw::ids::id];
+        const auto comp = (int) edit.addInsert (track, fx::ModuleType::compressor)[daw::ids::id];
+        const auto reverb = (int) edit.addInsert (track, fx::ModuleType::reverb)[daw::ids::id];
+        const auto valueOf = [&] (int insert, const char* param) { return (float) edit.getInsert (insert)[juce::Identifier (param)]; };
+
+        check (edit.mapMacro (track, 0, reverb, "reverbMix", 10.0f, 50.0f), "a value maps to a macro");
+        check (juce::approximatelyEqual (valueOf (reverb, "reverbMix"), 10.0f), "mapping sets the value from the macro (0: its min)");
+        check (edit.mapMacro (track, 0, comp, "compThreshold", -10.0f, -40.0f), "a macro takes more than one value");
+        edit.setMacro (track, 0, 0.5f);
+        check (juce::approximatelyEqual (valueOf (reverb, "reverbMix"), 30.0f) && juce::approximatelyEqual (valueOf (comp, "compThreshold"), -25.0f),
+               "turning the macro moves every mapped value in its range (min above max turns the other way)");
+
+        check (! edit.mapMacro (other, 0, reverb, "reverbMix", 0.0f, 100.0f), "a macro only reaches its own channel's effects");
+        check (! edit.mapMacro (track, 0, reverb, "noSuchValue", 0.0f, 1.0f), "a value the effect doesn't have can't be mapped");
+
+        edit.mapMacro (track, 1, reverb, "reverbMix", 0.0f, 100.0f);
+        const auto macros = daw::Edit::getMacros (edit.getChannel (track));
+        check (macros.getChildWithProperty (daw::ids::index, 0).getNumChildren() == 1, "a value follows one macro: mapping it to another takes it off the first");
+
+        edit.nameMacro (track, 1, "  Space  ");
+        check (macros.getChildWithProperty (daw::ids::index, 1)[daw::ids::name].toString() == "Space", "macros have names");
+
+        edit.unmapMacro (track, 1, reverb, "reverbMix");
+        check (macros.getChildWithProperty (daw::ids::index, 1).getNumChildren() == 0, "a value can be unmapped");
+
+        edit.removeInsert (comp);
+        check (macros.getChildWithProperty (daw::ids::index, 0).getNumChildren() == 0, "removing an effect removes its mappings");
+        edit.setMacro (track, 0, 1.0f); // nothing mapped: no harm
+
+        // A chain's macros go with it, by the effects' places in the chain.
+        const auto delay = (int) edit.addInsert (track, fx::ModuleType::echo)[daw::ids::id];
+        edit.mapMacro (track, 2, delay, "delayMix", 0.0f, 40.0f);
+        edit.mapMacro (track, 2, reverb, "reverbMix", 20.0f, 60.0f);
+        edit.setMacro (track, 2, 0.5f);
+        const auto saved = edit.getChainMacros (track);
+        juce::Array<juce::ValueTree> trees;
+        for (const auto& insert : daw::Edit::getInserts (edit.getChannel (track)))
+            trees.add (insert);
+        const auto copies = edit.pasteInsertTrees (trees, other, -1);
+        edit.setChainMacros (other, saved, copies);
+        const auto loaded = daw::Edit::getMacros (edit.getChannel (other)).getChildWithProperty (daw::ids::index, 2);
+        check (loaded.getNumChildren() == 2 && (int) loaded.getChild (0)[daw::ids::insert] == (int) copies[1][daw::ids::id]
+                   && juce::approximatelyEqual ((float) loaded[daw::ids::value], 0.5f),
+               "a saved chain's macros map onto the loaded copies, at the macro's value");
+
+        // Moved to another channel, an effect leaves its old channel's macros.
+        edit.moveInsertTo (delay, other, -1);
+        check (macros.getChildWithProperty (daw::ids::index, 2).getNumChildren() == 1, "an effect moved to another channel is unmapped");
+    }
+
+    void testLiveMacros()
+    {
+        std::cout << "\nMacros (Live)\n";
+        const auto set = [] (PluginProcessor& p, const char* id, float value)
+        {
+            auto* parameter = p.getState().getParameter (id);
+            parameter->setValueNotifyingHost (parameter->convertTo0to1 (value));
+        };
+        const auto get = [] (PluginProcessor& p, const char* id)
+        {
+            auto* parameter = p.getState().getParameter (id);
+            return parameter->convertFrom0to1 (parameter->getValue());
+        };
+        const auto render = [] (PluginProcessor& p)
+        {
+            const auto voice = makeVoice (180.0f, 0.5);
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            juce::MidiBuffer midi;
+            std::vector<float> out;
+            for (size_t start = 0; start + blockSize <= voice.size(); start += blockSize)
+            {
+                buffer.clear();
+                buffer.copyFrom (0, 0, voice.data() + start, blockSize);
+                p.processBlock (buffer, midi);
+                out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+            }
+            return out;
+        };
+
+        check (PluginProcessor().getState().getParameter ("macro8") != nullptr, "eight macro parameters for the host");
+
+        // The audio thread takes mapped values from their macro (a host automating the
+        // macro, no sync in between) and sounds like the value set by hand.
+        PluginProcessor mapped, byHand;
+        for (auto* p : { &mapped, &byHand })
+        {
+            set (*p, "compOn", 1.0f);
+            set (*p, "satOn", 1.0f);
+            p->prepareToPlay (sampleRate, blockSize);
+        }
+        check (mapped.mapLiveMacro (0, "compThreshold", -10.0f, -40.0f), "a Live value maps to a macro");
+        check (mapped.mapLiveMacro (0, "satDrive", 0.0f, 20.0f), "a macro takes more than one value");
+        check (! mapped.mapLiveMacro (0, "noSuchValue", 0.0f, 1.0f), "a value that doesn't exist can't be mapped");
+        set (mapped, "macro1", 50.0f);
+        set (byHand, "compThreshold", -25.0f);
+        set (byHand, "satDrive", 10.0f);
+        check (render (mapped) == render (byHand), "the sound follows the macro before the parameters catch up");
+
+        mapped.syncLiveMacros();
+        check (std::abs (get (mapped, "compThreshold") + 25.0f) < 0.05f && std::abs (get (mapped, "satDrive") - 10.0f) < 0.05f,
+               "mapped parameters follow their macro (for the page and the host)");
+
+        // Saved with the state.
+        mapped.nameLiveMacro (0, " Push ");
+        juce::MemoryBlock saved;
+        mapped.getStateInformation (saved);
+        PluginProcessor loaded;
+        loaded.setStateInformation (saved.getData(), (int) saved.getSize());
+        const auto macros = loaded.describeLiveMacros();
+        check (macros[0]["name"].toString() == "Push" && macros[0]["maps"].size() == 2
+                   && juce::approximatelyEqual ((float) macros[0]["value"], 0.5f),
+               "names, mappings and values come back with the state");
+
+        loaded.mapLiveMacro (1, "satDrive", 0.0f, 5.0f);
+        check (loaded.describeLiveMacros()[0]["maps"].size() == 1, "a value follows one macro: mapping it to another takes it off the first");
+        loaded.unmapLiveMacro ("compThreshold");
+        check (loaded.describeLiveMacros()[0]["maps"].size() == 0, "a value can be unmapped");
     }
 
     void testDeviceEdits()
@@ -17229,6 +17355,8 @@ int main()
         testDeviceEdits();
         testChainOrder();
         testPresetLibrary();
+        testMacros();
+        testLiveMacros();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -17272,6 +17400,8 @@ int main()
     testDeviceEdits();
     testChainOrder();
     testPresetLibrary();
+    testMacros();
+    testLiveMacros();
     testReturns();
     testPreview();
     testGroups();

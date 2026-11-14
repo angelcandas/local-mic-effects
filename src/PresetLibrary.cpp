@@ -210,6 +210,8 @@ bool PresetLibrary::isLiveChain (const juce::ValueTree& inserts)
 
     for (const auto& insert : inserts)
     {
+        if (! insert.hasType (INSERT))
+            continue;
         const auto type = insert[typeId].toString();
         bool builtIn = false;
         for (int t = 0; t < fx::numModuleTypes && ! builtIn; ++t)
@@ -234,7 +236,8 @@ juce::var PresetLibrary::listChains() const
 
         juce::Array<juce::var> effects;
         for (const auto& insert : tree)
-            effects.add (insert[typeId].toString());
+            if (insert.hasType (INSERT))
+                effects.add (insert[typeId].toString());
 
         auto* chain = new juce::DynamicObject();
         chain->setProperty (nameId, nameOf (tree, file));
@@ -248,7 +251,7 @@ juce::var PresetLibrary::listChains() const
     return result;
 }
 
-juce::String PresetLibrary::saveChain (const juce::String& name, const juce::ValueTree& inserts)
+juce::String PresetLibrary::saveChain (const juce::String& name, const juce::ValueTree& inserts, const juce::ValueTree& macros)
 {
     if (safeName (name).isEmpty())
         return "Give the chain a name.";
@@ -264,6 +267,8 @@ juce::String PresetLibrary::saveChain (const juce::String& name, const juce::Val
         copy.removeProperty (idId, nullptr); // ids belong to a project
         chain.appendChild (copy, nullptr);
     }
+    if (macros.isValid())
+        chain.appendChild (macros.createCopy(), nullptr);
 
     return writeTree (chainFile (name), chain);
 }
@@ -280,7 +285,7 @@ juce::ValueTree PresetLibrary::getDefaultChain() const
     return tree.hasType (INSERTS) ? tree : juce::ValueTree();
 }
 
-juce::String PresetLibrary::setDefaultChain (const juce::ValueTree& inserts)
+juce::String PresetLibrary::setDefaultChain (const juce::ValueTree& inserts, const juce::ValueTree& macros)
 {
     juce::ValueTree chain (INSERTS);
     chain.setProperty (nameId, "Audio track", nullptr);
@@ -291,6 +296,8 @@ juce::String PresetLibrary::setDefaultChain (const juce::ValueTree& inserts)
             copy.removeProperty (idId, nullptr);
             chain.appendChild (copy, nullptr);
         }
+    if (macros.isValid())
+        chain.appendChild (macros.createCopy(), nullptr);
     return writeTree (root.getChildFile ("Defaults").getChildFile (juce::String ("Audio track") + chainExtension), chain);
 }
 

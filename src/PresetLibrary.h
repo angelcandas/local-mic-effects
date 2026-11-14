@@ -6,7 +6,8 @@
 //
 //   <app data>/MicFX/Library/
 //     Effects/<kind>/<name>.micfxfx      one effect's settings  (<PRESET kind name><VALUE id value/>...)
-//     Chains/<name>.micfxchain           a chain of effects     (<INSERTS name><INSERT type .../>...</INSERTS>)
+//     Chains/<name>.micfxchain           a chain of effects     (<INSERTS name><INSERT type .../>...</INSERTS>),
+//                                        maybe with its <MACROS> (MAP slot: the effect's place)
 //     Defaults/Effects/<kind>.micfxfx    the settings a new effect of that kind starts with
 //
 // <kind> is the effect's preset key (a module id like "comp", or "tune+pitch+harmony" for the
@@ -40,14 +41,14 @@ public:
     //==============================================================================
     // Chains: [{ name, effects: [type...], live }], names sorted.
     juce::var listChains() const;
-    juce::String saveChain (const juce::String& name, const juce::ValueTree& inserts);
+    juce::String saveChain (const juce::String& name, const juce::ValueTree& inserts, const juce::ValueTree& macros = {});
     juce::ValueTree loadChain (const juce::String& name) const; // invalid if there's no such chain
     bool deleteChain (const juce::String& name);
     juce::String renameChain (const juce::String& name, const juce::String& newName);
 
     // The chain a new audio track starts with (an INSERTS node; invalid when there is none).
     juce::ValueTree getDefaultChain() const;
-    juce::String setDefaultChain (const juce::ValueTree& inserts);
+    juce::String setDefaultChain (const juce::ValueTree& inserts, const juce::ValueTree& macros = {});
     bool clearDefaultChain();
 
     // A chain Live can play: built-in effects only, at most one of each.

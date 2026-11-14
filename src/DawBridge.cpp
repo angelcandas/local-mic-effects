@@ -326,6 +326,7 @@ namespace
             { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "insertFile", "Load effect file" }, { "pasteInserts", "Paste effects" },
             { "duplicateInsert", "Duplicate effect" }, { "copyInsert", "Copy effect" }, { "replaceInsert", "Replace effect" },
             { "renameInsert", "Rename effect" }, { "insertAB", "Effect A/B" }, { "loadChain", "Load chain" },
+            { "setMacro", "Macro" }, { "mapMacro", "Map to macro" }, { "unmapMacro", "Unmap from macro" }, { "nameMacro", "Name macro" },
             { "loadPreset", "Load preset" }, { "setSend", "Send level" }, { "setOutput", "Track output" },
             { "groupTracks", "Group tracks" }, { "ungroup", "Ungroup tracks" }, { "setGroup", "Move to group" },
             { "addReturn", "Add return" }, { "removeReturn", "Delete return" }, { "moveReturn", "Move return" },
@@ -510,6 +511,23 @@ juce::File DawBridge::getRecordingFolder() const
 }
 
 //==============================================================================
+// A channel's 8 macros: [{ name, value, maps: [{ insert, param, min, max }] }].
+juce::var DawBridge::describeMacros (const juce::ValueTree& channel) const
+{
+    juce::Array<juce::var> list;
+    const auto macros = daw::Edit::getMacros (channel);
+    for (int index = 0; index < daw::Edit::numMacros; ++index)
+    {
+        const auto macro = macros.isValid() ? macros.getChildWithProperty (ids::index, index) : juce::ValueTree();
+        juce::Array<juce::var> maps;
+        for (const auto& map : macro)
+            maps.add (object ({ { "insert", (int) map[ids::insert] }, { "param", map[ids::param].toString() },
+                                { "min", (double) map[ids::min] }, { "max", (double) map[ids::max] } }));
+        list.add (object ({ { "name", macro[ids::name].toString() }, { "value", macro.isValid() ? (double) macro[ids::value] : 0.0 }, { "maps", maps } }));
+    }
+    return list;
+}
+
 juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
 {
     juce::Array<juce::var> list;
@@ -765,7 +783,7 @@ juce::var DawBridge::describeSession()
                               { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) }, { "automation", describeAutomation (track) },
                               { "link", daw::Edit::getLink (track) },
                               { "polarity", daw::Edit::getPolarity (track) }, { "nudge", daw::Edit::getNudge (track) },
-                              { "inserts", describeInserts (track) }, { "clips", clips },
+                              { "inserts", describeInserts (track) }, { "macros", describeMacros (track) }, { "clips", clips },
                               { "output", daw::Edit::getTrackOutput (track) }, { "sends", describeSends (track) },
                               { "group", daw::Edit::getTrackGroup (track) },
                               { "input", [&track]
@@ -810,7 +828,7 @@ juce::var DawBridge::describeSession()
                                { "mute", (bool) bus[ids::mute] }, { "solo", (bool) bus[ids::solo] },
                                { "group", daw::Edit::isGroup (bus) }, { "folded", (bool) bus.getProperty (ids::folded, false) },
                                { "sends", describeSends (bus) },
-                               { "inserts", describeInserts (bus) } }));
+                               { "inserts", describeInserts (bus) }, { "macros", describeMacros (bus) } }));
 
     if (lastInputNames.isEmpty())
         lastInputNames = getInputNames();
@@ -879,7 +897,7 @@ juce::var DawBridge::describeSession()
         { "view", state[ids::viewState].toString() },
         { "returns", returns },
         { "master", object ({ { "volume", number (master, ids::volume) }, { "pan", number (master, ids::pan) }, { "inGain", number (master, ids::inGain) },
-                              { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) } }) },
+                              { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) }, { "macros", describeMacros (master) } }) },
         { "tracks", tracks },
         { "patterns", describePatterns() },
         { "patternClips", describePatternClips() },
@@ -4246,7 +4264,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             juce::Array<juce::ValueTree> trees;
             for (const auto& insert : chain)
                 trees.add (insert);
-            edit.pasteInsertTrees (trees, track[ids::id], -1);
+            const auto copies = edit.pasteInsertTrees (trees, track[ids::id], -1);
+            if (const auto macros = chain.getChildWithName (ids::MACROS); macros.isValid())
+                edit.setChainMacros (track[ids::id], macros, copies);
         }
         complete (track[ids::id]);
         return;
@@ -4427,6 +4447,22 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
     if (command == "removeInsert") { edit.removeInsert (id); ok(); return; }
 
+    // Macros. { track, index, value }: turns it (with `continue`, one undo step per gesture);
+    // { track, index, insert, param, min, max }: maps a value to it (again: new range);
+    // { track, index, insert, param }: unmaps; { track, index, name }: names it.
+    if (command == "setMacro")   { edit.setMacro (arg (args, "track", -1), arg (args, "index", -1), (float) (double) args["value"]); ok(); return; }
+    if (command == "mapMacro")
+    {
+        if (edit.mapMacro (arg (args, "track", -1), arg (args, "index", -1), arg (args, "insert", -1), args["param"].toString(),
+                           (float) (double) args["min"], (float) (double) args["max"]))
+            ok();
+        else
+            complete (error ("That control can't follow this macro."));
+        return;
+    }
+    if (command == "unmapMacro") { edit.unmapMacro (arg (args, "track", -1), arg (args, "index", -1), arg (args, "insert", -1), args["param"].toString()); ok(); return; }
+    if (command == "nameMacro")  { edit.nameMacro (arg (args, "track", -1), arg (args, "index", -1), args["name"].toString()); ok(); return; }
+
     // Chains in the preset library. { track, name }: this chain saved under a name;
     // { track, default: true }: as the chain new audio tracks start with ({ track: -1,
     // default: true } clears that).
@@ -4434,12 +4470,14 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         engine.captureInstrumentStates(); // plug-ins' current settings go with them
         auto& library = processor.getLibrary();
-        const auto inserts = daw::Edit::getInserts (edit.getChannel (arg (args, "track", -1)));
+        const auto track = arg (args, "track", -1);
+        const auto inserts = daw::Edit::getInserts (edit.getChannel (track));
+        const auto macros = edit.getChainMacros (track); // the chain's macros go with it
         juce::String problem;
         if ((bool) args["default"])
-            problem = inserts.isValid() ? library.setDefaultChain (inserts) : (library.clearDefaultChain(), juce::String());
+            problem = inserts.isValid() ? library.setDefaultChain (inserts, macros) : (library.clearDefaultChain(), juce::String());
         else
-            problem = inserts.isValid() ? library.saveChain (args["name"].toString(), inserts) : juce::String ("There's no such track.");
+            problem = inserts.isValid() ? library.saveChain (args["name"].toString(), inserts, macros) : juce::String ("There's no such track.");
         complete (problem.isEmpty() ? object ({ { "ok", true } }) : error (problem));
         return;
     }
@@ -4464,8 +4502,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         juce::Array<juce::ValueTree> trees;
         for (const auto& insert : chain)
             trees.add (insert);
+        const auto copies = edit.pasteInsertTrees (trees, track, args.hasProperty ("index") ? arg (args, "index", -1) : -1);
+        // In place of the chain, its macros come too (in among one, the track keeps its own).
+        if (! args.hasProperty ("index"))
+            edit.setChainMacros (track, chain.getChildWithName (ids::MACROS), copies);
         juce::Array<juce::var> newIds;
-        for (const auto& copy : edit.pasteInsertTrees (trees, track, args.hasProperty ("index") ? arg (args, "index", -1) : -1))
+        for (const auto& copy : copies)
             newIds.add (copy[ids::id]);
         complete (object ({ { "ok", true }, { "ids", newIds } }));
         return;

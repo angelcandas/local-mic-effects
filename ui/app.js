@@ -7,6 +7,7 @@ import { createPresetPicker, effectPresets, presetParams } from "./fxpresets.js"
 import { ARC_END, ARC_START, arcPath, clamp, createFilePicker, formatDuration, formatValue, html, keyText, polar, releaseFocus, svg } from "./widgets.js";
 import { deviceKit, initDaw } from "./daw.js";
 import { DeviceCard } from "./devices.js";
+import { mountLiveMacros } from "./livemacros.js";
 import { LOOPER_KEYS, LoopPanel } from "./looper.js";
 import { MidiLearn, markLearnable } from "./midilearn.js";
 import { PracticeView } from "./practice.js";
@@ -1251,6 +1252,8 @@ Juce.getNativeFunction("getParameterInfo")().catch(() => ({})).then((info) => {
     count: document.querySelector(".active-count"),
     onUserChange: markModified,
   });
+  const grid = document.querySelector(".chain-grid");
+  mountLiveMacros({ parent: grid.parentElement, before: grid, grid, kit: deviceKit(), parameterInfo, setLive: (param, value, first) => rack.setLive(param, value, first) });
 });
 
 // Input/output gain belong to the mic setup rather than the preset.

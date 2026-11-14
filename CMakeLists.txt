@@ -69,6 +69,8 @@ juce_add_binary_data(MicFX_WebUI
         ui/daw.css
         ui/devices.js
         ui/devices.css
+        ui/macros.js
+        ui/livemacros.js
         ui/aiviews.css
         ui/aiviews.js
         ui/practice.js
@@ -141,6 +143,7 @@ set(MICFX_DSP_SOURCES
     src/MidiMap.h
     src/LiveHistory.cpp
     src/LiveHistory.h
+    src/Macros.h
     src/Scenes.cpp
     src/Scenes.h
     src/Setlist.cpp

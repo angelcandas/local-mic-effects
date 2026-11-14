@@ -305,6 +305,23 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                        // (action, ...) -> the Live chain's order, module keys first to last. "get";
                        // "set" (keys); "move" (key, index: its place among the keys); "last" (key):
                        // to the end, as the sidebar does when it switches an effect on.
+                       // Live macros: ("get") -> 8 × { name, value, maps: [{ param, min, max }] };
+                       // ("map", index, param, min, max) -> ok; ("unmap", param); ("name", index, name).
+                       .withNativeFunction ("liveMacros", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String ("get");
+                           const auto at = [&] (int i) { return args.size() > i ? args[i] : juce::var(); };
+                           if (action == "map")
+                           {
+                               complete (processorRef.mapLiveMacro ((int) at (1), at (2).toString(), (float) at (3), (float) at (4)));
+                               return;
+                           }
+                           if (action == "unmap")
+                               processorRef.unmapLiveMacro (at (1).toString());
+                           else if (action == "name")
+                               processorRef.nameLiveMacro ((int) at (1), at (2).toString());
+                           complete (processorRef.describeLiveMacros());
+                       })
                        .withNativeFunction ("chainOrder", [this] (const auto& args, auto complete)
                        {
                            const auto action = args.size() > 0 ? args[0].toString() : juce::String ("get");

@@ -111,6 +111,7 @@ private:
 
     juce::var describeStatus();
     juce::var describeInserts (const juce::ValueTree& trackOrMaster) const;
+    juce::var describeMacros (const juce::ValueTree& channel) const;
     juce::var describeInstrument (const juce::ValueTree& track) const;
     juce::var describeNotes (const juce::ValueTree& clip) const;
 

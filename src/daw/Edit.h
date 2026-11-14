@@ -126,6 +126,8 @@ namespace ids
     MICFX_DAW_ID (section) MICFX_DAW_ID (letter)
     MICFX_DAW_ID (rows) MICFX_DAW_ID (stepNote) MICFX_DAW_ID (step) MICFX_DAW_ID (swing) MICFX_DAW_ID (pattern) MICFX_DAW_ID (row)
     MICFX_DAW_ID (muted) MICFX_DAW_ID (levels)
+    MICFX_DAW_ID (MACROS) MICFX_DAW_ID (MACRO) MICFX_DAW_ID (MAP) MICFX_DAW_ID (insert) MICFX_DAW_ID (param) MICFX_DAW_ID (slot)
+    MICFX_DAW_ID (min) MICFX_DAW_ID (max) MICFX_DAW_ID (value) MICFX_DAW_ID (index)
 #undef MICFX_DAW_ID
 }
 
@@ -640,6 +642,8 @@ public:
     juce::ValueTree addPluginInsert (int trackId, const InstrumentInfo& plugin, int index = -1);
     static bool isPluginInsert (const juce::ValueTree& insert) { return insert[ids::type].toString() == "plugin"; }
     void removeInsert (int insertId);
+    // Takes an insert's value off every macro of its channel.
+    void unmapInsert (const juce::ValueTree& insert);
     void moveInsert (int insertId, int newIndex);
     void setInsertValue (int insertId, const juce::String& valueId, float value);
     // The file an insert plays through (a cabinet or room impulse response), stored as
@@ -648,6 +652,31 @@ public:
     juce::ValueTree getInsert (int insertId) const;
 
     static juce::ValueTree getInserts (const juce::ValueTree& trackOrMaster);
+
+    //==============================================================================
+    // Macros: up to 8 knobs per channel (track, return, group, master), each turning any
+    // number of its effects' values between their own min and max (min above max turns
+    // it the other way). A value follows one macro at a time.
+    //   MACROS
+    //     MACRO index name value(0..1)
+    //       MAP insert param min max
+    static constexpr int numMacros = 8;
+    static juce::ValueTree getMacros (const juce::ValueTree& channel) { return channel.getChildWithName (ids::MACROS); }
+    // Turns macro `index` of a channel and every value it's mapped to.
+    void setMacro (int channelId, int index, float value);
+    // Maps an effect's value to a macro (from another macro, if it followed one), and sets
+    // the value from the macro. False when the channel, insert or value doesn't exist.
+    bool mapMacro (int channelId, int index, int insertId, const juce::String& param, float min, float max);
+    void unmapMacro (int channelId, int index, int insertId, const juce::String& param);
+    void nameMacro (int channelId, int index, const juce::String& name);
+    // The value that macros of a channel write to an effect value (min + (max - min) * macro).
+    static float macroTarget (const juce::ValueTree& map, float macroValue);
+    // A channel's macros for a saved chain: MAP `slot` (the effect's place in the chain) in
+    // place of `insert`. Invalid when there's nothing to keep.
+    juce::ValueTree getChainMacros (int channelId) const;
+    // A loaded chain's macros onto a channel (whose old ones go), `inserts` being the
+    // chain's effects as pasted, in order.
+    void setChainMacros (int channelId, const juce::ValueTree& macros, const juce::Array<juce::ValueTree>& inserts);
 
     // A new insert starting from those values (an effect with a preset, one undo step).
     // Values the effect doesn't have are ignored.

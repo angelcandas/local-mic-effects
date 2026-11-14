@@ -2238,6 +2238,7 @@ bool Edit::moveInsertTo (int insertId, int channelId, int index)
         return true;
     }
 
+    unmapInsert (insert); // macros turn values of their own chain only
     source.removeChild (insert, undoTarget);
     target.addChild (insert, index < 0 ? -1 : juce::jmin (index, target.getNumChildren()), undoTarget);
     return true;
@@ -2373,7 +2374,159 @@ juce::ValueTree Edit::addPluginInsert (int trackId, const InstrumentInfo& info, 
 void Edit::removeInsert (int insertId)
 {
     if (auto insert = getInsert (insertId); insert.isValid())
+    {
+        unmapInsert (insert); // its macro mappings go with it
         insert.getParent().removeChild (insert, undoTarget);
+    }
+}
+
+//==============================================================================
+namespace
+{
+    juce::ValueTree findMacro (juce::ValueTree channel, int index, juce::UndoManager* undo, bool create)
+    {
+        if (! channel.isValid() || index < 0 || index >= Edit::numMacros)
+            return {};
+        auto macros = Edit::getMacros (channel);
+        if (! macros.isValid())
+        {
+            if (! create)
+                return {};
+            macros = juce::ValueTree (ids::MACROS);
+            channel.appendChild (macros, undo);
+        }
+        for (auto macro : macros)
+            if ((int) macro[ids::index] == index)
+                return macro;
+        if (! create)
+            return {};
+        juce::ValueTree macro (ids::MACRO);
+        macro.setProperty (ids::index, index, nullptr);
+        macro.setProperty (ids::value, 0.0f, nullptr);
+        macros.appendChild (macro, undo);
+        return macro;
+    }
+}
+
+float Edit::macroTarget (const juce::ValueTree& map, float macroValue)
+{
+    const auto lo = (float) map[ids::min], hi = (float) map[ids::max];
+    return lo + (hi - lo) * juce::jlimit (0.0f, 1.0f, macroValue);
+}
+
+void Edit::setMacro (int channelId, int index, float value)
+{
+    auto macro = findMacro (getChannel (channelId), index, undoTarget, true);
+    if (! macro.isValid())
+        return;
+    value = juce::jlimit (0.0f, 1.0f, value);
+    macro.setProperty (ids::value, value, undoTarget);
+    for (const auto& map : macro)
+        setInsertValue ((int) map[ids::insert], map[ids::param].toString(), macroTarget (map, value));
+}
+
+bool Edit::mapMacro (int channelId, int index, int insertId, const juce::String& param, float min, float max)
+{
+    const auto channel = getChannel (channelId);
+    const auto insert = getInsert (insertId);
+    if (! channel.isValid() || ! insert.isValid() || ! insert.hasProperty (juce::Identifier (param))
+        || insert.getParent().getParent() != channel || index < 0 || index >= numMacros)
+        return false;
+
+    // A value follows one macro: off the others first.
+    if (auto macros = getMacros (channel); macros.isValid())
+        for (auto other : macros)
+            for (int i = other.getNumChildren(); --i >= 0;)
+                if ((int) other.getChild (i)[ids::insert] == insertId && other.getChild (i)[ids::param].toString() == param)
+                    other.removeChild (i, undoTarget);
+
+    auto macro = findMacro (channel, index, undoTarget, true);
+    juce::ValueTree map (ids::MAP);
+    map.setProperty (ids::insert, insertId, nullptr);
+    map.setProperty (ids::param, param, nullptr);
+    map.setProperty (ids::min, min, nullptr);
+    map.setProperty (ids::max, max, nullptr);
+    macro.appendChild (map, undoTarget);
+    setInsertValue (insertId, param, macroTarget (map, (float) macro[ids::value]));
+    return true;
+}
+
+void Edit::unmapInsert (const juce::ValueTree& insert)
+{
+    const auto insertId = (int) insert[ids::id];
+    if (auto macros = getMacros (insert.getParent().getParent()); macros.isValid())
+        for (auto macro : macros)
+            for (int i = macro.getNumChildren(); --i >= 0;)
+                if ((int) macro.getChild (i)[ids::insert] == insertId)
+                    macro.removeChild (i, undoTarget);
+}
+
+juce::ValueTree Edit::getChainMacros (int channelId) const
+{
+    const auto channel = getChannel (channelId);
+    const auto inserts = getInserts (channel);
+    const auto macros = getMacros (channel);
+    if (! macros.isValid() || ! inserts.isValid())
+        return {};
+
+    juce::ValueTree result (ids::MACROS);
+    for (const auto& macro : macros)
+    {
+        auto copy = macro.createCopy();
+        for (int i = copy.getNumChildren(); --i >= 0;)
+        {
+            auto map = copy.getChild (i);
+            const auto slot = inserts.indexOf (getInsert ((int) map[ids::insert]));
+            if (slot < 0)
+                copy.removeChild (i, nullptr);
+            else
+            {
+                map.removeProperty (ids::insert, nullptr);
+                map.setProperty (ids::slot, slot, nullptr);
+            }
+        }
+        if (copy.getNumChildren() > 0 || copy[ids::name].toString().isNotEmpty())
+            result.appendChild (copy, nullptr);
+    }
+    return result.getNumChildren() > 0 ? result : juce::ValueTree();
+}
+
+void Edit::setChainMacros (int channelId, const juce::ValueTree& macros, const juce::Array<juce::ValueTree>& inserts)
+{
+    auto channel = getChannel (channelId);
+    if (! channel.isValid())
+        return;
+    if (auto old = getMacros (channel); old.isValid())
+        channel.removeChild (old, undoTarget);
+    if (! macros.hasType (ids::MACROS))
+        return;
+
+    for (const auto& macro : macros)
+    {
+        const auto index = (int) macro[ids::index];
+        if (index < 0 || index >= numMacros)
+            continue;
+        if (macro[ids::name].toString().isNotEmpty())
+            nameMacro (channelId, index, macro[ids::name].toString());
+        setMacro (channelId, index, (float) macro[ids::value]);
+        for (const auto& map : macro)
+            if (const auto slot = (int) map[ids::slot]; juce::isPositiveAndBelow (slot, inserts.size()))
+                mapMacro (channelId, index, (int) inserts[slot][ids::id], map[ids::param].toString(), (float) map[ids::min], (float) map[ids::max]);
+    }
+}
+
+void Edit::unmapMacro (int channelId, int index, int insertId, const juce::String& param)
+{
+    if (auto macro = findMacro (getChannel (channelId), index, undoTarget, false); macro.isValid())
+        for (int i = macro.getNumChildren(); --i >= 0;)
+            if ((int) macro.getChild (i)[ids::insert] == insertId && macro.getChild (i)[ids::param].toString() == param)
+                macro.removeChild (i, undoTarget);
+}
+
+void Edit::nameMacro (int channelId, int index, const juce::String& name)
+{
+    if (auto macro = findMacro (getChannel (channelId), index, undoTarget, true); macro.isValid())
+        macro.setProperty (ids::name, name.trim().substring (0, 30), undoTarget);
 }
 
 void Edit::moveInsert (int insertId, int newIndex)
