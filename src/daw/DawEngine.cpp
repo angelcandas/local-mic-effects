@@ -472,6 +472,20 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
 }
 
 //==============================================================================
+std::shared_ptr<std::atomic<bool>> DawEngine::getHold (int trackId, const juce::String& target)
+{
+    auto& flag = laneHolds[{ trackId, target }];
+    if (flag == nullptr)
+        flag = std::make_shared<std::atomic<bool>> (false);
+    return flag;
+}
+
+void DawEngine::holdLane (int trackId, const juce::String& target, bool held)
+{
+    getHold (trackId, target)->store (held);
+}
+
+//==============================================================================
 void DawEngine::setPreviewWarp (int clipId, const warp::Map& map)
 {
     const auto clip = edit.getClip (clipId);
@@ -1008,7 +1022,7 @@ void DawEngine::rebuild()
             }
 
             sendLevels[key] = level;
-            Send send { level, bus->second, (bool) sendTree.getProperty (ids::pre, false), {} };
+            Send send { level, bus->second, (bool) sendTree.getProperty (ids::pre, false), {}, getHold (trackId, "send:" + juce::String (target)) };
             for (const auto& point : Edit::parsePoints (sendTree[ids::automation].toString()))
                 send.points.emplace_back ((juce::int64) std::llround (point.time * sampleRate), point.value);
             track.sends.push_back (std::move (send));
@@ -1022,11 +1036,13 @@ void DawEngine::rebuild()
 
         for (const auto& point : Edit::getLane (trackTree, "pan"))
             track.pan.emplace_back ((juce::int64) std::llround (point.time * sampleRate), point.value);
+        if (! track.pan.empty())
+            track.panHeld = getHold (trackId, "pan");
 
         // Effect automation: the values' own lanes, then the values that follow a macro
         // with a lane (unless they have their own).
         std::set<std::pair<int, juce::String>> automated;
-        const auto addLane = [&] (const juce::ValueTree& insert, const juce::String& valueId, const auto& points, auto&& map)
+        const auto addLane = [&] (const juce::ValueTree& insert, const juce::String& valueId, const auto& points, auto&& map, const juce::String& holdTarget)
         {
             const auto module = track.strip->modulesByInsertId.find ((int) insert[ids::id]);
             if (module == track.strip->modulesByInsertId.end())
@@ -1036,6 +1052,7 @@ void DawEngine::rebuild()
             if (lane.value == nullptr)
                 return;
             lane.base = (float) insert.getProperty (juce::Identifier (valueId), 0.0f);
+            lane.held = getHold (trackId, holdTarget);
             for (const auto& point : points)
                 lane.points.emplace_back ((juce::int64) std::llround (point.time * sampleRate), map (point.value));
             track.lanes.push_back (std::move (lane));
@@ -1044,7 +1061,7 @@ void DawEngine::rebuild()
         const auto inserts = Edit::getAllInserts (trackTree);
         for (const auto& insert : inserts)
             for (const auto& [valueId, points] : Edit::getInsertAutomation (insert))
-                addLane (insert, valueId, points, [] (float v) { return v; });
+                addLane (insert, valueId, points, [] (float v) { return v; }, "insert:" + juce::String ((int) insert[ids::id]) + ":" + valueId);
         if (const auto macros = Edit::getMacros (trackTree); macros.isValid())
             for (const auto& macro : macros)
             {
@@ -1059,7 +1076,7 @@ void DawEngine::rebuild()
                         continue;
                     for (const auto& insert : inserts)
                         if ((int) insert[ids::id] == insertId)
-                            addLane (insert, param, points, [map] (float v) { return Edit::macroTarget (map, v); });
+                            addLane (insert, param, points, [map] (float v) { return Edit::macroTarget (map, v); }, "macro:" + macro[ids::index].toString());
                 }
             }
 
@@ -2317,7 +2334,7 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 
             auto& gain = send.level->gain;
             // Automated while playing: the lane's level where the timeline is.
-            if (isPlaying && ! send.points.empty())
+            if (isPlaying && ! send.points.empty() && ! isHeld (send.held))
             {
                 const auto db = rideDbAt (send.points, blockStart);
                 gain.setTargetValue (send.level->audible.load (std::memory_order_relaxed) && db >= Edit::minSendDb ? juce::Decibels::decibelsToGain (db) : 0.0f);
@@ -2374,7 +2391,8 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         {
             if (isPlaying)
                 for (auto& lane : track.lanes)
-                    lane.value->store (rideDbAt (lane.points, blockStart), std::memory_order_relaxed);
+                    if (! isHeld (lane.held))
+                        lane.value->store (rideDbAt (lane.points, blockStart), std::memory_order_relaxed);
             else if (track.automating)
                 for (auto& lane : track.lanes)
                     lane.value->store (lane.base, std::memory_order_relaxed);
@@ -2388,7 +2406,7 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
             feedSends (track, true);
 
         // Pan automation, while playing: the lane's pan in place of the knob.
-        if (isPlaying && ! track.pan.empty())
+        if (isPlaying && ! track.pan.empty() && ! isHeld (track.panHeld))
         {
             const auto [gainLeft, gainRight] = balanceGains (juce::jlimit (-1.0f, 1.0f, rideDbAt (track.pan, blockStart)));
             const auto gain = strip.targetGain.load (std::memory_order_relaxed);
