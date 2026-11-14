@@ -850,6 +850,9 @@ SessionAnalyser::Result SessionAnalyser::run (Progress progress, ProfileCache* c
                     child.setProperty (daw::ids::volume, 0.0f, nullptr);
                     child.setProperty (daw::ids::pan, 0.0f, nullptr);
                     child.removeProperty (daw::ids::ride, nullptr);
+                    child.removeProperty (daw::ids::panAutomation, nullptr);
+                    if (auto macros = daw::Edit::getMacros (child); macros.isValid())
+                        child.removeChild (macros, nullptr);
                     daw::Edit::getInserts (child).removeAllChildren (nullptr);
                 }
             }

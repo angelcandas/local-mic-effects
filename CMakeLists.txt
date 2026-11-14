@@ -59,6 +59,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/browser.js
         ui/pianoroll.js
         ui/takes.js
+        ui/automation.js
         ui/backing.js
         ui/capture.js
         ui/looper.js

@@ -286,6 +286,7 @@ private:
         int latencyAtBuild = 0; // the chain's delay when the current graph was built (message thread)
 
         std::atomic<float> targetLeft { 1.0f }, targetRight { 1.0f };
+        std::atomic<float> targetGain { 1.0f }; // the fader alone (0 when muted), for pan automation
         std::atomic<float> targetDirect { 1.0f }; // tracks: 0 while a return is soloed (sends still play)
         std::atomic<float> peakLeft { 0.0f }, peakRight { 0.0f };
         std::atomic<bool> monitoring { false }; // mic in (audio tracks) or MIDI in (MIDI tracks)
@@ -337,6 +338,7 @@ private:
     struct SendLevel
     {
         std::atomic<float> target { 0.0f };
+        std::atomic<bool> audible { true }; // the track isn't muted or soloed out (for send automation)
         juce::SmoothedValue<float> gain; // audio thread
     };
 
@@ -365,6 +367,7 @@ private:
         std::shared_ptr<SendLevel> level;
         int bus = 0;     // index into Graph::returns
         bool pre = false;
+        std::vector<std::pair<juce::int64, float>> points; // its level's automation: timeline sample, dB
     };
 
     struct Track
@@ -375,6 +378,7 @@ private:
         std::vector<Clip> clips;
         std::vector<MidiEvent> midiEvents; // MIDI tracks, in time order
         std::vector<std::pair<juce::int64, float>> ride; // volume automation: timeline sample, dB (Edit::RidePoint)
+        std::vector<std::pair<juce::int64, float>> pan;  // pan automation: timeline sample, -1..1
 
         // Effect automation (Edit::setInsertAutomation): each lane drives one value of one
         // of the strip's modules while playing, and puts back `base` when playback stops.
@@ -427,9 +431,19 @@ private:
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
     // Markers don't change what plays, so they don't need a new graph.
     // Markers and macros (MACROS, MACRO, MAP: they only write insert values) don't change the sound.
-    static bool isPlayed (const juce::ValueTree& child) { return ! (child.hasType (ids::MARKER) || child.hasType (ids::MACROS) || child.hasType (ids::MACRO) || child.hasType (ids::MAP)); }
-    void valueTreeChildAdded (juce::ValueTree&, juce::ValueTree& child) override        { if (isPlayed (child)) requestRebuild(); }
-    void valueTreeChildRemoved (juce::ValueTree&, juce::ValueTree& child, int) override { if (child.hasType (ids::CLIP)) previews.erase ((int) child[ids::id]); if (isPlayed (child)) requestRebuild(); }
+    // Macros only matter to playback when they have automation (their mapped values follow it).
+    static bool isPlayed (const juce::ValueTree& parent, const juce::ValueTree& child)
+    {
+        if (child.hasType (ids::MAP)) return parent.hasProperty (ids::automation);
+        if (child.hasType (ids::MACRO)) return child.hasProperty (ids::automation);
+        if (child.hasType (ids::MACROS))
+            for (const auto& macro : child)
+                if (macro.hasProperty (ids::automation))
+                    return true;
+        return ! (child.hasType (ids::MARKER) || child.hasType (ids::MACROS));
+    }
+    void valueTreeChildAdded (juce::ValueTree& parent, juce::ValueTree& child) override        { if (isPlayed (parent, child)) requestRebuild(); }
+    void valueTreeChildRemoved (juce::ValueTree& parent, juce::ValueTree& child, int) override { if (child.hasType (ids::CLIP)) previews.erase ((int) child[ids::id]); if (isPlayed (parent, child)) requestRebuild(); }
     void valueTreeChildOrderChanged (juce::ValueTree&, int, int) override         { requestRebuild(); }
     void valueTreeRedirected (juce::ValueTree&) override                          { previews.clear(); requestRebuild(); }
 

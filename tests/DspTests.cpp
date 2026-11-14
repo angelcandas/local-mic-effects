@@ -4381,6 +4381,95 @@ namespace
         return out;
     }
 
+    // Automation lanes (market item 6): pan, sends and macros as well as the ride and
+    // insert values, through Edit::setLane, played by the engine.
+    void testAutomationLanes()
+    {
+        std::cout << "\nAutomation lanes\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-lanes");
+        folder.createDirectory();
+        juce::AudioBuffer<float> tone (2, (int) (2.0 * sampleRate));
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                tone.setSample (ch, i, 0.2f * (float) std::sin (juce::MathConstants<double>::twoPi * 100.0 * i / sampleRate));
+        const auto toneFile = folder.getChildFile ("tone.wav");
+        writeWav (toneFile, tone, sampleRate);
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        engine.getAudioPool().loadNow (toneFile);
+        const auto track = (int) edit.addTrack ("Tone")[daw::ids::id];
+        edit.addClip (track, toneFile, 0.0, 2.0);
+        const auto bus = (int) edit.addReturn ("Dry bus")[daw::ids::id];
+
+        // The model: targets, clamping, sorting, one undo step, a send made for its lane.
+        edit.getUndoManager().beginNewTransaction();
+        check (edit.setLane (track, "pan", { { 1.0, 3.0f }, { 0.0, -1.0f } }), "a pan lane");
+        auto pan = daw::Edit::getLane (edit.getTrack (track), "pan");
+        check (pan.size() == 2 && pan[0].time == 0.0 && juce::approximatelyEqual (pan[1].value, 1.0f), "pan points sorted and clamped to -1..1");
+        edit.getUndoManager().undo();
+        check (daw::Edit::getLane (edit.getTrack (track), "pan").empty(), "a lane is one undo step");
+        check (! edit.setLane (track, "send:9999", { { 0.0, 0.0f } }) && ! edit.setLane (track, "nonsense", { { 0.0, 0.0f } })
+                   && ! edit.setLane (track, "insert:9999:eqLow", { { 0.0, 0.0f } }) && ! edit.setLane (track, "macro:8", { { 0.0, 0.0f } }),
+               "unknown targets are refused");
+        check (edit.setLane (track, "send:" + juce::String (bus), { { 0.0, 0.0f } })
+                   && daw::Edit::getSend (edit.getTrack (track), bus).isValid()
+                   && (float) daw::Edit::getSend (edit.getTrack (track), bus)[daw::ids::level] < daw::Edit::minSendDb,
+               "a send lane on a missing send adds the send, off");
+
+        const auto playRms = [&]
+        {
+            engine.rebuildNow();
+            engine.seek (0);
+            engine.play();
+            const auto out = render (engine, 0.8);
+            engine.stop();
+            render (engine, 0.05);
+            return std::pair<float, float> { rms (out[0], 9600, 33600), rms (out[1], 9600, 33600) };
+        };
+
+        // The send lane plays (the bus has no effects: the level doubles), and only while playing.
+        edit.setLane (track, "send:" + juce::String (bus), {});
+        const auto dry = playRms();
+        edit.setLane (track, "send:" + juce::String (bus), { { 0.0, 0.0f } });
+        const auto sent = playRms();
+        check (std::abs (sent.first / dry.first - 2.0f) < 0.02f, "the engine plays a send's lane (x" + juce::String (sent.first / dry.first, 2) + ")");
+        edit.setTrackMute (track, true);
+        check (playRms().first < 1.0e-4f, "a muted track's send lane is silent");
+        edit.setTrackMute (track, false);
+        edit.setLane (track, "send:" + juce::String (bus), {});
+
+        // Pan: hard right takes the left side away.
+        edit.setLane (track, "pan", { { 0.0, 1.0f } });
+        const auto panned = playRms();
+        check (panned.first < dry.first * 0.01f && std::abs (panned.second / dry.second - 1.0f) < 0.02f, "the engine plays a pan lane");
+        edit.setLane (track, "pan", {});
+
+        // A macro's lane moves the values mapped to it: a low shelf at 1 kHz down 12 dB at 1.
+        const auto eq = (int) edit.addInsert (track, fx::ModuleType::paraEq)[daw::ids::id];
+        edit.setInsertValue (eq, "peqLowFreq", 1000.0f);
+        edit.mapMacro (track, 2, eq, "peqLowGain", 0.0f, -12.0f);
+        const auto flat = playRms();
+        check (edit.setLane (track, "macro:2", { { 0.0, 1.0f } }), "a macro lane");
+        const auto down = playRms();
+        const auto drop = juce::Decibels::gainToDecibels (down.first / flat.first);
+        check (std::abs (drop + 12.0f) < 1.5f, "the engine plays a macro's lane through its mapping (" + juce::String (drop, 1) + " dB)");
+        check ((float) edit.getInsert (eq)["peqLowGain"] == 0.0f, "the macro's own setting is left as it was");
+        edit.setLane (track, "insert:" + juce::String (eq) + ":peqLowGain", { { 0.0, 0.0f } });
+        check (std::abs (juce::Decibels::gainToDecibels (playRms().first / flat.first)) < 0.5f, "a value's own lane wins over its macro's");
+
+        const auto targets = daw::Edit::getLaneTargets (edit.getTrack (track));
+        check (targets.contains ("macro:2") && targets.contains ("insert:" + juce::String (eq) + ":peqLowGain") && ! targets.contains ("pan"),
+               "the lanes with points are listed");
+        edit.setVolumeRide (track, { { 0.0, -3.0f } });
+        edit.setLane (track, "pan", { { 0.0, 0.5f } });
+        edit.clearLanes (track);
+        check (daw::Edit::getLaneTargets (edit.getTrack (track)).isEmpty(), "clearLanes clears them all");
+        folder.deleteRecursively();
+    }
+
     // Ableton-style chain edits: adding, removing or moving an effect doesn't restart the
     // others (a reverb tail rings on), and the single-effect commands.
     void testChainOrder()
@@ -17621,6 +17710,7 @@ int main()
     testVoiceFit();
     testDawFit();
     testEffectAutomation();
+    testAutomationLanes();
     testAnalysisSpeed();
     testLatency();
     testDenoise();

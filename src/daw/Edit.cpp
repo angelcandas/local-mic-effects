@@ -1013,9 +1013,264 @@ float Edit::getAutomationValueAt (const std::vector<AutomationPoint>& points, do
 
 void Edit::clearTrackAutomation (int trackId)
 {
-    for (auto insert : getInserts (getChannel (trackId)))
+    for (auto insert : getAllInserts (getChannel (trackId)))
         if (insert.hasProperty (ids::automation))
             insert.removeProperty (ids::automation, undoTarget);
+}
+
+void Edit::clearLanes (int trackId)
+{
+    clearTrackAutomation (trackId);
+    auto track = getTrack (trackId);
+    if (! track.isValid())
+        return;
+    track.removeProperty (ids::ride, undoTarget);
+    track.removeProperty (ids::panAutomation, undoTarget);
+    for (auto child : track)
+        if (child.hasType (ids::SEND) && child.hasProperty (ids::automation))
+            child.removeProperty (ids::automation, undoTarget);
+    if (auto macros = getMacros (track); macros.isValid())
+        for (auto macro : macros)
+            if (macro.hasProperty (ids::automation))
+                macro.removeProperty (ids::automation, undoTarget);
+}
+
+juce::Array<juce::ValueTree> Edit::getAllInserts (const juce::ValueTree& channel)
+{
+    juce::Array<juce::ValueTree> list;
+    std::function<void (const juce::ValueTree&)> add = [&] (const juce::ValueTree& inserts)
+    {
+        for (const auto& insert : inserts)
+        {
+            if (! insert.hasType (ids::INSERT))
+                continue;
+            list.add (insert);
+            for (const auto& chain : insert)
+                if (chain.hasType (ids::CHAIN))
+                    add (chain.getChildWithName (ids::INSERTS));
+        }
+    };
+    add (getInserts (channel));
+    return list;
+}
+
+//==============================================================================
+std::vector<Edit::AutomationPoint> Edit::parsePoints (const juce::String& text)
+{
+    std::vector<AutomationPoint> points;
+    for (const auto& part : juce::StringArray::fromTokens (text, ";", ""))
+        if (part.containsChar (':'))
+        {
+            const auto time = part.upToFirstOccurrenceOf (":", false, false).getDoubleValue();
+            const auto value = part.fromFirstOccurrenceOf (":", false, false).getDoubleValue();
+            if (std::isfinite (time) && std::isfinite (value))
+                points.push_back ({ juce::jmax (0.0, time), (float) value });
+        }
+    std::stable_sort (points.begin(), points.end(), [] (const auto& a, const auto& b) { return a.time < b.time; });
+    return points;
+}
+
+juce::String Edit::pointsToString (const std::vector<AutomationPoint>& points, int valueDecimals)
+{
+    juce::StringArray parts;
+    for (const auto& point : points)
+        parts.add (juce::String (juce::jmax (0.0, point.time), 3) + ":" + juce::String (point.value, valueDecimals));
+    return parts.joinIntoString (";");
+}
+
+namespace
+{
+    juce::ValueTree findMacro (juce::ValueTree channel, int index, juce::UndoManager* undo, bool create); // below
+
+    // A lane target split up: "send:3" -> { "send", 3, "" }, "insert:5:delayMix" -> { "insert", 5, "delayMix" }.
+    struct LaneTarget
+    {
+        juce::String kind, value;
+        int id = -1;
+    };
+
+    LaneTarget parseTarget (const juce::String& target)
+    {
+        LaneTarget t;
+        t.kind = target.upToFirstOccurrenceOf (":", false, false);
+        const auto rest = target.fromFirstOccurrenceOf (":", false, false);
+        if (t.kind == "send" || t.kind == "macro")
+            t.id = rest.containsOnly ("0123456789") && rest.isNotEmpty() ? rest.getIntValue() : -1;
+        else if (t.kind == "insert")
+        {
+            const auto id = rest.upToFirstOccurrenceOf (":", false, false);
+            t.id = id.containsOnly ("0123456789") && id.isNotEmpty() ? id.getIntValue() : -1;
+            t.value = rest.fromFirstOccurrenceOf (":", false, false);
+        }
+        return t;
+    }
+
+    juce::ValueTree findTrackInsert (const juce::ValueTree& track, int insertId)
+    {
+        for (const auto& insert : Edit::getAllInserts (track))
+            if ((int) insert[ids::id] == insertId)
+                return insert;
+        return {};
+    }
+
+    juce::ValueTree findTrackMacro (const juce::ValueTree& track, int index)
+    {
+        const auto macros = Edit::getMacros (track);
+        return macros.isValid() ? macros.getChildWithProperty (ids::index, index) : juce::ValueTree();
+    }
+}
+
+std::pair<float, float> Edit::getLaneRange (const juce::ValueTree&, const juce::String& target)
+{
+    const auto t = parseTarget (target);
+    if (t.kind == "volume") return { -maxRideDb, maxRideDb };
+    if (t.kind == "pan")    return { -1.0f, 1.0f };
+    if (t.kind == "send")   return { minSendDb - 1.0f, maxSendDb };
+    if (t.kind == "macro")  return { 0.0f, 1.0f };
+    return { -std::numeric_limits<float>::max(), std::numeric_limits<float>::max() };
+}
+
+bool Edit::setLane (int trackId, const juce::String& target, const std::vector<AutomationPoint>& input)
+{
+    auto track = getTrack (trackId);
+    if (! track.isValid())
+        return false;
+
+    const auto t = parseTarget (target);
+    const auto [lo, hi] = getLaneRange (track, target);
+    std::vector<AutomationPoint> points;
+    for (const auto& point : input)
+        if (std::isfinite (point.time) && std::isfinite (point.value))
+            points.push_back ({ juce::jmax (0.0, point.time), juce::jlimit (lo, hi, point.value) });
+    std::stable_sort (points.begin(), points.end(), [] (const auto& a, const auto& b) { return a.time < b.time; });
+    if (points.size() > (size_t) maxLanePoints)
+        points.resize ((size_t) maxLanePoints);
+
+    if (t.kind == "volume")
+    {
+        std::vector<RidePoint> ride;
+        for (const auto& point : points)
+            ride.push_back ({ point.time, point.value });
+        setVolumeRide (trackId, ride);
+        return true;
+    }
+
+    const auto store = [&] (juce::ValueTree tree, const juce::Identifier& property)
+    {
+        if (points.empty())
+            tree.removeProperty (property, undoTarget);
+        else
+            tree.setProperty (property, pointsToString (points), undoTarget);
+    };
+
+    if (t.kind == "pan")
+    {
+        store (track, ids::panAutomation);
+        return true;
+    }
+
+    if (t.kind == "send")
+    {
+        if (! getReturn (t.id).isValid() || isGroup (getReturn (t.id)) || t.id == getTrackOutput (track))
+            return false;
+        auto send = getSend (track, t.id);
+        if (! send.isValid())
+        {
+            if (points.empty())
+                return true;
+            send = juce::ValueTree (ids::SEND);
+            send.setProperty (ids::id, takeNextId(), nullptr);
+            send.setProperty (ids::target, t.id, nullptr);
+            send.setProperty (ids::level, minSendDb - 1.0f, nullptr);
+            send.setProperty (ids::pre, false, nullptr);
+            track.appendChild (send, undoTarget);
+        }
+        store (send, ids::automation);
+        return true;
+    }
+
+    if (t.kind == "insert")
+    {
+        const auto insert = findTrackInsert (track, t.id);
+        if (! insert.isValid() || t.value.isEmpty() || ! insert.hasProperty (juce::Identifier (t.value)))
+            return false;
+        setInsertAutomation (t.id, t.value, points);
+        return true;
+    }
+
+    if (t.kind == "macro")
+    {
+        if (t.id < 0 || t.id >= numMacros)
+            return false;
+        auto macro = findTrackMacro (track, t.id);
+        if (! macro.isValid())
+        {
+            if (points.empty())
+                return true;
+            macro = findMacro (track, t.id, undoTarget, true);
+        }
+        store (macro, ids::automation);
+        return true;
+    }
+
+    return false;
+}
+
+std::vector<Edit::AutomationPoint> Edit::getLane (const juce::ValueTree& track, const juce::String& target)
+{
+    const auto t = parseTarget (target);
+    if (t.kind == "volume")
+    {
+        std::vector<AutomationPoint> points;
+        for (const auto& point : getVolumeRide (track))
+            points.push_back ({ point.time, point.db });
+        return points;
+    }
+    if (t.kind == "pan")
+        return parsePoints (track[ids::panAutomation].toString());
+    if (t.kind == "send")
+        return parsePoints (getSend (track, t.id)[ids::automation].toString());
+    if (t.kind == "macro")
+        return parsePoints (findTrackMacro (track, t.id)[ids::automation].toString());
+    if (t.kind == "insert")
+    {
+        const auto lanes = getInsertAutomation (findTrackInsert (track, t.id));
+        const auto it = lanes.find (t.value);
+        return it != lanes.end() ? it->second : std::vector<AutomationPoint>();
+    }
+    return {};
+}
+
+juce::StringArray Edit::getLaneTargets (const juce::ValueTree& track)
+{
+    juce::StringArray targets;
+    if (track.hasProperty (ids::ride))          targets.add ("volume");
+    if (track.hasProperty (ids::panAutomation)) targets.add ("pan");
+    for (const auto& send : track)
+        if (send.hasType (ids::SEND) && send.hasProperty (ids::automation))
+            targets.add ("send:" + juce::String ((int) send[ids::target]));
+    for (const auto& insert : getAllInserts (track))
+        for (const auto& [valueId, points] : getInsertAutomation (insert))
+            targets.add ("insert:" + juce::String ((int) insert[ids::id]) + ":" + valueId);
+    if (const auto macros = getMacros (track); macros.isValid())
+        for (int index = 0; index < numMacros; ++index)
+            if (macros.getChildWithProperty (ids::index, index).hasProperty (ids::automation))
+                targets.add ("macro:" + juce::String (index));
+    return targets;
+}
+
+bool Edit::followsAutomatedMacro (const juce::ValueTree& insert, const juce::String& param)
+{
+    const auto macros = getMacros (getChannelOf (insert));
+    if (! macros.isValid())
+        return false;
+    const auto insertId = (int) insert[ids::id];
+    for (const auto& macro : macros)
+        if (macro.hasProperty (ids::automation))
+            for (const auto& map : macro)
+                if ((int) map[ids::insert] == insertId && map[ids::param].toString() == param)
+                    return true;
+    return false;
 }
 
 std::vector<Edit::RidePoint> Edit::getVolumeRide (const juce::ValueTree& track)
