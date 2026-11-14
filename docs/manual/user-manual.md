@@ -88,7 +88,11 @@ The cards move with your voice: the spectrum behind the EQ and filter curves, a 
 
 The preset menu also lists **Vocal chains**: complete vocal sounds by style, each a set of effects in a chosen order with their settings. They are: Pop lead, Pop ballad, Rap lead, Melodic trap, R&B and soul, Rock lead, Indie and lo-fi, Acoustic, Dance top line, Backing vocals, Ad-libs and throws, Podcast, Streamer, and two stage chains (**Live stage: lead** and **Live stage: ballad**) that add no delay. Hover a chain for a one-line description.
 
-Every chain is set up for a voice at about -18 LUFS with peaks near -8 dBFS, and comes out about as loud as it went in, so you can compare chains without the louder one winning. If your mic is much quieter or louder, set the input gain first (Mic check or Sound check helps). Chains are starting points: change anything, then keep the result with *Save this sound as…*. Three more are made for the DAW (a vocal bus, a plate return and a delay return) and appear there once the DAW library lists chains.
+Every chain is set up for a voice at about -18 LUFS with peaks near -8 dBFS, and comes out about as loud as it went in, so you can compare chains without the louder one winning. Chains are starting points: change anything, then keep the result with *Save this sound as…*.
+
+**Fit the chain to your voice.** A chain's compressors and gate expect that -18 LUFS. To make a chain fit your mic and room, load it, open **Sound check** and press **Keep this sound, fit the levels**, then sing for 10 to 20 seconds with a few pauses. The chain's effects and their settings stay as they are; only the input gain (so your voice arrives at -18 LUFS), the gate's threshold (from the room between your phrases), a Classic de-esser's threshold and the denoiser's picture of the room are set. Before / After and Revert work as in the full sound check.
+
+In the DAW, the vocal chains are in the library sidebar (**Presets → Vocal chains**) and in every track's chain menu, along with three made for the DAW: **Vocal bus: glue** for a group of vocal tracks, and **Vocal plate return** and **Vocal delay return** for return tracks. After a vocal chain loads onto a track with audio, a toast offers **Fit to this track**, also in the chain menu at any time: it listens to the track's clips and sets the chain's input gain, gates and Classic de-essers the same way, as one undo step.
 
 ### Vocal dynamics and space
 

@@ -3,6 +3,9 @@
 //
 //   pick a style -> Start -> sing (a level bar and the voice heard so far) -> Done (or wait)
 //   -> what changed and why, the input gain advice, Before / After, Revert, Save as scene, Keep.
+// Or "Keep this sound, fit the levels": the chain you loaded (a vocal chain, a sound of yours)
+// stays as it is, and only its input gain, gate and de-esser thresholds and the denoiser's
+// room are set for this voice.
 //
 // Engine: src/SoundCheck.* (native function "soundCheck", event "soundCheck").
 import * as Juce from "./juce/index.js";
@@ -121,7 +124,12 @@ export class SoundCheckPanel {
     const start = html("button", "tool is-accent soundcheck-start", "Start");
     start.type = "button";
     start.addEventListener("click", () => this.send("start", { seconds: this.seconds, style: Number(style.value) }));
-    this.body.append(options, tips, row("soundcheck-actions", start));
+    const fit = html("button", "tool soundcheck-fit", "Keep this sound, fit the levels");
+    fit.type = "button";
+    fit.title = "Keep the effects you have loaded (a vocal chain, a sound of yours) and set only the input level, "
+              + "the gate and de-esser thresholds and the denoiser's room for your voice";
+    fit.addEventListener("click", () => this.send("start", { seconds: this.seconds, style: Number(style.value), fit: true }));
+    this.body.append(options, tips, row("soundcheck-actions", fit, start));
     start.focus();
   }
 
@@ -162,7 +170,10 @@ export class SoundCheckPanel {
 
   renderResult() {
     const { state } = this;
-    this.body.append(html("p", "soundcheck-lead", `Set for your voice, from ${Number(state.sung ?? 0).toFixed(1)} s of singing. Listen, then keep it or go back.`));
+    const sung = `${Number(state.sung ?? 0).toFixed(1)} s of singing`;
+    this.body.append(html("p", "soundcheck-lead", state.fit
+      ? `The levels are fitted to your voice, from ${sung}; the sound itself is as you loaded it. Listen, then keep it or go back.`
+      : `Set for your voice, from ${sung}. Listen, then keep it or go back.`));
 
     if (state.advice) {
       const advice = html("p", `soundcheck-advice${/good/.test(state.advice) ? " is-good" : ""}`);

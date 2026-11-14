@@ -14,6 +14,8 @@
 #include "instruments/Kit.h"
 
 #include "Presets.h"
+#include "FactoryChains.h"
+#include "analysis/VoiceFit.h"
 #include "dsp/FxModules.h"
 
 #include <map>
@@ -217,6 +219,14 @@ struct DawBridge::KeyJob
     analysis::SessionAnalyser::Result result;
 };
 
+struct DawBridge::FitJob
+{
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> cancel { false }, finished { false };
+    analysis::SessionAnalyser::Result result;
+    int track = -1;
+};
+
 namespace
 {
     const char* styleKey (analysis::MixStyle style)
@@ -323,7 +333,7 @@ namespace
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
             { "defineTempo", "Tempo definition" }, { "tempoFromClip", "Project tempo from clip" }, { "stretchClip", "Stretch clip" },
             { "flattenClip", "Make warp permanent" }, { "quantize", "Quantize" }, { "setHitpoints", "Hitpoints" }, { "hitpointAction", "Hitpoints" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
-            { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
+            { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "fitChain", "Fit to this track" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
             { "setPart", "Pattern row" }, { "editPattern", "Edit pattern" }, { "setSteps", "Steps" },
@@ -423,6 +433,8 @@ DawBridge::~DawBridge()
         stemJob->cancel = true;
     if (keyJob != nullptr)
         keyJob->cancel = true;
+    if (fitJob != nullptr)
+        fitJob->cancel = true;
     if (songMapJob != nullptr)
         songMapJob->cancel = true;
     if (toMidiJob != nullptr)
@@ -1364,6 +1376,14 @@ void DawBridge::tick()
             finishKeyDetection();
         else
             emit ("dawKey", object ({ { "state", "analysing" }, { "progress", keyJob->progress.load() } }));
+    }
+
+    if (fitJob != nullptr)
+    {
+        if (fitJob->finished)
+            finishFit();
+        else
+            emit ("dawFit", object ({ { "state", "analysing" }, { "track", fitJob->track }, { "progress", fitJob->progress.load() } }));
     }
 
     if (songMapJob != nullptr)
@@ -3815,6 +3835,128 @@ void DawBridge::finishKeyDetection()
     emit ("dawKey", describeKey());
 }
 
+//==============================================================================
+// "fitChain" { action, track }: fit the track's chain to its voice (vocal effects V5).
+// The chain's effects and character stay; only what depends on how loud the voice and
+// the room arrive is set (analysis::fit): the chain's input gain (the voice to -18 LUFS,
+// where the factory vocal chains are set), the gates' and Classic de-essers' thresholds.
+//   analyse   listen to the track's clips (background, shared cache); "dawFit" brings
+//             { state: "done", track, changes [{ module, text }], notes } (one undo step) or
+//             { state: "error", error }
+//   cancel
+juce::var DawBridge::handleFit (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+
+    if (action == "cancel")
+    {
+        if (fitJob != nullptr)
+            fitJob->cancel = true;
+        return error ({});
+    }
+
+    if (action != "analyse")
+        return error ("Unknown fit action: " + action);
+
+    if (fitJob != nullptr)
+        return error ("Already listening to a track.");
+
+    const auto trackId = arg (args, "track", -1);
+    const auto track = edit.getTrack (trackId);
+    if (! track.isValid())
+        return error ("Fit to this track works on an audio track.");
+    if (daw::Edit::isMidiTrack (track))
+        return error ("Fit to this track works on an audio track with a voice on it.");
+
+    bool hasAudio = false;
+    for (const auto& clip : track)
+        hasAudio = hasAudio || (clip.hasType (ids::CLIP) && ! daw::Edit::isMidiClip (clip));
+    if (! hasAudio)
+        return error ("Record or import the voice on this track first.");
+
+    auto job = std::make_shared<FitJob>();
+    job->track = trackId;
+    auto analyser = std::make_shared<analysis::SessionAnalyser> (edit, analysis::SessionAnalyser::Point::source, false,
+                                                                 engine.getSampleRate());
+    fitJob = job;
+
+    juce::Thread::launch ([analyser, job, cache = profileCache]
+    {
+        job->result = analyser->run ([job] (double p) { job->progress = p; return ! job->cancel.load(); }, cache.get());
+        job->finished = true;
+    });
+
+    emit ("dawFit", object ({ { "state", "analysing" }, { "track", trackId }, { "progress", 0.0 } }));
+    return error ({});
+}
+
+void DawBridge::finishFit()
+{
+    auto job = std::move (fitJob);
+    if (job->result.cancelled)
+    {
+        emit ("dawFit", object ({ { "state", "cancelled" }, { "track", job->track } }));
+        return;
+    }
+
+    const auto fail = [&] (const juce::String& message)
+    {
+        emit ("dawFit", object ({ { "state", "error" }, { "track", job->track }, { "error", message } }));
+    };
+
+    const auto track = edit.getTrack (job->track);
+    const auto inserts = daw::Edit::getInserts (track);
+    const analysis::Profile* profile = nullptr;
+    for (const auto& [id, measured] : job->result.tracks)
+        if (id == job->track)
+            profile = &measured;
+    if (! track.isValid() || ! inserts.isValid() || profile == nullptr)
+        return fail ("The track isn't there any more.");
+
+    const auto isOn = [] (const juce::ValueTree& insert, const char* id) { return (float) insert.getProperty (id, 0.0f) >= 0.5f; };
+
+    analysis::fit::Chain current;
+    current.inputGainDb = (float) track.getProperty (ids::inGain, 0.0f);
+    current.minInputDb = -daw::Edit::maxChainGain;
+    current.maxInputDb = daw::Edit::maxChainGain;
+    std::vector<juce::ValueTree> gates, deEssers;
+    for (const auto& insert : inserts)
+    {
+        const auto type = insert[ids::type].toString();
+        if (type == "gate" && isOn (insert, "gateOn"))
+            gates.push_back (insert);
+        else if (type == "deEsser" && isOn (insert, "deessOn") && (float) insert.getProperty ("deessMode", 0.0f) < 0.5f)
+            deEssers.push_back (insert);
+        else if (type == "denoise" && isOn (insert, "denoiseOn"))
+            current.denoise = true;
+    }
+    current.gate = ! gates.empty();
+    current.classicDeEsser = ! deEssers.empty();
+
+    auto fitted = analysis::fit::plan (*profile, current);
+    if (fitted.error.isNotEmpty())
+        return fail (fitted.error);
+
+    edit.getUndoManager().beginNewTransaction ("Fit to this track");
+    if (! juce::approximatelyEqual (fitted.inputGainDb, current.inputGainDb))
+        edit.setChainGain (job->track, false, fitted.inputGainDb);
+    for (const auto& [valueId, value] : fitted.values)
+        for (const auto& insert : valueId == "gateThreshold" ? gates : deEssers)
+            edit.setInsertValue (insert[ids::id], valueId, value);
+
+    if (current.denoise)
+        fitted.notes.add ("The denoiser learns the room by itself as the track plays.");
+    fitted.notes.add ("Everything else in the chain stays as it was.");
+
+    juce::Array<juce::var> changes, notes;
+    for (const auto& [module, text] : fitted.changes)
+        changes.add (object ({ { "module", module }, { "text", text } }));
+    for (const auto& note : fitted.notes)
+        notes.add (note);
+    emit ("dawFit", object ({ { "state", "done" }, { "track", job->track }, { "changes", changes }, { "notes", notes },
+                              { "trim", fitted.trimDb }, { "voice", fitted.voiceLufs } }));
+}
+
 juce::var DawBridge::describeKey() const
 {
     if (! keyDetected)
@@ -4301,11 +4443,13 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         complete (problem.isEmpty() ? object ({ { "ok", true } }) : error (problem));
         return;
     }
-    // { track, name, index? }: a saved chain onto a track: in place of its chain, or with
-    // `index` (-1: the end) in among what's there. -> the new inserts' ids.
+    // { track, name, index?, factory? }: a saved chain (factory: true, one of the factory
+    // vocal chains) onto a track: in place of its chain, or with `index` (-1: the end) in
+    // among what's there. -> the new inserts' ids.
     if (command == "loadChain")
     {
-        const auto chain = processor.getLibrary().loadChain (args["name"].toString());
+        const auto chain = (bool) args["factory"] ? factory::makeInserts (args["name"].toString())
+                                                  : processor.getLibrary().loadChain (args["name"].toString());
         const auto track = arg (args, "track", -1);
         if (! chain.isValid() || ! daw::Edit::getInserts (edit.getChannel (track)).isValid())
         {
@@ -6147,6 +6291,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "key")
     {
         complete (handleKey (args));
+        return;
+    }
+
+    if (command == "fitChain")
+    {
+        complete (handleFit (args));
         return;
     }
 

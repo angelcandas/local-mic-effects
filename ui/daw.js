@@ -366,6 +366,9 @@ function typeValue(anchor, text, onCommit) {
   input.select();
 }
 
+// An audio track with recorded or imported audio on it.
+const hasVoiceClips = (track) => track.kind !== "midi" && (track.clips ?? []).some((clip) => !clip.midi);
+
 // Ask for a name in a small box over `anchor`, kept on the page's body so a re-render of the
 // anchor doesn't take it away. Enter commits, Escape or clicking elsewhere cancels.
 function askName(anchor, { value = "", placeholder = "Name" }, onCommit) {
@@ -4171,6 +4174,15 @@ class DawScreen {
         for (const chain of chains)
           item(chain.name, () => this.loadChain(owner.id, chain.name), { indent: true, hint: `Replace this chain with ${chain.effects.length} effects: ${chain.effects.join(", ")}` });
       }
+      const audioTrack = this.session.tracks.some((t) => t.id === owner.id) && hasVoiceClips(owner);
+      if (this.session.tracks.some((t) => t.id === owner.id))
+        item("Fit to this track", () => this.fitChain(owner.id), { disabled: !audioTrack || !owner.inserts.length,
+             hint: "Keep these effects and set only the input gain, gate and de-esser for this track's voice (one undo step)" });
+      if (this.factoryChains?.length) {
+        heading("Vocal chains");
+        for (const chain of this.factoryChains)
+          item(chain.name, () => this.loadChain(owner.id, chain.name, undefined, true), { indent: true, hint: `${chain.description}. Replaces this chain` });
+      }
       rule();
       item("Copy the chain", () => this.copyEffects(owner.id), { disabled: !owner.inserts.length });
       item(clipboard ? `Paste from ${clipboard.name}` : "Paste a chain", () => this.pasteEffects(owner.id),
@@ -4188,6 +4200,8 @@ class DawScreen {
   // Your chains in the preset library ([{ name, effects, live }]), kept for the library sidebar.
   async refreshChains() {
     try { this.chains = (await Juce.getNativeFunction("library")("chains")) ?? []; } catch { this.chains ??= []; }
+    if (!this.factoryChains?.length)
+      try { this.factoryChains = (await Juce.getNativeFunction("library")("factoryChains")) ?? []; } catch { this.factoryChains ??= []; }
     this.library?.renderItems?.();
     return this.chains;
   }
@@ -4207,10 +4221,32 @@ class DawScreen {
     toast(owner.inserts.length ? "New audio tracks will start with this chain." : "New audio tracks start empty again.");
   }
 
-  async loadChain(track, name, index) {
-    const result = await daw("loadChain", { track, name, ...(index === undefined ? {} : { index }) });
+  async loadChain(track, name, index, factory = false) {
+    const result = await daw("loadChain", { track, name, ...(index === undefined ? {} : { index }), ...(factory ? { factory: true } : {}) });
     if (result?.ok === false) toast(result.error ?? "Couldn't load the chain.", "is-error");
+    // A factory vocal chain is set for a voice at -18 LUFS: offer to fit it to this one.
+    else if (factory && index === undefined) {
+      const owner = this.session.tracks.find((t) => t.id === track);
+      if (owner && hasVoiceClips(owner))
+        toast(`Loaded "${name}". Fit its levels to this track's voice?`, "", { label: "Fit to this track", run: () => this.fitChain(track) });
+    }
     return result;
+  }
+
+  // "Fit to this track": listen to its clips, then set the chain's input gain, gates and
+  // de-essers for the voice (engine: DawBridge "fitChain", analysis::fit).
+  async fitChain(track) {
+    const result = await daw("fitChain", { action: "analyse", track });
+    if (result?.ok !== false) toast("Listening to the track to fit the chain…");
+  }
+
+  onFit(event) {
+    if (!event || typeof event !== "object") return;
+    if (event.state === "error") toast(event.error ?? "Couldn't fit the chain.", "is-error");
+    else if (event.state === "done") {
+      const changes = (event.changes ?? []).map((c) => `${c.module}: ${c.text}`);
+      toast(changes.length ? `Fitted to the voice. ${changes.join(". ")}.` : "The chain already fits this voice.", "", changes.length ? "undo" : null);
+    }
   }
 
   //============================================================================ clip commands
@@ -5063,6 +5099,7 @@ class DawScreen {
     });
 
     window.__JUCE__.backend.addEventListener("dawKey", (event) => this.onSongKey(event));
+    window.__JUCE__.backend.addEventListener("dawFit", (event) => this.onFit(event));
   }
 
   toggleKeyPanel(show = this.keyPanel.hidden) {

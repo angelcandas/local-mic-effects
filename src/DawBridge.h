@@ -200,6 +200,8 @@ private:
     // Song key (src/analysis/Key.h): detection runs on a background thread.
     juce::var handleKey (const juce::var& args);
     void finishKeyDetection();
+    juce::var handleFit (const juce::var& args);
+    void finishFit();
     juce::var describeKey() const;
     int setAutotunesToKey();
 
@@ -296,6 +298,8 @@ private:
     // Key detection: the running analysis (at most one) and the last result.
     struct KeyJob;
     std::shared_ptr<KeyJob> keyJob;
+    struct FitJob;
+    std::shared_ptr<FitJob> fitJob; // "Fit to this track" listening
     struct TakeCompJob;
     std::shared_ptr<TakeCompJob> takeCompJob;
     analysis::KeyEstimate lastKey;

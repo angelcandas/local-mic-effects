@@ -3,6 +3,7 @@
 #include <juce_audio_processors/juce_audio_processors.h>
 
 #include "analysis/MixAssistant.h"
+#include "analysis/VoiceFit.h"
 #include "dsp/FxChain.h"
 
 #include <atomic>
@@ -60,6 +61,12 @@ public:
 
     static Plan makePlan (const float* mono, int numSamples, double sampleRate, analysis::MixStyle);
 
+    // "Keep this sound, fit the levels": the loaded chain stays as it is; only the input
+    // gain (the voice to -18 LUFS at the chain), the gate and Classic de-esser thresholds
+    // and the denoiser's room profile are set (analysis::fit). `lowCutHz`: the high-pass
+    // in front of the denoiser (0 when off).
+    static Plan makeFitPlan (const float* mono, int numSamples, double sampleRate, const analysis::fit::Chain&, float lowCutHz);
+
     //==============================================================================
     SoundCheck (juce::AudioProcessorValueTreeState&, fx::FxChain& liveChain, Scenes&);
     ~SoundCheck();
@@ -72,7 +79,8 @@ public:
 
     // The page's "soundCheck" function: (action, options) -> describe(). Actions:
     //   "state"
-    //   "start" { seconds?, style? }  listen (style: an index into analysis::allStyles)
+    //   "start" { seconds?, style?, fit? }  listen (style: an index into analysis::allStyles;
+    //                                 fit: keep the chain and fit only its levels, see makeFitPlan)
     //   "finish"                      stop listening early and set the chain
     //   "cancel"                      stop listening, change nothing
     //   "compare" { after }           hear the sound from before (false) or after (true)
@@ -87,7 +95,7 @@ public:
 
     // { phase: idle | listening | analysing | done, seconds, target, voiceSeconds, level,
     //   canFinish, style, styles, error, changes [{ module, text }], notes, advice, peak,
-    //   comparing ("after" | "before"), scene }
+    //   comparing ("after" | "before"), scene, fit }
     juce::var describe() const;
 
     enum class Phase { idle, listening, analysing, done };
@@ -119,6 +127,7 @@ private:
 
     Phase phase = Phase::idle;
     analysis::MixStyle style = analysis::MixStyle::pop;
+    bool fitMode = false; // this run fits the chain's levels only
     std::future<Plan> pending;
 
     // While listening.
