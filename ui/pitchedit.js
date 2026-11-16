@@ -15,24 +15,56 @@ const KEYS = 40;     // the keyboard's width
 const RULER = 16;    // bar and beat numbers on top
 const LANE = 54;     // the loudness lane's height
 
-// Tools: [key, name, shortcut, what it does, icon path (24x24, stroked)].
+// Tools: [key, name, shortcut, what it does, icon path (24x24, stroked)]. With any tool, Shift+click
+// picks a note (or drops it), and a drag across empty space picks every note it touches. The
+// shape of the picked notes (straightness, vibrato, formants, level, glide) is set with the
+// sliders under the tools, all of them at once.
 const TOOLS = [
-  ["select", "Select", "V", "Click a note to pick it (Shift adds), drag it up or down to move it (snaps to semitones; hold Shift or Alt for cents, Ctrl/Cmd for whole semitones from where it is). Up/Down arrows move picked notes a semitone, Shift+arrow 10 cents. Drag empty space to pick several. Double-click a note to put it right on its semitone",
+  ["select", "Select", "V", "Drag a note up or down to move its pitch (it lands on a semitone; Shift or Alt: free, in cents; Ctrl/Cmd: whole semitones from where it is). Picked notes move together. Up/Down arrows move picked notes a semitone, Shift+arrow 10 cents. Double-click a note to put it right on its semitone",
     '<path d="M6 3l12 9-5.5 1.2L16 20l-2.6 1.2-2.7-6.4L6 19z"/>'],
   ["split", "Split", "C", "Click inside a note to cut it in two there; Alt-click a note to join it to the next one",
     '<circle cx="6" cy="7" r="2.6"/><circle cx="6" cy="17" r="2.6"/><path d="M8.2 8.4L20 17M8.2 15.6L20 7"/>'],
-  ["drift", "Drift", "D", "Drag a note up to straighten the slow wander of its pitch (100% = flat on the note), down to give it back",
-    '<path d="M3 15c3-6 5 4 8-2s4-3 5-1"/><path d="M14 9h7"/>'],
-  ["vibrato", "Vibrato", "M", "Drag a note up to widen its vibrato, down to calm it (0% = none, 200% = twice as wide)",
-    '<path d="M2 12c1.5-5 3-5 4.5 0s3 5 4.5 0 3-5 4.5 0 3 5 4.5 0 2-3 2-3"/>'],
-  ["transition", "Glide", "T", "Drag a note left or right to make its glide in from the note before quicker or slower",
-    '<path d="M3 17h5c4 0 4-10 8-10h5"/>'],
-  ["formant", "Formant", "F", "Drag a note up to make the voice smaller and brighter, down to make it bigger and darker, at the same pitch",
-    '<path d="M3 18c3 0 3-10 6-10s3 10 6 10 3-6 6-6"/><path d="M12 3v3"/>'],
-  ["level", "Level", "L", "Drag a note up or down to make it louder or softer (also in the loudness lane)",
-    '<path d="M5 20V12M10 20V8M15 20V4M20 20V10"/>'],
-  ["timing", "Timing", "W", "Drag a note left or right to move it in time (the notes either side stay put); the clip is warped",
+  ["timing", "Timing", "W", "Drag a note left or right to move it in time; picked notes move together and the notes around them stay put (the clip is warped)",
     '<path d="M4 12h16M8 8l-4 4 4 4M16 8l4 4-4 4"/>'],
+];
+
+// How far a note is pulled onto its semitone (0..1), and the note pulled that far. The note's
+// semitone is the one nearest where it is now (so a note moved by hand keeps its new note); at 0
+// it keeps the cents it was sung with, at 1 it sits right on the semitone.
+export function quantizeOf(note, transpose = 0) {
+  const sung = note.pitch + transpose, now = sung + note.shift;
+  const off = sung - Math.round(sung);
+  if (Math.abs(off) < 0.02) return null; // sung right on it: nothing to tell
+  return clamp(1 - (now - Math.round(now)) / off, 0, 1);
+}
+export function quantizeNote(note, amount, transpose = 0) {
+  const sung = note.pitch + transpose, now = sung + note.shift;
+  const target = Math.round(now), off = sung - Math.round(sung);
+  return { ...note, shift: clamp(target + off * (1 - amount) - sung, -24, 24) };
+}
+
+// The sliders for the picked notes: what each one reads from a note and writes into it.
+const SHAPES = [
+  { key: "quantize", label: "Quantize", min: 0, max: 100, step: 1, neutral: 0,
+    title: "Pitch quantize: pull the picked notes onto their semitone, 100% = right on it (their drift and vibrato stay)",
+    text: (v) => `${Math.round(v)}%`,
+    read: (n, tr) => { const q = quantizeOf(n, tr); return q == null ? null : q * 100; },
+    write: (n, v, tr) => quantizeNote(n, v / 100, tr) },
+  { key: "straighten", label: "Straighten", min: 0, max: 100, step: 1, neutral: 0,
+    title: "Straighten pitch: take the slow wander out of the picked notes, 100% = flat on the note (their vibrato stays)",
+    text: (v) => `${Math.round(v)}%`, read: (n) => n.straighten * 100, write: (n, v) => ({ ...n, straighten: v / 100 }) },
+  { key: "vibrato", label: "Vibrato", min: 0, max: 200, step: 1, neutral: 100,
+    title: "The picked notes' vibrato: 0% = none, 100% = as sung, 200% = twice as wide",
+    text: (v) => `${Math.round(v)}%`, read: (n) => n.vibrato * 100, write: (n, v) => ({ ...n, vibrato: v / 100 }) },
+  { key: "formant", label: "Formant", min: -12, max: 12, step: 0.1, neutral: 0,
+    title: "The picked notes' formants: up makes the voice smaller and brighter, down bigger and darker, at the same pitch",
+    text: (v) => `${signed(v, 1)} st`, read: (n) => n.formant, write: (n, v) => ({ ...n, formant: v }) },
+  { key: "gain", label: "Volume", min: -24, max: 12, step: 0.1, neutral: 0,
+    title: "The picked notes' level (also in the loudness lane)",
+    text: (v) => `${signed(v, 1)} dB`, read: (n) => n.gain, write: (n, v) => ({ ...n, gain: v }) },
+  { key: "transition", label: "Glide", min: 5, max: 500, step: 1, neutral: 60,
+    title: "How long the picked notes take to glide in from the note before",
+    text: (v) => `${Math.round(v)} ms`, read: (n) => n.transition * 1000, write: (n, v) => ({ ...n, transition: v / 1000 }) },
 ];
 
 const ICON = (path) => `<svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">${path}</svg>`;
@@ -112,18 +144,39 @@ export function createNoteEditor(host) {
     b.addEventListener("click", run);
     return b;
   };
-  const toKey = action("Snap", "Put the picked notes (or all of them) right on their semitone, or on the nearest note of the song's key when it's set (S)", () => snapNotes());
-  const straighten = action("Straighten", "Take the drift out of the picked notes (or all of them), keeping their vibrato", () => editPicked((n) => ({ ...n, straighten: 1 })));
+  const toKey = action("To key", "Put the picked notes (or all of them) right on their semitone, or on the nearest note of the song's key when it's set (S)", () => snapNotes());
   const reset = action("Reset", "Put the picked notes (or all of them) back as sung", () => resetNotes());
   const listenBox = html("input");
   listenBox.type = "checkbox";
   listenBox.checked = prefs.get("listen", true);
   listenBox.addEventListener("change", () => prefs.set("listen", listenBox.checked));
   const listen = html("label", "rhythm-check note-listen");
-  listen.title = "Hear a note as you move it: it plays when it lands on a new semitone, and after each arrow key (not while the song plays)";
+  listen.title = "Hear a note as you change it: it plays when it lands on a new semitone, after each arrow key and when you let go of a slider (not while the song plays: then the song itself has the change)";
   listen.append(listenBox, document.createTextNode(" Listen"));
   const readout = html("span", "note-readout");
-  bar.append(tools, toKey, straighten, reset, listen, readout);
+  bar.append(tools, toKey, reset, listen, readout);
+
+  // The picked notes' shape: one slider per quality, acting on every picked note at once (on
+  // all the notes when none is picked). Double-click a slider's name to put it back.
+  const shapeRow = html("div", "note-shape");
+  const scope = html("span", "note-shape-scope");
+  shapeRow.append(scope);
+  const sliders = [];
+  for (const def of SHAPES) {
+    const box = html("label", "note-slider");
+    box.title = def.title;
+    const name = html("span", "note-slider-name", def.label);
+    name.title = `${def.title}. Double-click to put it back`;
+    const input = html("input");
+    Object.assign(input, { type: "range", min: def.min, max: def.max, step: def.step });
+    const out = html("output", "note-slider-value");
+    box.append(name, input, out);
+    shapeRow.append(box);
+    sliders.push({ def, input, out, box });
+    input.addEventListener("input", () => shapeInput(def, Number(input.value)));
+    input.addEventListener("change", () => shapeDone());
+    name.addEventListener("dblclick", (event) => { event.preventDefault(); shapeInput(def, def.neutral); shapeDone(); });
+  }
 
   const area = html("div", "note-area");
   const canvas = html("canvas", "note-canvas");
@@ -137,7 +190,7 @@ export function createNoteEditor(host) {
   lane.append(laneCanvas, laneLabel);
   const message = html("div", "note-message");
   message.hidden = true;
-  element.append(bar, area, lane, message);
+  element.append(bar, shapeRow, area, lane, message);
 
   // What's shown: the clip's notes (edited locally until stored), its pitch lines and loudness.
   let data = null, notes = [], picked = new Set(), preview = null, hover = -1;
@@ -240,7 +293,12 @@ export function createNoteEditor(host) {
       if (pc === 0 || pc === 5) { g.fillStyle = "rgba(255,255,255,0.07)"; g.fillRect(KEYS, Math.round(y + rh) - 0.5, w - KEYS, 1); }
     }
 
-    // Bars and beats, from the project's tempo (the clip's time on the song).
+    // The ruler (click: move the song's cursor there, double-click: play from there), then bars
+    // and beats from the project's tempo (the clip's time on the song).
+    g.fillStyle = "rgba(255,255,255,0.05)";
+    g.fillRect(KEYS, 0, w - KEYS, RULER);
+    g.fillStyle = "rgba(255,255,255,0.12)";
+    g.fillRect(KEYS, RULER - 1, w - KEYS, 1);
     const map = screen.tempoMap, perBar = screen.beatsPerBar || 4;
     if (map) {
       const songOf = (t) => c.start + (t - c.offset);
@@ -292,7 +350,7 @@ export function createNoteEditor(host) {
 
     notes.forEach((n, i) => {
       if (n.until < a || n.at > b) return;
-      const moved = preview?.shiftTime?.[0] === i ? preview.shiftTime[1] : 0;
+      const moved = preview?.times?.get(i) ?? 0;
       const x0 = xOf(n.at + moved), x1 = xOf(n.until);
       const extra = moving?.get(i) ?? 0;
       const y = yOf(shown(n) + extra);
@@ -325,29 +383,13 @@ export function createNoteEditor(host) {
         g.fill();
       }
 
-      // Name inside, and the active tool's value above.
+      // Its name inside.
       g.font = "10px system-ui, sans-serif";
       const name = `${noteName(shown(n) + extra)}${centsText(shown(n) + extra)}`;
       if (x1 - x0 > g.measureText(name).width + 12 && hgt >= 10) {
         g.fillStyle = "rgba(10,12,18,0.85)";
         g.font = `${Math.min(10, hgt - 2)}px system-ui, sans-serif`;
         g.fillText(name, x0 + 9, y + Math.min(10, hgt - 2) / 2 - 1);
-      }
-      const value = toolValue(n);
-      if (value && (isPicked || i === hover)) {
-        g.fillStyle = "rgba(255,255,255,0.85)";
-        g.fillText(value, x0 + 2, y - hgt / 2 - 3);
-      }
-
-      // The glide in: a short slope at the note's start.
-      if (tool === "transition" && (isPicked || i === hover)) {
-        const gx = xOf(n.at - n.transition / 2), gx1 = xOf(n.at + n.transition / 2);
-        g.strokeStyle = "rgba(255,255,255,0.8)";
-        g.lineWidth = 1.5;
-        g.beginPath();
-        g.moveTo(gx, y + hgt / 2 + 3);
-        g.lineTo(gx1, y - hgt / 2 - 1);
-        g.stroke();
       }
     });
 
@@ -376,6 +418,7 @@ export function createNoteEditor(host) {
     paintLane();
     placePlayhead();
     readout.textContent = readoutText();
+    refreshShape();
   };
 
   const paintLane = () => {
@@ -440,22 +483,60 @@ export function createNoteEditor(host) {
     if (disposed) return;
     if (element.isConnected && screen.status?.position !== lastPosition) {
       lastPosition = screen.status?.position;
+      // While the song plays, page along with it (when zoomed in and the cursor is in the clip).
+      if (screen.status?.playing && view && !dragging && !screen.dragging) {
+        const c = clip(), t = lastPosition - c.start + c.offset;
+        const [a, b] = span();
+        if ((t > b || t < a - 0.05) && t >= c.offset && t <= c.offset + c.length) {
+          view = [t - (b - a) * 0.05, t + (b - a) * 0.95];
+          view = span();
+          paint();
+        }
+      }
       placePlayhead();
     }
     frame = requestAnimationFrame(tick);
   };
   frame = requestAnimationFrame(tick);
 
-  // The active tool's value for a note, shown above it.
-  const toolValue = (n) => {
-    switch (tool) {
-      case "drift": return `drift ${Math.round(n.straighten * 100)}%`;
-      case "vibrato": return `vibrato ${Math.round(n.vibrato * 100)}%`;
-      case "formant": return `formant ${signed(n.formant, 1)}`;
-      case "level": return `${signed(n.gain, 1)} dB`;
-      case "transition": return `glide ${Math.round(n.transition * 1000)} ms`;
-      default: return "";
+  // The sliders show the picked notes' values (the first one's, "mixed" when they differ).
+  let shaping = null; // a slider being moved: { before, live }
+  const refreshShape = () => {
+    if (shaping) return;
+    const list = targets();
+    const off = !notes.length || Boolean(data?.linked);
+    scope.textContent = !notes.length ? "Notes" : picked.size ? `${list.length} picked note${list.length === 1 ? "" : "s"}` : `All ${notes.length} notes`;
+    scope.title = picked.size ? "The sliders change the picked notes (Esc drops them)" : "Nothing picked: the sliders change every note. Click a note, or drag across empty space, to pick some";
+    for (const { def, input, out, box } of sliders) {
+      input.disabled = off;
+      const values = list.map((i) => def.read(notes[i], transpose())).filter((v) => v != null);
+      const value = values.length ? values[0] : def.neutral;
+      const mixed = values.some((v) => Math.abs(v - value) > def.step);
+      input.value = String(value);
+      out.textContent = mixed ? "mixed" : def.text(value);
+      box.classList.toggle("is-mixed", mixed);
+      box.classList.toggle("is-changed", values.some((v) => Math.abs(v - def.neutral) > def.step / 2));
     }
+  };
+  const shapeInput = (def, value) => {
+    if (!notes.length || data?.linked) return;
+    if (!shaping) shaping = { before: notes.map((n) => ({ ...n })), live: livePreview(daw, screen, "previewPitchNotes", clip().id) };
+    const chosen = new Set(targets());
+    notes = shaping.before.map((n, i) => (chosen.has(i) ? def.write(n, value, transpose()) : n));
+    const slider = sliders.find((x) => x.def === def);
+    slider.out.textContent = def.text(value);
+    slider.box.classList.remove("is-mixed");
+    shaping.live.send({ notes: payload(notes) });
+    paint();
+  };
+  const shapeDone = () => {
+    if (!shaping) return;
+    const { live } = shaping;
+    shaping = null;
+    live.end(true);
+    store(notes);
+    const list = targets();
+    if (list.length <= 3) audition(notes, list[0]);
   };
 
   const readoutText = () => {
@@ -567,16 +648,17 @@ export function createNoteEditor(host) {
     return best;
   };
 
+  const inRuler = (event) => event.clientY - area.getBoundingClientRect().top < RULER;
   area.addEventListener("pointermove", (event) => {
     if (dragging) return;
-    const i = noteAt(event);
+    const i = inRuler(event) ? -1 : noteAt(event);
     if (i !== hover) { hover = i; paint(); }
-    area.style.cursor = cursorFor(i);
+    area.style.cursor = inRuler(event) ? "pointer" : cursorFor(i, event);
   });
   area.addEventListener("pointerleave", () => { if (!dragging && hover >= 0) { hover = -1; paint(); } });
-  const cursorFor = (i) => {
-    if (i < 0) return tool === "select" ? "crosshair" : "default";
-    return { select: "ns-resize", split: "col-resize", transition: "ew-resize", timing: "ew-resize" }[tool] ?? "ns-resize";
+  const cursorFor = (i, event) => {
+    if (i < 0 || event.shiftKey) return i < 0 ? "crosshair" : "copy";
+    return { select: "ns-resize", split: "col-resize", timing: "ew-resize" }[tool] ?? "default";
   };
 
   let dragging = false;
@@ -599,161 +681,168 @@ export function createNoteEditor(host) {
     area.addEventListener("pointercancel", up);
   };
 
+  // The song's cursor: the clip's rendered time t is at c.start + (t - c.offset) in the song.
+  const songTime = (clientX) => { const c = clip(); return Math.max(0, c.start + timeAt(clientX) - c.offset); };
+  const locate = (clientX, play = false) => {
+    daw("transport", { action: "seek", time: songTime(clientX) });
+    if (play && !screen.status?.playing) daw("transport", { action: "play" });
+  };
+  // The ruler: click (or drag) moves the cursor, double-click plays from there.
+  const rulerPress = (event) => {
+    if (event.detail >= 2) { locate(event.clientX, true); return; }
+    locate(event.clientX);
+    let last = 0;
+    drag(event, (e) => {
+      const now = performance.now();
+      if (now - last < 40) return;
+      last = now;
+      locate(e.clientX);
+    }, (e) => locate(e.clientX));
+  };
+
   area.addEventListener("pointerdown", (event) => {
-    if (event.button !== 0 || !data || data.linked) return;
+    if (event.button !== 0 || !data) return;
     event.preventDefault();
     element.focus({ preventScroll: true });
-    const index = noteAt(event);
+    if (inRuler(event)) { rulerPress(event); return; }
+    // Double-click on empty space: play from there.
+    const index = data.linked ? -1 : noteAt(event);
+    if (index < 0 && event.detail >= 2) { locate(event.clientX, true); return; }
+    if (data.linked) return;
 
-    if (tool === "split") {
-      if (index < 0) return;
-      if (event.altKey) joinNext(index); else splitAt(index, timeAt(event.clientX));
-      return;
-    }
-    if (tool === "timing") { if (index >= 0) moveInTime(event, index); return; }
-
-    if (index < 0) {
-      if (tool === "select") rubberBand(event);
-      else if (!event.shiftKey && picked.size) { picked.clear(); paint(); }
-      return;
-    }
-
+    // With any tool: a drag across empty space picks notes (Shift adds to them), a click
+    // there drops them; Shift+click a note picks it or drops it.
+    if (index < 0) { rubberBand(event); return; }
     if (event.shiftKey) {
       if (picked.has(index)) picked.delete(index); else picked.add(index);
       paint();
       return;
     }
-    if (!picked.has(index)) picked = new Set([index]);
 
-    if (tool === "select" && event.detail >= 2) {
+    if (tool === "split") {
+      if (event.altKey) joinNext(index); else splitAt(index, timeAt(event.clientX));
+      return;
+    }
+    if (!picked.has(index)) picked = new Set([index]);
+    if (tool === "timing") { moveInTime(event, index); return; }
+
+    if (event.detail >= 2) {
       const n = notes[index];
       const target = Math.round(shown(n));
       store(notes.map((x, i) => (i === index ? { ...x, shift: target - x.pitch - transpose() } : x)));
       return;
     }
 
+    // Moving pitch: the grabbed note lands on a semitone, the other picked notes move with it.
+    // Shift or Alt: free (cents). Ctrl/Cmd: whole semitones, keeping its offset from one.
     const chosen = [...picked];
     const before = notes.map((n) => ({ ...n }));
-    const startX = event.clientX, startY = event.clientY;
+    const startY = event.clientY;
     const rh = rowHeight();
     let changed = false, heard = null;
     const live = livePreview(daw, screen, "previewPitchNotes", clip().id);
-
+    const grabbed = before[index];
     drag(event, (e) => {
-      const dy = (startY - e.clientY), dx = e.clientX - startX;
-      if (Math.abs(dx) + Math.abs(dy) > 2) changed = true;
-      if (tool === "select") {
-        // Moving pitch: the grabbed note lands on a semitone, the rest move with it.
-        // Shift or Alt: free (cents). Ctrl/Cmd: whole semitones, keeping its offset from one.
-        const grabbed = before[index];
-        let delta = dy / rh;
-        if (e.ctrlKey || e.metaKey) delta = Math.round(delta);
-        else if (!e.altKey && !e.shiftKey) delta = Math.round(shown(grabbed) + delta) - shown(grabbed);
-        preview = { offsets: new Map(chosen.map((i) => [i, delta])) };
-        paint();
-        const landed = Math.round((shown(grabbed) + delta) * 100);
-        const moved = before.map((n, i) => (preview.offsets.has(i) ? { ...n, shift: clamp(n.shift + preview.offsets.get(i), -24, 24) } : n));
-        if (landed !== heard && Math.abs(delta) > 1e-3) {
-          heard = landed;
-          audition(moved, index);
-        }
-        live.send({ notes: payload(moved) });
-        return;
-      }
-      notes = before.map((n, i) => (picked.has(i) ? adjust(n, dx, dy, e) : n));
-      live.send({ notes: payload(notes) });
+      const dy = startY - e.clientY;
+      if (Math.abs(dy) > 2) changed = true;
+      let delta = dy / rh;
+      if (e.ctrlKey || e.metaKey) delta = Math.round(delta);
+      else if (!e.altKey && !e.shiftKey) delta = Math.round(shown(grabbed) + delta) - shown(grabbed);
+      preview = { offsets: new Map(chosen.map((i) => [i, delta])) };
       paint();
-    }, (e) => {
-      live.end(changed);
-      if (!changed) { preview = null; paint(); return; }
-      if (tool === "select") {
-        const offsets = preview?.offsets ?? new Map();
-        preview = null;
-        store(before.map((n, i) => (offsets.has(i) ? { ...n, shift: clamp(n.shift + offsets.get(i), -24, 24) } : n)));
-        return;
+      const landed = Math.round((shown(grabbed) + delta) * 100);
+      const moved = before.map((n, i) => (preview.offsets.has(i) ? { ...n, shift: clamp(n.shift + preview.offsets.get(i), -24, 24) } : n));
+      if (landed !== heard && Math.abs(delta) > 1e-3) {
+        heard = landed;
+        audition(moved, index);
       }
-      const next = before.map((n, i) => (picked.has(i) ? adjust(n, e.clientX - startX, startY - e.clientY, e) : n));
-      store(next);
+      live.send({ notes: payload(moved) });
+    }, () => {
+      live.end(changed);
+      const offsets = preview?.offsets ?? new Map();
+      preview = null;
+      if (!changed) { paint(); return; }
+      store(before.map((n, i) => (offsets.has(i) ? { ...n, shift: clamp(n.shift + offsets.get(i), -24, 24) } : n)));
     });
   });
 
-  // A tool's drag on one note: dx, dy in pixels (up is positive).
-  const adjust = (n, dx, dy, e) => {
-    const fine = e.altKey ? 0.2 : 1;
-    switch (tool) {
-      case "drift": return { ...n, straighten: clamp(n.straighten + dy * fine / 120, 0, 1) };
-      case "vibrato": return { ...n, vibrato: clamp(n.vibrato + dy * fine / 80, 0, 2) };
-      case "formant": return { ...n, formant: Math.round(clamp(n.formant + dy * fine / 12, -12, 12) * 10) / 10 };
-      case "level": return { ...n, gain: Math.round(clamp(n.gain + dy * fine / 6, -24, 12) * 10) / 10 };
-      case "transition": {
-        const [a, b] = span();
-        return { ...n, transition: clamp(n.transition + dx * fine * (b - a) / width(), 0.005, 0.5) };
-      }
-      default: return n;
-    }
-  };
-
+  // A box across the notes: picks the ones it touches (Shift: adds them to the picked ones).
+  // A click without a drag drops the picked notes.
   const rubberBand = (event) => {
     const box = area.getBoundingClientRect();
     const x0 = event.clientX, y0 = event.clientY;
     const keep = event.shiftKey ? new Set(picked) : new Set();
-    band.hidden = false;
+    let moved = false;
     const place = (e) => {
-      const left = Math.min(x0, e.clientX) - box.left, top = Math.min(y0, e.clientY) - box.top;
-      Object.assign(band.style, { left: `${left}px`, top: `${top}px`, width: `${Math.abs(e.clientX - x0)}px`, height: `${Math.abs(e.clientY - y0)}px` });
+      if (!moved && Math.abs(e.clientX - x0) + Math.abs(e.clientY - y0) < 4) return;
+      moved = true;
+      band.hidden = false;
+      const left = Math.min(x0, e.clientX) - box.left, top = Math.max(RULER, Math.min(y0, e.clientY) - box.top);
+      Object.assign(band.style, { left: `${left}px`, top: `${top}px`, width: `${Math.abs(e.clientX - x0)}px`, height: `${Math.max(0, Math.max(y0, e.clientY) - box.top - top)}px` });
       const t0 = timeAt(Math.min(x0, e.clientX)), t1 = timeAt(Math.max(x0, e.clientX));
       const m0 = midiAt(Math.max(y0, e.clientY)), m1 = midiAt(Math.min(y0, e.clientY));
       picked = new Set(keep);
       notes.forEach((n, i) => { if (n.until >= t0 && n.at <= t1 && shown(n) >= m0 - 0.5 && shown(n) <= m1 + 0.5) picked.add(i); });
       paint();
     };
-    place(event);
-    drag(event, place, () => { band.hidden = true; paint(); });
+    drag(event, place, () => {
+      band.hidden = true;
+      if (!moved && !event.shiftKey) picked.clear();
+      paint();
+    });
   };
 
-  // Timing: the note's start moves; the starts of the notes either side stay put (warp
-  // markers, as the waveform view makes them).
+  // Timing: the picked notes' starts move together; the starts of the notes either side of
+  // them stay put (warp markers, as the waveform view makes them).
   const moveInTime = (event, index) => {
     const c = clip();
     const markers = (c.warp ?? []).map((m) => [...m]);
     const [a, b] = span();
     const perPx = (b - a) / width();
     if (!markers.length) markers.push([c.offset, c.offset], [c.offset + c.length, c.offset + c.length]);
-    const pin = (t) => {
-      if (t === undefined || markers.some(([, m]) => Math.abs(m - t) / perPx < 3)) return;
-      markers.push([toSource(markers, t), t]);
+    const markerAt = (t) => {
+      const near = markers.find(([, m]) => Math.abs(m - t) / perPx < 3);
+      if (near) return near;
+      const added = [toSource(markers, t), t];
+      markers.push(added);
       markers.sort((x, y) => x[0] - y[0]);
+      return added;
     };
-    pin(notes[index - 1]?.at);
-    pin(notes[index + 1]?.at);
-    const grabbed = notes[index].at;
-    let at = markers.findIndex(([, t]) => Math.abs(t - grabbed) / perPx < 3);
-    if (at < 0) {
-      markers.push([toSource(markers, grabbed), grabbed]);
-      markers.sort((x, y) => x[0] - y[0]);
-      at = markers.findIndex(([, t]) => t === grabbed);
-    }
-    const low = at > 0 ? markers[at - 1][1] + 0.01 : -Infinity;
-    const high = at < markers.length - 1 ? markers[at + 1][1] - 0.01 : Infinity;
+    const moving = [...picked].sort((x, y) => x - y);
+    const pins = new Set();
+    for (const i of moving) for (const j of [i - 1, i + 1]) if (notes[j] && !picked.has(j)) pins.add(markerAt(notes[j].at));
+    const movers = new Map(); // marker -> where it was
+    for (const i of moving) { const m = markerAt(notes[i].at); if (!pins.has(m)) movers.set(m, m[1]); }
+    const grabbedMarker = markers.find(([, m]) => Math.abs(m - notes[index].at) / perPx < 3);
+    if (!movers.size || !grabbedMarker || !movers.has(grabbedMarker)) return;
+    // How far they can go: not past a marker that stays.
+    let low = -Infinity, high = Infinity;
+    markers.forEach((m, k) => {
+      if (!movers.has(m)) return;
+      let p = k - 1; while (p >= 0 && movers.has(markers[p])) --p;
+      let q = k + 1; while (q < markers.length && movers.has(markers[q])) ++q;
+      if (p >= 0) low = Math.max(low, markers[p][1] + 0.01 - m[1]);
+      if (q < markers.length) high = Math.min(high, markers[q][1] - 0.01 - m[1]);
+    });
+    const grabbed = grabbedMarker[1];
     const startX = event.clientX;
-    let target = grabbed;
+    let delta = 0;
     const live = livePreview(daw, screen, "previewWarp", c.id);
+    const moved = () => markers.map((m) => (movers.has(m) ? [m[0], movers.get(m) + delta] : m));
     drag(event, (e) => {
       const free = grabbed + (e.clientX - startX) * perPx;
       const snapped = screen.snapTime ? screen.snapTime(c.start + (free - c.offset), e) - c.start + c.offset : free;
-      target = clamp(snapped, low, high);
-      preview = { shiftTime: [index, target - grabbed] };
-      live.send({ markers: markers.map((m, i) => (i === at ? [m[0], target] : m)) });
-      host.setStatus?.(`Moving ${noteName(shown(notes[index]))} ${signed((target - grabbed) * 1000)} ms`);
+      delta = clamp(snapped - grabbed, low, high);
+      preview = { times: new Map(moving.map((i) => [i, delta])) };
+      live.send({ markers: moved() });
+      host.setStatus?.(`Moving ${moving.length > 1 ? `${moving.length} notes` : noteName(shown(notes[index]))} ${signed(delta * 1000)} ms`);
       paint();
     }, () => {
       preview = null;
       host.setStatus?.("");
-      live.end(Math.abs(target - grabbed) > 1e-4);
-      if (Math.abs(target - grabbed) > 1e-4) {
-        markers[at][1] = target;
-        daw("setWarp", { id: c.id, markers });
-      }
+      const changed = Math.abs(delta) > 1e-4;
+      live.end(changed);
+      if (changed) daw("setWarp", { id: c.id, markers: moved() });
       paint();
     });
   };
