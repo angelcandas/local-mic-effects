@@ -12,6 +12,7 @@
 #include "analysis/MixCheck.h"
 #include "analysis/Structure.h"
 #include "stems/StemSplitter.h"
+#include "DawActions.h"
 
 // Connects the web UI's DAW screen (ui/daw.js) to the processor's DAW session.
 //
@@ -38,9 +39,13 @@
 //   "dawSongMap"  { state: "analysing", progress } while the song map listens, then
 //                 { state: "ready", map... } (see describeSongMap), "cancelled" or
 //                 { state: "error", error }
+// "actions.list" and "actions.run" { name, args } are the named, typed actions an AI (or the
+// command box) drives the app with; see DawActions.h.
 // See handle() for the commands. Message thread only.
 class DawBridge final : private juce::ValueTree::Listener
 {
+    friend class DawActions;
+
 public:
     // What Undo and Redo would do ("Move clip"), empty when there is nothing; for the app's Edit menu.
     juce::String getUndoName() const;
@@ -244,6 +249,7 @@ private:
     void pasteLanesWith (const juce::var& args, const juce::ValueTree& clip);
     Emit emit;
     std::function<juce::int64()> roundTripLatency;
+    std::unique_ptr<DawActions> actions; // the catalogue behind "actions.list" and "actions.run" (src/DawActions.h)
 
     bool sessionChanged = true;
     int watchedTrack = -1;                    // whose inserts get live readings
