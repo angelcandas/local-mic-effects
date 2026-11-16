@@ -25,6 +25,7 @@
 #include "analysis/MixAssistant.h"
 #include "analysis/MixCheck.h"
 #include "analysis/MixBench.h"
+#include "analysis/MixCorrect.h"
 #include "analysis/TakeComp.h"
 #include "Presets.h"
 #include "FactoryChains.h"
@@ -12797,6 +12798,69 @@ namespace
         check (std::abs (bench::getToneTiltDbPerOctave (a, b) - 1.5f) < 0.01f, "tilt of a 1.5 dB per octave curve");
         check (bench::getToneDistanceDb (b, b) < 1.0e-6f, "no tonal distance between equal curves");
 
+        // Listen and correct, on its own thread like the app runs it: the plan is written to a
+        // copy, rendered once and its levels corrected; a second listen to the corrected plan
+        // finds them where they were aimed.
+        {
+            daw::Edit edit;
+            std::map<int, analysis::Role> roles;
+            std::map<int, float> volumes;
+            for (const auto* name : { "Lead vocal", "Bass", "Drums" })
+            {
+                const auto id = (int) edit.addTrack (name)[daw::ids::id];
+                edit.addClip (id, song.getChildFile ("tracks/" + juce::String (name) + ".wav"), 0.0, seconds);
+                volumes[id] = 0.0f;
+            }
+            const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+            for (const auto& [id, profile] : source.tracks)
+                roles[id] = analysis::guessRole (edit.getTrack (id)[daw::ids::name].toString(), profile, seconds);
+
+            analysis::MixOptions options;
+            auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::rock, options);
+            const analysis::ApplyOptions apply;
+            const auto session = edit.getState().createCopy();
+
+            analysis::MixCorrection first, second;
+            std::thread worker ([&] { first = analysis::listenAndCorrect (session, plan, roles, analysis::MixStyle::rock, options, apply); });
+            worker.join();
+
+            const auto reading = [] (const analysis::MixCorrection& c, const juce::String& what) -> const analysis::MixReading*
+            {
+                for (const auto& r : c.readings)
+                    if (r.what == what)
+                        return &r;
+                return nullptr;
+            };
+
+            const auto* vob = reading (first, "Voice over backing");
+            const auto* master = reading (first, "Master loudness");
+            const auto* peak = reading (first, "True peak");
+            check (vob != nullptr && master != nullptr && peak != nullptr && ! first.cancelled,
+                   "listen and correct: measures voice over backing, master loudness and true peak in the render");
+            if (vob == nullptr || master == nullptr || peak == nullptr)
+                return;
+            std::cout << "        voice over backing aimed " << vob->aimed << ", got " << vob->got << ", after " << vob->after
+                      << "; master aimed " << master->aimed << ", got " << master->got << ", after " << master->after
+                      << "; peak " << peak->got << " -> " << peak->after << "; " << first.passes << " pass(es)\n";
+            check (first.passes <= 2, "at most two correction passes");
+
+            analysis::applyCorrection (plan, first, roles, volumes, 0.0f, apply);
+            check (plan.notes.joinIntoString (" ").contains ("Listened to the result"), "the readings go into the plan's notes");
+
+            second = analysis::listenAndCorrect (session, plan, roles, analysis::MixStyle::rock, options, apply);
+            const auto* vob2 = reading (second, "Voice over backing");
+            const auto* master2 = reading (second, "Master loudness");
+            const auto* peak2 = reading (second, "True peak");
+            check (vob2 != nullptr && std::abs (vob2->got - vob2->aimed) < 0.7f
+                       && std::abs (vob2->got - vob2->aimed) <= std::abs (vob->got - vob->aimed) + 0.1f,
+                   "the corrected plan lands the voice where it was aimed (" + juce::String (vob2 != nullptr ? vob2->got : 0.0f, 2)
+                       + " LU, aimed " + juce::String (vob->aimed, 1) + ", first try " + juce::String (vob->got, 2) + ")");
+            check (master2 != nullptr && peak2 != nullptr && peak2->got <= -0.8f
+                       && (std::abs (master2->got - master2->aimed) < 1.0f || peak2->got > -1.6f),
+                   "and the master at its loudness target or held at -1 dBTP (" + juce::String (master2 != nullptr ? master2->got : 0.0f, 1)
+                       + " LUFS, " + juce::String (peak2 != nullptr ? peak2->got : 0.0f, 1) + " dBTP)");
+        }
+
         folder.deleteRecursively();
     }
 
@@ -18143,6 +18207,102 @@ static void testDawFit()
     folder.deleteRecursively();
 }
 
+// Listen and correct in the app: after Listen, Auto Mix renders its plan once on a copy,
+// measures it and plans again with the corrections, which show in the notes.
+static void testAutoMixListenBridge()
+{
+    std::cout << "\nAuto Mix: listen and correct in the app\n";
+
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-listen", {});
+    folder.createDirectory();
+    juce::PropertiesFile::Options options;
+    options.applicationName = "MicFXTests";
+    options.filenameSuffix = ".settings";
+    juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+
+    PluginProcessor processor;
+    processor.prepareToPlay (sampleRate, blockSize);
+    auto& edit = processor.getDawEdit();
+
+    std::vector<std::pair<juce::String, juce::var>> events;
+    DawBridge::availableForTesting = true;
+    DawBridge bridge (processor, settings,
+                      [&] (const juce::Identifier& event, const juce::var& payload) { events.emplace_back (event.toString(), payload); },
+                      [] { return (juce::int64) 0; });
+    const auto run = [&] (const juce::String& command, std::initializer_list<std::pair<const char*, juce::var>> properties = {})
+    {
+        auto* object = new juce::DynamicObject();
+        for (const auto& [name, value] : properties)
+            object->setProperty (name, value);
+        juce::var result;
+        bridge.handle (command, juce::var (object), [&] (juce::var r) { result = r; });
+        return result;
+    };
+    run ("mode", { { "daw", true } });
+
+    // A voice and a loud noisy band, 8 s.
+    const auto seconds = 8.0;
+    const auto length = (int) (seconds * sampleRate);
+    juce::AudioBuffer<float> voice (1, length), band (1, length);
+    juce::Random random (3);
+    const auto twoPi = juce::MathConstants<double>::twoPi;
+    for (int i = 0; i < length; ++i)
+    {
+        const auto t = i / sampleRate;
+        double v = 0.0;
+        if (std::fmod (t, 2.0) < 1.5)
+            for (int h = 1; h <= 10; ++h)
+                v += std::sin (twoPi * 220.0 * h * t) / h;
+        voice.setSample (0, i, (float) (0.12 * v));
+        band.setSample (0, i, (float) (0.3 * std::sin (twoPi * 55.0 * t) + (random.nextFloat() - 0.5f) * 0.4f * std::exp (-std::fmod (t, 0.5) * 20.0)));
+    }
+    writeWav (folder.getChildFile ("Lead vocal.wav"), voice, sampleRate);
+    writeWav (folder.getChildFile ("Band.wav"), band, sampleRate);
+
+    const auto first = (int) edit.getTracks()[0][daw::ids::id];
+    edit.getTrack (first).setProperty (daw::ids::name, "Lead vocal", nullptr);
+    const auto second = (int) edit.addTrack ("Band")[daw::ids::id];
+    edit.addClip (first, folder.getChildFile ("Lead vocal.wav"), 0.0, seconds);
+    edit.addClip (second, folder.getChildFile ("Band.wav"), 0.0, seconds);
+    processor.getDawEngine().loadAllNow();
+    processor.getDawEngine().rebuildNow();
+
+    check ((bool) run ("autoMix", { { "action", "analyse" }, { "style", "pop" } })["ok"], "Auto Mix starts listening");
+
+    int ready = 0;
+    juce::var last;
+    bool checking = false;
+    for (int i = 0; i < 3000 && ready < 2; ++i)
+    {
+        events.clear();
+        bridge.tick();
+        for (const auto& [name, payload] : events)
+            if (name == "dawAutoMix")
+            {
+                if (payload["state"].toString() == "ready")
+                    ++ready, last = payload;
+                else if (payload["state"].toString() == "analysing" && ready == 1)
+                    checking = true;
+                else if (payload["state"].toString() == "error" || payload["state"].toString() == "cancelled")
+                    ready = 99;
+            }
+        if (ready < 2)
+            juce::Thread::sleep (10);
+    }
+
+    check (ready == 2 && checking, "the plan shows, then it listens to the result and shows the plan again");
+    juce::String notes;
+    if (auto* array = last["notes"].getArray())
+        for (const auto& note : *array)
+            notes << note.toString() << "\n";
+    std::cout << notes.replace ("Listened", "        Listened");
+    check (notes.contains ("Listened to the result: voice over backing aimed for"),
+           "the notes say what it aimed for and what came out");
+
+    processor.releaseResources();
+    folder.deleteRecursively();
+}
+
 static void testFactoryChains()
 {
     std::cout << "\nFactory vocal chains\n";
@@ -18412,6 +18572,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "bench")
     {
         testMixBench();
+        testAutoMixListenBridge();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -18704,6 +18865,7 @@ int main()
     testAutoMixAudition();
     testAutoMixPlacement();
     testMixBench();
+    testAutoMixListenBridge();
     testAutoMixPhase();
     testAutoMixRides();
     testAutoMixModes();

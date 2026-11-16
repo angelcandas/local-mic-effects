@@ -153,6 +153,10 @@ struct DawBridge::AutoMixJob
     juce::ValueTree session;
     std::map<int, analysis::Role> knownRoles;
     std::vector<analysis::TrackPairAlignment> alignments;
+
+    // Listen and correct (check): the plan rendered on a copy, measured and corrected.
+    bool check = false;
+    analysis::MixCorrection correction;
 };
 
 struct DawBridge::MixCheckJob
@@ -1473,7 +1477,17 @@ void DawBridge::tick()
         {
             auto job = std::move (autoMixJob);
 
-            if (job->result.cancelled)
+            if (job->check)
+            {
+                // Cancelled: the plan stays as it was planned.
+                if (! job->correction.cancelled)
+                {
+                    autoMixCorrection = std::move (job->correction);
+                    replanAutoMix();
+                }
+                emit ("dawAutoMix", describeAutoMix());
+            }
+            else if (job->result.cancelled)
             {
                 emit ("dawAutoMix", object ({ { "state", "cancelled" } }));
             }
@@ -1519,8 +1533,10 @@ void DawBridge::tick()
                 autoMixReference = false;
                 autoMixTicks.clear(); // a new listen: its own list, every move at its default
                 autoMixApplied = false;
+                autoMixCorrection.reset();
                 replanAutoMix();
                 emit ("dawAutoMix", describeAutoMix());
+                startAutoMixCheck();
             }
         }
         else
@@ -2832,6 +2848,47 @@ void DawBridge::replanAutoMix()
 
     autoMixPlan = analysis::planMix (*autoMixAnalysis, autoMixRoles, volumes,
                                      (float) edit.getMaster().getProperty (ids::volume, 0.0f), autoMixStyle, options);
+
+    // What listening to the result found (for this style and mode).
+    if (autoMixCorrection.has_value() && autoMixCorrection->style == autoMixStyle && autoMixCorrection->mode == autoMixOptions.mode)
+        analysis::applyCorrection (autoMixPlan, *autoMixCorrection, autoMixRoles, volumes,
+                                   (float) edit.getMaster().getProperty (ids::volume, 0.0f), getAutoMixApplyOptions());
+}
+
+// Listen and correct: writes the plan into a copy of the session, renders it once and
+// corrects the levels it measures (MixCorrect.h), on a background thread. The panel shows
+// the plan meanwhile; it's planned again with the corrections when they're in.
+void DawBridge::startAutoMixCheck()
+{
+    if (autoMixJob != nullptr || autoMixPlan.moves.empty() || autoMixReference
+        || (autoMixOptions.mode != analysis::MixMode::mix && autoMixOptions.mode != analysis::MixMode::fit))
+        return;
+
+    engine.captureInstrumentStates();
+    auto job = std::make_shared<AutoMixJob>();
+    job->check = true;
+
+    auto apply = getAutoMixApplyOptions();
+    for (const auto& track : edit.getTracks())
+    {
+        const auto id = (int) track[ids::id];
+        const auto current = (float) track.getProperty (ids::volume, 0.0f);
+        if (const auto base = getAutoMixBaseVolume (id, current); std::abs (base - current) > 0.001f)
+            apply.baseVolumes[id] = base;
+    }
+
+    auto options = autoMixOptions;
+    options.tempo = edit.getTempo();
+    autoMixJob = job;
+    emit ("dawAutoMix", object ({ { "state", "analysing" }, { "progress", 0.0 } }));
+
+    juce::Thread::launch ([job, session = edit.getState().createCopy(), plan = autoMixPlan, roles = autoMixRoles, style = autoMixStyle,
+                           options, apply, rate = engine.getSampleRate(), cache = profileCache]
+    {
+        job->correction = analysis::listenAndCorrect (session, plan, roles, style, options, apply, rate, cache.get(),
+                                                      [job] (double p) { job->progress = p; return ! job->cancel.load(); });
+        job->finished = true;
+    });
     autoMixDirty = true;
     saveAutoMixState();
 }
@@ -4725,7 +4782,10 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
             for (const auto& property : roles->getProperties())
             {
                 const auto trackId = property.name.toString().getIntValue();
-                autoMixRoles[trackId] = analysis::getRoleFromKey (property.value.toString());
+                const auto role = analysis::getRoleFromKey (property.value.toString());
+                if (autoMixRoles.count (trackId) == 0 || autoMixRoles[trackId] != role)
+                    autoMixCorrection.reset(); // measured for other roles: listen again to correct
+                autoMixRoles[trackId] = role;
                 if (auto track = edit.getTrack (trackId); track.isValid())
                     track.setProperty (ids::mixRole, analysis::getRoleKey (autoMixRoles[trackId]), nullptr);
             }

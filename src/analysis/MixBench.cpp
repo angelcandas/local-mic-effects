@@ -641,8 +641,20 @@ Run runSong (const Song& song, MixStyle style, const juce::File& outFolder, cons
         mixOptions.alignments = measureAlignments (edit.getState().createCopy(), knownRoles);
 
     run.plan = planMix (analysis, run.roles, volumes, 0.0f, style, mixOptions);
+
+    ApplyOptions apply;
+    apply.amount = options.amount;
+    if (options.listen)
+    {
+        log ("  listening to the result");
+        run.correction = listenAndCorrect (edit.getState().createCopy(), run.plan, run.roles, style, mixOptions, apply, options.sampleRate);
+        applyCorrection (run.plan, run.correction, run.roles, volumes, 0.0f, apply);
+        run.listened = true;
+        run.style << "+listen";
+    }
+
     run.numMoves = (int) run.plan.moves.size();
-    applyMix (edit, run.plan, options.amount);
+    applyMix (edit, run.plan, apply);
 
     outFolder.createDirectory();
     run.rendered = outFolder.getChildFile (juce::File::createLegalFileName (song.name) + "-" + run.style + ".wav");
@@ -701,7 +713,7 @@ juce::String getCsvHeader()
                                 "lufs_ours", "lufs_human", "lra_ours", "lra_human", "crest_ours", "crest_human",
                                 "width_ours", "width_human", "corr_ours", "corr_human", "balance_ours", "balance_human",
                                 "tone_distance_db", "tone_tilt_db_oct", "vob_ours", "vob_ours_exact", "vob_human", "vob_error",
-                                "role_error_lu", "fit_ours_db", "fit_human_db", "lag_human_s" };
+                                "role_error_lu", "fit_ours_db", "fit_human_db", "lag_human_s", "corrections" };
     for (const auto role : allRoles)
     {
         columns.add (juce::String ("lu_") + getRoleKey (role) + "_ours");
@@ -735,6 +747,13 @@ juce::String toCsvRow (const Run& run)
     cells.add (num (run.oursFit.fitErrorDb, 2));
     cells.add (run.hasHuman ? num (run.humanFit.fitErrorDb, 2) : juce::String());
     cells.add (run.hasHuman ? juce::String (run.humanFit.lagHops * Profile::hopSeconds, 1) : juce::String());
+    {
+        juce::StringArray changes;
+        for (const auto& [id, db] : run.correction.volumeDb)
+            changes.add ((id == daw::Edit::masterId ? juce::String ("master") : run.trackNames.count (id) > 0 ? run.trackNames.at (id) : juce::String (id))
+                         + " " + signedNum (db));
+        cells.add (quoteCsv (changes.joinIntoString ("; ")));
+    }
     for (const auto role : allRoles)
     {
         const auto o = run.oursLevels.roleLu.find (role);

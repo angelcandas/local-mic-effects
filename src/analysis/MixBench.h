@@ -2,6 +2,7 @@
 
 #include "Analysis.h"
 #include "MixAssistant.h"
+#include "MixCorrect.h"
 
 #include <map>
 #include <optional>
@@ -101,6 +102,7 @@ struct Options
     float amount = 1.0f;
     double sampleRate = 44100.0;
     bool alignments = true;           // measure phase between tracks like the app does
+    bool listen = false;              // listen and correct (MixCorrect.h) before writing the plan
     std::function<void (const juce::String&)> log; // progress lines
 };
 
@@ -122,6 +124,8 @@ struct Run
     RoleLevels oursLevels, humanLevels;
     RoleLevels oursExactLevels;      // ours from the tracks' own renders (no fit), to check the fit
     MixPlan plan;
+    bool listened = false;
+    MixCorrection correction;        // when listened
 
     float getToneDistanceDb() const { return bench::getToneDistanceDb (ours.tone, human.tone); }
     float getToneTiltDbPerOctave() const { return bench::getToneTiltDbPerOctave (ours.tone, human.tone); }
