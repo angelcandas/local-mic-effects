@@ -2853,6 +2853,9 @@ void DawBridge::replanAutoMix()
     if (autoMixCorrection.has_value() && autoMixCorrection->style == autoMixStyle && autoMixCorrection->mode == autoMixOptions.mode)
         analysis::applyCorrection (autoMixPlan, *autoMixCorrection, autoMixRoles, volumes,
                                    (float) edit.getMaster().getProperty (ids::volume, 0.0f), getAutoMixApplyOptions());
+
+    autoMixDirty = true;
+    saveAutoMixState();
 }
 
 // Listen and correct: writes the plan into a copy of the session, renders it once and
@@ -2889,8 +2892,6 @@ void DawBridge::startAutoMixCheck()
                                                       [job] (double p) { job->progress = p; return ! job->cancel.load(); });
         job->finished = true;
     });
-    autoMixDirty = true;
-    saveAutoMixState();
 }
 
 //==============================================================================
