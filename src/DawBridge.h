@@ -200,8 +200,11 @@ private:
     // message thread as one undo step.
     juce::var handleBackingVocals (const juce::var& args);
     void finishBackingVocals();
+    void finishBackingRender();
     struct BackingJob;
     std::shared_ptr<BackingJob> backingJob;
+    struct BackingRender;
+    std::shared_ptr<BackingRender> backingRender;
 
     // Song key (src/analysis/Key.h): detection runs on a background thread.
     juce::var handleKey (const juce::var& args);

@@ -1,5 +1,5 @@
 // "Build backing vocals" (the clip menu): harmony and double voices from a sung lead, as
-// real clips on new tracks in a folded group (see src/analysis/Harmony.h and the bridge's
+// rendered audio clips on regular tracks (see src/analysis/Harmony.h and the bridge's
 // "backingVocals" command). Each voice is a copy of the lead clip with note edits, so the
 // note pitch editor can fix any of its notes afterwards.
 
@@ -74,7 +74,9 @@ export class BackingVocals {
     });
     this.feel = select("feel", [["tight", "Tight (a careful studio take)"], ["loose", "Loose (a live group)"]], prefs.feel || "tight");
     this.follow = select("follow", [["chords", "The chords of the other tracks"], ["key", "The song key only"]], prefs.follow || "chords");
-    options.append(row("Feel", "How far each voice wanders from the lead in time, tuning and vibrato", this.feel),
+    this.tracks = select("tracks", [["one", "One track with all the voices"], ["each", "One track for each voice"]], prefs.tracks || "one");
+    options.append(row("Tracks", "Where the rendered voices go. Separate tracks can each be automated", this.tracks),
+                   row("Feel", "How far each voice wanders from the lead in time, tuning and vibrato", this.feel),
                    row("Harmony", "What the harmony notes are chosen from", this.follow));
     this.follow.addEventListener("change", () => this.update());
 
@@ -122,8 +124,8 @@ export class BackingVocals {
     const from = this.follow.value === "chords"
       ? `Harmonies follow the chords the other tracks play${keyed ? `, in ${keyName}` : ""}.`
       : keyed ? `Harmonies follow the scale of ${keyName}.` : "Harmonies follow the scale of the key the lead sings in.";
-    this.note.textContent = `${from} Each voice is a copy of this clip on its own track, in a folded “Backing vocals” group, ` +
-      "sung a little differently so they sound like separate takes. Fix any note afterwards in the clip's Notes view.";
+    this.note.textContent = `${from} The voices are rendered to ordinary audio ` +
+      "(sung a little differently so they sound like separate takes) and land as plain clips on regular tracks under this one.";
   }
 
   setStatus(text, isError = false) {
@@ -134,9 +136,10 @@ export class BackingVocals {
     if (!this.clip) return;
     const parts = this.parts();
     if (!parts.length) return this.setStatus("Pick at least one voice.", true);
-    savePrefs({ voices: this.voiceSelects.map((s) => s.value), feel: this.feel.value, follow: this.follow.value });
+    savePrefs({ voices: this.voiceSelects.map((s) => s.value), feel: this.feel.value, follow: this.follow.value, tracks: this.tracks.value });
     this.setStatus("Starting…");
-    const result = await this.daw("backingVocals", { action: "start", id: this.clip.id, parts, feel: this.feel.value, follow: this.follow.value });
+    const result = await this.daw("backingVocals", { action: "start", id: this.clip.id, parts, feel: this.feel.value, follow: this.follow.value,
+                                                                separate: this.tracks.value === "each" });
     if (result?.ok === false) this.setStatus(result.error, true);
   }
 
@@ -150,7 +153,7 @@ export class BackingVocals {
       this.bar.style.setProperty("--progress", String(progress));
       s.setJob("backing", { label: "Backing vocals", progress, cancel: () => this.daw("backingVocals", { action: "cancel" }),
                             open: () => { this.panel.hidden = false; } });
-      this.setStatus(progress < 0.7 && this.follow.value === "chords" ? "Listening to the chords…" : "Listening to the lead…");
+      this.setStatus(event.stage === "rendering" ? "Rendering the voices…" : progress < 0.7 && this.follow.value === "chords" ? "Listening to the chords…" : "Listening to the lead…");
       return;
     }
     s.endJob("backing");
@@ -158,9 +161,9 @@ export class BackingVocals {
     if (event.state === "cancelled") return this.setStatus("Cancelled.");
     if (event.state === "done") {
       this.panel.hidden = true;
-      const count = Number(event.count) || 0;
+      const count = Number(event.count) || 0, tracks = Number(event.tracks) || 1;
       const chords = event.listened && !event.chords ? " (no chords were heard, so they follow the key)" : "";
-      this.toast(`Added ${count} backing voice${count === 1 ? "" : "s"} in a folded group${event.key ? `, in ${event.key}` : ""}${chords}.`, "", "undo");
+      this.toast(`Added ${count} backing voice${count === 1 ? "" : "s"}${tracks > 1 ? ` on ${tracks} tracks` : ""}${event.key ? `, in ${event.key}` : ""}${chords}.`, "", "undo");
     }
   }
 }
