@@ -47,6 +47,12 @@ Which tracks: by number (`2`, the first is 1), by name (part of a name works), b
 | `effect.add`, `effect.remove`, `effect.set` | Effects on tracks (reverb, compressor, eq...). |
 | `return.add`, `send.set` | Shared effect tracks and sends to them. |
 | `mix.auto`, `mix.check`, `mix.fix` | Run Auto Mix (listen and apply), run Mix Check, apply one of its fixes. |
+| `instruments.list` | The instruments a MIDI track can use. |
+| `context.get` | What a new part must fit: key, tempo, bars and sections of a range, chords per bar (from MIDI notes), what each track plays there. |
+| `midi.write` | Write a part: notes (pitch as `60` or `"C4"`, start and length in beats) on a MIDI track, or on a new one with an instrument. |
+| `midi.get`, `midi.clear` | Read the notes in a range; delete them. |
+| `midi.quantize`, `midi.snapToKey` | Put notes on a grid; move out-of-key notes into the song's key. |
+| `audio.toMidi` | Turn an audio track's melody, bass or drums into MIDI notes (to give an AI the lead melody as notes). |
 | `history.undo`, `history.redo` | Undo and redo. |
 
 Not offered: deleting tracks or clearing the project. Ask for those in MicFX itself.
@@ -57,6 +63,16 @@ Not offered: deleting tracks or clearing the project. Ask for those in MicFX its
 - "Mute the voice and loop the second chorus." → `track.mute { tracks: "voice" }`, `loop.set { from: "chorus 2" }`
 - "Make the guitars 3 dB quieter and pan them left." → `track.volume { tracks: "guitar", change: -3 }`, `track.pan`
 - "Run Auto Mix in rock style but let me hear the plan first." → `mix.auto { style: "rock", apply: false }`
+
+## Writing a part
+
+"Create a trumpet melody that fills the second chorus": the AI calls `context.get { from: "chorus 2" }` for the key,
+tempo, bars and chords, may call `midi.get` or `audio.toMidi` to see the lead melody, writes the part with `midi.write`
+(`from: "chorus 2"`, notes in beats from there), and can fit it with `midi.snapToKey`. All one undo step per call.
+
+The built-in instruments have no trumpet or other brass or woodwinds. A word like "trumpet" uses the closest built-in
+sound (Nova, a synth lead) and the answer says so; an instrument plug-in you have installed can be named by its id
+(`instruments.list`). A real brass instrument is a separate piece of work.
 
 ## Other programs
 
