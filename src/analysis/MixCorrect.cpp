@@ -111,7 +111,6 @@ MixCorrection listenAndCorrect (const juce::ValueTree& session, const MixPlan& p
         return result;
 
     const auto targets = getTargets (style);
-    const auto fit = options.mode == MixMode::fit;
 
     // The plan as it would be written, on a copy.
     daw::Edit copy;
@@ -168,7 +167,7 @@ MixCorrection listenAndCorrect (const juce::ValueTree& session, const MixPlan& p
     };
 
     std::map<int, float> gain; // dB change per track
-    float masterGain = 0.0f;
+    constexpr float masterGain = 0.0f; // Auto Mix leaves the master alone
 
     const auto voiceOverBacking = [&]() -> std::optional<float>
     {
@@ -261,23 +260,6 @@ MixCorrection listenAndCorrect (const juce::ValueTree& session, const MixPlan& p
                         gain[id] += change, changed = true;
                 }
 
-        // The master: towards the loudness target, the true peak under -1 dBTP. Fit mode
-        // leaves it (the backing's mix set it).
-        if (! fit && mixGot > -150.0f && canChange (daw::Edit::masterId))
-        {
-            const auto loud = mixPowers();
-            const auto peak = truePeak();
-            const auto forLoudness = targets.masterLufs - loud;
-            const auto forPeak = -1.0f - peak;
-            const auto wanted = juce::jmin (forLoudness, forPeak);
-            if (std::abs (forLoudness) > loudnessTolerance || forPeak < 0.0f)
-            {
-                const auto change = step ("master", wanted);
-                if (std::abs (change) > 0.05f)
-                    masterGain += change, changed = true;
-            }
-        }
-
         if (! changed)
             break;
         ++result.passes;
@@ -286,13 +268,10 @@ MixCorrection listenAndCorrect (const juce::ValueTree& session, const MixPlan& p
     for (const auto& [id, g] : gain)
         if (std::abs (g) > 0.05f)
             result.volumeDb[id] = std::round (g * 10.0f) / 10.0f;
-    if (std::abs (masterGain) > 0.05f)
-        result.volumeDb[daw::Edit::masterId] = std::round (masterGain * 10.0f) / 10.0f;
 
     // Readings, with the rounded corrections.
     for (auto& [id, g] : gain)
         g = result.volumeDb.count (id) > 0 ? result.volumeDb[id] : 0.0f;
-    masterGain = result.volumeDb.count (daw::Edit::masterId) > 0 ? result.volumeDb[daw::Edit::masterId] : 0.0f;
 
     if (vobGot.has_value())
         result.readings.push_back ({ "Voice over backing", "LU", targets.voiceOverBackingLu, *vobGot, voiceOverBacking().value_or (*vobGot),
@@ -300,11 +279,12 @@ MixCorrection listenAndCorrect (const juce::ValueTree& session, const MixPlan& p
     for (const auto& [id, got] : underGot)
         result.readings.push_back ({ "Background vocals under the lead", "LU", targets.backingVocalUnderLeadLu, got, underLead (id).value_or (got),
                                      result.volumeDb.count (id) > 0 });
-    if (! fit && mixGot > -150.0f)
+    // The mix's loudness and peak as they come out (Auto Mix leaves the master alone:
+    // mastering sets the final loudness), so a mix that clips before mastering is seen.
+    if (mixGot > -150.0f)
     {
-        const auto masterChanged = result.volumeDb.count (daw::Edit::masterId) > 0;
-        result.readings.push_back ({ "Master loudness", "LUFS", targets.masterLufs, mixGot, mixPowers(), masterChanged });
-        result.readings.push_back ({ "True peak", "dBTP", -1.0f, peakGot, truePeak(), masterChanged });
+        result.readings.push_back ({ "Mix loudness", "LUFS", targets.masterLufs, mixGot, mixPowers(), false });
+        result.readings.push_back ({ "True peak", "dBTP", -1.0f, peakGot, truePeak(), false });
     }
 
     // How much the rest still covers the lead's words, as rendered.
@@ -364,9 +344,14 @@ void applyCorrection (MixPlan& plan, const MixCorrection& correction, const std:
     {
         const auto format = [&] (float v) { return (r.unit == "LU" ? formatLu (v) : juce::String (v, 1)) + " " + r.unit; };
         juce::String line;
-        line << "Listened to the result: " << r.what.toLowerCase() << (r.unit == "dBTP" ? " kept under " : " aimed for ")
-             << format (r.aimed) << ", came out at " << format (r.got);
-        if (r.corrected)
+        line << "Listened to the result: " << r.what.toLowerCase();
+        if (r.what == "Mix loudness")
+            line << " " << format (r.after) << " (mastering takes it to the final level)";
+        else if (r.what == "True peak")
+            line << " " << format (r.after) << (r.after > -1.0f ? ", over -1 dBTP: master it, or lower the master before exporting" : "");
+        else
+            line << " aimed for " << format (r.aimed) << ", came out at " << format (r.got);
+        if (r.corrected && r.unit == "LU")
             line << ", corrected to " << format (r.after);
         plan.notes.add (line + ".");
     }
@@ -382,7 +367,7 @@ void applyCorrection (MixPlan& plan, const MixCorrection& correction, const std:
     {
         if (r.what == "Voice over backing")
             plan.voiceOverBackingLu = r.after;
-        else if (r.what == "Master loudness")
+        else if (r.what == "Mix loudness")
             plan.mixLufs = r.after;
     }
 }

@@ -12833,32 +12833,27 @@ namespace
             };
 
             const auto* vob = reading (first, "Voice over backing");
-            const auto* master = reading (first, "Master loudness");
+            const auto* master = reading (first, "Mix loudness");
             const auto* peak = reading (first, "True peak");
             check (vob != nullptr && master != nullptr && peak != nullptr && ! first.cancelled,
-                   "listen and correct: measures voice over backing, master loudness and true peak in the render");
+                   "listen and correct: measures voice over backing, the mix's loudness and true peak in the render");
             if (vob == nullptr || master == nullptr || peak == nullptr)
                 return;
             std::cout << "        voice over backing aimed " << vob->aimed << ", got " << vob->got << ", after " << vob->after
-                      << "; master aimed " << master->aimed << ", got " << master->got << ", after " << master->after
+                      << "; mix " << master->got << " LUFS -> " << master->after
                       << "; peak " << peak->got << " -> " << peak->after << "; " << first.passes << " pass(es)\n";
             check (first.passes <= 2, "at most two correction passes");
 
+            check (first.volumeDb.count (daw::Edit::masterId) == 0, "the master is left alone");
             analysis::applyCorrection (plan, first, roles, volumes, 0.0f, apply);
             check (plan.notes.joinIntoString (" ").contains ("Listened to the result"), "the readings go into the plan's notes");
 
             second = analysis::listenAndCorrect (session, plan, roles, analysis::MixStyle::rock, options, apply);
             const auto* vob2 = reading (second, "Voice over backing");
-            const auto* master2 = reading (second, "Master loudness");
-            const auto* peak2 = reading (second, "True peak");
             check (vob2 != nullptr && std::abs (vob2->got - vob2->aimed) < 0.7f
                        && std::abs (vob2->got - vob2->aimed) <= std::abs (vob->got - vob->aimed) + 0.1f,
                    "the corrected plan lands the voice where it was aimed (" + juce::String (vob2 != nullptr ? vob2->got : 0.0f, 2)
                        + " LU, aimed " + juce::String (vob->aimed, 1) + ", first try " + juce::String (vob->got, 2) + ")");
-            check (master2 != nullptr && peak2 != nullptr && peak2->got <= -0.8f
-                       && (std::abs (master2->got - master2->aimed) < 1.0f || peak2->got > -1.6f),
-                   "and the master at its loudness target or held at -1 dBTP (" + juce::String (master2 != nullptr ? master2->got : 0.0f, 1)
-                       + " LUFS, " + juce::String (peak2 != nullptr ? peak2->got : 0.0f, 1) + " dBTP)");
         }
 
         folder.deleteRecursively();

@@ -7,8 +7,8 @@
 // loudness in ways the prediction only estimates. This writes the plan into a copy of the
 // session, renders it once (each track as it plays in the mix, and the mix), measures what
 // came out against what the plan aimed for, and works out the volume corrections that close
-// the gap: the lead voice over the backing, background vocals under the lead, and the
-// master's loudness held under -1 dBTP. Volume changes scale each track's render exactly,
+// the gap: the lead voice over the backing and background vocals under the lead. The mix's
+// loudness and true peak are reported (the master is left alone: mastering is its own flow). Volume changes scale each track's render exactly,
 // so the corrections are worked out from that one render in up to two passes, each one
 // smaller than the last, stopping within 0.5 LU / 1 dB.
 //
@@ -18,7 +18,7 @@ namespace analysis
 {
 struct MixReading
 {
-    juce::String what;     // "Voice over backing", "Master loudness"...
+    juce::String what;     // "Voice over backing", "Background vocals under the lead", "Mix loudness", "True peak"
     juce::String unit;     // "LU", "LUFS", "dBTP"
     float aimed = 0.0f;    // what the plan aimed for (a limit for "dBTP")
     float got = 0.0f;      // measured in the render of the plan
@@ -28,7 +28,7 @@ struct MixReading
 
 struct MixCorrection
 {
-    std::map<int, float> volumeDb;  // by track id (daw::Edit::masterId for the master): change to the applied volume, dB
+    std::map<int, float> volumeDb;  // by track id: change to the applied volume, dB
     std::vector<MixReading> readings;
     float maskingDb = 0.0f;         // how much the rest still covers the lead's words (importance weighted, dB), as rendered
     bool hasMasking = false;
