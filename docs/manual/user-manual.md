@@ -382,7 +382,7 @@ When you record over existing audio, or with a loop, every pass becomes a **take
 
 ## 4.8 The clip editor: pitch and timing
 
-Double-click an audio clip (or press **W**) to open the **clip editor** on the Clip tab. It has two views, **Wave** and **Notes**.
+Double-click an audio clip (or press **W**) to open the **clip editor** on the Clip tab. It has two views, **Wave** and **Notes**. **⧉ Window** opens it in its own window over the arrangement: drag its title bar to move it, its edges or corners to resize it, double-click the title bar (or □) to fill the screen, and **Dock** or × to put it back. The window shows whichever audio clip is selected.
 
 ![The clip editor, Wave view](images/clip-editor.png)
 
@@ -402,8 +402,10 @@ In the arrangement: the **Warp tool** (**J**) works on the selected clips (click
 
 **Notes view** is a note-by-note vocal editor. Your sung notes appear as blocks on a keyboard with the pitch curve, with the energy of your voice in a lane below.
 
-- Tools (keys): **V** select, **C** cut, **D** drift, **M** modulation (vibrato), **T** transition, **F** formant, **L** loudness, **W** timing.
-- Move a note to retune it, **Snap** pulls notes to the nearest scale note, **Straighten** reduces drift, **Reset** puts things back. You can also change a note's formant and level.
+- Tools (keys): **V** select (drag a note up or down to retune it; picked notes move together), **C** split (Alt-click joins a note to the next), **W** timing (drag notes left or right; picked notes move together).
+- **Picking notes works with every tool**: drag across empty space to pick every note the box touches, **Shift-click** a note to add or drop it, **Shift-drag** to add a box, **Ctrl+A** for all, **Esc** for none.
+- **The sliders act on the picked notes** (on every note when none is picked): **Quantize** pulls notes onto their semitone (100% = right on it), **Straighten** takes out the slow wander of the pitch, **Vibrato** (0% none, 200% twice as wide), **Formant**, **Volume** and **Glide** (how quickly a note slides in from the one before). "mixed" means the picked notes differ; double-click a slider's name to put it back. **To key** puts notes right on the song's key (or semitones), **Reset** puts them back as sung.
+- **Hear it with the song**: click the ruler at the top to move the song's cursor there (drag to scrub), double-click it (or empty space) to play from there; Space plays and stops as anywhere. While the song plays, the view pages along and your edits are heard as you make them.
 - Each note edit is non-destructive and you hear the result when you play.
 
 ## 4.9 MIDI tracks, instruments and the piano roll

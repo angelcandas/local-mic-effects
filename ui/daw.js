@@ -4091,6 +4091,7 @@ class DawScreen {
   }
 
   renderInspector() {
+    this.renderClipWindow();
     if (this.dockTab === "mixer") {
       this.watchInserts(-1);
       return;
@@ -4128,11 +4129,9 @@ class DawScreen {
     const onTrackTab = this.dockTab === "track";
     const returnsKey = [...(session.returns ?? []), ...(session.groups ?? [])].map((r) => `${r.id}:${r.name}`).join(",");
     // The other audio clips selected with an audio clip: more lanes in its clip editor.
-    const laneClips = found && !found.clip.midi
-      ? this.selectedClipIds().filter((id) => id !== found.clip.id).map((id) => this.findClip(id)).filter((f) => f && !f.clip.midi)
-          .map((f) => ({ clip: f.clip, track: { ...f.track, colour: f.track.colour || trackColour(f.track, session.tracks.indexOf(f.track)) } }))
-      : [];
-    const key = `${this.dockTab}|${owner?.id}|${found?.clip.id}|${laneClips.map((f) => f.clip.id).join(",")}|${owner?.name}|${returnsKey}|${(this.session.inputs ?? []).join(",")}`;
+    const laneClips = this.laneClipsFor(found);
+    const popped = Boolean(this.clipWindowOpen && found && !found.clip.midi);
+    const key = `${this.dockTab}|${owner?.id}|${found?.clip.id}|${laneClips.map((f) => f.clip.id).join(",")}|${owner?.name}|${returnsKey}|${(this.session.inputs ?? []).join(",")}|${popped}`;
     if (key !== this.inspectorKey) {
       this.inspectorKey = key;
       this.inspector.replaceChildren();
@@ -4144,10 +4143,12 @@ class DawScreen {
       if (onTrackTab) {
         // An audio clip: its card, then its editor (waveform, pitch, warping), then the
         // track's Pitch & time. A MIDI clip: the piano roll.
-        const shared = { daw, peaks: (args) => nativeDaw("peaks", args), ValueKnob, button, toast: (...a) => toast(...a) };
+        const shared = { daw, peaks: (args) => nativeDaw("peaks", args), ValueKnob, button, toast: (...a) => toast(...a), popOut: () => this.toggleClipWindow(true) };
         this.clipPanel = !found ? null : found.clip.midi ? this.createPianoRoll(found.clip, found.track) : this.createClipPanel(found.clip);
         this.inspector.append(this.clipPanel?.element ?? this.createNoClipPanel(owner));
-        if (found && !found.clip.midi) {
+        if (popped) {
+          this.inspector.append(this.createPoppedPanel());
+        } else if (found && !found.clip.midi) {
           this.clipEditor = createClipEditor(this, found.track, found.clip, shared, laneClips);
           this.clipEditor.element.style.setProperty("--wave", trackColour(found.track, session.tracks.indexOf(found.track)));
           this.inspector.append(this.clipEditor.element);
@@ -4172,6 +4173,167 @@ class DawScreen {
       this.chainGains.output.knob.update(owner.outGain ?? 0);
     }
     this.watchInserts(owner && !onTrackTab && !this.root.classList.contains("dock-hidden") ? owner.id : -1);
+  }
+
+  // The other audio clips selected with an audio clip: more lanes in its clip editor.
+  laneClipsFor(found) {
+    const session = this.session;
+    if (!found || found.clip.midi) return [];
+    return this.selectedClipIds().filter((id) => id !== found.clip.id).map((id) => this.findClip(id)).filter((f) => f && !f.clip.midi)
+      .map((f) => ({ clip: f.clip, track: { ...f.track, colour: f.track.colour || trackColour(f.track, session.tracks.indexOf(f.track)) } }));
+  }
+
+  // Where the clip editor's window was and whether it filled the screen (kept between runs;
+  // the window itself opens from the editor's Window button).
+  static clipWindowPrefs() {
+    try { return JSON.parse(localStorage.getItem("micfx.clipWindow") ?? "null") ?? {}; } catch { return {}; }
+  }
+  saveClipWindow() {
+    const saved = { ...DawScreen.clipWindowPrefs(), ...(this.clipWinBox ?? {}), max: Boolean(this.clipWinMax) };
+    try { localStorage.setItem("micfx.clipWindow", JSON.stringify(saved)); } catch { /* private mode */ }
+  }
+
+  // The clip editor in its own window (over the arrangement): open it, or put it back in the
+  // bottom panel's Track tab.
+  toggleClipWindow(open = !this.clipWindowOpen) {
+    this.clipWindowOpen = open;
+    this.inspectorKey = null;
+    this.saveClipWindow();
+    this.renderInspector();
+  }
+
+  // The Track tab's card in the editor's place while it's in its own window.
+  createPoppedPanel() {
+    const element = html("section", "panel clip-panel is-empty clip-popped");
+    const head = html("div", "clip-head");
+    head.append(html("h3", "", "Clip editor"));
+    element.append(head, html("p", "panel-caption", "The clip editor is open in its own window: it shows the selected audio clip."),
+      button("tool", "Bring it back here", "Put the clip editor back in the bottom panel", () => this.toggleClipWindow(false)));
+    return element;
+  }
+
+  // The window: a title bar to drag it by (double-click maximises), edges and corners to resize
+  // it, the editor of the selected audio clip inside. It follows the selection like the dock does.
+  renderClipWindow() {
+    const found = this.findClip(this.selectedClip);
+    const audio = found && !found.clip.midi ? found : null;
+    if (!this.clipWindowOpen) {
+      this.windowEditor?.dispose?.();
+      this.windowEditor = null;
+      this.windowKey = "";
+      if (this.clipWin) this.clipWin.hidden = true;
+      return;
+    }
+    const win = this.clipWindowElement();
+    const wasHidden = win.hidden;
+    win.hidden = false;
+    if (wasHidden || this.clipWinMax) this.placeClipWindow();
+    const laneClips = this.laneClipsFor(audio);
+    const key = audio ? `${audio.clip.id}|${laneClips.map((f) => f.clip.id).join(",")}` : "none";
+    if (key !== this.windowKey) {
+      this.windowKey = key;
+      this.windowEditor?.dispose?.();
+      this.windowEditor = null;
+      if (audio) {
+        const shared = { daw, peaks: (args) => nativeDaw("peaks", args), ValueKnob, button, toast: (...a) => toast(...a), popped: true, popOut: () => this.toggleClipWindow(false) };
+        this.windowEditor = createClipEditor(this, audio.track, audio.clip, shared, laneClips);
+        this.clipWinBody.replaceChildren(this.windowEditor.element);
+      } else {
+        this.clipWinBody.replaceChildren(html("p", "panel-caption clip-window-empty", "Select an audio clip to edit it here."));
+      }
+    }
+    if (audio) {
+      this.windowEditor.element.style.setProperty("--wave", trackColour(audio.track, this.session.tracks.indexOf(audio.track)));
+      this.windowEditor.update(audio.track, audio.clip, laneClips);
+    }
+    this.clipWinTitle.textContent = audio ? `${audio.track.name} · ${audio.clip.name || "clip"}` : "Clip editor";
+  }
+
+  clipWindowElement() {
+    if (this.clipWin) return this.clipWin;
+    const win = this.clipWin = html("div", "clip-window");
+    win.hidden = true;
+    win.setAttribute("role", "dialog");
+    win.setAttribute("aria-label", "Clip editor");
+    const head = html("div", "clip-window-head");
+    this.clipWinTitle = html("strong", "", "Clip editor");
+    const maxButton = button("mini", "\u25A1", "Fill the whole window, or back to its size (double-click the title bar)", () => this.maximiseClipWindow());
+    head.append(this.clipWinTitle,
+      maxButton,
+      button("mini", "\u00D7", "Close the window: the clip editor goes back to the bottom panel", () => this.toggleClipWindow(false)));
+    this.clipWinBody = html("div", "clip-window-body");
+    win.append(head, this.clipWinBody);
+    for (const edge of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
+      const grip = html("div", `clip-window-grip is-${edge}`);
+      grip.addEventListener("pointerdown", (event) => this.dragClipWindow(event, edge));
+      win.append(grip);
+    }
+    head.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || event.target.closest("button")) return;
+      if (event.detail >= 2) { this.maximiseClipWindow(); return; }
+      this.dragClipWindow(event, "move");
+    });
+    window.addEventListener("resize", () => { if (!win.hidden) this.placeClipWindow(); });
+    this.root.append(win);
+    return win;
+  }
+
+  // Puts the window where it was (kept inside the screen), or in the middle of the screen.
+  placeClipWindow() {
+    const win = this.clipWin, host = this.root.getBoundingClientRect();
+    const saved = this.clipWinBox ?? DawScreen.clipWindowPrefs();
+    if (this.clipWinMax === undefined) this.clipWinMax = Boolean(saved.max);
+    const w = clamp(saved.w ?? Math.round(host.width * 0.8), 420, Math.max(420, host.width));
+    const h = clamp(saved.h ?? Math.round(host.height * 0.7), 260, Math.max(260, host.height));
+    const x = clamp(saved.x ?? Math.round((host.width - w) / 2), 0, Math.max(0, host.width - w));
+    const y = clamp(saved.y ?? Math.round((host.height - h) / 3), 0, Math.max(0, host.height - h));
+    this.clipWinBox = { x, y, w, h };
+    win.classList.toggle("is-max", this.clipWinMax);
+    // Maximised, it leaves the transport bar in sight.
+    const bar = this.root.querySelector(".daw-transport")?.getBoundingClientRect();
+    const top = bar && bar.height ? Math.max(0, Math.round(bar.bottom - host.top + 6)) : 0;
+    Object.assign(win.style, this.clipWinMax ? { left: "0px", top: `${top}px`, width: "100%", height: `calc(100% - ${top}px)` }
+      : { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
+  }
+
+  maximiseClipWindow() {
+    this.clipWinMax = !this.clipWinMax;
+    this.placeClipWindow();
+    this.saveClipWindow();
+  }
+
+  // Moving the window by its title bar, or resizing it by an edge or corner.
+  dragClipWindow(event, edge) {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const target = event.currentTarget;
+    target.setPointerCapture?.(event.pointerId);
+    if (this.clipWinMax) { this.clipWinMax = false; if (edge === "move") { const host = this.root.getBoundingClientRect(); this.clipWinBox.x = clamp(event.clientX - host.left - this.clipWinBox.w / 2, 0, host.width - this.clipWinBox.w); this.clipWinBox.y = 0; } this.placeClipWindow(); }
+    const start = { ...this.clipWinBox }, x0 = event.clientX, y0 = event.clientY;
+    const host = this.root.getBoundingClientRect();
+    const move = (e) => {
+      const dx = e.clientX - x0, dy = e.clientY - y0;
+      let { x, y, w, h } = start;
+      if (edge === "move") { x = clamp(x + dx, 0, host.width - w); y = clamp(y + dy, 0, host.height - 40); }
+      else {
+        if (edge.includes("e")) w = clamp(w + dx, 420, host.width - x);
+        if (edge.includes("s")) h = clamp(h + dy, 260, host.height - y);
+        if (edge.includes("w")) { const nx = clamp(x + dx, 0, x + w - 420); w += x - nx; x = nx; }
+        if (edge.includes("n")) { const ny = clamp(y + dy, 0, y + h - 260); h += y - ny; y = ny; }
+      }
+      this.clipWinBox = { x, y, w, h };
+      Object.assign(this.clipWin.style, { left: `${x}px`, top: `${y}px`, width: `${w}px`, height: `${h}px` });
+    };
+    const up = () => {
+      target.removeEventListener("pointermove", move);
+      target.removeEventListener("pointerup", up);
+      target.removeEventListener("pointercancel", up);
+      this.saveClipWindow();
+    };
+    target.addEventListener("pointermove", move);
+    target.addEventListener("pointerup", up);
+    target.addEventListener("pointercancel", up);
   }
 
   // The Track tab's clip card when no clip is selected.
@@ -5657,6 +5819,7 @@ class DawScreen {
     if (status.recording || this.rows.querySelector(".rec-region")) this.updateRecording();
     this.pianoRoll?.setStatus(status);
     this.clipEditor?.setStatus?.(status);
+    this.windowEditor?.setStatus?.(status);
     if (this.dockTab === "patterns") this.patternsPanel.setStatus(status);
   }
 
