@@ -25,7 +25,7 @@ void AutomationRecorder::setMode (Mode m)
 
 bool AutomationRecorder::moved (int trackId, const juce::String& target, float knob, double time)
 {
-    const auto track = edit.getTrack (trackId);
+    const auto track = edit.getChannel (trackId);
     if (mode == Mode::off || ! track.isValid())
         return false;
 
@@ -128,7 +128,7 @@ void AutomationRecorder::finish (int trackId, const juce::String& target, Pass& 
     if (end > points.back().time)
         points.push_back ({ end, pass.lastValue });
 
-    const auto track = edit.getTrack (trackId);
+    const auto track = edit.getChannel (trackId);
     if (! track.isValid())
         return;
     points = Edit::thinPoints (points, Edit::getThinTolerance (track, target, points));

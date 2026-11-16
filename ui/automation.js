@@ -1,4 +1,5 @@
-// Automation lanes under a track (see daw::Edit::setLane for the targets and how they play).
+// Automation lanes under a track, a return or the master (see daw::Edit::setLane for the
+// targets and how they play). A return or the master comes with `isBus` (the master as id 0).
 //
 // The curve button in a track's header unfolds its lanes: one row per target (volume ride,
 // pan, a send, any effect value, a macro), picked from the menu in the row's head. In a lane:
@@ -103,10 +104,12 @@ export class AutomationLanes {
   // What can be automated on a track, for the target menu: [[group, [[target, name]...]]...].
   choices(track) {
     const returns = this.screen.session?.returns ?? [];
-    const mixer = [["volume", "Volume"], ["pan", "Pan"]];
-    returns.forEach((bus, i) => {
-      if (bus.id !== track.output) mixer.push([`send:${bus.id}`, `Send ${this.kit.returnLetter(i)} · ${bus.name}`]);
-    });
+    const mixer = [["volume", "Volume"], ["pan", track.isBus && track.id === 0 ? "Balance" : "Pan"]];
+    // (Returns and the master have no sends with lanes.)
+    if (!track.isBus)
+      returns.forEach((bus, i) => {
+        if (bus.id !== track.output) mixer.push([`send:${bus.id}`, `Send ${this.kit.returnLetter(i)} · ${bus.name}`]);
+      });
     const groups = [["Mixer", mixer]];
     const info = this.kit.parameterInfo();
     const addInserts = (inserts, prefix) => {
@@ -158,6 +161,7 @@ export class AutomationLanes {
     if (kind === "pan")
       return { name: "Pan", ...linear(-1, 1), base: track.pan ?? 0, step: 0, format: this.kit.panText };
     if (kind === "send") {
+      if (track.isBus) return null;
       const returns = this.screen.session?.returns ?? [];
       const index = returns.findIndex((r) => r.id === Number(a));
       if (index < 0) return null;

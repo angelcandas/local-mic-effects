@@ -2770,7 +2770,8 @@ class DawScreen {
     const session = this.session;
     const returns = session.returns ?? [];
     const key = JSON.stringify([force ? Math.random() : 0, this.pinnedFolded, returns.map((b) => [b.id, b.name, b.colour, b.inserts.length]),
-                                session.master.inserts.length]);
+                                session.master.inserts.length,
+                                [...returns.map((b) => b.id), 0].map((id) => [this.automation.isOpen(id), id ? returns.find((b) => b.id === id)?.lanes?.length : session.master.lanes?.length])]);
     if (key !== this.pinnedKey) {
       this.pinnedKey = key;
       this.busRows = [...returns.map((bus, index) => this.createBusRow(bus, index, "return")), this.createBusRow(session.master, 0, "master")];
@@ -2792,6 +2793,20 @@ class DawScreen {
     returns.forEach((bus, i) => this.busRows[i].update(bus));
     this.busRows.at(-1).update(session.master);
     for (const row of this.busRows) this.meters.set(row.busId, row.meter);
+
+    // Their automation lanes, under each one (built again only when they change).
+    const buses = [...returns.map((bus) => ({ ...bus, isBus: true })), { ...session.master, id: 0, isBus: true }];
+    buses.forEach((bus, i) => {
+      const row = this.busRows[i];
+      const lanesKey = this.automation.rowsKey(bus) + JSON.stringify([this.timelineSeconds(), this.zoom]);
+      if (row.lanesKey === lanesKey && row.laneRows?.every((r) => r.isConnected)) return;
+      row.lanesKey = lanesKey;
+      for (const r of row.laneRows ?? []) r.remove();
+      const colour = bus.id === 0 ? "var(--accent)" : returnColour(bus, i);
+      row.laneRows = this.automation.createRows(bus, colour);
+      row.after(...row.laneRows);
+      row.classList.toggle("has-lanes", row.laneRows.length > 0);
+    });
   }
 
   createBusRow(bus, index, kind) {
@@ -2819,6 +2834,8 @@ class DawScreen {
     });
     const nameLine = html("div", "th-line th-name");
     nameLine.append(isMaster ? html("span", "bus-tag", "Main") : html("span", "return-letter", returnLetter(index)), name);
+    // The curve button: automation lanes under the return or the master.
+    nameLine.append(this.automation.createToggle({ ...bus, id, isBus: true }));
     const switches = {};
     if (!isMaster) {
       const toggles = html("div", "track-toggles");
@@ -5194,7 +5211,8 @@ class DawScreen {
     const roles = () => Object.fromEntries([...panel.querySelectorAll(".automix-role select")].map((s) => [s.dataset.track, s.value]));
     const effects = () => Object.fromEntries([...panel.querySelectorAll(".automix-effects input")].map((c) => [c.name, c.checked]));
     this.autoMixEffects = effects;
-    const mode = () => ({ mode: $("[name=mode]").value, focus: Number($("[name=focus]").value), masterLufs: Number($("[name=masterLufs]").value) });
+    const mode = () => ({ mode: $("[name=mode]").value, focus: Number($("[name=focus]").value), masterTemplate: $("[name=masterTemplate]").value,
+                          sectionMoves: $("[name=sectionMoves]").checked });
     this.autoMixMode = mode;
     const planArgs = () => ({ style: style(), roles: roles(), effects: effects(), ...mode() });
 
@@ -5218,7 +5236,7 @@ class DawScreen {
       if (this.autoMix.plan?.kind === "mix") this.replanAutoMix(planArgs());
     });
     // Mix the song, fit one track into the backing, or clean one up: the plan follows.
-    for (const name of ["mode", "focus", "masterLufs"])
+    for (const name of ["mode", "focus", "masterTemplate", "sectionMoves"])
       $(`[name=${name}]`).addEventListener("change", () => {
         this.renderAutoMixMode();
         if (this.autoMix.plan?.kind === "mix") this.replanAutoMix(planArgs());
@@ -5316,7 +5334,8 @@ class DawScreen {
     this.autoMix = { plan: null, applied: false, after: true };
     panel.querySelector("[name=mode]").value = "mix";
     panel.querySelector("[name=focus]").value = "0";
-    panel.querySelector("[name=masterLufs]").value = "-14";
+    panel.querySelector("[name=masterTemplate]").value = "streaming";
+    panel.querySelector("[name=sectionMoves]").checked = true;
     const slider = panel.querySelector("[name=amount]");
     slider.value = "100";
     panel.querySelector(".automix-amount-value").textContent = "100%";
@@ -5337,7 +5356,11 @@ class DawScreen {
     focus.value = [...focus.options].some((o) => o.value === selected) ? selected : "0";
 
     panel.querySelector(".automix-focus").hidden = mode === "mix" || mode === "master";
-    panel.querySelector(".automix-target").hidden = mode !== "master";
+    for (const element of panel.querySelectorAll(".automix-target")) element.hidden = mode !== "master";
+    const about = panel.querySelector(".automix-target-about");
+    const picked = (this.masterTemplates ?? []).find((t) => t.key === panel.querySelector("[name=masterTemplate]").value);
+    about.hidden = mode !== "master" || !picked?.about;
+    about.textContent = picked?.about ?? "";
     panel.classList.toggle("is-clean", mode === "clean");
     panel.classList.toggle("is-master", mode === "master");
     const intro = panel.querySelector(".automix-mode-intro");
@@ -5347,7 +5370,7 @@ class DawScreen {
       : mode === "clean"
         ? "Cleans up this track only: rumble, mains hum, noise between phrases, mud, harshness, S's and uneven level. No reverb, no level changes, no other tracks."
         : mode === "master"
-          ? "Masters the song as it plays now: a mastering EQ towards the balance of finished records, a gentle multiband, width with a mono low end, and a limiter up to the loudness you pick. Listen again after changing the mix."
+          ? "Masters the song as it plays now: a mastering EQ towards the balance of finished records, a gentle multiband, width with a mono low end, and a limiter up to the target's loudness and peak level. With section moves, the choruses open up as automation on the master. Listen again after changing the mix."
           : "";
   }
 
@@ -5360,6 +5383,7 @@ class DawScreen {
     const result = await daw("autoMix", { action: "tags" });
     if (!result?.ok || this.autoMix.plan) return;
     this.autoMixRoleNames = result.roles;
+    if (result.masterTemplates) { this.masterTemplates = result.masterTemplates; this.renderAutoMixMode(); }
     this.renderAutoMixRoles(result.tracks.map((t) => ({ ...t, detail: t.tagged ? "tagged" : t.role ? (t.midi ? "from its name or instrument" : "from its name") : "" })), true);
   }
 
@@ -5556,7 +5580,10 @@ class DawScreen {
       this.renderAutoMixMode();
       const focus = panel.querySelector("[name=focus]");
       if ([...focus.options].some((o) => o.value === String(event.focus ?? 0))) focus.value = String(event.focus ?? 0);
-      if (event.masterLufs) panel.querySelector("[name=masterLufs]").value = String(event.masterLufs);
+      const target = panel.querySelector("[name=masterTemplate]");
+      if (event.masterTemplate && [...target.options].some((o) => o.value === event.masterTemplate)) target.value = event.masterTemplate;
+      this.masterTemplates = event.masterTemplates ?? this.masterTemplates;
+      if (typeof event.effects?.sectionMoves === "boolean") panel.querySelector("[name=sectionMoves]").checked = event.effects.sectionMoves;
     }
     for (const [name, on] of Object.entries(event.effects ?? {})) {
       const box = panel.querySelector(`.automix-effects [name=${name}]`);

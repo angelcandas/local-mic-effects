@@ -926,7 +926,7 @@ void Edit::setTrackTranspose (int trackId, double semitones)
 
 void Edit::setVolumeRide (int trackId, const std::vector<RidePoint>& points)
 {
-    auto track = getTrack (trackId);
+    auto track = getChannel (trackId); // a track, a return or the master
     if (! track.isValid())
         return;
 
@@ -1022,7 +1022,7 @@ void Edit::clearTrackAutomation (int trackId)
 void Edit::clearLanes (int trackId)
 {
     clearTrackAutomation (trackId);
-    auto track = getTrack (trackId);
+    auto track = getChannel (trackId);
     if (! track.isValid())
         return;
     track.removeProperty (ids::ride, undoTarget);
@@ -1133,7 +1133,7 @@ std::pair<float, float> Edit::getLaneRange (const juce::ValueTree&, const juce::
 
 bool Edit::setLane (int trackId, const juce::String& target, const std::vector<AutomationPoint>& input)
 {
-    auto track = getTrack (trackId);
+    auto track = getChannel (trackId); // returns and the master have lanes too (no sends)
     if (! track.isValid())
         return false;
 
@@ -1172,7 +1172,7 @@ bool Edit::setLane (int trackId, const juce::String& target, const std::vector<A
 
     if (t.kind == "send")
     {
-        if (! getReturn (t.id).isValid() || isGroup (getReturn (t.id)) || t.id == getTrackOutput (track))
+        if (! track.hasType (ids::TRACK) || ! getReturn (t.id).isValid() || isGroup (getReturn (t.id)) || t.id == getTrackOutput (track))
             return false;
         auto send = getSend (track, t.id);
         if (! send.isValid())
@@ -1337,7 +1337,7 @@ float Edit::getThinTolerance (const juce::ValueTree& track, const juce::String& 
 bool Edit::writeLaneRange (int trackId, const juce::String& target, const std::vector<AutomationPoint>& recorded,
                            double start, double end, float base)
 {
-    const auto track = getTrack (trackId);
+    const auto track = getChannel (trackId);
     if (! track.isValid() || recorded.empty())
         return false;
 

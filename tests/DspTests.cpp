@@ -2789,6 +2789,145 @@ namespace
                "no mix measured: a note to listen again");
     }
 
+    void testMasterTemplatesAndLanes()
+    {
+        std::cout << "\nMastering templates, section moves and master lanes\n";
+
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-master-templates");
+        folder.createDirectory();
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto file = folder.getChildFile (name + ".wav");
+            writeWav (file, audio, sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, file, 0.0, 12.0);
+            return id;
+        };
+        add ("Vocal", makeSungLine (12.0, 3.0, 1.5));
+        add ("Backing", makeBacking (12.0));
+
+        const auto measure = [&edit]
+        {
+            return *analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, true, 48000.0, false).run().mix;
+        };
+        const auto before = measure();
+        const auto findMove = [] (const analysis::MixPlan& plan, fx::ModuleType type) -> const analysis::MixMove*
+        {
+            for (const auto& move : plan.moves)
+                if (move.insert == type)
+                    return &move;
+            return nullptr;
+        };
+
+        // Every template plans its own ceiling and loudness.
+        {
+            auto ok = analysis::getMasterTemplates().size() >= 20;
+            for (const auto& t : analysis::getMasterTemplates())
+            {
+                const auto plan = analysis::planMaster (before, t, 0.0f);
+                const auto* limiter = findMove (plan, fx::ModuleType::limiter);
+                const auto* meter = findMove (plan, fx::ModuleType::loudness);
+                ok = ok && limiter != nullptr && meter != nullptr && t.lufs >= -24.0f && t.lufs <= -6.0f
+                     && limiter->values.at ("limCeiling") == t.ceiling && meter->values.at ("loudTarget") == t.lufs;
+            }
+            check (ok, juce::String ((int) analysis::getMasterTemplates().size()) + " templates, each with its ceiling and loudness target");
+            check (analysis::findMasterTemplate ("apple") != nullptr && analysis::findMasterTemplate ("nope") == nullptr,
+                   "templates found by key");
+        }
+
+        // Broadcast: quiet and limited at -1 dB; club: loud with a -0.3 dB ceiling.
+        for (const auto* key : { "ebu", "club" })
+        {
+            const auto& t = *analysis::findMasterTemplate (key);
+            analysis::SessionAnalyser::Result result;
+            result.mix = before;
+            analysis::MixOptions options;
+            options.mode = analysis::MixMode::master;
+            options.masterTemplate = key;
+            analysis::applyMix (edit, analysis::planMix (result, {}, {}, 0.0f, analysis::MixStyle::pop, options));
+            const auto after = measure();
+            check (std::abs (after.integratedLufs - t.lufs) < 2.0f && after.peakDb < t.ceiling + 0.3f,
+                   t.name + ": " + juce::String (after.integratedLufs, 1) + " LUFS (target " + juce::String (t.lufs, 0) + "), peak "
+                       + juce::String (after.peakDb, 1) + " dB (ceiling " + juce::String (t.ceiling, 1) + ")");
+            edit.getUndoManager().undo();
+        }
+
+        // Lifted parts: the choruses; else louder sections; else the mix's loud stretches.
+        {
+            using S = analysis::MixOptions::Section;
+            analysis::Profile song;
+            for (int i = 0; i < 1200; ++i) // 2 minutes: quiet, 30 s loud from 0:40, quiet
+            {
+                song.momentaryLufs.push_back (i >= 400 && i < 700 ? -12.0f : -18.0f);
+                song.rmsDb.push_back (-20.0f);
+                song.active.push_back (true);
+            }
+            const auto chorus = analysis::findLiftedParts (song, { S { 0.0, 40.0, "verse", "Verse" }, S { 40.0, 30.0, "chorus", "Chorus" },
+                                                                   S { 70.0, 50.0, "verse", "Verse" } });
+            check (chorus.size() == 1 && chorus[0].first == 40.0 && chorus[0].second == 70.0, "the chorus section is lifted");
+            const auto louder = analysis::findLiftedParts (song, { S { 0.0, 40.0, "part", "A" }, S { 40.0, 30.0, "part", "B" },
+                                                                   S { 70.0, 50.0, "part", "A" } });
+            check (louder.size() == 1 && louder[0].first == 40.0, "no chorus: the louder section is lifted");
+            const auto found = analysis::findLiftedParts (song, {});
+            check (found.size() == 1 && std::abs (found[0].first - 40.0) < 3.0 && std::abs (found[0].second - 70.0) < 3.0,
+                   "no sections: the loud stretch is found ("
+                       + (found.empty() ? juce::String ("none") : juce::String (found[0].first, 1) + " - " + juce::String (found[0].second, 1) + " s") + ")");
+            for (auto& value : song.momentaryLufs)
+                value = -18.0f;
+            check (analysis::findLiftedParts (song, {}).empty(), "an even song: nothing lifted");
+        }
+
+        // Section moves: automation on the master's imager, EQ and limiter, played by the engine.
+        {
+            using S = analysis::MixOptions::Section;
+            const auto& t = *analysis::findMasterTemplate ("pop");
+            const auto plan = analysis::planMaster (before, t, 0.0f, true, true, { S { 0.0, 6.0, "verse", "Verse" }, S { 6.0, 6.0, "chorus", "Chorus" } });
+            const auto* imager = findMove (plan, fx::ModuleType::imager);
+            const auto* limiter = findMove (plan, fx::ModuleType::limiter);
+            const auto* eq = findMove (plan, fx::ModuleType::masterEq);
+            check (imager != nullptr && imager->automation.count ("imgWidth") > 0 && limiter != nullptr && limiter->automation.count ("limDrive") > 0
+                       && eq != nullptr && eq->automation.count ("meqAirGain") > 0,
+                   "section moves: width, drive and air follow the chorus");
+            const auto none = analysis::planMaster (before, t, 0.0f, true, false, { S { 6.0, 6.0, "chorus", "Chorus" } });
+            check (findMove (none, fx::ModuleType::limiter)->automation.empty(), "section moves off: no automation");
+
+            analysis::applyMix (edit, plan);
+            const auto lanes = daw::Edit::getLaneTargets (edit.getMaster());
+            check (lanes.size() >= 3, "the master shows its lanes (" + lanes.joinIntoString (", ") + ")");
+            edit.getUndoManager().undo();
+        }
+
+        // Master lanes play: a volume lane 12 dB down over the second half.
+        {
+            const auto plain = measure();
+            check (edit.setLane (daw::Edit::masterId, "volume", { { 0.0, 0.0f }, { 5.9, 0.0f }, { 6.0, -12.0f }, { 12.0, -12.0f } }),
+                   "a volume lane on the master");
+            check (! edit.setLane (daw::Edit::masterId, "send:1", { { 0.0, 0.0f } }), "no send lanes on the master");
+            const auto ridden = measure();
+            const auto loudness = [] (const analysis::Profile& p, int from, int to)
+            {
+                double power = 0.0;
+                for (int i = from; i < to; ++i)
+                    power += std::pow (10.0, p.momentaryLufs[(size_t) i] / 10.0);
+                return 10.0 * std::log10 (power / (to - from));
+            };
+            const auto firstChange = loudness (ridden, 10, 55) - loudness (plain, 10, 55);
+            const auto secondChange = loudness (ridden, 70, 115) - loudness (plain, 70, 115);
+            check (std::abs (firstChange) < 0.5 && std::abs (secondChange + 12.0) < 1.0,
+                   "the master's lane plays: " + juce::String (firstChange, 1) + " dB, then " + juce::String (secondChange, 1) + " dB");
+            edit.setLane (daw::Edit::masterId, "volume", {});
+
+            // An effect lane on a return (its volume lane too) is kept with the return.
+            const auto ret = edit.getReturns().getFirst();
+            const auto returnId = (int) ret[daw::ids::id];
+            check (edit.setLane (returnId, "volume", { { 0.0, -6.0f } }) && daw::Edit::getLaneTargets (edit.getReturn (returnId)).contains ("volume"),
+                   "a volume lane on a return");
+        }
+
+        folder.deleteRecursively();
+    }
+
     void testAutoMixSends()
     {
         std::cout << "\nAuto Mix: shared reverb (sends)\n";
@@ -17966,6 +18105,7 @@ int main()
     testAutoMixModes();
     testAutoMixSynths();
     testAutoMixMaster();
+    testMasterTemplatesAndLanes();
     testAutoMixSends();
     testDynamics();
     testVocalDynamics();
