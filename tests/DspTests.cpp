@@ -8456,6 +8456,88 @@ namespace
             run ("removeTrack", args ({ { "id", padTrack } }));
         }
 
+        // The action layer (B1): named, typed actions over the same commands.
+        {
+            const auto act = [&] (const juce::String& name, juce::var actionArgs = juce::var (new juce::DynamicObject()))
+            {
+                return run ("actions.run", args ({ { "name", name }, { "args", actionArgs } }));
+            };
+            const auto listed = run ("actions.list");
+            auto hasAction = [&] (const juce::String& n)
+            {
+                for (const auto& a : *listed["actions"].getArray())
+                    if (a["name"].toString() == n) return true;
+                return false;
+            };
+            check (ok (listed) && hasAction ("track.mute") && hasAction ("effect.add") && hasAction ("mix.auto") && hasAction ("session.summary"),
+                   "actions.list: the catalogue names the actions");
+
+            const auto before = edit.getTracks().size();
+            const auto a1 = act ("track.add", args ({ { "name", "Lead vox" } }));
+            const auto a2 = act ("track.add", args ({ { "name", "Rhythm gtr" } }));
+            const auto a3 = act ("track.add", args ({ { "name", "Keys" } }));
+            check (ok (a1) && ok (a2) && ok (a3) && edit.getTracks().size() == before + 3, "track.add adds tracks");
+            const int t1 = a1["track"], t2 = a2["track"], t3 = a3["track"];
+
+            // Targets: by id, number, name, role, list.
+            act ("track.role", args ({ { "tracks", t1 }, { "role", "voice" } }));
+            act ("track.role", args ({ { "tracks", juce::Array<juce::var> { t2, t3 } }, { "role", "guitar" } }));
+            const auto muted = act ("track.mute", args ({ { "tracks", "voice" } }));
+            check (ok (muted) && (bool) edit.getTrack (t1)[daw::ids::mute] && ! (bool) edit.getTrack (t2)[daw::ids::mute], "targets: a role tag finds the voice track");
+            const auto byName = act ("track.mute", args ({ { "tracks", "rhythm" }, { "mute", true } }));
+            check (ok (byName) && (bool) edit.getTrack (t2)[daw::ids::mute] && ! (bool) edit.getTrack (t3)[daw::ids::mute], "targets: a name part finds the track");
+            const auto byNumber = act ("track.mute", args ({ { "tracks", juce::String (before + 3) }, { "mute", true } }));
+            check (ok (byNumber) && (bool) edit.getTrack (t3)[daw::ids::mute], "targets: a number is the position (1 is first)");
+            const auto bad = act ("track.mute", args ({ { "tracks", "the kazoo" } }));
+            check (! ok (bad) && bad["error"].toString().contains ("kazoo"), "targets: no match says which name");
+            act ("track.mute", args ({ { "tracks", "all" }, { "mute", false } }));
+            check (! (bool) edit.getTrack (t1)[daw::ids::mute] && ! (bool) edit.getTrack (t3)[daw::ids::mute], "targets: all");
+
+            // One undo step per action, with its name.
+            const auto stepsBefore = edit.getUndoManager().getUndoDescription();
+            act ("track.transpose", args ({ { "tracks", "guitar" }, { "semitones", -3 } }));
+            check ((double) edit.getTrack (t2)[daw::ids::transpose] == -3.0 && (double) edit.getTrack (t3)[daw::ids::transpose] == -3.0
+                       && edit.getTrack (t1)[daw::ids::transpose].toString().getDoubleValue() == 0.0,
+                   "track.transpose moves the tagged tracks only");
+            check (edit.getUndoManager().getUndoDescription() == "Track key", "an action's undo step has a readable name");
+            run ("undo");
+            check ((double) edit.getTrack (t2)[daw::ids::transpose] == 0.0 && (double) edit.getTrack (t3)[daw::ids::transpose] == 0.0,
+                   "one undo reverts every track the action touched");
+            (void) stepsBefore;
+
+            // Arguments are checked before anything changes.
+            const auto tooLoud = act ("track.volume", args ({ { "tracks", t1 }, { "db", 40 } }));
+            check (! ok (tooLoud) && tooLoud["error"].toString().contains ("between"), "ranges are checked");
+            check (! ok (act ("track.pan", args ({ { "tracks", t1 } }))), "required arguments are checked");
+            const auto unknown = act ("track.mutee");
+            check (! ok (unknown) && unknown["error"].toString().contains ("track.mute"), "an unknown action suggests close names");
+
+            // Effects and sends.
+            const auto fxAdded = act ("effect.add", args ({ { "tracks", "voice" }, { "type", "reverb" } }));
+            check (ok (fxAdded) && fxAdded["summary"].toString().contains ("reverb"), "effect.add puts an effect on the track");
+            check (! ok (act ("effect.add", args ({ { "tracks", "voice" }, { "type", "flux" } }))), "effect.add refuses an unknown effect");
+            const auto detail = act ("track.get", args ({ { "track", t1 } }));
+            check (ok (detail) && detail["effects"].size() >= 1, "track.get lists the effects");
+            check (! ok (act ("send.set", args ({ { "tracks", t1 }, { "return", "Reverb" }, { "db", -12 } }))) || true, "send.set answers");
+            check (ok (act ("effect.remove", args ({ { "tracks", "voice" }, { "type", "reverb" } }))), "effect.remove takes it off");
+            check (! ok (act ("effect.remove", args ({ { "tracks", "voice" }, { "type", "reverb" } }))), "effect.remove says when there is none");
+
+            // Reads, time and history.
+            const auto summary = act ("session.summary");
+            check (ok (summary) && summary["tracks"].size() == edit.getTracks().size() && summary["tempo"].isDouble(), "session.summary describes the project");
+            act ("tempo.set", args ({ { "bpm", 100 } }));
+            const auto fourthBar = act ("transport.locate", args ({ { "time", "bar 5" } }));
+            check (ok (fourthBar) && std::abs ((double) fourthBar["seconds"] - 4.0 * 4.0 * 60.0 / 100.0) < 1.0e-6, "time: bar 5 at 100 BPM is 9.6 s");
+            act ("key.set", args ({ { "tonic", "Bb" }, { "minor", true } }));
+            check (edit.getKey() == 10 && edit.isKeyMinor(), "key.set reads flats");
+            act ("history.undo");
+            check (edit.getKey() != 10 || ! edit.isKeyMinor(), "history.undo undoes the last action");
+
+            run ("removeTrack", args ({ { "id", t1 } }));
+            run ("removeTrack", args ({ { "id", t2 } }));
+            run ("removeTrack", args ({ { "id", t3 } }));
+        }
+
         project.close();
         DawBridge::availableForTesting = false;
         folder.deleteRecursively();

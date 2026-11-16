@@ -250,6 +250,7 @@ target_sources(MicFX
     PRIVATE
         ${MICFX_DSP_SOURCES}
         src/DawBridge.cpp
+        src/DawActions.cpp
         src/PluginEditor.cpp
         src/StandaloneApp.cpp)
 
@@ -384,7 +385,7 @@ if(MICFX_BUILD_TESTS)
     juce_add_console_app(MicFXTests PRODUCT_NAME "MicFXTests")
     add_dependencies(MicFXTests MicFXTestSynth_VST3 MicFXTestEffect_VST3)
 
-    target_sources(MicFXTests PRIVATE tests/DspTests.cpp src/DawBridge.cpp ${MICFX_DSP_SOURCES})
+    target_sources(MicFXTests PRIVATE tests/DspTests.cpp src/DawBridge.cpp src/DawActions.cpp ${MICFX_DSP_SOURCES})
     target_include_directories(MicFXTests PRIVATE src)
 
     target_compile_definitions(MicFXTests

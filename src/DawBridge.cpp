@@ -437,6 +437,14 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
     edit.getState().addListener (this);
     project.setAutosaveInterval (autosaveSeconds);
 
+    // The action layer hears the events that finish its long actions (Auto Mix listening...).
+    actions = std::make_unique<DawActions> (processor, *this);
+    emit = [this, inner = std::move (emit)] (const juce::Identifier& event, const juce::var& payload)
+    {
+        actions->onEvent (event, payload);
+        inner (event, payload);
+    };
+
     // Pick up where the app left off: the mode, and the last project if none is open.
     if (isAvailable())
     {
@@ -4820,6 +4828,10 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         complete (object ({ { "ok", true } }));
         return;
     }
+
+    // The action layer: its actions make their own undo step.
+    if (command == "actions.list") { complete (actions->list()); return; }
+    if (command == "actions.run")  { actions->run (args["name"].toString(), args["args"], std::move (complete)); return; }
 
     // Each command is one undo step, unless it continues a drag (args.continue). The step
     // is named for the Undo button and the toasts ("Undo move clip").
