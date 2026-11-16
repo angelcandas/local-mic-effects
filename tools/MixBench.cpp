@@ -26,10 +26,12 @@ namespace
 void printUsage()
 {
     std::cout << "Usage: MicFXMixBench <songs folder | song folder> [--style pop|rock|...|song|all]\n"
-                 "                     [--out folder] [--amount 0..1] [--only name] [--no-phase]\n\n"
+                 "                     [--out folder] [--amount 0..1] [--only name] [--no-phase]\n"
+                 "                     [--listen both|on|off]\n\n"
                  "A song folder holds tracks/*.wav, the human mix as mix.* and optionally song.txt\n"
                  "(style = rock, tempo = 96, role.<track file name> = voice).\n"
-                 "--style song (default) mixes each song in its own style (pop when it has none).\n";
+                 "--style song (default) mixes each song in its own style (pop when it has none).\n"
+                 "--listen both (default) mixes each song with and without listen-and-correct.\n";
 }
 }
 
@@ -63,6 +65,12 @@ int main (int argc, char* argv[])
     options.amount = juce::jlimit (0.0f, 1.0f, value ("--amount", "1").getFloatValue());
     options.alignments = ! args.contains ("--no-phase");
     options.log = [] (const juce::String& line) { std::cout << line << "\n"; };
+    const auto listenArg = value ("--listen", "both");
+    std::vector<bool> listenModes;
+    if (listenArg != "on")
+        listenModes.push_back (false);
+    if (listenArg != "off")
+        listenModes.push_back (true);
 
     juce::StringArray errors;
     auto songs = bench::findSongs (root, errors);
@@ -106,8 +114,10 @@ int main (int argc, char* argv[])
         }
 
         for (const auto style : styles)
+        for (const auto listen : listenModes)
         {
-            std::cout << song.name << " (" << bench::getStyleKey (style) << ")\n";
+            std::cout << song.name << " (" << bench::getStyleKey (style) << (listen ? ", listen and correct" : "") << ")\n";
+            options.listen = listen;
             auto run = bench::runSong (song, style, out, options);
             if (run.error.isNotEmpty())
                 std::cout << "  failed: " << run.error << "\n";
@@ -123,6 +133,9 @@ int main (int argc, char* argv[])
                     std::cout << ", tone distance " << juce::String (run.getToneDistanceDb(), 1) << " dB, role error "
                               << juce::String (run.getRoleErrorLu(), 1) << " LU (fit " << juce::String (run.humanFit.fitErrorDb, 1) << " dB)";
                 std::cout << "\n";
+                for (const auto& note : run.plan.notes)
+                    if (note.startsWith ("Listened"))
+                        std::cout << "  " << note << "\n";
             }
             runs.push_back (std::move (run));
 

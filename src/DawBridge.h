@@ -8,6 +8,7 @@
 #include "daw/Exporter.h"
 #include "daw/AutomationRecorder.h"
 #include "analysis/MixAssistant.h"
+#include "analysis/MixCorrect.h"
 #include "analysis/ToMidi.h"
 #include "analysis/MixCheck.h"
 #include "analysis/Structure.h"
@@ -306,6 +307,10 @@ private:
     analysis::MixOptions autoMixOptions; // the effects it may add (the inserts are filled per plan)
     bool autoMixReference = false; // the plan matches a reference song
     std::vector<analysis::TrackPairAlignment> autoMixAlignments; // measured with the last analysis
+    // Listen and correct: after a new analysis the plan is rendered once on a copy and its
+    // levels corrected (MixCorrect.h); kept until the next analysis or a role change.
+    std::optional<analysis::MixCorrection> autoMixCorrection;
+    void startAutoMixCheck();
     std::map<int, float> autoMixPans;  // pans the last applied plan set (not yours: planned again)
 
     // The review list: which moves are ticked (only the ones changed from their default:
