@@ -24,6 +24,7 @@
 #include "analysis/Key.h"
 #include "analysis/MixAssistant.h"
 #include "analysis/MixCheck.h"
+#include "analysis/MixBench.h"
 #include "analysis/TakeComp.h"
 #include "Presets.h"
 #include "FactoryChains.h"
@@ -12239,6 +12240,114 @@ namespace
     // adds Smooth where it rings.
     // Auto Mix placement: who goes left and right, pairs evened out, the centre roles left
     // in the middle, both sides as loud as each other, mono-safe pans.
+    // The Auto Mix test bench on a tiny synthetic song: a song folder is read, mixed,
+    // rendered and scored, and the contribution fit finds the gains of a known mix.
+    void testMixBench()
+    {
+        std::cout << "\nAuto Mix test bench\n";
+        namespace bench = analysis::bench;
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getChildFile ("micfx-bench-test");
+        folder.deleteRecursively();
+        const auto song = folder.getChildFile ("Tiny song");
+        song.getChildFile ("tracks").createDirectory();
+
+        constexpr double rate = 44100.0, seconds = 12.0;
+        const auto length = (int) (rate * seconds);
+        juce::AudioBuffer<float> voice (1, length), bass (1, length), drums (1, length);
+        voice.clear(), bass.clear(), drums.clear();
+        juce::Random random (7);
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+
+        for (int i = 0; i < length; ++i)
+        {
+            const auto t = (double) i / rate;
+            // Voice: phrases of 1.5 s with 0.5 s gaps, a buzzy tone that moves between two notes.
+            if (std::fmod (t, 2.0) < 1.5)
+            {
+                const auto f = std::fmod (t, 4.0) < 2.0 ? 220.0 : 262.0;
+                double v = 0.0;
+                for (int h = 1; h <= 10; ++h)
+                    v += std::sin (twoPi * f * h * t) / h;
+                voice.setSample (0, i, (float) (0.15 * v));
+            }
+            bass.setSample (0, i, (float) (0.3 * std::sin (twoPi * 55.0 * t) + 0.1 * std::sin (twoPi * 110.0 * t)));
+            // Drums: a noise hit with a fast decay on every beat at 120 BPM.
+            const auto sinceBeat = std::fmod (t, 0.5);
+            drums.setSample (0, i, (float) ((random.nextFloat() * 2.0f - 1.0f) * 0.5 * std::exp (-sinceBeat * 30.0)));
+        }
+
+        writeWav (song.getChildFile ("tracks/Lead vocal.wav"), voice, rate);
+        writeWav (song.getChildFile ("tracks/Bass.wav"), bass, rate);
+        writeWav (song.getChildFile ("tracks/Drums.wav"), drums, rate);
+        song.getChildFile ("song.txt").replaceWithText ("style = rock\ntempo = 120\n");
+
+        // The "human" mix: voice at 0 dB, bass -6 dB, drums -3 dB, starting 0.5 s late.
+        const auto lag = (int) (0.5 * rate);
+        juce::AudioBuffer<float> human (2, length + lag);
+        human.clear();
+        const float gains[] = { 1.0f, juce::Decibels::decibelsToGain (-6.0f), juce::Decibels::decibelsToGain (-3.0f) };
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            human.addFrom (ch, lag, voice, 0, 0, length, gains[0]);
+            human.addFrom (ch, lag, bass, 0, 0, length, gains[1]);
+            human.addFrom (ch, lag, drums, 0, 0, length, gains[2]);
+        }
+        writeWav (song.getChildFile ("mix.wav"), human, rate);
+
+        juce::StringArray errors;
+        const auto songs = bench::findSongs (folder, errors);
+        check (songs.size() == 1 && errors.isEmpty() && songs[0].tracks.size() == 3 && songs[0].mix.existsAsFile()
+                   && songs[0].style == analysis::MixStyle::rock,
+               "reads the song folder: three tracks, the human mix and its style");
+        if (songs.size() != 1)
+            return;
+
+        const auto run = bench::runSong (songs[0], analysis::MixStyle::rock, folder.getChildFile ("out"));
+        check (run.error.isEmpty() && run.rendered.existsAsFile() && run.numMoves > 0 && run.hasHuman,
+               "mixes the song with Auto Mix, renders it and reads the human mix (" + run.error + ")");
+
+        std::map<juce::String, int> idOf;
+        for (const auto& [id, name] : run.trackNames)
+            idOf[name] = id;
+        check (run.roles.at (idOf["Lead vocal"]) == analysis::Role::voice && run.roles.at (idOf["Bass"]) == analysis::Role::bass
+                   && run.roles.at (idOf["Drums"]) == analysis::Role::drums,
+               "guesses the roles from the names");
+
+        const auto voiceGain = run.humanFit.gainDb.at (idOf["Lead vocal"]);
+        const auto bassGain = run.humanFit.gainDb.at (idOf["Bass"]) - voiceGain;
+        const auto drumsGain = run.humanFit.gainDb.at (idOf["Drums"]) - voiceGain;
+        check (run.humanFit.lagHops == 5, "finds the human mix starts 0.5 s late (" + juce::String (run.humanFit.lagHops) + " hops)");
+        check (std::abs (voiceGain) < 1.0f && std::abs (bassGain + 6.0f) < 1.5f && std::abs (drumsGain + 3.0f) < 1.5f,
+               "fits the human mix's track gains: voice " + juce::String (voiceGain, 1) + " dB, bass " + juce::String (bassGain, 1)
+                   + " dB, drums " + juce::String (drumsGain, 1) + " dB under it (0, -6, -3)");
+        check (run.humanFit.fitErrorDb < 2.0f, "and the fit explains the mix (" + juce::String (run.humanFit.fitErrorDb, 2) + " dB error)");
+        check (run.humanLevels.hasVoice && run.oursLevels.hasVoice && std::isfinite (run.getVoiceOverBackingErrorLu()),
+               "measures voice over backing in both mixes (ours " + juce::String (run.oursLevels.voiceOverBackingLu, 1) + " LU, exactly "
+                   + juce::String (run.oursExactLevels.voiceOverBackingLu, 1) + " LU, planned " + juce::String (run.plan.voiceOverBackingLu, 1) + " LU; human "
+                   + juce::String (run.humanLevels.voiceOverBackingLu, 1) + " LU)");
+        check (run.ours.lufs > -30.0f && run.human.lufs > -30.0f && run.human.widthDb < -60.0f,
+               "measures loudness and width (the human mix is dual mono: " + juce::String (run.human.widthDb, 1) + " dB)");
+
+        const auto header = bench::getCsvHeader();
+        const auto row = bench::toCsvRow (run);
+        check (juce::StringArray::fromTokens (header, ",", "\"").size() == juce::StringArray::fromTokens (row, ",", "\"").size(),
+               "one CSV row per run, as many cells as the header");
+        check (bench::summarise ({ run }).contains ("Tiny song"), "and a summary table");
+
+        // Tilt and distance on known tone curves.
+        analysis::Bands a {}, b {};
+        for (int i = 0; i < analysis::numBands; ++i)
+        {
+            b[(size_t) i] = 0.0f;
+            a[(size_t) i] = (float) (1.5 * std::log2 (analysis::getBandCentre (i) / 1000.0));
+        }
+        check (std::abs (bench::getToneTiltDbPerOctave (a, b) - 1.5f) < 0.01f, "tilt of a 1.5 dB per octave curve");
+        check (bench::getToneDistanceDb (b, b) < 1.0e-6f, "no tonal distance between equal curves");
+
+        folder.deleteRecursively();
+    }
+
     void testAutoMixPlacement()
     {
         std::cout << "\nAuto Mix: placement (pan)\n";
@@ -17685,6 +17794,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=bench: just the Auto Mix test bench's smoke test.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "bench")
+    {
+        testMixBench();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=placement: just Auto Mix's pans.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "placement")
     {
@@ -17961,6 +18078,7 @@ int main()
     testAutoMixRoles();
     testAutoMixBackingTrack();
     testAutoMixPlacement();
+    testMixBench();
     testAutoMixPhase();
     testAutoMixRides();
     testAutoMixModes();
