@@ -311,6 +311,7 @@ private:
     // levels corrected (MixCorrect.h); kept until the next analysis or a role change.
     std::optional<analysis::MixCorrection> autoMixCorrection;
     void startAutoMixCheck();
+    juce::var describeAutoMixSections() const;
     std::map<int, float> autoMixPans;  // pans the last applied plan set (not yours: planned again)
 
     // The review list: which moves are ticked (only the ones changed from their default:

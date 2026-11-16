@@ -897,6 +897,12 @@ body.is-daw .chip--live { display: none; }
 .automix-move ul { margin: 0; padding-left: 16px; color: var(--muted); font-size: 12px; line-height: 1.5; }
 .automix-summary { color: var(--text); font-size: 12px; }
 .automix-note { color: var(--warn); font-size: 12px; }
+.automix-sections { display: flex; gap: 2px; margin: 6px 0; min-width: 0; }
+.automix-section { flex: 1 1 0; min-width: 0; display: flex; flex-direction: column; gap: 1px; padding: 3px 5px; border-radius: 4px;
+  background: var(--panel-2, rgba(127,127,127,0.12)); font-size: 11px; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+.automix-section strong { font-weight: 600; overflow: hidden; text-overflow: ellipsis; }
+.automix-section span { opacity: 0.8; overflow: hidden; text-overflow: ellipsis; }
+.automix-section.is-lifted { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 .automix-focus[hidden], .automix-mode-intro[hidden], .automix-target[hidden], .automix-target-about[hidden] { display: none; }
 .automix-target-about { margin: 0; color: var(--muted); font-size: 12px; }
 .automix-panel.is-master .automix-effects, .automix-panel.is-master .automix-roles, .automix-panel.is-master .automix-style { display: none; }

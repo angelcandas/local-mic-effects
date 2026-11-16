@@ -1,4 +1,5 @@
 #include "MixAssistant.h"
+#include "MixSections.h"
 
 #include "daw/Edit.h"
 
@@ -2927,6 +2928,8 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
                  const MixOptions& options)
 {
     auto plan = planMixMoves (measured, roles, currentVolumes, currentMasterVolume, style, options);
+    if (options.bySection && (options.mode == MixMode::mix || options.mode == MixMode::fit))
+        planBySection (plan, measured, roles, currentVolumes, style, options);
     labelMoves (plan, roles);
     return plan;
 }
@@ -3725,6 +3728,14 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, const ApplyOptions& options
                 continue;
             const auto db = move.values.count ("send") > 0 ? move.values.at ("send") : daw::Edit::minSendDb;
             edit.setSend (move.trackId, move.sendTo, daw::Edit::minSendDb + (db - daw::Edit::minSendDb) * amount); // from off
+            if (const auto lane = move.automation.find ("send"); lane != move.automation.end())
+            {
+                // Its lane (mix by section), scaled like the level from off.
+                std::vector<daw::Edit::AutomationPoint> points;
+                for (const auto& [time, value] : lane->second)
+                    points.push_back ({ time, daw::Edit::minSendDb + (value - daw::Edit::minSendDb) * amount });
+                edit.setLane (move.trackId, "send:" + juce::String (move.sendTo), points);
+            }
             continue;
         }
 

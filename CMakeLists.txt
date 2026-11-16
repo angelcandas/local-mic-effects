@@ -120,6 +120,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/MixBench.h
     src/analysis/MixCorrect.cpp
     src/analysis/MixCorrect.h
+    src/analysis/MixSections.cpp
+    src/analysis/MixSections.h
     src/analysis/Beats.cpp
     src/analysis/Beats.h
     src/analysis/Coach.cpp

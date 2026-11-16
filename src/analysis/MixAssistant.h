@@ -231,6 +231,11 @@ struct MixOptions
 
     // Track names by id, for the notes (optional).
     std::map<int, juce::String> trackNames;
+
+    // Mix by section (MixSections.h): per-section automation from the song's sections (mix
+    // and fit modes). drawnRides: tracks whose volume lane you drew (left alone).
+    bool bySection = true;
+    std::set<int> drawnRides;
 };
 
 MixTargets getTargets (MixStyle);
@@ -312,6 +317,17 @@ struct MixPlan
     // Predictions after the moves (for the UI).
     float voiceOverBackingLu = 0.0f;
     float mixLufs = -200.0f;
+
+    // Mix by section (MixSections.h): what changes where, for the panel's section strip.
+    struct Section
+    {
+        juce::String name;
+        double start = 0.0, end = 0.0;
+        bool lifted = false;  // a chorus-like section: the band lifts
+        float voiceDb = 0.0f; // the lead voice's level here against the rest of the song
+        float liftDb = 0.0f;  // the instruments' lift here
+    };
+    std::vector<Section> sections;
 };
 
 // Plans the moves from a SessionAnalyser result at Point::source, the roles of the
