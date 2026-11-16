@@ -191,9 +191,6 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
   const fit = button("tool", "Fit", "Show the whole clip", () => { if (mode === "notes") notesView?.fit(); else { view = null; draw(); } });
   const status = html("span", "clip-editor-status");
   // Its own window (move it, resize it, maximise it) for fine work, or back in the bottom panel.
-  const popOut = ui.popOut ? button("tool", ui.popped ? "Dock" : "\u29C9 Window",
-    ui.popped ? "Put the clip editor back in the bottom panel" : "Open the clip editor in its own window, to move and make as big as you like for fine work",
-    () => ui.popOut()) : null;
 
   // Two views of the clip: its waveform (timing) and its sung notes (pitch, note by note).
   let mode = prefs.get("view", "wave");
@@ -222,7 +219,7 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
     tools.warp.update();
     drawOverlay();
   };
-  bar.append(views, editSwitch, musical, clipTempoLabel, algorithmRow, compare, solo, loop, status, fit, ...(popOut ? [popOut] : []));
+  bar.append(views, editSwitch, musical, clipTempoLabel, algorithmRow, compare, solo, loop, status, fit);
 
   const overview = html("canvas", "clip-editor-overview");
   overview.title = "The whole recording: the clip's part is lit, the box is what's shown. Drag the box to scroll, its edges to zoom";

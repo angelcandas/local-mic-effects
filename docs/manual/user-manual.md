@@ -375,7 +375,7 @@ Automation makes a setting move over time: the voice comes up in the chorus, the
 
 ![Take lanes](images/take-lanes.png)
 
-When you record over existing audio, or with a loop, every pass becomes a **take** shown in lanes under the track. The track's main lane is the **comp**: the pieces of different takes you chose.
+When you record over existing audio, or with a loop, every pass becomes a **take** shown in lanes under the track, the newest on top and the oldest at the bottom. The newest take also goes straight into the comp. The track's main lane is the **comp**: the pieces of different takes you chose.
 
 - Click or drag on a take lane to put that part into the comp (short crossfades make the joins clean). Audition a take on its own.
 - **Auto Comp** (in the Auto Mix panel, *Pick the best takes*) cuts takes into phrases, scores each for pitch, missing lines, clipping and level, and picks the best pieces for you. You can then change any piece by hand.
@@ -383,7 +383,7 @@ When you record over existing audio, or with a loop, every pass becomes a **take
 
 ## 4.8 The clip editor: pitch and timing
 
-Double-click an audio clip (or press **W**) to open the **clip editor** on the Clip tab. It has two views, **Wave** and **Notes**. **⧉ Window** opens it in its own window over the arrangement: drag its title bar to move it, its edges or corners to resize it, double-click the title bar (or □) to fill the screen, and **Dock** or × to put it back. The window shows whichever audio clip is selected.
+Double-click an audio clip, press **W**, choose **Audio, Edit pitch and warp…** or right-click the clip to open the **clip editor**. It is always its own window over the arrangement, never part of the bottom panel. It has two views, **Wave** and **Notes**. Drag its title bar to move it, its edges or corners to resize it, double-click the title bar (or □) to fill the screen, and × to close it. The window shows whichever audio clip is selected.
 
 ![The clip editor, Wave view](images/clip-editor.png)
 

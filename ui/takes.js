@@ -49,7 +49,7 @@ export class TakeLanes {
   createRows(track, colour) {
     if (!track.takes?.length || !track.takesShown) return [];
     const height = takeRowHeight(this.screen.rowHeight);
-    return [this.createToolsRow(track, colour), ...track.takes.map((take) => this.createTakeRow(track, take, colour, height))];
+    return [this.createToolsRow(track, colour), ...[...track.takes].reverse().map((take) => this.createTakeRow(track, take, colour, height))];
   }
 
   createToolsRow(track, colour) {

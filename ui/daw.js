@@ -3879,9 +3879,10 @@ class DawScreen {
   openClipEditor() {
     const found = this.findClip(this.selectedClip);
     if (!found) return toast("Select a clip first.");
+    if (!found.clip.midi) return this.toggleClipWindow(true); // the audio editor is always its own window
     this.setDockTab("track");
     this.setDock(true);
-    if (found.clip.midi) this.pianoRoll?.element.focus();
+    this.pianoRoll?.element.focus();
   }
 
   // Pattern mode loops the selected pattern (made when there is none); Song mode plays the arrangement.
@@ -4147,7 +4148,7 @@ class DawScreen {
     const returnsKey = [...(session.returns ?? []), ...(session.groups ?? [])].map((r) => `${r.id}:${r.name}`).join(",");
     // The other audio clips selected with an audio clip: more lanes in its clip editor.
     const laneClips = this.laneClipsFor(found);
-    const popped = Boolean(this.clipWindowOpen && found && !found.clip.midi);
+    const popped = Boolean(found && !found.clip.midi); // the audio editor lives in its window, never inline
     const key = `${this.dockTab}|${owner?.id}|${found?.clip.id}|${laneClips.map((f) => f.clip.id).join(",")}|${owner?.name}|${returnsKey}|${(this.session.inputs ?? []).join(",")}|${popped}`;
     if (key !== this.inspectorKey) {
       this.inspectorKey = key;
@@ -4160,16 +4161,10 @@ class DawScreen {
       if (onTrackTab) {
         // An audio clip: its card, then its editor (waveform, pitch, warping), then the
         // track's Pitch & time. A MIDI clip: the piano roll.
-        const shared = { daw, peaks: (args) => nativeDaw("peaks", args), ValueKnob, button, toast: (...a) => toast(...a), popOut: () => this.toggleClipWindow(true) };
+        const shared = { daw, peaks: (args) => nativeDaw("peaks", args), ValueKnob, button, toast: (...a) => toast(...a) };
         this.clipPanel = !found ? null : found.clip.midi ? this.createPianoRoll(found.clip, found.track) : this.createClipPanel(found.clip);
         this.inspector.append(this.clipPanel?.element ?? this.createNoClipPanel(owner));
-        if (popped) {
-          this.inspector.append(this.createPoppedPanel());
-        } else if (found && !found.clip.midi) {
-          this.clipEditor = createClipEditor(this, found.track, found.clip, shared, laneClips);
-          this.clipEditor.element.style.setProperty("--wave", trackColour(found.track, session.tracks.indexOf(found.track)));
-          this.inspector.append(this.clipEditor.element);
-        }
+        if (popped) this.inspector.append(this.createPoppedPanel());
         this.rhythmPanel = owner && owner.id !== 0 && !owner.isReturn && owner.kind !== "midi" // audio quantize/warp only
           ? createRhythmPanel(this, owner, shared) : null;
         if (this.rhythmPanel) this.inspector.append(this.rhythmPanel.element);
@@ -4224,8 +4219,8 @@ class DawScreen {
     const element = html("section", "panel clip-panel is-empty clip-popped");
     const head = html("div", "clip-head");
     head.append(html("h3", "", "Clip editor"));
-    element.append(head, html("p", "panel-caption", "The clip editor is open in its own window: it shows the selected audio clip."),
-      button("tool", "Bring it back here", "Put the clip editor back in the bottom panel", () => this.toggleClipWindow(false)));
+    element.append(head, html("p", "panel-caption", "Pitch, warp, hitpoints and tempo of the selected audio clip open in their own window."),
+      button("tool", "Open the clip editor", "Warp, pitch, hitpoints and tempo of this clip, in a window (W, or double-click the clip)", () => this.toggleClipWindow(true)));
     return element;
   }
 
@@ -4252,7 +4247,7 @@ class DawScreen {
       this.windowEditor?.dispose?.();
       this.windowEditor = null;
       if (audio) {
-        const shared = { daw, peaks: (args) => nativeDaw("peaks", args), ValueKnob, button, toast: (...a) => toast(...a), popped: true, popOut: () => this.toggleClipWindow(false) };
+        const shared = { daw, peaks: (args) => nativeDaw("peaks", args), ValueKnob, button, toast: (...a) => toast(...a), popped: true };
         this.windowEditor = createClipEditor(this, audio.track, audio.clip, shared, laneClips);
         this.clipWinBody.replaceChildren(this.windowEditor.element);
       } else {
@@ -4277,7 +4272,7 @@ class DawScreen {
     const maxButton = button("mini", "\u25A1", "Fill the whole window, or back to its size (double-click the title bar)", () => this.maximiseClipWindow());
     head.append(this.clipWinTitle,
       maxButton,
-      button("mini", "\u00D7", "Close the window: the clip editor goes back to the bottom panel", () => this.toggleClipWindow(false)));
+      button("mini", "\u00D7", "Close the clip editor", () => this.toggleClipWindow(false)));
     this.clipWinBody = html("div", "clip-window-body");
     win.append(head, this.clipWinBody);
     for (const edge of ["n", "s", "e", "w", "ne", "nw", "se", "sw"]) {
@@ -6609,7 +6604,7 @@ class DawScreen {
       item("Loop this clip", () => this.run("loopClip"), { shortcut: "Ctrl+L" });
       item("Zoom to the clip", () => this.run("zoomClip"), { shortcut: "Z" });
       if (audio) {
-        item("Edit pitch and timing", () => this.openClipEditor(), { shortcut: "W", hint: "The clip's waveform on the Clip tab: transpose it, drag notes in time" });
+        item("Edit pitch and warp\u2026", () => this.openClipEditor(), { shortcut: "W", hint: "Opens the clip editor window: transpose the clip, warp it, drag notes in time" });
         const next = this.nextClipTouching(clip);
         item("Crossfade with the next clip", () => this.crossfade(clip, next, 0.05), { disabled: !next,
              hint: next ? "Both clips reach into each other by 25 ms and fade across (50 ms in all), so the join can't click" : "Only when another clip starts where this one ends" });
@@ -6779,6 +6774,7 @@ class DawScreen {
           toast(`Kept ${result.clips} phrase${result.clips === 1 ? "" : "s"}.`, "", "undo");
         }
       }),
+      editWarp: () => this.openClipEditor(),
       splitStems: () => this.withClip((clip) => this.toggleStems(true, clip)),
       rebalanceStems: () => this.withClip((clip) => this.toggleRebalance(true, clip)),
       loopClip: () => this.withClip((clip) => daw("loop", { on: true, start: clip.start, end: clip.start + clip.length })),

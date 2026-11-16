@@ -285,6 +285,8 @@ namespace
             } },
             // Offline processes that change a clip's audio (not live effects or settings).
             { "Audio", {
+                { "editWarp",           "Edit pitch and warp...",             "W", true },
+                { "", "", "", false },
                 { "normaliseClip",      "Normalise clip",                     "",  true },
                 { "", "", "", false },
                 { "stripSilenceQuiet",  "Strip silence: quiet room (-55 dB)", "",  true },
