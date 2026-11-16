@@ -4,6 +4,7 @@
 #include "Alignment.h"
 #include "dsp/FxModule.h"
 
+#include <array>
 #include <map>
 #include <set>
 
@@ -48,6 +49,23 @@ inline constexpr Role allRoles[] = { Role::voice, Role::backingVocal, Role::back
 const char* getRoleKey (Role);              // "voice", "background", "instrumental", "guitar"... (project files, UI)
 Role getRoleFromKey (const juce::String&);  // other when unknown
 juce::String getRoleName (Role);            // "Voice", "Background vocals"...
+
+// How much a track is the star of the song (the Front / Normal / Back switch next to its
+// role). Front: it keeps its level and its frequencies, and the other tracks dip and duck
+// for it. Back: filler, it sits lower and takes deeper dips and ducks more under the
+// front tracks. Normal: as before. The lead voice is Front by default.
+enum class Priority { back = -1, normal = 0, front = 1 };
+
+const char* getPriorityKey (Priority);              // "back", "normal", "front" (project files, UI)
+Priority getPriorityFromKey (const juce::String&);  // normal when unknown
+
+// The five sliders of the review list: what each move of a plan belongs to. fixed moves
+// (phase, input gain, the others' levels, the master) follow Amount only.
+enum class MixGroup { tone, dynamics, space, width, vocal, fixed };
+inline constexpr int numMixGroups = 6;
+const char* getGroupKey (MixGroup);   // "tone", "dynamics", "space", "width", "vocal", "fixed"
+MixGroup getGroupFromKey (const juce::String&);
+juce::String getGroupName (MixGroup);
 
 // The roles played by one instrument (guitar, piano, pad, synth, bass, drums, other instrument).
 bool isInstrument (Role) noexcept;
@@ -127,7 +145,16 @@ struct MixOptions
 {
     MixMode mode = MixMode::mix;
     int focusTrackId = 0; // the track fit and clean work on (0: the lead voice)
-    float masterLufs = -14.0f; // master mode's target: -14 streaming, -10 loud, -16 dynamic
+    float masterLufs = -14.0f; // master mode's target when there's no template: -14 streaming, -10 loud, -16 dynamic
+    juce::String masterTemplate; // master mode: a MasterTemplate key (getMasterTemplates); empty: masterLufs alone
+
+    // Master mode, section moves: the master's effects follow the song (automation on the
+    // master's inserts). The choruses (the song's sections, or else its loudest stretches)
+    // open up: a little wider, a touch more air and more drive into the limiter, back
+    // down for the verses.
+    bool sectionMoves = true;
+    struct Section { double start = 0.0, length = 0.0; juce::String kind; juce::String name; };
+    std::vector<Section> sections; // the session's song sections (Edit::getSongSections), in time order
 
     bool eq = true, compressor = true, deEsser = true, reverb = true;
     bool saturation = true, echo = true, exciter = true, width = true; // used when the style asks for them
@@ -189,6 +216,12 @@ struct MixOptions
     // track before it that shares the most sound with it. Halves of a stereo pair (named
     // L and R) keep their timing, it's their image.
     bool phase = true;
+
+    // Priority of each track (by id; missing: normal). Front tracks other than the lead keep
+    // their level and band; every other instrument also dips where it covers a front one and
+    // ducks while it plays. Back tracks sit about 2 to 3 LU lower, take deeper dips and
+    // duck more under the lead. Mix mode only.
+    std::map<int, Priority> priorities;
     std::vector<TrackPairAlignment> alignments;            // measured (measureAlignments)
     std::map<int, std::pair<bool, float>> currentPhase;    // by id: polarity, nudge (ms) as the tracks are now
 
@@ -262,6 +295,13 @@ struct MixMove
     // values {"polarity": 0 or 1, "nudge": ms} with no insert: the track's phase (Edit::setTrackPolarity, setTrackNudge).
     std::vector<std::pair<double, float>> ride; // volume automation (seconds, dB), when not empty (no insert, no values)
     juce::StringArray reasons;       // one line per change, for the UI
+
+    // Set by labelMoves (planMix does it): which slider it belongs to, whether it is a matter
+    // of taste (starts unticked in the review list) and a stable name for it, the same when
+    // the plan is made again ("12:paraEq:0"), so the ticks survive a replan.
+    MixGroup group = MixGroup::fixed;
+    bool taste = false;
+    juce::String key;
 };
 
 struct MixPlan
@@ -280,6 +320,13 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
                  const std::map<int, float>& currentVolumes, float currentMasterVolume, MixStyle,
                  const MixOptions& = {});
 
+// Gives every move its group, taste flag and key (see MixMove). `roles` is by track id.
+void labelMoves (MixPlan&, const std::map<int, Role>& roles);
+
+// A plan as plain data (for saving with the project) and back; false when it isn't one.
+juce::var planToVar (const MixPlan&);
+bool planFromVar (const juce::var&, MixPlan&);
+
 // Matches the mix to a reference song you like: a gentle master EQ (shelves and three
 // wide bells) towards the reference's long-term tonal balance, and the master volume
 // towards its loudness, held below clipping. `mix` is the session's mix as it plays
@@ -289,11 +336,57 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
 // width with a mono low end, a limiter towards the loudness target, a loudness meter).
 MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVolume, bool smooth = true);
 
+// Where a master goes for a platform or a style: its loudness, the limiter's ceiling,
+// how much limiting that kind of master takes, its width and mono low end, how firmly
+// the multiband holds it, and a lean in its tonal balance.
+struct MasterTemplate
+{
+    juce::String key, name, group; // group: "Platform" or "Style"
+    float lufs = -14.0f;           // integrated loudness target
+    float ceiling = -1.0f;         // limiter ceiling, dB (where the peaks stop)
+    float maxDrive = 5.0f;         // limiter drive, dB: as much as this kind of master takes
+    float width = 110.0f;          // stereo width, % (100: as it is)
+    float monoBelow = 120.0f;      // Hz under which the master is mono (0: none)
+    float ratio = 2.0f;            // multiband ratio
+    float lowLean = 0.0f, highLean = 0.0f; // dB added to the low and top end EQ moves (+ more, - less)
+    juce::String about;            // one line for the UI
+};
+
+// The templates, platforms first, then styles.
+const std::vector<MasterTemplate>& getMasterTemplates();
+// A template by key; nullptr when there's none.
+const MasterTemplate* findMasterTemplate (const juce::String& key);
+// A template from a loudness alone (what master mode did before templates).
+MasterTemplate getLoudnessTemplate (float targetLufs);
+
+// With a template and (optionally) section moves over the song's sections.
+MixPlan planMaster (const Profile& mix, const MasterTemplate&, float currentMasterVolume, bool smooth = true,
+                    bool sectionMoves = false, const std::vector<MixOptions::Section>& sections = {});
+
+// The stretches of the song a master lifts (the choruses): the sections of kind "chorus",
+// else the sections clearly louder than the rest, else (no sections) the mix's loudest
+// stretches of 8 s or more. Pairs of start and end, seconds, in time order.
+std::vector<std::pair<double, double>> findLiftedParts (const Profile& mix, const std::vector<MixOptions::Section>& sections);
+
 MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float currentMasterVolume);
+
+// What to write of a plan: Amount is the master of five group amounts (0..1 each: the sliders
+// Tone, Dynamics, Space, Width and Vocal level; fixed moves follow Amount alone), and `off`
+// holds the keys of the moves left unticked.
+struct ApplyOptions
+{
+    float amount = 1.0f;
+    std::array<float, numMixGroups> groups { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    std::set<juce::String> off;
+    // Tracks whose volume is set to this first (by id), inside the same undo step: the level
+    // they had before a plan that was written without undo history (a reopened project).
+    std::map<int, float> baseVolumes;
+};
 
 // Writes the plan into the session as one undo step. Inserts it needs are reused when
 // the track already has one of that type (or that many, for a move's instance), otherwise added at the start of the chain
 // (at the end for a move with atEnd). `amount` 0..1 scales every move from neutral
 // (EQ gains, compression, reverb mix) or from the current volume.
 void applyMix (daw::Edit&, const MixPlan&, float amount = 1.0f, const char* undoName = "Auto Mix");
+void applyMix (daw::Edit&, const MixPlan&, const ApplyOptions&, const char* undoName = "Auto Mix");
 }

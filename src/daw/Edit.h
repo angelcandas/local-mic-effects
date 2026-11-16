@@ -26,7 +26,7 @@
 //         INSERT  type "plugin", id, pluginOn, pluginInGain, pluginOutGain, plugin, name, format,
 //                 vendor, description, state   (a VST3/AU effect, see PluginInsert.h)
 //     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor, transpose,
-//            kind ("midi" for MIDI tracks; audio when missing), mixRole (Auto Mix's tag:
+//            kind ("midi" for MIDI tracks; audio when missing), mixPriority ("front" or "back": Auto Mix's priority; none: normal), mixRole (Auto Mix's tag:
 //            "voice", "drums"... see analysis::getRoleKey; missing when not tagged),
 //            ride (volume automation, see RidePoint; missing when none),
 //            output (the RETURN id the track plays into instead of the master; missing = master),
@@ -114,7 +114,7 @@ namespace ids
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
-    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
+    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (mixPriority) MICFX_DAW_ID (autoMixAudition) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns) MICFX_DAW_ID (group) MICFX_DAW_ID (folded)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)

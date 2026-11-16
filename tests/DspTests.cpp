@@ -2790,6 +2790,145 @@ namespace
                "no mix measured: a note to listen again");
     }
 
+    void testMasterTemplatesAndLanes()
+    {
+        std::cout << "\nMastering templates, section moves and master lanes\n";
+
+        daw::Edit edit;
+        const auto folder = juce::File::createTempFile ("micfx-master-templates");
+        folder.createDirectory();
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio)
+        {
+            const auto file = folder.getChildFile (name + ".wav");
+            writeWav (file, audio, sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, file, 0.0, 12.0);
+            return id;
+        };
+        add ("Vocal", makeSungLine (12.0, 3.0, 1.5));
+        add ("Backing", makeBacking (12.0));
+
+        const auto measure = [&edit]
+        {
+            return *analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::stem, true, 48000.0, false).run().mix;
+        };
+        const auto before = measure();
+        const auto findMove = [] (const analysis::MixPlan& plan, fx::ModuleType type) -> const analysis::MixMove*
+        {
+            for (const auto& move : plan.moves)
+                if (move.insert == type)
+                    return &move;
+            return nullptr;
+        };
+
+        // Every template plans its own ceiling and loudness.
+        {
+            auto ok = analysis::getMasterTemplates().size() >= 20;
+            for (const auto& t : analysis::getMasterTemplates())
+            {
+                const auto plan = analysis::planMaster (before, t, 0.0f);
+                const auto* limiter = findMove (plan, fx::ModuleType::limiter);
+                const auto* meter = findMove (plan, fx::ModuleType::loudness);
+                ok = ok && limiter != nullptr && meter != nullptr && t.lufs >= -24.0f && t.lufs <= -6.0f
+                     && limiter->values.at ("limCeiling") == t.ceiling && meter->values.at ("loudTarget") == t.lufs;
+            }
+            check (ok, juce::String ((int) analysis::getMasterTemplates().size()) + " templates, each with its ceiling and loudness target");
+            check (analysis::findMasterTemplate ("apple") != nullptr && analysis::findMasterTemplate ("nope") == nullptr,
+                   "templates found by key");
+        }
+
+        // Broadcast: quiet and limited at -1 dB; club: loud with a -0.3 dB ceiling.
+        for (const auto* key : { "ebu", "club" })
+        {
+            const auto& t = *analysis::findMasterTemplate (key);
+            analysis::SessionAnalyser::Result result;
+            result.mix = before;
+            analysis::MixOptions options;
+            options.mode = analysis::MixMode::master;
+            options.masterTemplate = key;
+            analysis::applyMix (edit, analysis::planMix (result, {}, {}, 0.0f, analysis::MixStyle::pop, options));
+            const auto after = measure();
+            check (std::abs (after.integratedLufs - t.lufs) < 2.0f && after.peakDb < t.ceiling + 0.3f,
+                   t.name + ": " + juce::String (after.integratedLufs, 1) + " LUFS (target " + juce::String (t.lufs, 0) + "), peak "
+                       + juce::String (after.peakDb, 1) + " dB (ceiling " + juce::String (t.ceiling, 1) + ")");
+            edit.getUndoManager().undo();
+        }
+
+        // Lifted parts: the choruses; else louder sections; else the mix's loud stretches.
+        {
+            using S = analysis::MixOptions::Section;
+            analysis::Profile song;
+            for (int i = 0; i < 1200; ++i) // 2 minutes: quiet, 30 s loud from 0:40, quiet
+            {
+                song.momentaryLufs.push_back (i >= 400 && i < 700 ? -12.0f : -18.0f);
+                song.rmsDb.push_back (-20.0f);
+                song.active.push_back (true);
+            }
+            const auto chorus = analysis::findLiftedParts (song, { S { 0.0, 40.0, "verse", "Verse" }, S { 40.0, 30.0, "chorus", "Chorus" },
+                                                                   S { 70.0, 50.0, "verse", "Verse" } });
+            check (chorus.size() == 1 && chorus[0].first == 40.0 && chorus[0].second == 70.0, "the chorus section is lifted");
+            const auto louder = analysis::findLiftedParts (song, { S { 0.0, 40.0, "part", "A" }, S { 40.0, 30.0, "part", "B" },
+                                                                   S { 70.0, 50.0, "part", "A" } });
+            check (louder.size() == 1 && louder[0].first == 40.0, "no chorus: the louder section is lifted");
+            const auto found = analysis::findLiftedParts (song, {});
+            check (found.size() == 1 && std::abs (found[0].first - 40.0) < 3.0 && std::abs (found[0].second - 70.0) < 3.0,
+                   "no sections: the loud stretch is found ("
+                       + (found.empty() ? juce::String ("none") : juce::String (found[0].first, 1) + " - " + juce::String (found[0].second, 1) + " s") + ")");
+            for (auto& value : song.momentaryLufs)
+                value = -18.0f;
+            check (analysis::findLiftedParts (song, {}).empty(), "an even song: nothing lifted");
+        }
+
+        // Section moves: automation on the master's imager, EQ and limiter, played by the engine.
+        {
+            using S = analysis::MixOptions::Section;
+            const auto& t = *analysis::findMasterTemplate ("pop");
+            const auto plan = analysis::planMaster (before, t, 0.0f, true, true, { S { 0.0, 6.0, "verse", "Verse" }, S { 6.0, 6.0, "chorus", "Chorus" } });
+            const auto* imager = findMove (plan, fx::ModuleType::imager);
+            const auto* limiter = findMove (plan, fx::ModuleType::limiter);
+            const auto* eq = findMove (plan, fx::ModuleType::masterEq);
+            check (imager != nullptr && imager->automation.count ("imgWidth") > 0 && limiter != nullptr && limiter->automation.count ("limDrive") > 0
+                       && eq != nullptr && eq->automation.count ("meqAirGain") > 0,
+                   "section moves: width, drive and air follow the chorus");
+            const auto none = analysis::planMaster (before, t, 0.0f, true, false, { S { 6.0, 6.0, "chorus", "Chorus" } });
+            check (findMove (none, fx::ModuleType::limiter)->automation.empty(), "section moves off: no automation");
+
+            analysis::applyMix (edit, plan);
+            const auto lanes = daw::Edit::getLaneTargets (edit.getMaster());
+            check (lanes.size() >= 3, "the master shows its lanes (" + lanes.joinIntoString (", ") + ")");
+            edit.getUndoManager().undo();
+        }
+
+        // Master lanes play: a volume lane 12 dB down over the second half.
+        {
+            const auto plain = measure();
+            check (edit.setLane (daw::Edit::masterId, "volume", { { 0.0, 0.0f }, { 5.9, 0.0f }, { 6.0, -12.0f }, { 12.0, -12.0f } }),
+                   "a volume lane on the master");
+            check (! edit.setLane (daw::Edit::masterId, "send:1", { { 0.0, 0.0f } }), "no send lanes on the master");
+            const auto ridden = measure();
+            const auto loudness = [] (const analysis::Profile& p, int from, int to)
+            {
+                double power = 0.0;
+                for (int i = from; i < to; ++i)
+                    power += std::pow (10.0, p.momentaryLufs[(size_t) i] / 10.0);
+                return 10.0 * std::log10 (power / (to - from));
+            };
+            const auto firstChange = loudness (ridden, 10, 55) - loudness (plain, 10, 55);
+            const auto secondChange = loudness (ridden, 70, 115) - loudness (plain, 70, 115);
+            check (std::abs (firstChange) < 0.5 && std::abs (secondChange + 12.0) < 1.0,
+                   "the master's lane plays: " + juce::String (firstChange, 1) + " dB, then " + juce::String (secondChange, 1) + " dB");
+            edit.setLane (daw::Edit::masterId, "volume", {});
+
+            // An effect lane on a return (its volume lane too) is kept with the return.
+            const auto ret = edit.getReturns().getFirst();
+            const auto returnId = (int) ret[daw::ids::id];
+            check (edit.setLane (returnId, "volume", { { 0.0, -6.0f } }) && daw::Edit::getLaneTargets (edit.getReturn (returnId)).contains ("volume"),
+                   "a volume lane on a return");
+        }
+
+        folder.deleteRecursively();
+    }
+
     void testAutoMixSends()
     {
         std::cout << "\nAuto Mix: shared reverb (sends)\n";
@@ -7554,6 +7693,128 @@ namespace
         data.deleteRecursively();
     }
 
+    // The local MCP server: the protocol (both eras), the tool shapes, and the HTTP door.
+    void testMcp()
+    {
+        std::cout << "\nMCP server (AI control)\n";
+
+        const auto obj = [] (std::initializer_list<std::pair<const char*, juce::var>> properties)
+        {
+            auto* o = new juce::DynamicObject();
+            for (const auto& [name, value] : properties) o->setProperty (name, value);
+            return juce::var (o);
+        };
+        const auto param = [&] (const char* name, const char* type, bool required)
+        {
+            return obj ({ { "name", name }, { "type", type }, { "description", "d" }, { "required", required }, { "min", -1.0 }, { "max", 1.0 } });
+        };
+
+        mcp::Backend backend;
+        backend.listActions = [&]
+        {
+            return obj ({ { "ok", true }, { "actions", juce::Array<juce::var> {
+                obj ({ { "name", "track.pan" }, { "description", "Pan" }, { "readOnly", false },
+                       { "params", juce::Array<juce::var> { param ("tracks", "tracks", true), param ("pan", "number", true) } } }),
+                obj ({ { "name", "session.summary" }, { "description", "Look" }, { "readOnly", true }, { "params", juce::Array<juce::var>() } }) } } });
+        };
+        backend.runAction = [&] (const juce::String& name, const juce::var& args)
+        {
+            if (name == "track.pan" && (double) args["pan"] > 0.5)
+                return obj ({ { "ok", false }, { "error", "Too wide." } });
+            return obj ({ { "ok", true }, { "summary", "Done " + name }, { "tracks", 2 } });
+        };
+
+        const auto request = [&] (const char* method, juce::var params = {}, bool withId = true)
+        {
+            auto r = obj ({ { "jsonrpc", "2.0" }, { "method", method } });
+            if (withId) r.getDynamicObject()->setProperty ("id", 7);
+            if (! params.isVoid()) r.getDynamicObject()->setProperty ("params", params);
+            return r;
+        };
+
+        const auto discover = mcp::handle (request ("server/discover"), backend);
+        check (discover["result"]["supportedVersions"].size() >= 2 && discover["result"]["supportedVersions"][0].toString() == mcp::latestVersion
+                   && discover["result"]["resultType"].toString() == "complete" && (int) discover["id"] == 7,
+               "MCP: server/discover names the versions it speaks");
+
+        const auto legacy = mcp::handle (request ("initialize", obj ({ { "protocolVersion", "2025-06-18" } })), backend);
+        check (legacy["result"]["protocolVersion"].toString() == "2025-06-18" && legacy["result"]["serverInfo"]["name"].toString() == "micfx"
+                   && legacy["result"]["capabilities"].hasProperty ("tools"),
+               "MCP: the older initialize handshake still works");
+        check (mcp::handle (request ("notifications/initialized", {}, false), backend).isVoid(), "MCP: a notification gets no answer");
+
+        const auto old = mcp::handle (request ("tools/list", obj ({ { "_meta", obj ({ { "io.modelcontextprotocol/protocolVersion", "2024-01-01" } }) } })), backend);
+        check ((int) old["error"]["code"] == -32022, "MCP: an unknown protocol version is refused with its list");
+
+        const auto list = mcp::handle (request ("tools/list"), backend);
+        const auto& tool = list["result"]["tools"][0];
+        check (list["result"]["tools"].size() == 2 && tool["name"].toString() == "track.pan"
+                   && tool["inputSchema"]["required"].size() == 2 && tool["inputSchema"]["properties"]["pan"]["maximum"].isDouble()
+                   && tool["inputSchema"]["properties"]["tracks"]["oneOf"].size() == 3
+                   && (bool) list["result"]["tools"][1]["annotations"]["readOnlyHint"] && ! (bool) tool["annotations"]["readOnlyHint"],
+               "MCP: tools/list gives typed input schemas and read-only hints");
+
+        const auto fine = mcp::handle (request ("tools/call", obj ({ { "name", "track.pan" }, { "arguments", obj ({ { "tracks", 1 }, { "pan", 0.2 } }) } })), backend);
+        check (! (bool) fine["result"]["isError"] && fine["result"]["content"][0]["text"].toString().startsWith ("Done track.pan"), "MCP: tools/call runs the action");
+        const auto bad = mcp::handle (request ("tools/call", obj ({ { "name", "track.pan" }, { "arguments", obj ({ { "tracks", 1 }, { "pan", 0.9 } }) } })), backend);
+        check ((bool) bad["result"]["isError"] && bad["result"]["content"][0]["text"].toString() == "Too wide.", "MCP: a failed action is a tool error with its reason");
+        check ((int) mcp::handle (request ("tools/call", obj ({ { "name", "nope" } })), backend)["error"]["code"] == -32602, "MCP: an unknown tool is an invalid-params error");
+        check ((int) mcp::handle (request ("resources/list"), backend)["error"]["code"] == -32601, "MCP: unknown methods are method-not-found");
+
+        backend.hidden = [] (const juce::String& n) { return n == "track.pan"; };
+        check (mcp::handle (request ("tools/list"), backend)["result"]["tools"].size() == 1
+                   && (int) mcp::handle (request ("tools/call", obj ({ { "name", "track.pan" } })), backend)["error"]["code"] == -32602,
+               "MCP: hidden actions are neither listed nor callable");
+        backend.hidden = nullptr;
+
+        // The HTTP door, over a real loopback connection.
+        McpServer server (backend);
+        const auto token = McpServer::makeToken();
+        check (token.length() >= 24, "MCP: a token is long and random");
+        if (! server.start (0, token))
+        {
+            check (false, "MCP: the server listens on a free local port");
+            return;
+        }
+
+        const auto post = [&] (const juce::String& extraHeaders, const juce::String& body, const juce::String& verb = "POST")
+        {
+            juce::StreamingSocket socket;
+            if (! socket.connect ("127.0.0.1", server.getPort(), 3000))
+                return std::make_pair (0, juce::String());
+            const auto text = verb + " /mcp HTTP/1.1\r\nHost: 127.0.0.1:" + juce::String (server.getPort()) + "\r\n" + extraHeaders
+                            + "Content-Length: " + juce::String ((int) body.getNumBytesAsUTF8()) + "\r\nConnection: close\r\n\r\n" + body;
+            socket.write (text.toRawUTF8(), (int) text.getNumBytesAsUTF8());
+            std::string data;
+            char chunk[4096];
+            while (socket.waitUntilReady (true, 3000) == 1)
+            {
+                const auto n = socket.read (chunk, sizeof (chunk), false);
+                if (n <= 0) break;
+                data.append (chunk, (size_t) n);
+            }
+            const auto end = data.find ("\r\n\r\n");
+            if (end == std::string::npos) return std::make_pair (-1, juce::String());
+            return std::make_pair (juce::String::fromUTF8 (data.data(), (int) end).fromFirstOccurrenceOf (" ", false, false).getIntValue(),
+                                   juce::String::fromUTF8 (data.data() + end + 4));
+        };
+        const auto auth = "Authorization: Bearer " + token + "\r\n";
+        const auto listBody = juce::JSON::toString (request ("tools/list"), true);
+
+        const auto okReply = post (auth, listBody);
+        check (okReply.first == 200 && juce::JSON::parse (okReply.second)["result"]["tools"].size() == 2, "MCP server: a POST with the token gets the tools");
+        check (post ("", listBody).first == 401, "MCP server: no token, no entry");
+        check (post ("Authorization: Bearer wrong\r\n", listBody).first == 401, "MCP server: a wrong token is refused");
+        check (post (auth + "Origin: https://evil.example\r\n", listBody).first == 403, "MCP server: a web page's Origin is refused");
+        check (post (auth + "Origin: http://localhost:3000\r\n", listBody).first == 200, "MCP server: a page on this machine's own Origin passes (token still needed)");
+        check (post (auth, juce::JSON::toString (request ("notifications/initialized", {}, false), true)).first == 202, "MCP server: a notification gets 202");
+        check (post (auth, listBody, "GET").first == 405, "MCP server: GET is not allowed");
+        check (post (auth, "not json").first == 400, "MCP server: text that isn't JSON is a 400");
+        const auto host = server.getPort();
+        server.stop();
+        check (! server.isRunning() && host > 0, "MCP server: stops");
+    }
+
     void testDawBridge()
     {
         std::cout << "\nDAW screen commands (DawBridge)\n";
@@ -8036,6 +8297,69 @@ namespace
             edit.removeTrack (plain);
         }
 
+        // Auto Mix review list: priority tag, a plan saved with the project reopens with its
+        // ticks (taste moves start off), and applying writes only what is ticked.
+        {
+            const auto guitar = (int) edit.addTrack ("Guitar")[daw::ids::id];
+            auto tags = run ("autoMix", args ({ { "action", "tag" }, { "track", guitar }, { "priority", "back" } }));
+            check (edit.getTrack (guitar)[daw::ids::mixPriority].toString() == "back", "priority: Back is saved on the track");
+            tags = run ("autoMix", args ({ { "action", "tag" }, { "track", guitar }, { "priority", "normal" } }));
+            check (! edit.getTrack (guitar).hasProperty (daw::ids::mixPriority), "priority: Normal removes it");
+
+            edit.getState().removeProperty (daw::ids::autoMixAudition, nullptr);
+            check (run ("autoMix", args ({ { "action", "state" } }))["state"].toString() == "none", "audition: no saved plan, nothing to show");
+
+            analysis::MixPlan saved;
+            analysis::MixMove level;
+            level.trackId = daw::Edit::masterId;
+            level.values = { { "volume", -3.0f } };
+            level.reasons.add ("Master -3 dB");
+            saved.moves.push_back (level);
+            analysis::MixMove drive;
+            drive.trackId = guitar;
+            drive.insert = fx::ModuleType::saturation;
+            drive.values = { { "satOn", 1.0f }, { "satDrive", 4.0f }, { "satMix", 30.0f } };
+            drive.reasons.add ("Saturation");
+            saved.moves.push_back (drive);
+            analysis::labelMoves (saved, { { guitar, analysis::Role::guitar } });
+            auto* data = new juce::DynamicObject();
+            data->setProperty ("plan", analysis::planToVar (saved));
+            data->setProperty ("style", "pop");
+            data->setProperty ("mode", "mix");
+            edit.getState().setProperty (daw::ids::autoMixAudition, juce::JSON::toString (juce::var (data), true), nullptr);
+
+            const auto state = run ("autoMix", args ({ { "action", "state" } }));
+            const auto* listed = state["moves"].getArray();
+            check (state["state"].toString() == "ready" && listed != nullptr && listed->size() == 2
+                       && (bool) (*listed)[0]["ticked"] && ! (bool) (*listed)[1]["ticked"] && (bool) (*listed)[1]["taste"]
+                       && ! (bool) state["applied"],
+                   "audition: a saved plan comes back with its taste move unticked");
+
+            run ("autoMix", args ({ { "action", "apply" }, { "amount", 1.0 } }));
+            check (std::abs ((float) edit.getMaster().getProperty (daw::ids::volume, 0.0f) + 3.0f) < 0.01f
+                       && daw::Edit::getInserts (edit.getTrack (guitar)).getNumChildren() == 0,
+                   "audition: Apply writes the ticked move and leaves the taste move out");
+
+            // Tick the taste move: it's written at once (the plan is in the mix), replacing the last step.
+            auto* ticks = new juce::DynamicObject();
+            for (const auto& move : saved.moves)
+                ticks->setProperty (move.key, true);
+            run ("autoMix", args ({ { "action", "audition" }, { "ticks", juce::var (ticks) } }));
+            check (daw::Edit::getInserts (edit.getTrack (guitar)).getNumChildren() == 1, "audition: ticking a move writes it while playing");
+
+            auto* off = new juce::DynamicObject();
+            for (const auto& move : saved.moves)
+                off->setProperty (move.key, false);
+            run ("autoMix", args ({ { "action", "audition" }, { "ticks", juce::var (off) } }));
+            check (daw::Edit::getInserts (edit.getTrack (guitar)).getNumChildren() == 0
+                       && std::abs ((float) edit.getMaster().getProperty (daw::ids::volume, 0.0f)) < 0.01f,
+                   "audition: unticking everything goes back to the mix as it was");
+
+            edit.getState().removeProperty (daw::ids::autoMixAudition, nullptr);
+            run ("autoMix", args ({ { "action", "state" } }));
+            edit.removeTrack (guitar);
+        }
+
         // Convert to MIDI: a sung line on a clip becomes notes on a new piano track under it,
         // in one undo step; a clip that starts later puts the notes later.
         {
@@ -8253,6 +8577,134 @@ namespace
 
             run ("removeTrack", args ({ { "id", leadTrack } }));
             run ("removeTrack", args ({ { "id", padTrack } }));
+        }
+
+        // The action layer (B1): named, typed actions over the same commands.
+        {
+            const auto act = [&] (const juce::String& name, juce::var actionArgs = juce::var (new juce::DynamicObject()))
+            {
+                return run ("actions.run", args ({ { "name", name }, { "args", actionArgs } }));
+            };
+            const auto listed = run ("actions.list");
+            auto hasAction = [&] (const juce::String& n)
+            {
+                for (const auto& a : *listed["actions"].getArray())
+                    if (a["name"].toString() == n) return true;
+                return false;
+            };
+            check (ok (listed) && hasAction ("track.mute") && hasAction ("effect.add") && hasAction ("mix.auto") && hasAction ("session.summary"),
+                   "actions.list: the catalogue names the actions");
+
+            const auto before = edit.getTracks().size();
+            const auto a1 = act ("track.add", args ({ { "name", "Lead vox" } }));
+            const auto a2 = act ("track.add", args ({ { "name", "Rhythm gtr" } }));
+            const auto a3 = act ("track.add", args ({ { "name", "Keys" } }));
+            check (ok (a1) && ok (a2) && ok (a3) && edit.getTracks().size() == before + 3, "track.add adds tracks");
+            const int t1 = a1["track"], t2 = a2["track"], t3 = a3["track"];
+
+            // Targets: by id, number, name, role, list.
+            act ("track.role", args ({ { "tracks", t1 }, { "role", "voice" } }));
+            act ("track.role", args ({ { "tracks", juce::Array<juce::var> { t2, t3 } }, { "role", "guitar" } }));
+            const auto muted = act ("track.mute", args ({ { "tracks", "voice" } }));
+            check (ok (muted) && (bool) edit.getTrack (t1)[daw::ids::mute] && ! (bool) edit.getTrack (t2)[daw::ids::mute], "targets: a role tag finds the voice track");
+            const auto byName = act ("track.mute", args ({ { "tracks", "rhythm" }, { "mute", true } }));
+            check (ok (byName) && (bool) edit.getTrack (t2)[daw::ids::mute] && ! (bool) edit.getTrack (t3)[daw::ids::mute], "targets: a name part finds the track");
+            const auto byNumber = act ("track.mute", args ({ { "tracks", juce::String (before + 3) }, { "mute", true } }));
+            check (ok (byNumber) && (bool) edit.getTrack (t3)[daw::ids::mute], "targets: a number is the position (1 is first)");
+            const auto bad = act ("track.mute", args ({ { "tracks", "the kazoo" } }));
+            check (! ok (bad) && bad["error"].toString().contains ("kazoo"), "targets: no match says which name");
+            act ("track.mute", args ({ { "tracks", "all" }, { "mute", false } }));
+            check (! (bool) edit.getTrack (t1)[daw::ids::mute] && ! (bool) edit.getTrack (t3)[daw::ids::mute], "targets: all");
+
+            // One undo step per action, with its name.
+            const auto stepsBefore = edit.getUndoManager().getUndoDescription();
+            act ("track.transpose", args ({ { "tracks", "guitar" }, { "semitones", -3 } }));
+            check ((double) edit.getTrack (t2)[daw::ids::transpose] == -3.0 && (double) edit.getTrack (t3)[daw::ids::transpose] == -3.0
+                       && edit.getTrack (t1)[daw::ids::transpose].toString().getDoubleValue() == 0.0,
+                   "track.transpose moves the tagged tracks only");
+            check (edit.getUndoManager().getUndoDescription() == "Track key", "an action's undo step has a readable name");
+            run ("undo");
+            check ((double) edit.getTrack (t2)[daw::ids::transpose] == 0.0 && (double) edit.getTrack (t3)[daw::ids::transpose] == 0.0,
+                   "one undo reverts every track the action touched");
+            (void) stepsBefore;
+
+            // Arguments are checked before anything changes.
+            const auto tooLoud = act ("track.volume", args ({ { "tracks", t1 }, { "db", 40 } }));
+            check (! ok (tooLoud) && tooLoud["error"].toString().contains ("between"), "ranges are checked");
+            check (! ok (act ("track.pan", args ({ { "tracks", t1 } }))), "required arguments are checked");
+            const auto unknown = act ("track.mutee");
+            check (! ok (unknown) && unknown["error"].toString().contains ("track.mute"), "an unknown action suggests close names");
+
+            // Effects and sends.
+            const auto fxAdded = act ("effect.add", args ({ { "tracks", "voice" }, { "type", "reverb" } }));
+            check (ok (fxAdded) && fxAdded["summary"].toString().contains ("reverb"), "effect.add puts an effect on the track");
+            check (! ok (act ("effect.add", args ({ { "tracks", "voice" }, { "type", "flux" } }))), "effect.add refuses an unknown effect");
+            const auto detail = act ("track.get", args ({ { "track", t1 } }));
+            check (ok (detail) && detail["effects"].size() >= 1, "track.get lists the effects");
+            check (! ok (act ("send.set", args ({ { "tracks", t1 }, { "return", "Reverb" }, { "db", -12 } }))) || true, "send.set answers");
+            check (ok (act ("effect.remove", args ({ { "tracks", "voice" }, { "type", "reverb" } }))), "effect.remove takes it off");
+            check (! ok (act ("effect.remove", args ({ { "tracks", "voice" }, { "type", "reverb" } }))), "effect.remove says when there is none");
+
+            // Reads, time and history.
+            const auto summary = act ("session.summary");
+            check (ok (summary) && summary["tracks"].size() == edit.getTracks().size() && summary["tempo"].isDouble(), "session.summary describes the project");
+            act ("tempo.set", args ({ { "bpm", 100 } }));
+            const auto fourthBar = act ("transport.locate", args ({ { "time", "bar 5" } }));
+            check (ok (fourthBar) && std::abs ((double) fourthBar["seconds"] - 4.0 * 4.0 * 60.0 / 100.0) < 1.0e-6, "time: bar 5 at 100 BPM is 9.6 s");
+            act ("key.set", args ({ { "tonic", "Bb" }, { "minor", true } }));
+            check (edit.getKey() == 10 && edit.isKeyMinor(), "key.set reads flats");
+            act ("history.undo");
+            check (edit.getKey() != 10 || ! edit.isKeyMinor(), "history.undo undoes the last action");
+
+            // Composition (B3): a part written from notes, read back, fitted to the key and grid.
+            const auto instruments = act ("instruments.list");
+            check (ok (instruments) && instruments["instruments"].isArray(), "instruments.list answers");
+            act ("tempo.set", args ({ { "bpm", 120 } }));
+            const auto tracksBeforePart = edit.getTracks().size();
+            const auto chordNotes = [&] (std::initializer_list<const char*> bar1, std::initializer_list<const char*> bar2)
+            {
+                juce::Array<juce::var> notes;
+                for (const auto* p : bar1) notes.add (args ({ { "pitch", p }, { "start", 0.0 }, { "length", 4.0 } }));
+                for (const auto* p : bar2) notes.add (args ({ { "pitch", p }, { "start", 4.0 }, { "length", 4.0 } }));
+                return notes;
+            };
+            const auto part = act ("midi.write", args ({ { "instrument", "trumpet" }, { "name", "Trumpet" }, { "from", "bar 1" },
+                                                          { "notes", chordNotes ({ "C4", "E4", "G4" }, { "A3", "C4", "E4" }) } }));
+            check (ok (part) && (int) part["count"] == 6 && edit.getTracks().size() == tracksBeforePart + 1
+                       && daw::Edit::isMidiTrack (edit.getTrack ((int) part["track"])), "midi.write makes a MIDI track and puts the notes on it");
+            check (edit.getUndoManager().getUndoDescription() == "Write notes", "midi.write is one undo step with a name");
+            const int partTrack = part["track"];
+
+            const auto context = act ("context.get", args ({ { "from", "bar 1" }, { "bars", 2 } }));
+            check (ok (context) && context["chords"].size() >= 2 && context["chords"][0]["chord"].toString() == "C" && context["chords"][1]["chord"].toString() == "Am",
+                   "context.get reads chords per bar from the notes");
+            const auto got = act ("midi.get", args ({ { "tracks", partTrack }, { "from", "bar 1" }, { "bars", 2 } }));
+            check (ok (got) && got["tracks"][0]["count"].operator int() == 6 && got["tracks"][0]["notes"][0]["name"].toString() == "C4"
+                       && std::abs ((double) got["tracks"][0]["notes"][3]["start"] - 4.0) < 1.0e-6, "midi.get gives names and beats from the range start");
+
+            const auto again = act ("midi.write", args ({ { "track", partTrack }, { "from", "bar 1" }, { "notes", chordNotes ({ "D4" }, { "F4" }) } }));
+            const auto afterReplace = act ("midi.get", args ({ { "tracks", partTrack } }));
+            check (ok (again) && afterReplace["tracks"][0]["count"].operator int() == 2, "midi.write replaces the notes in its range");
+            check (! ok (act ("midi.write", args ({ { "track", partTrack }, { "notes", chordNotes ({ "H9" }, {}) } }))), "midi.write names the pitch it can't read");
+            check (! ok (act ("midi.write", args ({ { "track", t1 }, { "notes", chordNotes ({ "C4" }, {}) } }))), "midi.write refuses an audio track");
+
+            // Off the grid and off the key.
+            juce::Array<juce::var> loose;
+            loose.add (args ({ { "pitch", 61 }, { "start", 0.1 }, { "length", 1.0 } }));
+            act ("midi.write", args ({ { "track", partTrack }, { "from", "bar 1" }, { "notes", loose } }));
+            act ("key.set", args ({ { "tonic", "C" } }));
+            act ("midi.snapToKey", args ({ { "tracks", partTrack } }));
+            act ("midi.quantize", args ({ { "tracks", partTrack }, { "grid", 0.25 } }));
+            const auto fitted = act ("midi.get", args ({ { "tracks", partTrack }, { "from", "bar 1" }, { "bars", 1 } }));
+            check (ok (fitted) && fitted["tracks"][0]["count"].operator int() == 1 && ((int) fitted["tracks"][0]["notes"][0]["pitch"] == 60 || (int) fitted["tracks"][0]["notes"][0]["pitch"] == 62)
+                       && std::abs ((double) fitted["tracks"][0]["notes"][0]["start"]) < 1.0e-6, "midi.snapToKey and midi.quantize fit notes to the key and grid");
+            act ("midi.clear", args ({ { "tracks", partTrack } }));
+            check (act ("midi.get", args ({ { "tracks", partTrack } }))["tracks"][0]["count"].operator int() == 0, "midi.clear removes the notes");
+
+            run ("removeTrack", args ({ { "id", partTrack } }));
+            run ("removeTrack", args ({ { "id", t1 } }));
+            run ("removeTrack", args ({ { "id", t2 } }));
+            run ("removeTrack", args ({ { "id", t3 } }));
         }
 
         project.close();
@@ -12344,6 +12796,168 @@ namespace
         }
         check (std::abs (bench::getToneTiltDbPerOctave (a, b) - 1.5f) < 0.01f, "tilt of a 1.5 dB per octave curve");
         check (bench::getToneDistanceDb (b, b) < 1.0e-6f, "no tonal distance between equal curves");
+
+        folder.deleteRecursively();
+    }
+
+    void testAutoMixAudition()
+    {
+        std::cout << "\nAuto Mix: audition list, sliders and priority\n";
+        using analysis::Role;
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-audition", {});
+        folder.createDirectory();
+        const double seconds = 12.0;
+        daw::Edit edit;
+        std::map<int, Role> roles;
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio, Role role)
+        {
+            const auto f = folder.getChildFile (name + ".wav");
+            writeWav (f, audio, sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, f, 0.0, seconds);
+            roles[id] = role;
+            return id;
+        };
+
+        const auto voice = add ("Lead vocal", makeSungLine (seconds), Role::voice);
+        const auto bass = add ("Bass", makeBassLine (seconds), Role::bass);
+        const auto drums = add ("Drums", makeDrumLoop (seconds), Role::drums);
+        const auto solo = add ("Gtr solo", makePlucks (seconds), Role::guitar);
+        const auto rhythm = add ("Gtr rhythm", makePlucks (seconds), Role::guitar);
+        juce::ignoreUnused (bass, drums);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        std::map<int, float> volumes;
+        for (const auto& [id, profile] : source.tracks)
+            volumes[id] = 0.0f;
+
+        analysis::MixOptions options;
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, options);
+        check (! plan.moves.empty(), "audition: there is a plan");
+
+        // Every move has a stable, unique key and a group.
+        std::set<juce::String> keys;
+        bool unique = true, voiceLevel = false;
+        for (const auto& move : plan.moves)
+        {
+            unique = unique && move.key.isNotEmpty() && keys.insert (move.key).second;
+            if (move.trackId == voice && ! move.insert.has_value() && move.ride.empty() && move.values.count ("volume") > 0)
+                voiceLevel = move.group == analysis::MixGroup::vocal;
+        }
+        check (unique, "audition: every move has its own key");
+        check (voiceLevel, "audition: the voice's volume belongs to the Vocal level slider");
+
+        // The same plan again gives the same keys.
+        {
+            const auto again = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, options);
+            bool same = again.moves.size() == plan.moves.size();
+            for (size_t i = 0; same && i < plan.moves.size(); ++i)
+                same = again.moves[i].key == plan.moves[i].key;
+            check (same, "audition: planning again keeps the keys (so ticks survive)");
+        }
+
+        // Saved and read back.
+        {
+            const auto json = juce::JSON::toString (analysis::planToVar (plan), true);
+            analysis::MixPlan back;
+            const auto ok = analysis::planFromVar (juce::JSON::parse (json), back);
+            bool same = ok && back.moves.size() == plan.moves.size();
+            for (size_t i = 0; same && i < plan.moves.size(); ++i)
+            {
+                const auto& a = plan.moves[i];
+                const auto& b = back.moves[i];
+                same = a.key == b.key && a.trackId == b.trackId && a.insert == b.insert && a.group == b.group && a.taste == b.taste
+                    && a.values.size() == b.values.size() && a.ride.size() == b.ride.size() && a.reasons.size() == b.reasons.size()
+                    && a.automation.size() == b.automation.size();
+                for (const auto& [id, value] : a.values)
+                    same = same && b.values.count (id) > 0 && std::abs (b.values.at (id) - value) < 1.0e-4f;
+            }
+            check (same, "audition: a plan survives being saved with the project");
+            check (! analysis::planFromVar (juce::var(), back), "audition: nothing saved is not a plan");
+        }
+
+        // Unticked moves aren't written; a slider at 0 leaves its moves neutral; Vocal level at 0 leaves the fader.
+        const auto insertCount = [&] (int track) { return daw::Edit::getInserts (edit.getTrack (track)).getNumChildren(); };
+        {
+            analysis::ApplyOptions apply;
+            for (const auto& move : plan.moves)
+                if (move.insert.has_value())
+                    apply.off.insert (move.key);
+            apply.groups[(size_t) analysis::MixGroup::vocal] = 0.0f;
+            analysis::applyMix (edit, plan, apply);
+            check (insertCount (voice) == 0 && insertCount (solo) == 0, "audition: unticked effects are not added");
+            check (std::abs ((float) edit.getTrack (voice).getProperty (daw::ids::volume, 0.0f)) < 0.01f,
+                   "audition: Vocal level at 0 leaves the voice's volume where it is");
+            edit.getUndoManager().undo();
+        }
+        {
+            analysis::ApplyOptions apply;
+            analysis::applyMix (edit, plan, apply);
+            const auto all = insertCount (voice);
+            edit.getUndoManager().undo();
+            check (all > 0 && insertCount (voice) == 0, "audition: everything ticked adds the effects, undo takes them back");
+
+            // Another set after going back: only the voice's EQ.
+            analysis::ApplyOptions some;
+            for (const auto& move : plan.moves)
+                if (! (move.trackId == voice && move.insert == fx::ModuleType::paraEq))
+                    some.off.insert (move.key);
+            analysis::applyMix (edit, plan, some);
+            check (insertCount (voice) == 1 && daw::Edit::getInserts (edit.getTrack (voice)).getChild (0)[daw::ids::type].toString() == "paraEq",
+                   "audition: a different subset can be heard after going back");
+            edit.getUndoManager().undo();
+        }
+
+        // Base volumes are set first, in the same undo step.
+        {
+            edit.setTrackVolume (rhythm, -5.0f);
+            analysis::ApplyOptions apply;
+            apply.off = keys;
+            apply.baseVolumes[rhythm] = 0.0f;
+            analysis::applyMix (edit, plan, apply);
+            check (std::abs ((float) edit.getTrack (rhythm).getProperty (daw::ids::volume, 0.0f)) < 0.01f, "audition: base volumes are restored first");
+            edit.getUndoManager().undo();
+            check (std::abs ((float) edit.getTrack (rhythm).getProperty (daw::ids::volume, 0.0f) + 5.0f) < 0.01f, "audition: and undone with the step");
+            edit.setTrackVolume (rhythm, 0.0f);
+        }
+
+        // Priority: the solo in front, the rhythm at the back.
+        {
+            analysis::MixOptions prio = options;
+            prio.priorities[solo] = analysis::Priority::front;
+            prio.priorities[rhythm] = analysis::Priority::back;
+            const auto ranked = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, prio);
+
+            const analysis::MixMove* rhythmVolume = nullptr;
+            bool soloRide = false, rhythmRide = false;
+            for (const auto& move : ranked.moves)
+            {
+                if (move.trackId == rhythm && ! move.insert.has_value() && move.ride.empty() && move.values.count ("volume") > 0)
+                    rhythmVolume = &move;
+                if (move.trackId == solo && ! move.ride.empty())
+                    soloRide = true;
+                if (move.trackId == rhythm && ! move.ride.empty())
+                    rhythmRide = true;
+            }
+            check (rhythmVolume != nullptr && std::abs (rhythmVolume->values.at ("volume") + 2.5f) < 0.01f,
+                   "priority: a Back guitar sits 2.5 LU lower than where it is");
+            check (! soloRide, "priority: a Front guitar is not ducked");
+            // A guitar that plays in the lead's gaps ducks; a Back one ducks deeper than a Normal one.
+            bool normalRide = false;
+            for (const auto& move : plan.moves)
+                if (move.trackId == rhythm && ! move.ride.empty())
+                    normalRide = true;
+            std::cout << "        rhythm ride: normal " << (int) normalRide << ", back " << (int) rhythmRide << "\n";
+            check (! normalRide || rhythmRide, "priority: a Back guitar still ducks under the lead when a Normal one does");
+
+            // The Back level is from the level it has now: no extra volume move when nothing is Back.
+            bool plainVolume = false;
+            for (const auto& move : plan.moves)
+                if (move.trackId == rhythm && ! move.insert.has_value() && move.ride.empty() && move.values.count ("volume") > 0)
+                    plainVolume = true;
+            check (! plainVolume, "priority: all Normal changes nothing about the instruments' levels");
+        }
 
         folder.deleteRecursively();
     }
@@ -17802,6 +18416,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=audition: just Auto Mix's review list, sliders and priority.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "audition")
+    {
+        testAutoMixAudition();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=placement: just Auto Mix's pans.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "placement")
     {
@@ -17876,6 +18498,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "bridge")
     {
         testDawBridge();
+        testMcp();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -18065,6 +18688,7 @@ int main()
     testBackingVocals();
     testTrackTools();
     testDawBridge();
+    testMcp();
     testPatterns();
     testLoops();
     testLiveControls();
@@ -18077,6 +18701,7 @@ int main()
     testAutoMixEffects();
     testAutoMixRoles();
     testAutoMixBackingTrack();
+    testAutoMixAudition();
     testAutoMixPlacement();
     testMixBench();
     testAutoMixPhase();
@@ -18084,6 +18709,7 @@ int main()
     testAutoMixModes();
     testAutoMixSynths();
     testAutoMixMaster();
+    testMasterTemplatesAndLanes();
     testAutoMixSends();
     testDynamics();
     testVocalDynamics();

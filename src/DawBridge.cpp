@@ -437,6 +437,20 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
     edit.getState().addListener (this);
     project.setAutosaveInterval (autosaveSeconds);
 
+    // The action layer hears the events that finish its long actions (Auto Mix listening...).
+    actions = std::make_unique<DawActions> (processor, *this);
+    emit = [this, inner = std::move (emit)] (const juce::Identifier& event, const juce::var& payload)
+    {
+        actions->onEvent (event, payload);
+        inner (event, payload);
+    };
+    if (isAvailable() && settings.getBoolValue ("dawMcpOn", false))
+    {
+        if (settings.getValue ("mcpToken").isEmpty())
+            settings.setValue ("mcpToken", McpServer::makeToken());
+        startMcpServer();
+    }
+
     // Pick up where the app left off: the mode, and the last project if none is open.
     if (isAvailable())
     {
@@ -465,6 +479,8 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
 DawBridge::~DawBridge()
 {
     *alive = false;
+    mcpServer.reset(); // first: its connections may be waiting for the message thread
+    McpServer::removeDiscoveryFile();
     edit.getState().removeListener (this);
     processor.getPluginHost().onScanFinished = nullptr;
     instrumentWindows.clear();
@@ -934,7 +950,8 @@ juce::var DawBridge::describeSession()
                                { "mute", (bool) bus[ids::mute] }, { "solo", (bool) bus[ids::solo] },
                                { "group", daw::Edit::isGroup (bus) }, { "folded", (bool) bus.getProperty (ids::folded, false) },
                                { "sends", describeSends (bus) },
-                               { "inserts", describeInserts (bus) }, { "macros", describeMacros (bus) } }));
+                               { "inserts", describeInserts (bus) }, { "macros", describeMacros (bus) },
+                               { "lanes", describeLanes (bus) } }));
 
     if (lastInputNames.isEmpty())
         lastInputNames = getInputNames();
@@ -1005,7 +1022,8 @@ juce::var DawBridge::describeSession()
         { "view", state[ids::viewState].toString() },
         { "returns", returns },
         { "master", object ({ { "volume", number (master, ids::volume) }, { "pan", number (master, ids::pan) }, { "inGain", number (master, ids::inGain) },
-                              { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) }, { "macros", describeMacros (master) } }) },
+                              { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) }, { "macros", describeMacros (master) },
+                              { "lanes", describeLanes (master) } }) },
         { "tracks", tracks },
         { "patterns", describePatterns() },
         { "patternClips", describePatternClips() },
@@ -1395,7 +1413,7 @@ void DawBridge::pasteLanesWith (const juce::var& args, const juce::ValueTree& cl
 
 void DawBridge::recordMove (int trackId, const juce::String& target, float knob)
 {
-    if (engine.isPlaying() && edit.getTrack (trackId).isValid())
+    if (engine.isPlaying() && edit.getChannel (trackId).isValid())
         automationRecorder.moved (trackId, target, knob, (double) engine.getPosition() / juce::jmax (1.0, engine.getSampleRate()));
 }
 
@@ -1469,8 +1487,13 @@ void DawBridge::tick()
                 {
                     autoMixReference = true;
                     autoMixReferenceName = job->reference.getFileNameWithoutExtension();
+                    autoMixTicks.clear();
+                    autoMixApplied = false;
                     autoMixPlan = analysis::planReferenceMatch (*job->result.mix, job->referenceProfile,
                                                                 (float) edit.getMaster().getProperty (ids::volume, 0.0f));
+                    analysis::labelMoves (autoMixPlan, {});
+                    autoMixDirty = true;
+                    saveAutoMixState();
                     emit ("dawAutoMix", describeAutoMix());
                 }
             }
@@ -1494,6 +1517,8 @@ void DawBridge::tick()
 
                 autoMixRoles = roles;
                 autoMixReference = false;
+                autoMixTicks.clear(); // a new listen: its own list, every move at its default
+                autoMixApplied = false;
                 replanAutoMix();
                 emit ("dawAutoMix", describeAutoMix());
             }
@@ -2757,9 +2782,10 @@ void DawBridge::replanAutoMix()
     if (! autoMixAnalysis.has_value())
         return;
 
+    // A volume Auto Mix set last time is planned again from where it started.
     std::map<int, float> volumes;
     for (const auto& track : edit.getTracks())
-        volumes[(int) track[ids::id]] = track.getProperty (ids::volume, 0.0f);
+        volumes[(int) track[ids::id]] = getAutoMixBaseVolume ((int) track[ids::id], track.getProperty (ids::volume, 0.0f));
 
     auto options = autoMixOptions;
     options.tempo = edit.getTempo();
@@ -2773,6 +2799,8 @@ void DawBridge::replanAutoMix()
             options.stereoTracks.insert (id);
 
         options.currentPhase[id] = { daw::Edit::getPolarity (track), daw::Edit::getNudge (track) };
+        if (track.hasProperty (ids::mixPriority))
+            options.priorities[id] = analysis::getPriorityFromKey (track[ids::mixPriority].toString());
 
         // Pans you set stay; the ones Auto Mix set last time are planned again.
         const auto pan = (float) track.getProperty (ids::pan, 0.0f);
@@ -2787,6 +2815,11 @@ void DawBridge::replanAutoMix()
 
     options.alignments = autoMixAlignments;
 
+    // The song's sections, for the master's section moves.
+    for (const auto& section : edit.getSongSections())
+        options.sections.push_back ({ (double) section[ids::time], (double) section.getProperty (ids::length, 0.0),
+                                      section[ids::section].toString(), section[ids::name].toString() });
+
     // The shared reverb: the first return with a reverb on it.
     for (const auto& ret : edit.getReturns())
     {
@@ -2799,6 +2832,178 @@ void DawBridge::replanAutoMix()
 
     autoMixPlan = analysis::planMix (*autoMixAnalysis, autoMixRoles, volumes,
                                      (float) edit.getMaster().getProperty (ids::volume, 0.0f), autoMixStyle, options);
+    autoMixDirty = true;
+    saveAutoMixState();
+}
+
+//==============================================================================
+// The review list: ticks, sliders and the plan, kept with the project.
+float DawBridge::getAutoMixBaseVolume (int trackId, float current) const
+{
+    const auto applied = autoMixAppliedVolumes.find (trackId);
+    const auto base = autoMixBaseVolumes.find (trackId);
+    if (applied != autoMixAppliedVolumes.end() && base != autoMixBaseVolumes.end() && std::abs (applied->second - current) < 0.01f)
+        return base->second;
+    return current;
+}
+
+bool DawBridge::isAutoMixTicked (const analysis::MixMove& move) const
+{
+    const auto found = autoMixTicks.find (move.key);
+    return found != autoMixTicks.end() ? found->second : ! move.taste;
+}
+
+analysis::ApplyOptions DawBridge::getAutoMixApplyOptions() const
+{
+    analysis::ApplyOptions options;
+    options.amount = autoMixAmount;
+    options.groups = autoMixGroups;
+    for (const auto& move : autoMixPlan.moves)
+        if (! isAutoMixTicked (move))
+            options.off.insert (move.key);
+    return options;
+}
+
+void DawBridge::readAutoMixAudition (const juce::var& args)
+{
+    if (auto* ticks = args["ticks"].getDynamicObject())
+    {
+        autoMixTicks.clear();
+        for (const auto& property : ticks->getProperties())
+            autoMixTicks[property.name.toString()] = (bool) property.value;
+    }
+    if (auto* groups = args["groups"].getDynamicObject())
+        for (int i = 0; i < analysis::numMixGroups; ++i)
+            if (groups->hasProperty (analysis::getGroupKey ((analysis::MixGroup) i)))
+                autoMixGroups[(size_t) i] = juce::jlimit (0.0f, 1.0f, (float) groups->getProperty (analysis::getGroupKey ((analysis::MixGroup) i)));
+    if (args.hasProperty ("amount"))
+        autoMixAmount = juce::jlimit (0.0f, 1.0f, (float) args["amount"]);
+}
+
+juce::var DawBridge::applyAutoMix (bool replace)
+{
+    auto& undo = edit.getUndoManager();
+    if (autoMixPlan.moves.empty())
+        return error ("Nothing to apply yet.");
+
+    // Writing it again replaces what it wrote before (one undo step), whatever was ticked then.
+    if ((replace || autoMixApplied) && undo.getUndoDescription() == autoMixUndoName)
+        undo.undo();
+
+    auto options = getAutoMixApplyOptions();
+    std::map<int, float> base;
+    for (const auto& track : edit.getTracks())
+    {
+        const auto id = (int) track[ids::id];
+        const auto current = (float) track.getProperty (ids::volume, 0.0f);
+        base[id] = getAutoMixBaseVolume (id, current);
+        if (std::abs (base[id] - current) > 0.001f)
+            options.baseVolumes[id] = base[id]; // a plan written before the project was reopened: start from where it began
+    }
+
+    analysis::applyMix (edit, autoMixPlan, options);
+
+    autoMixBaseVolumes = base;
+    autoMixAppliedVolumes.clear();
+    for (const auto& track : edit.getTracks())
+        autoMixAppliedVolumes[(int) track[ids::id]] = track.getProperty (ids::volume, 0.0f);
+
+    autoMixPans.clear();
+    for (const auto& move : autoMixPlan.moves)
+        if (options.off.count (move.key) == 0 && ! move.insert.has_value() && move.values.count ("pan") > 0)
+            if (const auto track = edit.getTrack (move.trackId); track.isValid())
+                autoMixPans[move.trackId] = track.getProperty (ids::pan, 0.0f);
+
+    autoMixApplied = true;
+    autoMixDirty = false;
+    saveAutoMixState();
+    return error ({});
+}
+
+void DawBridge::saveAutoMixState()
+{
+    if (autoMixPlan.moves.empty())
+        return;
+
+    const auto toObject = [] (const auto& map, auto convert)
+    {
+        auto* o = new juce::DynamicObject();
+        for (const auto& [key, value] : map)
+            o->setProperty (juce::String (key), convert (value));
+        return juce::var (o);
+    };
+    const auto asVar = [] (auto value) { return juce::var (value); };
+
+    auto* groups = new juce::DynamicObject();
+    for (int i = 0; i < analysis::numMixGroups; ++i)
+        groups->setProperty (analysis::getGroupKey ((analysis::MixGroup) i), autoMixGroups[(size_t) i]);
+
+    const auto saved = juce::JSON::toString (object ({
+        { "plan", analysis::planToVar (autoMixPlan) },
+        { "style", styleKey (autoMixStyle) }, { "mode", analysis::getModeKey (autoMixOptions.mode) },
+        { "focus", autoMixOptions.focusTrackId }, { "masterTemplate", autoMixOptions.masterTemplate },
+        { "masterLufs", autoMixOptions.masterLufs },
+        { "reference", autoMixReference }, { "referenceName", autoMixReferenceName },
+        { "ticks", toObject (autoMixTicks, asVar) }, { "groups", juce::var (groups) }, { "amount", autoMixAmount },
+        { "base", toObject (autoMixBaseVolumes, asVar) }, { "applied", toObject (autoMixAppliedVolumes, asVar) } }), true);
+
+    autoMixSaved = saved;
+    edit.getState().setProperty (ids::autoMixAudition, saved, nullptr);
+}
+
+// The plan the project was saved with (when the project isn't the one it was made in, or it
+// was opened anew). Nothing was listened to, so it can be ticked and applied but not planned again.
+void DawBridge::restoreAutoMixState()
+{
+    const auto saved = edit.getState()[ids::autoMixAudition].toString();
+    if (saved == autoMixSaved)
+        return;
+
+    autoMixSaved = saved;
+    autoMixPlan = {};
+    autoMixAnalysis.reset();
+    autoMixRoles.clear();
+    autoMixTicks.clear();
+    autoMixGroups.fill (1.0f);
+    autoMixAmount = 1.0f;
+    autoMixApplied = false;
+    autoMixDirty = false;
+    autoMixBaseVolumes.clear();
+    autoMixAppliedVolumes.clear();
+    autoMixPans.clear();
+    autoMixReference = false;
+    autoMixReferenceName = {};
+
+    const auto data = juce::JSON::parse (saved);
+    if (! analysis::planFromVar (data["plan"], autoMixPlan))
+    {
+        autoMixPlan = {};
+        return;
+    }
+
+    autoMixStyle = styleFromKey (data["style"].toString());
+    autoMixOptions.mode = analysis::getModeFromKey (data["mode"].toString());
+    autoMixOptions.focusTrackId = (int) data["focus"];
+    autoMixOptions.masterTemplate = data["masterTemplate"].toString();
+    if (data.hasProperty ("masterLufs"))
+        autoMixOptions.masterLufs = (float) data["masterLufs"];
+    autoMixReference = (bool) data["reference"];
+    autoMixReferenceName = data["referenceName"].toString();
+    autoMixAmount = juce::jlimit (0.0f, 1.0f, data.hasProperty ("amount") ? (float) data["amount"] : 1.0f);
+
+    if (auto* ticks = data["ticks"].getDynamicObject())
+        for (const auto& property : ticks->getProperties())
+            autoMixTicks[property.name.toString()] = (bool) property.value;
+    if (auto* groups = data["groups"].getDynamicObject())
+        for (int i = 0; i < analysis::numMixGroups; ++i)
+            if (groups->hasProperty (analysis::getGroupKey ((analysis::MixGroup) i)))
+                autoMixGroups[(size_t) i] = juce::jlimit (0.0f, 1.0f, (float) groups->getProperty (analysis::getGroupKey ((analysis::MixGroup) i)));
+    if (auto* base = data["base"].getDynamicObject())
+        for (const auto& property : base->getProperties())
+            autoMixBaseVolumes[property.name.toString().getIntValue()] = (float) property.value;
+    if (auto* applied = data["applied"].getDynamicObject())
+        for (const auto& property : applied->getProperties())
+            autoMixAppliedVolumes[property.name.toString().getIntValue()] = (float) property.value;
 }
 
 // A track recorded in stereo: an input pair, or an audio file whose two sides differ
@@ -2865,6 +3070,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("smooth", autoMixOptions.smooth);
     read ("pan", autoMixOptions.pan);
     read ("phase", autoMixOptions.phase);
+    read ("sectionMoves", autoMixOptions.sectionMoves);
     read ("split", autoMixSplit);
 }
 
@@ -2876,6 +3082,25 @@ void DawBridge::readAutoMixMode (const juce::var& args)
         autoMixOptions.focusTrackId = (int) args["focus"];
     if (args.hasProperty ("masterLufs"))
         autoMixOptions.masterLufs = juce::jlimit (-24.0f, -6.0f, (float) args["masterLufs"]);
+    if (args.hasProperty ("sectionMoves"))
+        autoMixOptions.sectionMoves = (bool) args["sectionMoves"];
+    if (args.hasProperty ("masterTemplate"))
+    {
+        const auto key = args["masterTemplate"].toString();
+        autoMixOptions.masterTemplate = analysis::findMasterTemplate (key) != nullptr ? key : juce::String();
+        if (const auto* found = analysis::findMasterTemplate (key))
+            autoMixOptions.masterLufs = found->lufs;
+    }
+}
+
+// The mastering templates for the Auto Mix panel: [{ key, name, group, lufs, ceiling, about }].
+juce::var DawBridge::describeMasterTemplates()
+{
+    juce::Array<juce::var> list;
+    for (const auto& t : analysis::getMasterTemplates())
+        list.add (object ({ { "key", t.key }, { "name", t.name }, { "group", t.group }, { "lufs", t.lufs },
+                            { "ceiling", t.ceiling }, { "about", t.about } }));
+    return list;
 }
 
 // Every track's tag before Auto Mix listens: the one you picked (tagged), or the guess
@@ -2901,13 +3126,14 @@ juce::var DawBridge::describeAutoMixTags() const
         const auto role = tagged ? juce::String (analysis::getRoleKey (analysis::getRoleFromKey (track[ids::mixRole].toString())))
                         : guess.has_value() ? juce::String (analysis::getRoleKey (*guess)) : juce::String();
         tracks.add (object ({ { "id", (int) track[ids::id] }, { "name", track[ids::name].toString() }, { "role", role },
-                              { "tagged", tagged }, { "midi", daw::Edit::isMidiTrack (track) } }));
+                              { "tagged", tagged }, { "midi", daw::Edit::isMidiTrack (track) },
+                              { "priority", track[ids::mixPriority].toString().isEmpty() ? juce::String ("normal") : track[ids::mixPriority].toString() } }));
     }
 
     for (auto role : analysis::allRoles)
         roles.add (object ({ { "key", analysis::getRoleKey (role) }, { "name", analysis::getRoleName (role) } }));
 
-    return object ({ { "ok", true }, { "tracks", tracks }, { "roles", roles } });
+    return object ({ { "ok", true }, { "tracks", tracks }, { "roles", roles }, { "masterTemplates", describeMasterTemplates() } });
 }
 
 juce::var DawBridge::describeAutoMix() const
@@ -2928,7 +3154,9 @@ juce::var DawBridge::describeAutoMix() const
                 continue;
 
             const auto role = autoMixRoles.count (id) > 0 ? autoMixRoles.at (id) : analysis::Role::other;
+            const auto priority = edit.getTrack (id)[ids::mixPriority].toString();
             tracks.add (object ({ { "id", id }, { "name", nameOf (id) }, { "role", analysis::getRoleKey (role) },
+                                  { "priority", priority.isEmpty() ? juce::String ("normal") : priority },
                                   { "lufs", profile.integratedLufs }, { "active", profile.getActiveSeconds() } }));
         }
 
@@ -2963,11 +3191,18 @@ juce::var DawBridge::describeAutoMix() const
         for (const auto& reason : move.reasons)
             reasons.add (reason);
 
-        moves.add (object ({ { "track", move.trackId }, { "name", nameOf (move.trackId) }, { "effect", effect }, { "reasons", reasons } }));
+        moves.add (object ({ { "track", move.trackId }, { "name", nameOf (move.trackId) }, { "effect", effect }, { "reasons", reasons },
+                             { "key", move.key }, { "group", analysis::getGroupKey (move.group) }, { "taste", move.taste },
+                             { "ticked", isAutoMixTicked (move) } }));
     }
 
     for (const auto& note : autoMixPlan.notes)
         notes.add (note);
+
+    auto* groups = new juce::DynamicObject();
+    for (int i = 0; i < analysis::numMixGroups - 1; ++i) // the sliders (not "fixed")
+        groups->setProperty (analysis::getGroupKey ((analysis::MixGroup) i), autoMixGroups[(size_t) i]);
+    const juce::var groupAmounts (groups);
 
     const auto effects = object ({ { "eq", autoMixOptions.eq }, { "compressor", autoMixOptions.compressor },
                                    { "deEsser", autoMixOptions.deEsser }, { "reverb", autoMixOptions.reverb },
@@ -2976,12 +3211,16 @@ juce::var DawBridge::describeAutoMix() const
                                    { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour }, { "sends", autoMixOptions.sends }, { "throws", autoMixOptions.throws },
                                    { "dynamicEq", autoMixOptions.dynamicEq }, { "transients", autoMixOptions.transients },
                                    { "smooth", autoMixOptions.smooth }, { "pan", autoMixOptions.pan }, { "phase", autoMixOptions.phase },
+                                   { "sectionMoves", autoMixOptions.sectionMoves },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
                      { "style", styleKey (autoMixStyle) }, { "mode", analysis::getModeKey (autoMixOptions.mode) },
-                     { "focus", autoMixOptions.focusTrackId }, { "masterLufs", autoMixOptions.masterLufs }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
-                     { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs } });
+                     { "focus", autoMixOptions.focusTrackId }, { "masterLufs", autoMixOptions.masterLufs },
+                     { "masterTemplate", autoMixOptions.masterTemplate }, { "masterTemplates", describeMasterTemplates() }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
+                     { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs },
+                     { "groups", groupAmounts }, { "amount", autoMixAmount },
+                     { "applied", autoMixApplied && ! autoMixDirty }, { "after", autoMixApplied } });
 }
 
 //==============================================================================
@@ -4478,9 +4717,41 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
                     track.setProperty (ids::mixRole, analysis::getRoleKey (autoMixRoles[trackId]), nullptr);
             }
 
+        // Priority (Front / Normal / Back) is a tag of the track too.
+        if (auto* priorities = args["priorities"].getDynamicObject())
+            for (const auto& property : priorities->getProperties())
+                if (auto track = edit.getTrack (property.name.toString().getIntValue()); track.isValid())
+                {
+                    const auto priority = analysis::getPriorityFromKey (property.value.toString());
+                    if (priority == analysis::Priority::normal)
+                        track.removeProperty (ids::mixPriority, nullptr);
+                    else
+                        track.setProperty (ids::mixPriority, analysis::getPriorityKey (priority), nullptr);
+                }
+
         autoMixReference = false;
         replanAutoMix();
         return describeAutoMix();
+    }
+
+    // The plan this project was saved with, when nothing is listened to yet.
+    if (action == "state")
+    {
+        restoreAutoMixState();
+        if (autoMixPlan.moves.empty())
+            return object ({ { "ok", true }, { "state", "none" } });
+        return describeAutoMix();
+    }
+
+    // Ticks, sliders or Amount changed: while the plan is written, it's written again with
+    // them (the song keeps playing), otherwise they're kept for Apply.
+    if (action == "audition")
+    {
+        readAutoMixAudition (args);
+        if (autoMixApplied && ! autoMixDirty)
+            return applyAutoMix (true);
+        saveAutoMixState();
+        return error ({});
     }
 
     if (action == "tags")
@@ -4491,6 +4762,18 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
         auto track = edit.getTrack (arg (args, "track", -1));
         if (! track.isValid())
             return error ("That track is gone.");
+
+        // { track, priority }: Front, Normal or Back, nothing else changes.
+        if (args.hasProperty ("priority"))
+        {
+            const auto priority = analysis::getPriorityFromKey (args["priority"].toString());
+            if (priority == analysis::Priority::normal)
+                track.removeProperty (ids::mixPriority, nullptr);
+            else
+                track.setProperty (ids::mixPriority, analysis::getPriorityKey (priority), nullptr);
+            if (! args.hasProperty ("role"))
+                return describeAutoMixTags();
+        }
 
         // "auto" forgets the tag: Auto Mix guesses again from the name and the sound.
         const auto key = args["role"].toString();
@@ -4510,19 +4793,8 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
 
     if (action == "apply")
     {
-        if (autoMixPlan.moves.empty())
-            return error ("Nothing to apply yet.");
-
-        if (arg (args, "replace", false) && undo.getUndoDescription() == autoMixUndoName)
-            undo.undo();
-
-        analysis::applyMix (edit, autoMixPlan, arg (args, "amount", 1.0f));
-        autoMixPans.clear();
-        for (const auto& move : autoMixPlan.moves)
-            if (! move.insert.has_value() && move.values.count ("pan") > 0)
-                if (const auto track = edit.getTrack (move.trackId); track.isValid())
-                    autoMixPans[move.trackId] = track.getProperty (ids::pan, 0.0f);
-        return error ({});
+        readAutoMixAudition (args);
+        return applyAutoMix (arg (args, "replace", false));
     }
 
     if (action == "compare")
@@ -4533,10 +4805,111 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
         else if (! after && undo.getUndoDescription() == autoMixUndoName)
             undo.undo();
 
+        autoMixApplied = undo.getUndoDescription() == autoMixUndoName;
+
         return object ({ { "ok", true }, { "after", undo.getUndoDescription() == autoMixUndoName } });
     }
 
     return error ("Unknown Auto Mix action: " + action);
+}
+
+// The local MCP server (src/McpServer.h), for AI programs that drive the app through the actions.
+bool DawBridge::startMcpServer()
+{
+    mcp::Backend backend;
+    backend.serverName = "micfx";
+    backend.serverVersion = "1";
+    backend.instructions = "MicFX is a voice-first recording and mixing app. Call session.summary first to see the project, then use the "
+                           "actions. Tracks can be named by number, name, role (voice, instrumental, guitar...) or \"selected\". "
+                           "Every change is one undo step (history.undo).";
+    backend.listActions = [this]
+    {
+        // The catalogue never changes after start-up, so it is safe to read from a connection thread.
+        return actions->list();
+    };
+    backend.runAction = [this, aliveFlag = alive] (const juce::String& name, const juce::var& args)
+    {
+        struct Call { juce::WaitableEvent done; juce::var result; };
+        auto call = std::make_shared<Call>();
+        juce::MessageManager::callAsync ([this, aliveFlag, call, name, args]
+        {
+            if (! *aliveFlag) { call->result = juce::var(); call->done.signal(); return; }
+            actions->run (name, args, [call] (juce::var r) { call->result = std::move (r); call->done.signal(); });
+        });
+
+        // Long actions (Auto Mix listening) can take minutes; give up when the app is closing.
+        for (int waited = 0; waited < 30 * 60 * 10; ++waited)
+        {
+            if (call->done.wait (100))
+                return call->result.isVoid() ? object ({ { "ok", false }, { "error", "MicFX is closing." } }) : call->result;
+            if (! *aliveFlag)
+                break;
+        }
+        return object ({ { "ok", false }, { "error", "The action didn't finish in time. It may still be running in MicFX." } });
+    };
+
+    auto server = std::make_unique<McpServer> (std::move (backend));
+    if (! server->start (settings.getIntValue ("mcpPort", 0), settings.getValue ("mcpToken")))
+        if (! server->start (0, settings.getValue ("mcpToken")))
+            return false;
+
+    settings.setValue ("mcpPort", server->getPort());
+    if (! McpServer::writeDiscoveryFile (server->getPort(), settings.getValue ("mcpToken")))
+        return false;
+    mcpServer = std::move (server);
+    return true;
+}
+
+// { action: "state" } | { action: "set", on } | { action: "copy" } | { action: "newToken" }
+juce::var DawBridge::handleAiControl (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+    auto problem = juce::String();
+
+    if (settings.getValue ("mcpToken").isEmpty())
+        settings.setValue ("mcpToken", McpServer::makeToken());
+
+    if (action == "set")
+    {
+        const auto on = (bool) args["on"];
+        settings.setValue ("dawMcpOn", on);
+        if (! on)
+        {
+            mcpServer.reset();
+            McpServer::removeDiscoveryFile();
+        }
+        else if (mcpServer == nullptr && ! startMcpServer())
+            problem = "Couldn't start the local server (no free port, or the folder for its key file isn't writable).";
+        settings.saveIfNeeded();
+    }
+    else if (action == "newToken")
+    {
+        // A new key: AI programs that held the old one are refused until they read the file again.
+        settings.setValue ("mcpToken", McpServer::makeToken());
+        if (mcpServer != nullptr)
+        {
+            mcpServer.reset();
+            if (! startMcpServer())
+                problem = "Couldn't restart the local server.";
+        }
+        settings.saveIfNeeded();
+    }
+
+    const auto helper = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getSiblingFile ("micfx-mcp");
+    auto* config = new juce::DynamicObject();
+    auto* server = new juce::DynamicObject();
+    server->setProperty ("command", helper.getFullPathName());
+    auto* servers = new juce::DynamicObject();
+    servers->setProperty ("micfx", juce::var (server));
+    config->setProperty ("mcpServers", juce::var (servers));
+    const auto configText = juce::JSON::toString (juce::var (config), false);
+
+    if (action == "copy")
+        juce::SystemClipboard::copyTextToClipboard (configText);
+
+    return object ({ { "ok", problem.isEmpty() }, { "error", problem }, { "on", mcpServer != nullptr },
+                     { "port", mcpServer != nullptr ? mcpServer->getPort() : 0 },
+                     { "helperFound", helper.existsAsFile() }, { "command", helper.getFullPathName() }, { "config", configText } });
 }
 
 void DawBridge::handle (const juce::String& command, const juce::var& args, Complete complete)
@@ -4562,6 +4935,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         complete (object ({ { "ok", true } }));
         return;
     }
+
+    if (command == "aiControl") { complete (handleAiControl (args)); return; }
+
+    // The action layer: its actions make their own undo step.
+    if (command == "actions.list") { complete (actions->list()); return; }
+    if (command == "actions.run")  { actions->run (args["name"].toString(), args["args"], std::move (complete)); return; }
 
     // Each command is one undo step, unless it continues a drag (args.continue). The step
     // is named for the Undo button and the toasts ("Undo move clip").
@@ -4806,7 +5185,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         const auto trackId = arg (args, "track", -1);
         const auto target = arg (args, "target", juce::String());
-        const auto track = edit.getTrack (trackId);
+        const auto track = edit.getChannel (trackId);
         const auto points = daw::Edit::getLane (track, target);
         const auto thinned = daw::Edit::thinPoints (points, daw::Edit::getThinTolerance (track, target, points));
         if (thinned.size() < points.size())

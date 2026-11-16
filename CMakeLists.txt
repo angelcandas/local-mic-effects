@@ -252,6 +252,9 @@ target_sources(MicFX
     PRIVATE
         ${MICFX_DSP_SOURCES}
         src/DawBridge.cpp
+        src/DawActions.cpp
+        src/McpProtocol.cpp
+        src/McpServer.cpp
         src/PluginEditor.cpp
         src/StandaloneApp.cpp)
 
@@ -381,6 +384,17 @@ if(MICFX_BUILD_MIXBENCH)
     endif()
 endif()
 
+# The stdio side of AI control: AI programs start this as a command and it talks to the running app
+# (src/McpRelay.cpp). Built next to the app.
+add_executable(micfx-mcp src/McpRelay.cpp)
+target_link_libraries(micfx-mcp PRIVATE juce::juce_core juce::juce_recommended_config_flags juce::juce_recommended_warning_flags)
+target_compile_definitions(micfx-mcp PRIVATE JUCE_WEB_BROWSER=0 JUCE_USE_CURL=0 JUCE_STANDALONE_APPLICATION=1)
+if(TARGET MicFX_Standalone)
+    add_dependencies(MicFX_Standalone micfx-mcp)
+    add_custom_command(TARGET MicFX_Standalone POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:micfx-mcp> $<TARGET_FILE_DIR:MicFX_Standalone>)
+endif()
+
 # Headless test runner for the DSP: pitch accuracy, autotune, every preset, CPU load.
 #   cmake --build --preset debug --target MicFXTests && ./build/debug/MicFXTests_artefacts/Debug/MicFXTests
 option(MICFX_BUILD_TESTS "Build the DSP test runner" ON)
@@ -423,7 +437,7 @@ if(MICFX_BUILD_TESTS)
     juce_add_console_app(MicFXTests PRODUCT_NAME "MicFXTests")
     add_dependencies(MicFXTests MicFXTestSynth_VST3 MicFXTestEffect_VST3)
 
-    target_sources(MicFXTests PRIVATE tests/DspTests.cpp src/DawBridge.cpp ${MICFX_DSP_SOURCES})
+    target_sources(MicFXTests PRIVATE tests/DspTests.cpp src/DawBridge.cpp src/DawActions.cpp src/McpProtocol.cpp src/McpServer.cpp ${MICFX_DSP_SOURCES})
     target_include_directories(MicFXTests PRIVATE src)
 
     target_compile_definitions(MicFXTests

@@ -12,6 +12,8 @@
 #include "analysis/MixCheck.h"
 #include "analysis/Structure.h"
 #include "stems/StemSplitter.h"
+#include "DawActions.h"
+#include "McpServer.h"
 
 // Connects the web UI's DAW screen (ui/daw.js) to the processor's DAW session.
 //
@@ -38,9 +40,15 @@
 //   "dawSongMap"  { state: "analysing", progress } while the song map listens, then
 //                 { state: "ready", map... } (see describeSongMap), "cancelled" or
 //                 { state: "error", error }
+// "actions.list" and "actions.run" { name, args } are the named, typed actions an AI (or the
+// command box) drives the app with; see DawActions.h.
+// "aiControl" { action: "state" | "set" (on) | "copy" | "newToken" }: the settings switch for the local
+// MCP server (src/McpServer.h); answers { on, running, port, command, config }.
 // See handle() for the commands. Message thread only.
 class DawBridge final : private juce::ValueTree::Listener
 {
+    friend class DawActions;
+
 public:
     // What Undo and Redo would do ("Move clip"), empty when there is nothing; for the app's Edit menu.
     juce::String getUndoName() const;
@@ -173,6 +181,7 @@ private:
     void replanAutoMix();
     void readAutoMixEffects (const juce::var& effects);
     void readAutoMixMode (const juce::var& args); // mode, focus
+    static juce::var describeMasterTemplates();
     static std::optional<analysis::Role> guessRoleFromTrack (const juce::ValueTree& track);
     juce::var describeAutoMix() const;
     juce::var describeAutoMixTags() const;
@@ -244,6 +253,10 @@ private:
     void pasteLanesWith (const juce::var& args, const juce::ValueTree& clip);
     Emit emit;
     std::function<juce::int64()> roundTripLatency;
+    std::unique_ptr<McpServer> mcpServer; // the local MCP server, only while "AI control" is on
+    juce::var handleAiControl (const juce::var& args);
+    bool startMcpServer();
+    std::unique_ptr<DawActions> actions; // the catalogue behind "actions.list" and "actions.run" (src/DawActions.h)
 
     bool sessionChanged = true;
     int watchedTrack = -1;                    // whose inserts get live readings
@@ -294,6 +307,25 @@ private:
     bool autoMixReference = false; // the plan matches a reference song
     std::vector<analysis::TrackPairAlignment> autoMixAlignments; // measured with the last analysis
     std::map<int, float> autoMixPans;  // pans the last applied plan set (not yours: planned again)
+
+    // The review list: which moves are ticked (only the ones changed from their default:
+    // taste moves start off, the rest on), the five sliders, the Amount, and whether the plan
+    // is written into the session now. Saved with the project (ids::autoMixAudition).
+    std::map<juce::String, bool> autoMixTicks;
+    std::array<float, analysis::numMixGroups> autoMixGroups { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    float autoMixAmount = 1.0f;
+    bool autoMixApplied = false;
+    std::map<int, float> autoMixBaseVolumes;    // track volumes before the plan was written
+    std::map<int, float> autoMixAppliedVolumes; // and after: a volume still at that is Auto Mix's, not yours
+    juce::String autoMixSaved;                  // the saved state last written or read
+    float getAutoMixBaseVolume (int trackId, float current) const;
+    analysis::ApplyOptions getAutoMixApplyOptions() const;
+    bool isAutoMixTicked (const analysis::MixMove&) const;
+    void saveAutoMixState();
+    void restoreAutoMixState();
+    void readAutoMixAudition (const juce::var& args); // ticks, groups, amount
+    juce::var applyAutoMix (bool replace);
+    bool autoMixDirty = false; // the plan changed since it was written
     std::map<juce::String, bool> stereoFiles; // audio files by path: a real stereo image (hasStereoImage)
     bool hasStereoImage (const juce::ValueTree& track);
     bool autoMixSplit = false;

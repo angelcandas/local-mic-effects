@@ -377,13 +377,9 @@ private:
         std::shared_ptr<std::atomic<bool>> held;            // holdLane: the knob instead of the lane
     };
 
-    struct Track
+    // A channel's automation (tracks, returns and the master): volume, pan and effect lanes.
+    struct Automation
     {
-        std::shared_ptr<Strip> strip;
-        std::vector<Send> sends;
-        int output = -1; // index into Graph::returns, or -1 for the master
-        std::vector<Clip> clips;
-        std::vector<MidiEvent> midiEvents; // MIDI tracks, in time order
         std::vector<std::pair<juce::int64, float>> ride; // volume automation: timeline sample, dB (Edit::RidePoint)
         std::vector<std::pair<juce::int64, float>> pan;  // pan automation: timeline sample, -1..1
         std::shared_ptr<std::atomic<bool>> panHeld;
@@ -399,13 +395,22 @@ private:
         };
         std::vector<Lane> lanes;
         bool automating = false;
+    };
+
+    struct Track : Automation
+    {
+        std::shared_ptr<Strip> strip;
+        std::vector<Send> sends;
+        int output = -1; // index into Graph::returns, or -1 for the master
+        std::vector<Clip> clips;
+        std::vector<MidiEvent> midiEvents; // MIDI tracks, in time order
 
         // Latency compensation, before the inserts (audio thread).
         Delay delay;
     };
 
     // A return track: what the tracks send it, through its own strip, into the master.
-    struct Bus
+    struct Bus : Automation
     {
         std::shared_ptr<Strip> strip;
         std::vector<Send> sends; // group tracks only: into the plain returns, which come later
@@ -417,6 +422,10 @@ private:
         std::vector<Track> tracks;
         std::vector<Bus> returns;
         std::shared_ptr<Strip> master;
+        Automation masterAutomation;
+        // How far behind the timeline the returns and the master hear the tracks (their
+        // chains and the returns' latency compensation), so their lanes line up.
+        juce::int64 returnsBehind = 0, masterBehind = 0;
 
         // What the tracks play straight into the master, delayed to line up with the
         // returns' effects when they add latency (otherwise unused).
@@ -435,6 +444,12 @@ private:
     };
 
     void followChords (Graph&, bool isPlaying, juce::int64 blockStart, int numSamples) noexcept;
+
+    // Message thread, building a graph: a channel's lanes (volume, pan, effects, macros).
+    void buildAutomation (Automation&, Strip&, const juce::ValueTree& channel);
+    // Audio thread: the effect lanes before the chain plays, and the volume and pan after.
+    static void playEffectLanes (Automation&, bool isPlaying, juce::int64 time) noexcept;
+    static void playVolumeAndPan (Automation&, Strip&, bool isPlaying, juce::int64 time, int numSamples) noexcept;
 
     // ValueTree::Listener
     void valueTreePropertyChanged (juce::ValueTree&, const juce::Identifier&) override;
