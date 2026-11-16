@@ -5237,10 +5237,6 @@ class DawScreen {
       }
       daw("autoMix", { action: "analyse", style: style(), effects: effects(), ...mode() });
     });
-    $(".automix-reference").addEventListener("click", () => {
-      this.setAutoMixResult("");
-      daw("autoMix", { action: "reference" });
-    });
     $(".automix-cancel").addEventListener("click", () => daw("autoMix", { action: "cancel" }));
     $("[name=style]").addEventListener("change", () => {
       if (this.autoMix.plan?.kind === "mix") this.replanAutoMix(planArgs());
@@ -5262,8 +5258,26 @@ class DawScreen {
       if (result?.ok === false) return;
       Object.assign(this.autoMix, { applied: true, after: true });
       this.renderAutoMixControls();
-      this.setAutoMixResult("Applied. Tick moves on and off to hear other sets, or switch between before and after.");
+      this.setAutoMixResult("Trying it: the changes are in the mix but not final yet. Tick moves on and off, change the sliders, or hear the original. Keep changes makes them final.");
     });
+
+    // Keep: what's heard now becomes final and the panel starts over.
+    $(".automix-keep").addEventListener("click", async () => {
+      const result = await daw("autoMix", { action: "keep" });
+      if (result?.ok === false) return this.setAutoMixResult(result.error || "Couldn't keep the changes.", true);
+      this.resetAutoMix();
+      this.refreshAutoMixTags(true);
+      this.setAutoMixResult("Kept. The changes are in your mix; Undo takes them back.");
+    });
+    // Discard: back to the mix as it was.
+    $(".automix-discard").addEventListener("click", async () => {
+      if (!(await this.confirmDiscardAutoMix())) return;
+      this.refreshAutoMixTags(true);
+    });
+    $(".automix-ask-no").addEventListener("click", () => this.answerAutoMixAsk(false));
+    $(".automix-ask-yes").addEventListener("click", () => this.answerAutoMixAsk(true));
+    // The mode tabs ask first when switching would lose the list.
+    panel.beforeModeChange = () => this.confirmDiscardAutoMix();
 
     // After applying, the amount re-applies the same plan, gentler or stronger.
     const slider = $("[name=amount]");
@@ -5331,8 +5345,48 @@ class DawScreen {
     });
   }
 
+  // True when switching the mode, closing or clearing would lose something: the plan Auto
+  // Mix listened out, or (worse) changes already in the mix that haven't been kept.
+  hasUnkeptAutoMix() {
+    const { plan, applied } = this.autoMix;
+    return Boolean(plan && plan.moves.length > 0) && !this.autoMixPanel.classList.contains("is-running") ? (applied ? "tried" : "plan") : null;
+  }
+
+  // Asks before the changes are thrown away; "yes" takes back what was tried (the mix goes
+  // back to how it was) and clears the panel. Resolves true at once when there's nothing to lose.
+  confirmDiscardAutoMix() {
+    const unkept = this.hasUnkeptAutoMix();
+    if (!unkept) return Promise.resolve(true);
+    const panel = this.autoMixPanel;
+    const ask = panel.querySelector(".automix-ask");
+    ask.querySelector(".automix-ask-text").textContent = unkept === "tried"
+      ? "You tried Auto Mix's changes and haven't kept them. Switching now takes them out of the mix again. Lose these changes?"
+      : "Auto Mix has a list of changes that aren't kept. Switching now loses the list; your mix is as it was. Lose these changes?";
+    ask.hidden = false;
+    return new Promise((resolve) => {
+      this.autoMixAskResolve?.(false);
+      this.autoMixAskResolve = resolve;
+    });
+  }
+
+  async answerAutoMixAsk(yes) {
+    const resolve = this.autoMixAskResolve;
+    this.autoMixAskResolve = null;
+    this.autoMixPanel.querySelector(".automix-ask").hidden = true;
+    if (yes) {
+      await daw("autoMix", { action: "discard" });
+      this.resetAutoMix();
+    }
+    resolve?.(yes);
+  }
+
   toggleAutoMix(show = this.autoMixPanel.hidden) {
     const wasOpen = !this.autoMixPanel.hidden;
+    // Closing with changes in the mix that weren't kept: ask first.
+    if (!show && wasOpen && this.hasUnkeptAutoMix() === "tried") {
+      this.confirmDiscardAutoMix().then((lose) => { if (lose) this.toggleAutoMix(false); });
+      return;
+    }
     this.autoMixPanel.hidden = !show;
     // Closing ends the run: opened again, it starts clean from the tracks as they are now.
     if (!show && wasOpen) this.resetAutoMix();
@@ -5389,6 +5443,9 @@ class DawScreen {
     about.textContent = picked?.about ?? "";
     panel.classList.toggle("is-clean", mode === "clean");
     panel.classList.toggle("is-master", mode === "master");
+    // Mastering is its own flow with its own title; the mix modes' tabs hide.
+    panel.querySelector(".ai-title strong").textContent = mode === "master" ? "Master" : "Auto Mix";
+    panel.querySelector(".ai-title small").textContent = mode === "master" ? "Mastering · listens offline, one undo" : "AI mixer · listens offline, one undo";
     const intro = panel.querySelector(".automix-mode-intro");
     intro.hidden = mode === "mix";
     intro.textContent = mode === "fit"
@@ -5706,13 +5763,20 @@ class DawScreen {
     const { plan, applied, after } = this.autoMix;
     const apply = panel.querySelector(".automix-apply");
     apply.disabled = !plan || plan.moves.length === 0 || applied;
-    apply.textContent = applied ? "Applied" : "Apply";
+    apply.textContent = applied ? "In the mix" : "Try on the mix";
+    apply.classList.toggle("is-accent", !applied);
+    const keep = panel.querySelector(".automix-keep");
+    keep.hidden = !plan || plan.moves.length === 0;
+    keep.disabled = !applied || !after;
+    keep.classList.toggle("is-accent", applied);
+    keep.title = !applied ? "Try the changes on the mix first" : !after ? "Switch to the mix with Auto Mix's changes first" : "Makes the changes you hear final and clears this list. One undo takes them back";
+    panel.querySelector(".automix-discard").hidden = !plan || plan.moves.length === 0;
     panel.querySelector(".automix-analyse").textContent = plan ? "Listen again" : "Listen";
     panel.querySelector(".automix-amount").hidden = !plan || plan.moves.length === 0;
     panel.querySelector(".automix-sliders").hidden = !plan || plan.moves.length === 0 || plan.kind !== "mix" || plan.mode !== "mix";
     const compare = panel.querySelector(".automix-compare");
     compare.hidden = !applied;
-    compare.textContent = after ? "Hear before" : "Hear after";
+    compare.textContent = after ? "Hear original" : "Hear Auto Mix";
     compare.setAttribute("aria-pressed", String(!after));
   }
 
@@ -6388,11 +6452,12 @@ class DawScreen {
   }
 
   // Opens Auto Mix in one of its modes, on a track for "fit" and "clean".
-  openAutoMix(mode, trackId = null) {
+  async openAutoMix(mode, trackId = null) {
     const panel = this.autoMixPanel;
     if (panel.classList.contains("is-running")) return this.toggleAutoMix(true);
     this.toggleAutoMix(true);
     const modeSelect = panel.querySelector("[name=mode]");
+    if (modeSelect.value !== mode && !(await this.confirmDiscardAutoMix())) return;
     modeSelect.value = mode;
     this.renderAutoMixMode();
     if (trackId !== null) panel.querySelector("[name=focus]").value = String(trackId);

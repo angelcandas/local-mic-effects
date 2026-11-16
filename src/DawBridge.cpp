@@ -2920,6 +2920,24 @@ juce::var DawBridge::applyAutoMix (bool replace)
     return error ({});
 }
 
+void DawBridge::clearAutoMix()
+{
+    autoMixPlan = {};
+    autoMixAnalysis.reset();
+    autoMixTicks.clear();
+    autoMixGroups.fill (1.0f);
+    autoMixAmount = 1.0f;
+    autoMixApplied = false;
+    autoMixDirty = false;
+    autoMixBaseVolumes.clear();
+    autoMixAppliedVolumes.clear();
+    autoMixPans.clear();
+    autoMixReference = false;
+    autoMixReferenceName = {};
+    autoMixSaved = {};
+    edit.getState().removeProperty (ids::autoMixAudition, nullptr);
+}
+
 void DawBridge::saveAutoMixState()
 {
     if (autoMixPlan.moves.empty())
@@ -3077,7 +3095,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
 void DawBridge::readAutoMixMode (const juce::var& args)
 {
     if (args.hasProperty ("mode"))
-        autoMixOptions.mode = analysis::getModeFromKey (args["mode"].toString());
+        autoMixOptions.mode = analysis::getModeFromKey (args["mode"].toString()); // "master" is the Master panel's flow
     if (args.hasProperty ("focus"))
         autoMixOptions.focusTrackId = (int) args["focus"];
     if (args.hasProperty ("masterLufs"))
@@ -4638,7 +4656,7 @@ int DawBridge::setAutotunesToKey()
 //   analyse {style, effects}  listen to every track (background); "dawAutoMix" brings the plan.
 //                       With effects.split, first split the instrumental into stems
 //                       ("dawAutoMix" { state: "splitting", phase, progress })
-//   reference           pick a song and plan a master match to it (background)
+//   reference           refused: Auto Mix doesn't change the master (mastering is its own flow)
 //   tags                which role each track has before listening (describeAutoMixTags)
 //   tag {track, role}   tag a track: a role key (analysis::getRoleKey), or "auto" to guess
 //                       from its name and sound again. Saved with the project.
@@ -4652,9 +4670,12 @@ int DawBridge::setAutotunesToKey()
 //   apply {amount, replace}  write the plan as one undo step ("Auto Mix"); with replace,
 //                       first undo the Auto Mix just applied (to change the amount)
 //   compare {after}     undo or redo the last Auto Mix, to hear before and after
+//   keep                what's in the mix now is final: clears the plan, the undo step stays
+//   discard             undo what was tried (if it is in the mix) and clear the plan
 //   cancel
 juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
 {
+    (void) complete;
     auto& undo = edit.getUndoManager();
     const auto action = args["action"].toString();
 
@@ -4667,7 +4688,10 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
         return error ({});
     }
 
-    if (action == "analyse" || action == "reference")
+    if (action == "reference")
+        return error ("Auto Mix no longer changes the master. Matching a reference belongs to mastering.");
+
+    if (action == "analyse")
     {
         if (autoMixJob != nullptr)
             return error ("Auto Mix is already listening.");
@@ -4687,17 +4711,6 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
             startAutoMix ({});
             return error ({});
         }
-
-        withChooser ("Pick a reference song", juce::File::getSpecialLocation (juce::File::userMusicDirectory),
-                     "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3;*.m4a",
-                     juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
-                     [this] (const juce::File& file)
-                     {
-                         startAutoMix (file);
-                         return error ({});
-                     },
-                     complete);
-        return {}; // the chooser completes
     }
 
     if (action == "replan")
@@ -4795,6 +4808,24 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
     {
         readAutoMixAudition (args);
         return applyAutoMix (arg (args, "replace", false));
+    }
+
+    // Keep: what's heard now is final. The list is cleared; the change stays as one undo step.
+    if (action == "keep")
+    {
+        if (! autoMixApplied || undo.getUndoDescription() != autoMixUndoName)
+            return error ("Try the changes on the mix first, with the mix after Auto Mix playing.");
+        clearAutoMix();
+        return error ({});
+    }
+
+    // Discard: take back what was tried (when it is in the mix) and clear the list.
+    if (action == "discard")
+    {
+        if (autoMixApplied && undo.getUndoDescription() == autoMixUndoName)
+            undo.undo();
+        clearAutoMix();
+        return error ({});
     }
 
     if (action == "compare")

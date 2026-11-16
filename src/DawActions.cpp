@@ -379,6 +379,7 @@ void DawActions::onEvent (const juce::Identifier& event, const juce::var& payloa
             processor.getDawEdit().getUndoManager().beginNewTransaction ("Auto Mix");
             const auto applied = call ("autoMix", obj ({ { "action", "apply" } }));
             if (! (bool) applied["ok"]) { finish (applied); return; }
+            call ("autoMix", obj ({ { "action", "keep" } })); // applied from here is final: no preview left in the panel
         }
         finish (done (autoMixApply ? "Auto Mix listened and applied its plan." : "Auto Mix listened; the plan is ready (not applied).", { { "plan", payload } }));
     }
@@ -1040,7 +1041,7 @@ void DawActions::build()
     add ("mix.auto", "Run Auto Mix: listen to the song, plan a mix, and apply it (apply: false to only plan). Takes a while on a long song.", "Auto Mix",
         { withChoices (P ("style", "string", "pop (default), ballad, rock, coaching, hipHop, rnb, acoustic, electronic, jazz, lofi, speech"),
                        { "pop", "ballad", "rock", "coaching", "hiphop", "rnb", "acoustic", "electronic", "jazz", "lofi", "speech" }),
-          withChoices (P ("mode", "string", "mix (whole song, default), fit, clean or master"), { "mix", "fit", "clean", "master" }),
+          withChoices (P ("mode", "string", "mix (whole song, default), fit or clean. The master is left alone"), { "mix", "fit", "clean" }),
           P ("apply", "boolean", "Apply the plan (default true)") },
         [this] (const juce::var& args, Complete complete)
         {

@@ -249,7 +249,7 @@
       <div class="ai-modes" role="tablist" aria-label="What Auto Mix works on"></div>
       <details class="ai-about"><summary>How it works</summary><p class="automix-intro">Tag what's on each track (voice, background vocals, drums, bass...), then Auto Mix listens and adds the effects each one needs (EQ, compressor, de-esser, reverb and more), sets the levels and writes volume rides. Nothing plays while it listens: it measures every track offline, many times faster than real time, and listening again only measures the tracks you changed. One undo takes it all back.</p></details>
       <div class="export-options">
-        <label title="What Auto Mix works on">Mode <select class="dropdown" name="mode"><option value="mix">Mix the whole song</option><option value="fit">Fit one track into the backing</option><option value="clean">Clean &amp; polish one track</option><option value="master">Master the song</option></select></label>
+        <label title="What Auto Mix works on">Mode <select class="dropdown" name="mode"><option value="mix">Mix the whole song</option><option value="fit">Fit one track into the backing</option><option value="clean">Clean &amp; polish one track</option></select></label>
         <label class="automix-target" hidden title="Where the master goes: a platform's loudness and peak level, or where records of a style usually sit">Target <select class="dropdown" name="masterTemplate"><optgroup label="Platform"><option value="streaming">Spotify, YouTube, Tidal (-14 LUFS, -1 dB)</option><option value="apple">Apple Music (-16 LUFS, -1 dB)</option><option value="amazon">Amazon Music (-14 LUFS, -2 dB)</option><option value="deezer">Deezer (-15 LUFS, -1 dB)</option><option value="soundcloud">SoundCloud (-11 LUFS, -1 dB)</option><option value="podcast">Podcast / spoken word (-16 LUFS, -1 dB)</option><option value="ebu">Broadcast (EBU R128) (-23 LUFS, -1 dB)</option><option value="atsc">Broadcast (ATSC A/85, US) (-24 LUFS, -2 dB)</option><option value="cd">CD / download (-9 LUFS, -0.3 dB)</option><option value="club">Club / DJ (-8 LUFS, -0.3 dB)</option><option value="vinyl">Vinyl pre-master (-12 LUFS, -3 dB)</option></optgroup><optgroup label="Style"><option value="pop">Pop (-10 LUFS, -1 dB)</option><option value="edm">EDM / dance (-8 LUFS, -1 dB)</option><option value="hiphop">Hip-hop / trap (-9 LUFS, -1 dB)</option><option value="rock">Rock / metal (-9 LUFS, -1 dB)</option><option value="rnb">R&amp;B / soul (-11 LUFS, -1 dB)</option><option value="acoustic">Acoustic / folk (-14 LUFS, -1 dB)</option><option value="jazz">Jazz (-16 LUFS, -1 dB)</option><option value="classical">Classical / orchestral (-18 LUFS, -1 dB)</option><option value="lofi">Lo-fi / chill (-13 LUFS, -1 dB)</option><option value="ambient">Ambient / cinematic (-16 LUFS, -1 dB)</option></optgroup></select></label>
         <label class="check automix-target" hidden title="Automation on the master's effects: the choruses open up (a little wider, more air, 1 dB more into the limiter) and the verses settle back. Uses the song's sections from the song map when it has them, otherwise its loudest stretches"><input type="checkbox" name="sectionMoves" checked> Section moves</label>
         <p class="automix-target-about" hidden></p>
@@ -295,12 +295,18 @@
         <label title="How far the voice's level moves toward its target">Vocal level <input type="range" data-group="vocal" min="0" max="100" step="1" value="100"> <span>100%</span></label>
       </div>
       <div class="export-footer">
-        <button class="text-button automix-reference" title="Match the mix's tone and loudness to a song you like">Match a reference…</button>
         <span class="export-result automix-result"></span>
         <button class="tool automix-cancel">Cancel</button>
-        <button class="tool automix-compare" hidden title="Switch between the mix before and after Auto Mix">Hear before</button>
+        <button class="tool automix-discard" hidden title="Take back what was tried and clear the list">Discard</button>
+        <button class="tool automix-compare" hidden title="Switch between your mix as it was and the mix with Auto Mix's changes">Hear original</button>
         <button class="tool automix-analyse">Listen</button>
-        <button class="tool is-accent automix-apply" disabled>Apply</button>
+        <button class="tool is-accent automix-apply" disabled title="Puts the ticked changes in the mix so you can hear them. Nothing is final until you keep them">Try on the mix</button>
+        <button class="tool automix-keep" hidden disabled title="Makes the changes you hear final and clears this list. One undo takes them back">Keep changes</button>
+      </div>
+      <div class="automix-ask" hidden role="alertdialog" aria-live="assertive">
+        <span class="automix-ask-text"></span>
+        <button class="tool is-accent automix-ask-yes">Discard changes</button>
+        <button class="tool automix-ask-no">Keep editing</button>
       </div>
       </div>
     </div>

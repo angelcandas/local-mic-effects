@@ -322,6 +322,7 @@ private:
     analysis::ApplyOptions getAutoMixApplyOptions() const;
     bool isAutoMixTicked (const analysis::MixMove&) const;
     void saveAutoMixState();
+    void clearAutoMix(); // forgets the plan and its list (what's written stays, as one undo step)
     void restoreAutoMixState();
     void readAutoMixAudition (const juce::var& args); // ticks, groups, amount
     juce::var applyAutoMix (bool replace);

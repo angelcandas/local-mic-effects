@@ -2907,42 +2907,16 @@ static MixPlan planMixMoves (const SessionAnalyser::Result& measured, const std:
         }
     }
 
-    // Master: towards the loudness target, without clipping (peaks add up at worst).
+    // The loudness of the mix. Auto Mix leaves the master as it is: mastering is its own
+    // flow (the Mix Check master fix and the mastering chain).
     {
         std::vector<double> parts;
-        double peakSum = 0.0;
         for (const auto& [id, profile] : analysis.tracks)
-        {
             parts.push_back (finalLoudness[id]);
-            if (profile.peakDb > -150.0f)
-                peakSum += std::pow (10.0, finalPeak[id] / 20.0);
-        }
 
         const auto mix = sumLoudness (parts);
         if (mix > -150.0)
-        {
-            const auto forLoudness = targets.masterLufs - mix;
-            const auto forPeak = peakSum > 0.0 ? -1.0 - 20.0 * std::log10 (peakSum) : 24.0;
-            const auto master = roundTo (juce::jlimit (-24.0, 12.0, juce::jmin (forLoudness, forPeak)), 0.1);
-
-            // Fit mode leaves the master as it is: the backing's mix already set it.
-            if (fit)
-            {
-                plan.mixLufs = (float) (mix + currentMasterVolume);
-                return plan;
-            }
-
-            MixMove move;
-            move.trackId = daw::Edit::masterId;
-            move.values = { { "volume", master } };
-            move.reasons.add ("Master " + juce::String (master, 1) + " dB, towards " + juce::String (targets.masterLufs, 0) + " LUFS");
-            if (forPeak < forLoudness)
-                move.reasons.add ("Held back " + formatDb (forLoudness - forPeak) + " so the peaks stay under -1 dB. "
-                                  "Export with Normalise for more loudness.");
-            plan.moves.push_back (move);
-            plan.mixLufs = (float) (mix + master);
-        }
-
+            plan.mixLufs = (float) (mix + currentMasterVolume);
     }
 
     return plan;

@@ -5,7 +5,6 @@ const MODES = [
   ["mix", "Mix", "Mix the whole song"],
   ["fit", "Fit", "Fit one track into the backing"],
   ["clean", "Clean", "Clean & polish one track"],
-  ["master", "Master", "Master the song"],
 ];
 
 export function decorateAiPanels(root) {
@@ -38,8 +37,10 @@ function decorateAutoMix(panel) {
     tab.title = title;
     tab.setAttribute("role", "tab");
     tab.textContent = label;
-    tab.addEventListener("click", () => {
+    tab.addEventListener("click", async () => {
       if (select.value === value) return;
+      // The Auto Mix view asks first when the list it made would be lost.
+      if (panel.beforeModeChange && !(await panel.beforeModeChange())) return;
       select.value = value;
       select.dispatchEvent(new Event("change", { bubbles: true }));
       sync();
