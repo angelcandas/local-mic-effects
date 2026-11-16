@@ -2166,15 +2166,25 @@ Role guessRole (const juce::String& trackName, const Profile& profile, double so
 }
 
 //==============================================================================
-MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Role>& roles,
-                 const std::map<int, float>& currentVolumes, float currentMasterVolume, MixStyle style,
-                 const MixOptions& options)
+static MixPlan planMixMoves (const SessionAnalyser::Result& measured, const std::map<int, Role>& roles,
+                             const std::map<int, float>& currentVolumes, float currentMasterVolume, MixStyle style,
+                             const MixOptions& options)
 {
     MixPlan plan;
     auto targets = getTargets (style);
 
     const auto volumeOf = [&] (int id) { auto it = currentVolumes.find (id); return it != currentVolumes.end() ? it->second : 0.0f; };
     const auto roleOf = [&] (int id) { auto it = roles.find (id); return it != roles.end() ? it->second : Role::other; };
+    const auto priorityOf = [&] (int id)
+    {
+        auto it = options.priorities.find (id);
+        return options.mode == MixMode::mix && it != options.priorities.end() ? it->second : Priority::normal;
+    };
+    // How far a Back track sits under its role's level (LU).
+    const auto backLu = [&] (Role role)
+    {
+        return role == Role::bass || role == Role::drums ? 2.0 : role == Role::pad || role == Role::backing ? 3.0 : 2.5;
+    };
 
     if (options.mode == MixMode::master)
     {
@@ -2377,12 +2387,32 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
     // covers the focus, a ride down while that plays).
     const auto makeRoomOnly = fit;
 
+    // Front instruments (not the lead voice): the others make room for them as for the
+    // voice. Their activity joins the lead's for the ducks.
+    std::vector<int> frontIds;
+    for (auto id : instruments)
+        if (priorityOf (id) == Priority::front)
+            frontIds.push_back (id);
+    Profile duckSource = leadProfile;
+    for (auto id : frontIds)
+    {
+        const auto& active = findProfile (analysis, id)->active;
+        if (duckSource.active.size() < active.size())
+            duckSource.active.resize (active.size(), false);
+        for (size_t i = 0; i < active.size(); ++i)
+            if (active[i])
+                duckSource.active[i] = true;
+    }
+
     for (auto& [id, change] : backingChange)
     {
         const auto& profile = *findProfile (analysis, id);
         const auto role = roleOf (id);
         const auto instrument = isInstrument (role) && ! makeRoomOnly;
         const auto shape = getInstrumentShape (role);
+        const auto priority = priorityOf (id);
+        const auto isFront = priority == Priority::front && isInstrument (role); // keeps its level and band
+        const auto isBack = priority == Priority::back;
 
         MixMove eqMove;
         eqMove.trackId = id;
@@ -2405,13 +2435,14 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             }
         }
 
-        if (options.eq)
+        if (options.eq && ! isFront)
         {
             const auto masking = measureMasking (leadProfile, profile);
             if (masking.worstBand >= 0)
             {
                 const auto difference = masking.backingOverVoiceDb[(size_t) masking.worstBand];
-                const auto cut = juce::jlimit (0.0, isInstrument (role) || role == Role::backingVocal ? shape.maskCap : 4.0, 0.5 * (difference + 6.0));
+                const auto cap = (isInstrument (role) || role == Role::backingVocal ? shape.maskCap : 4.0) * (isBack ? 1.5 : 1.0);
+                const auto cut = juce::jlimit (0.0, cap, 0.5 * (difference + (isBack ? 9.0 : 6.0)));
 
                 if (cut >= 1.0)
                 {
@@ -2426,6 +2457,39 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             // pocket where the voice is clearest (1-4 kHz), not cuts to each instrument.
             if (role == Role::backing && (! fit || focusIsVoice))
                 planVocalPocket (eq, eqMove, masking, leadProfile);
+
+            // A front instrument: a dip (bell 3) where this track covers it most.
+            if (! frontIds.empty() && role != Role::backing && eq.bells[2].db >= 0.0f)
+            {
+                double deepest = 0.0;
+                int band = -1;
+                int frontId = 0;
+                for (auto front : frontIds)
+                {
+                    if (front == id)
+                        continue;
+                    const auto m = measureMasking (*findProfile (analysis, front), profile);
+                    if (m.worstBand < 0)
+                        continue;
+                    const auto over = m.backingOverVoiceDb[(size_t) m.worstBand];
+                    if (over > deepest || band < 0)
+                    {
+                        deepest = over;
+                        band = m.worstBand;
+                        frontId = front;
+                    }
+                }
+                if (band >= 0)
+                {
+                    const auto cut = juce::jlimit (0.0, (isBack ? 1.5 : 1.0) * (isInstrument (role) ? shape.maskCap : 3.0), 0.5 * (deepest + 6.0));
+                    if (cut >= 1.0 && (eq.bells[1].db >= 0.0f || std::abs (std::log2 (getBandCentre (band) / (double) eq.bells[1].hz)) > 0.5))
+                    {
+                        eq.bells[2] = { (float) roundTo (getBandCentre (band), 1.0), -roundTo (cut, 0.5), 1.2f };
+                        eqMove.reasons.add ("Dip " + formatDb (eq.bells[2].db) + " at " + formatHz (getBandCentre (band)) + " so "
+                                            + nameOf (options, frontId, "the front track") + " comes through");
+                    }
+                }
+            }
         }
 
         double eqChange = 0.0;
@@ -2588,9 +2652,24 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
 
         finalLoudness[id] += eqChange;
 
+        // Back: it sits lower, from the level it has now.
+        if (isBack && ! makeRoomOnly && role != Role::other)
+        {
+            const auto lower = roundTo (backLu (role), 0.5);
+            MixMove move;
+            move.trackId = id;
+            move.values = { { "volume", volumeOf (id) - (float) lower } };
+            move.reasons.add ("Volume " + juce::String (-lower, 1) + " dB from where it is: marked Back, it sits behind the rest");
+            plan.moves.push_back (move);
+            change -= lower;
+            finalLoudness[id] -= lower;
+            finalPeak[id] -= lower;
+        }
+
         // A dip while the lead sings, up between lines (not bass and drums: the groove
-        // stays steady).
-        if (options.rides && role != Role::bass && role != Role::drums)
+        // stays steady). A front track doesn't dip; a Back one dips more; with front
+        // instruments playing, the others also dip while those play.
+        if (options.rides && role != Role::bass && role != Role::drums && ! isFront)
         {
             MixMove duck;
             duck.trackId = id;
@@ -2600,9 +2679,15 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             auto duckTargets = targets;
             if (role == Role::backing && targets.duckDb > 0.0f && (! fit || focusIsVoice))
                 duckTargets.duckDb = juce::jmax (targets.duckDb, 2.0f);
-            const auto overall = planDuck (duck, profile, leadProfile, duckTargets, whileSinging);
+            if (! frontIds.empty())
+                duckTargets.duckDb = juce::jmax (duckTargets.duckDb, 1.5f);
+            if (isBack)
+                duckTargets.duckDb = juce::jmax (duckTargets.duckDb, 1.0f) + 1.5f;
+            const auto overall = planDuck (duck, profile, frontIds.empty() ? leadProfile : duckSource, duckTargets, whileSinging);
             if (! duck.ride.empty())
             {
+                if (! frontIds.empty())
+                    duck.reasons.add ("It also dips while the front track plays");
                 plan.moves.push_back (duck);
                 change += whileSinging;
                 finalLoudness[id] += overall;
@@ -2770,7 +2855,8 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
         auto volume = current;
         if (backingLoudness > -150.0)
         {
-            volume = (float) juce::jlimit (-30.0, 12.0, backingLoudness + targets.voiceOverBackingLu - voiceLoudness);
+            volume = (float) juce::jlimit (-30.0, 12.0, backingLoudness + targets.voiceOverBackingLu - voiceLoudness
+                                                        - (id != lead && priorityOf (id) == Priority::back ? backLu (Role::voice) : 0.0));
             volume = roundTo (volume, 0.1);
 
             MixMove move;
@@ -2806,7 +2892,8 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
             const auto& profile = *findProfile (analysis, id);
             const auto& vp = voicePlans[id];
             const auto loudness = profile.getLoudnessOver() + vp.loudnessChange; // at unity
-            const auto volume = roundTo (juce::jlimit (-30.0, 12.0, leadLoudness - targets.backingVocalUnderLeadLu - loudness), 0.1);
+            const auto volume = roundTo (juce::jlimit (-30.0, 12.0, leadLoudness - targets.backingVocalUnderLeadLu - loudness
+                                                                    - (priorityOf (id) == Priority::back ? backLu (Role::voice) : 0.0)), 0.1);
 
             MixMove move;
             move.trackId = id;
@@ -2858,6 +2945,15 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
 
     }
 
+    return plan;
+}
+
+MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Role>& roles,
+                 const std::map<int, float>& currentVolumes, float currentMasterVolume, MixStyle style,
+                 const MixOptions& options)
+{
+    auto plan = planMixMoves (measured, roles, currentVolumes, currentMasterVolume, style, options);
+    labelMoves (plan, roles);
     return plan;
 }
 
@@ -3386,16 +3482,265 @@ MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float 
 }
 
 //==============================================================================
+const char* getPriorityKey (Priority priority)
+{
+    return priority == Priority::front ? "front" : priority == Priority::back ? "back" : "normal";
+}
+
+Priority getPriorityFromKey (const juce::String& key)
+{
+    return key == "front" ? Priority::front : key == "back" ? Priority::back : Priority::normal;
+}
+
+const char* getGroupKey (MixGroup group)
+{
+    switch (group)
+    {
+        case MixGroup::tone:     return "tone";
+        case MixGroup::dynamics: return "dynamics";
+        case MixGroup::space:    return "space";
+        case MixGroup::width:    return "width";
+        case MixGroup::vocal:    return "vocal";
+        case MixGroup::fixed:    break;
+    }
+    return "fixed";
+}
+
+MixGroup getGroupFromKey (const juce::String& key)
+{
+    for (int i = 0; i < numMixGroups; ++i)
+        if (key == getGroupKey ((MixGroup) i))
+            return (MixGroup) i;
+    return MixGroup::fixed;
+}
+
+juce::String getGroupName (MixGroup group)
+{
+    switch (group)
+    {
+        case MixGroup::tone:     return "Tone";
+        case MixGroup::dynamics: return "Dynamics";
+        case MixGroup::space:    return "Space";
+        case MixGroup::width:    return "Width";
+        case MixGroup::vocal:    return "Vocal level";
+        case MixGroup::fixed:    break;
+    }
+    return "Fixed";
+}
+
+namespace
+{
+    // The kind of a move, for its stable key.
+    juce::String getMoveKind (const MixMove& move)
+    {
+        if (move.sendTo != 0)
+            return "send" + juce::String (move.sendTo);
+        if (move.insert.has_value())
+            return juce::String (fx::getModuleKey (*move.insert)) + ":" + juce::String (move.instance);
+        if (! move.ride.empty())
+            return "ride";
+        if (move.values.count ("inGain") > 0)
+            return "inGain";
+        if (move.values.count ("pan") > 0)
+            return "pan";
+        if (move.values.count ("polarity") > 0 || move.values.count ("nudge") > 0)
+            return "phase";
+        return "volume";
+    }
+}
+
+void labelMoves (MixPlan& plan, const std::map<int, Role>& roles)
+{
+    std::map<juce::String, int> seen;
+    for (auto& move : plan.moves)
+    {
+        const auto role = roles.find (move.trackId) != roles.end() ? roles.at (move.trackId) : Role::other;
+        const auto kind = getMoveKind (move);
+        move.group = MixGroup::fixed;
+        move.taste = false;
+
+        if (move.sendTo != 0)
+            move.group = MixGroup::space;
+        else if (! move.ride.empty())
+            move.group = MixGroup::dynamics;
+        else if (move.insert.has_value())
+        {
+            using T = fx::ModuleType;
+            switch (*move.insert)
+            {
+                case T::paraEq: case T::masterEq: case T::dynamicEq: case T::smooth: case T::highPass: case T::eq:
+                    move.group = MixGroup::tone;
+                    break;
+                case T::saturation: case T::exciter:
+                    move.group = MixGroup::tone;
+                    move.taste = true;
+                    break;
+                case T::compressor: case T::opto: case T::autoLevel: case T::deEsser: case T::gate: case T::transient:
+                case T::multiband: case T::limiter: case T::loudness:
+                    move.group = MixGroup::dynamics;
+                    break;
+                case T::reverb: case T::plate: case T::irReverb:
+                    move.group = MixGroup::space;
+                    break;
+                case T::echo: case T::doubler: case T::chorus:
+                    move.group = MixGroup::space;
+                    move.taste = true;
+                    break;
+                case T::width:
+                    move.group = MixGroup::width;
+                    move.taste = true;
+                    break;
+                case T::imager:
+                    move.group = MixGroup::width;
+                    break;
+                default:
+                    break;
+            }
+        }
+        else if (move.values.count ("pan") > 0)
+            move.group = MixGroup::width;
+        else if (kind == "volume" && (role == Role::voice || role == Role::backingVocal) && move.trackId != daw::Edit::masterId)
+            move.group = MixGroup::vocal;
+
+        const auto base = juce::String (move.trackId) + ":" + kind;
+        const auto n = seen[base]++;
+        move.key = n == 0 ? base : base + "#" + juce::String (n);
+    }
+}
+
+juce::var planToVar (const MixPlan& plan)
+{
+    auto* root = new juce::DynamicObject();
+    juce::Array<juce::var> moves, notes;
+    for (const auto& move : plan.moves)
+    {
+        auto* m = new juce::DynamicObject();
+        m->setProperty ("track", move.trackId);
+        if (move.insert.has_value())
+            m->setProperty ("insert", juce::String (fx::getModuleKey (*move.insert)));
+        m->setProperty ("atEnd", move.atEnd);
+        m->setProperty ("instance", move.instance);
+        m->setProperty ("sendTo", move.sendTo);
+        m->setProperty ("group", juce::String (getGroupKey (move.group)));
+        m->setProperty ("taste", move.taste);
+        m->setProperty ("key", move.key);
+
+        auto* values = new juce::DynamicObject();
+        for (const auto& [id, value] : move.values)
+            values->setProperty (id, value);
+        m->setProperty ("values", juce::var (values));
+
+        auto* automation = new juce::DynamicObject();
+        for (const auto& [id, points] : move.automation)
+        {
+            juce::Array<juce::var> list;
+            for (const auto& [time, value] : points)
+                list.add (juce::Array<juce::var> { time, value });
+            automation->setProperty (id, list);
+        }
+        m->setProperty ("automation", juce::var (automation));
+
+        juce::Array<juce::var> ride, reasons;
+        for (const auto& [time, db] : move.ride)
+            ride.add (juce::Array<juce::var> { time, db });
+        m->setProperty ("ride", ride);
+        for (const auto& reason : move.reasons)
+            reasons.add (reason);
+        m->setProperty ("reasons", reasons);
+        moves.add (juce::var (m));
+    }
+    for (const auto& note : plan.notes)
+        notes.add (note);
+    root->setProperty ("moves", moves);
+    root->setProperty ("notes", notes);
+    root->setProperty ("voiceOverBackingLu", plan.voiceOverBackingLu);
+    root->setProperty ("mixLufs", plan.mixLufs);
+    return juce::var (root);
+}
+
+bool planFromVar (const juce::var& data, MixPlan& plan)
+{
+    if (! data.isObject() || ! data["moves"].isArray())
+        return false;
+
+    MixPlan result;
+    for (const auto& m : *data["moves"].getArray())
+    {
+        MixMove move;
+        move.trackId = (int) m["track"];
+        if (m.hasProperty ("insert"))
+        {
+            bool found = false;
+            for (int t = 0; t < fx::numModuleTypes && ! found; ++t)
+                if (m["insert"].toString() == fx::getModuleKey ((fx::ModuleType) t))
+                {
+                    move.insert = (fx::ModuleType) t;
+                    found = true;
+                }
+            if (! found)
+                continue; // an effect this build doesn't have
+        }
+        move.atEnd = (bool) m["atEnd"];
+        move.instance = (int) m["instance"];
+        move.sendTo = (int) m["sendTo"];
+        move.group = getGroupFromKey (m["group"].toString());
+        move.taste = (bool) m["taste"];
+        move.key = m["key"].toString();
+
+        if (auto* values = m["values"].getDynamicObject())
+            for (const auto& property : values->getProperties())
+                move.values[property.name.toString()] = (float) property.value;
+        if (auto* automation = m["automation"].getDynamicObject())
+            for (const auto& property : automation->getProperties())
+                if (auto* list = property.value.getArray())
+                    for (const auto& point : *list)
+                        if (auto* pair = point.getArray(); pair != nullptr && pair->size() == 2)
+                            move.automation[property.name.toString()].push_back ({ (double) (*pair)[0], (float) (*pair)[1] });
+        if (auto* ride = m["ride"].getArray())
+            for (const auto& point : *ride)
+                if (auto* pair = point.getArray(); pair != nullptr && pair->size() == 2)
+                    move.ride.push_back ({ (double) (*pair)[0], (float) (*pair)[1] });
+        if (auto* reasons = m["reasons"].getArray())
+            for (const auto& reason : *reasons)
+                move.reasons.add (reason.toString());
+        result.moves.push_back (std::move (move));
+    }
+    if (auto* notes = data["notes"].getArray())
+        for (const auto& note : *notes)
+            result.notes.add (note.toString());
+    result.voiceOverBackingLu = (float) data["voiceOverBackingLu"];
+    result.mixLufs = data.hasProperty ("mixLufs") ? (float) data["mixLufs"] : -200.0f;
+    plan = std::move (result);
+    return true;
+}
+
+//==============================================================================
 void applyMix (daw::Edit& edit, const MixPlan& plan, float amount, const char* undoName)
 {
+    ApplyOptions options;
+    options.amount = amount;
+    applyMix (edit, plan, options, undoName);
+}
+
+void applyMix (daw::Edit& edit, const MixPlan& plan, const ApplyOptions& options, const char* undoName)
+{
     // Volume rides are written whole (a new ride replaces one the track had).
-    amount = juce::jlimit (0.0f, 1.0f, amount);
     edit.getUndoManager().beginNewTransaction (undoName); // DawBridge looks for "Auto Mix"
 
     std::map<int, int> added; // inserts added per track, so they keep the plan's order
 
+    for (const auto& [id, volume] : options.baseVolumes)
+        if (edit.getTrack (id).isValid())
+            edit.setTrackVolume (id, volume);
+
     for (const auto& move : plan.moves)
     {
+        if (options.off.count (move.key) > 0)
+            continue; // unticked in the review list
+
+        // This move's amount: the master Amount times its slider.
+        const auto amount = juce::jlimit (0.0f, 1.0f, options.amount) * juce::jlimit (0.0f, 1.0f, options.groups[(size_t) move.group]);
+
         auto owner = edit.getChannel (move.trackId); // a track, a return or the master
         if (! owner.isValid())
             continue;

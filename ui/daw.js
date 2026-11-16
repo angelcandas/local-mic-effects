@@ -5208,13 +5208,23 @@ class DawScreen {
 
     const style = () => $("[name=style]").value;
     const amount = () => Number($("[name=amount]").value) / 100;
-    const roles = () => Object.fromEntries([...panel.querySelectorAll(".automix-role select")].map((s) => [s.dataset.track, s.value]));
+    const roles = () => Object.fromEntries([...panel.querySelectorAll(".automix-role select[data-track]")].map((s) => [s.dataset.track, s.value]));
+    const priorities = () => Object.fromEntries([...panel.querySelectorAll(".automix-role select[data-priority]")].map((s) => [s.dataset.priority, s.value]));
+    // The review list's state: which moves are ticked and the five sliders.
+    const ticks = () => Object.fromEntries([...panel.querySelectorAll(".automix-tick input")].map((c) => [c.dataset.key, c.checked]));
+    const groups = () => Object.fromEntries([...panel.querySelectorAll(".automix-sliders input")].map((r) => [r.dataset.group, Number(r.value) / 100]));
+    this.autoMixPriorities = priorities;
     const effects = () => Object.fromEntries([...panel.querySelectorAll(".automix-effects input")].map((c) => [c.name, c.checked]));
     this.autoMixEffects = effects;
     const mode = () => ({ mode: $("[name=mode]").value, focus: Number($("[name=focus]").value), masterTemplate: $("[name=masterTemplate]").value,
                           sectionMoves: $("[name=sectionMoves]").checked });
     this.autoMixMode = mode;
-    const planArgs = () => ({ style: style(), roles: roles(), effects: effects(), ...mode() });
+    const planArgs = () => ({ style: style(), roles: roles(), priorities: priorities(), effects: effects(), ...mode() });
+    this.autoMixPlanArgs = planArgs;
+    // Ticks, sliders and Amount: once the plan is in the mix, it's written again at once with
+    // them (the song keeps playing); before that they wait for Apply.
+    const audition = () => daw("autoMix", { action: "audition", ticks: ticks(), groups: groups(), amount: amount() });
+    this.autoMixAudition = audition;
 
     $(".automix-close").addEventListener("click", () => this.toggleAutoMix(false));
     $(".automix-analyse").addEventListener("click", async () => {
@@ -5248,22 +5258,31 @@ class DawScreen {
       });
 
     $(".automix-apply").addEventListener("click", async () => {
-      const result = await daw("autoMix", { action: "apply", amount: amount() });
+      const result = await daw("autoMix", { action: "apply", amount: amount(), ticks: ticks(), groups: groups() });
       if (result?.ok === false) return;
       Object.assign(this.autoMix, { applied: true, after: true });
       this.renderAutoMixControls();
-      this.setAutoMixResult("Applied. Play the song, then switch between before and after.");
+      this.setAutoMixResult("Applied. Tick moves on and off to hear other sets, or switch between before and after.");
     });
 
     // After applying, the amount re-applies the same plan, gentler or stronger.
     const slider = $("[name=amount]");
     slider.addEventListener("input", () => { $(".automix-amount-value").textContent = `${slider.value}%`; });
-    slider.addEventListener("change", () => {
+    slider.addEventListener("change", async () => {
+      await audition();
       if (!this.autoMix.applied) return;
-      daw("autoMix", { action: "apply", amount: amount(), replace: true });
       this.autoMix.after = true;
       this.renderAutoMixControls();
     });
+    for (const range of panel.querySelectorAll(".automix-sliders input")) {
+      range.addEventListener("input", () => { range.nextElementSibling.textContent = `${range.value}%`; });
+      range.addEventListener("change", async () => {
+        await audition();
+        if (!this.autoMix.applied) return;
+        this.autoMix.after = true;
+        this.renderAutoMixControls();
+      });
+    }
 
     $(".automix-compare").addEventListener("click", async () => {
       const result = await daw("autoMix", { action: "compare", after: !this.autoMix.after });
@@ -5322,8 +5341,15 @@ class DawScreen {
       this.mixCheck.panel.hidden = true;
       this.songMap.panel.hidden = true;
       this.renderAutoMixMode();
-      if (!this.autoMix.plan) this.refreshAutoMixTags(true);
+      if (!this.autoMix.plan) this.refreshAutoMixState();
     }
+  }
+
+  // The plan this project was saved with (its list, ticks and sliders), or else the tags.
+  async refreshAutoMixState() {
+    const result = await daw("autoMix", { action: "state" });
+    if (result?.state === "ready" && !this.autoMix.plan) return this.onAutoMix(result);
+    this.refreshAutoMixTags(true);
   }
 
   // Forgets the last run (its plan, roles, results and amount, and its mode and track),
@@ -5406,6 +5432,19 @@ class DawScreen {
       const select = html("select", "dropdown");
       select.dataset.track = track.id;
       if (beforeListening) select.append(new Option("Not sure: listen", "auto"));
+      // Front: the star (keeps its level and band, the others make room). Back: filler.
+      const priority = html("select", "dropdown automix-priority");
+      priority.dataset.priority = track.id;
+      priority.title = "Front: this track is a star of the song, the others dip and duck for it. Back: filler, it sits lower and ducks more. The lead voice always keeps its place up front.";
+      for (const [key, label] of [["front", "Front"], ["normal", "Normal"], ["back", "Back"]]) priority.append(new Option(label, key));
+      priority.value = track.priority || "normal";
+      priority.addEventListener("change", async () => {
+        if (beforeListening) {
+          await daw("autoMix", { action: "tag", track: track.id, priority: priority.value });
+          return;
+        }
+        this.replanAutoMix(this.autoMixPlanArgs());
+      });
       for (const role of names) select.append(new Option(role.name, role.key));
       select.value = track.role || "auto";
       select.addEventListener("change", async () => {
@@ -5414,10 +5453,10 @@ class DawScreen {
           this.refreshAutoMixTags(true);
           return;
         }
-        const roles = Object.fromEntries([...rolesBox.querySelectorAll("select")].map((s) => [s.dataset.track, s.value]));
-        this.replanAutoMix({ style: panel.querySelector("[name=style]").value, roles, effects: this.autoMixEffects(), ...this.autoMixMode() });
+        const roles = Object.fromEntries([...rolesBox.querySelectorAll("select[data-track]")].map((s) => [s.dataset.track, s.value]));
+        this.replanAutoMix({ style: panel.querySelector("[name=style]").value, roles, priorities: this.autoMixPriorities(), effects: this.autoMixEffects(), ...this.autoMixMode() });
       });
-      row.append(name, select);
+      row.append(name, select, priority);
       rolesBox.append(row);
     }
   }
@@ -5572,8 +5611,18 @@ class DawScreen {
     if (event.state === "error") return this.setAutoMixResult(event.error, true);
     if (event.state !== "ready") return;
 
-    Object.assign(this.autoMix, { plan: event, applied: false, after: true });
+    Object.assign(this.autoMix, { plan: event, applied: Boolean(event.applied), after: event.after !== false });
     this.setAutoMixResult("");
+    // Sliders and Amount as the plan has them (they're kept with it).
+    {
+      const amount = panel.querySelector("[name=amount]");
+      amount.value = String(Math.round((event.amount ?? 1) * 100));
+      panel.querySelector(".automix-amount-value").textContent = `${amount.value}%`;
+      for (const range of panel.querySelectorAll(".automix-sliders input")) {
+        range.value = String(Math.round((event.groups?.[range.dataset.group] ?? 1) * 100));
+        range.nextElementSibling.textContent = `${range.value}%`;
+      }
+    }
     if (event.style) panel.querySelector("[name=style]").value = event.style;
     if (event.mode) {
       panel.querySelector("[name=mode]").value = event.mode;
@@ -5601,10 +5650,36 @@ class DawScreen {
     planBox.replaceChildren();
     if (event.kind === "reference") planBox.append(html("div", "automix-summary", `Matching the master to “${event.reference}”.`));
     for (const note of event.notes) planBox.append(html("div", "automix-note", note));
+    // Every move with a tick box, grouped by track. Taste moves start unticked. Ticking
+    // is live once the plan is in the mix: any set can be heard, changed and heard again.
+    if (event.moves.length > 0 && event.kind === "mix")
+      planBox.append(html("div", "automix-list-head", "Tick moves on and off to hear other sets. Nothing is final: the list is saved with the project."));
+    let lastTrack = null;
     for (const move of event.moves) {
+      if (event.kind === "mix" && move.track !== lastTrack) {
+        planBox.append(html("div", "automix-track-head", move.name));
+        lastTrack = move.track;
+      }
       const card = html("section", "automix-move");
+      card.classList.toggle("is-off", !move.ticked);
       const head = html("header");
-      head.append(html("span", "", move.name), html("span", "", move.effect));
+      const tick = html("label", "automix-tick");
+      const box = document.createElement("input");
+      box.type = "checkbox";
+      box.checked = Boolean(move.ticked);
+      box.dataset.key = move.key;
+      box.addEventListener("change", async () => {
+        card.classList.toggle("is-off", !box.checked);
+        await this.autoMixAudition();
+        if (this.autoMix.applied) {
+          this.autoMix.after = true;
+          this.renderAutoMixControls();
+        }
+      });
+      const label = html("span", "", event.kind === "mix" ? move.effect : move.name);
+      tick.append(box, label);
+      if (move.taste) tick.append(html("small", "automix-taste", "taste"));
+      head.append(tick, html("span", "", event.kind === "mix" ? "" : move.effect));
       const list = html("ul");
       for (const reason of move.reasons) list.append(html("li", "", reason));
       card.append(head, list);
@@ -5634,6 +5709,7 @@ class DawScreen {
     apply.textContent = applied ? "Applied" : "Apply";
     panel.querySelector(".automix-analyse").textContent = plan ? "Listen again" : "Listen";
     panel.querySelector(".automix-amount").hidden = !plan || plan.moves.length === 0;
+    panel.querySelector(".automix-sliders").hidden = !plan || plan.moves.length === 0 || plan.kind !== "mix" || plan.mode !== "mix";
     const compare = panel.querySelector(".automix-compare");
     compare.hidden = !applied;
     compare.textContent = after ? "Hear before" : "Hear after";
@@ -5689,6 +5765,11 @@ class DawScreen {
     this.projectPath = path;
     const scroll = opened ? this.restoreView(session.view) : null;
     if (pathChanged) this.library?.refresh();
+    // Another project has its own Auto Mix list.
+    if (pathChanged && this.autoMixPanel) {
+      this.resetAutoMix();
+      if (!this.autoMixPanel.hidden) this.refreshAutoMixState();
+    }
     document.dispatchEvent(new CustomEvent("daw-session", { detail: session }));
     if (this.autoMixPanel && !this.autoMixPanel.hidden && !this.autoMix?.plan) this.refreshAutoMixTags();
     if (this.active) this.render();

@@ -8296,6 +8296,69 @@ namespace
             edit.removeTrack (plain);
         }
 
+        // Auto Mix review list: priority tag, a plan saved with the project reopens with its
+        // ticks (taste moves start off), and applying writes only what is ticked.
+        {
+            const auto guitar = (int) edit.addTrack ("Guitar")[daw::ids::id];
+            auto tags = run ("autoMix", args ({ { "action", "tag" }, { "track", guitar }, { "priority", "back" } }));
+            check (edit.getTrack (guitar)[daw::ids::mixPriority].toString() == "back", "priority: Back is saved on the track");
+            tags = run ("autoMix", args ({ { "action", "tag" }, { "track", guitar }, { "priority", "normal" } }));
+            check (! edit.getTrack (guitar).hasProperty (daw::ids::mixPriority), "priority: Normal removes it");
+
+            edit.getState().removeProperty (daw::ids::autoMixAudition, nullptr);
+            check (run ("autoMix", args ({ { "action", "state" } }))["state"].toString() == "none", "audition: no saved plan, nothing to show");
+
+            analysis::MixPlan saved;
+            analysis::MixMove level;
+            level.trackId = daw::Edit::masterId;
+            level.values = { { "volume", -3.0f } };
+            level.reasons.add ("Master -3 dB");
+            saved.moves.push_back (level);
+            analysis::MixMove drive;
+            drive.trackId = guitar;
+            drive.insert = fx::ModuleType::saturation;
+            drive.values = { { "satOn", 1.0f }, { "satDrive", 4.0f }, { "satMix", 30.0f } };
+            drive.reasons.add ("Saturation");
+            saved.moves.push_back (drive);
+            analysis::labelMoves (saved, { { guitar, analysis::Role::guitar } });
+            auto* data = new juce::DynamicObject();
+            data->setProperty ("plan", analysis::planToVar (saved));
+            data->setProperty ("style", "pop");
+            data->setProperty ("mode", "mix");
+            edit.getState().setProperty (daw::ids::autoMixAudition, juce::JSON::toString (juce::var (data), true), nullptr);
+
+            const auto state = run ("autoMix", args ({ { "action", "state" } }));
+            const auto* listed = state["moves"].getArray();
+            check (state["state"].toString() == "ready" && listed != nullptr && listed->size() == 2
+                       && (bool) (*listed)[0]["ticked"] && ! (bool) (*listed)[1]["ticked"] && (bool) (*listed)[1]["taste"]
+                       && ! (bool) state["applied"],
+                   "audition: a saved plan comes back with its taste move unticked");
+
+            run ("autoMix", args ({ { "action", "apply" }, { "amount", 1.0 } }));
+            check (std::abs ((float) edit.getMaster().getProperty (daw::ids::volume, 0.0f) + 3.0f) < 0.01f
+                       && daw::Edit::getInserts (edit.getTrack (guitar)).getNumChildren() == 0,
+                   "audition: Apply writes the ticked move and leaves the taste move out");
+
+            // Tick the taste move: it's written at once (the plan is in the mix), replacing the last step.
+            auto* ticks = new juce::DynamicObject();
+            for (const auto& move : saved.moves)
+                ticks->setProperty (move.key, true);
+            run ("autoMix", args ({ { "action", "audition" }, { "ticks", juce::var (ticks) } }));
+            check (daw::Edit::getInserts (edit.getTrack (guitar)).getNumChildren() == 1, "audition: ticking a move writes it while playing");
+
+            auto* off = new juce::DynamicObject();
+            for (const auto& move : saved.moves)
+                off->setProperty (move.key, false);
+            run ("autoMix", args ({ { "action", "audition" }, { "ticks", juce::var (off) } }));
+            check (daw::Edit::getInserts (edit.getTrack (guitar)).getNumChildren() == 0
+                       && std::abs ((float) edit.getMaster().getProperty (daw::ids::volume, 0.0f)) < 0.01f,
+                   "audition: unticking everything goes back to the mix as it was");
+
+            edit.getState().removeProperty (daw::ids::autoMixAudition, nullptr);
+            run ("autoMix", args ({ { "action", "state" } }));
+            edit.removeTrack (guitar);
+        }
+
         // Convert to MIDI: a sung line on a clip becomes notes on a new piano track under it,
         // in one undo step; a clip that starts later puts the notes later.
         {
@@ -12582,6 +12645,168 @@ namespace
     // adds Smooth where it rings.
     // Auto Mix placement: who goes left and right, pairs evened out, the centre roles left
     // in the middle, both sides as loud as each other, mono-safe pans.
+    void testAutoMixAudition()
+    {
+        std::cout << "\nAuto Mix: audition list, sliders and priority\n";
+        using analysis::Role;
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-audition", {});
+        folder.createDirectory();
+        const double seconds = 12.0;
+        daw::Edit edit;
+        std::map<int, Role> roles;
+        const auto add = [&] (const juce::String& name, const juce::AudioBuffer<float>& audio, Role role)
+        {
+            const auto f = folder.getChildFile (name + ".wav");
+            writeWav (f, audio, sampleRate);
+            const auto id = (int) edit.addTrack (name)[daw::ids::id];
+            edit.addClip (id, f, 0.0, seconds);
+            roles[id] = role;
+            return id;
+        };
+
+        const auto voice = add ("Lead vocal", makeSungLine (seconds), Role::voice);
+        const auto bass = add ("Bass", makeBassLine (seconds), Role::bass);
+        const auto drums = add ("Drums", makeDrumLoop (seconds), Role::drums);
+        const auto solo = add ("Gtr solo", makePlucks (seconds), Role::guitar);
+        const auto rhythm = add ("Gtr rhythm", makePlucks (seconds), Role::guitar);
+        juce::ignoreUnused (bass, drums);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        std::map<int, float> volumes;
+        for (const auto& [id, profile] : source.tracks)
+            volumes[id] = 0.0f;
+
+        analysis::MixOptions options;
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, options);
+        check (! plan.moves.empty(), "audition: there is a plan");
+
+        // Every move has a stable, unique key and a group.
+        std::set<juce::String> keys;
+        bool unique = true, voiceLevel = false;
+        for (const auto& move : plan.moves)
+        {
+            unique = unique && move.key.isNotEmpty() && keys.insert (move.key).second;
+            if (move.trackId == voice && ! move.insert.has_value() && move.ride.empty() && move.values.count ("volume") > 0)
+                voiceLevel = move.group == analysis::MixGroup::vocal;
+        }
+        check (unique, "audition: every move has its own key");
+        check (voiceLevel, "audition: the voice's volume belongs to the Vocal level slider");
+
+        // The same plan again gives the same keys.
+        {
+            const auto again = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, options);
+            bool same = again.moves.size() == plan.moves.size();
+            for (size_t i = 0; same && i < plan.moves.size(); ++i)
+                same = again.moves[i].key == plan.moves[i].key;
+            check (same, "audition: planning again keeps the keys (so ticks survive)");
+        }
+
+        // Saved and read back.
+        {
+            const auto json = juce::JSON::toString (analysis::planToVar (plan), true);
+            analysis::MixPlan back;
+            const auto ok = analysis::planFromVar (juce::JSON::parse (json), back);
+            bool same = ok && back.moves.size() == plan.moves.size();
+            for (size_t i = 0; same && i < plan.moves.size(); ++i)
+            {
+                const auto& a = plan.moves[i];
+                const auto& b = back.moves[i];
+                same = a.key == b.key && a.trackId == b.trackId && a.insert == b.insert && a.group == b.group && a.taste == b.taste
+                    && a.values.size() == b.values.size() && a.ride.size() == b.ride.size() && a.reasons.size() == b.reasons.size()
+                    && a.automation.size() == b.automation.size();
+                for (const auto& [id, value] : a.values)
+                    same = same && b.values.count (id) > 0 && std::abs (b.values.at (id) - value) < 1.0e-4f;
+            }
+            check (same, "audition: a plan survives being saved with the project");
+            check (! analysis::planFromVar (juce::var(), back), "audition: nothing saved is not a plan");
+        }
+
+        // Unticked moves aren't written; a slider at 0 leaves its moves neutral; Vocal level at 0 leaves the fader.
+        const auto insertCount = [&] (int track) { return daw::Edit::getInserts (edit.getTrack (track)).getNumChildren(); };
+        {
+            analysis::ApplyOptions apply;
+            for (const auto& move : plan.moves)
+                if (move.insert.has_value())
+                    apply.off.insert (move.key);
+            apply.groups[(size_t) analysis::MixGroup::vocal] = 0.0f;
+            analysis::applyMix (edit, plan, apply);
+            check (insertCount (voice) == 0 && insertCount (solo) == 0, "audition: unticked effects are not added");
+            check (std::abs ((float) edit.getTrack (voice).getProperty (daw::ids::volume, 0.0f)) < 0.01f,
+                   "audition: Vocal level at 0 leaves the voice's volume where it is");
+            edit.getUndoManager().undo();
+        }
+        {
+            analysis::ApplyOptions apply;
+            analysis::applyMix (edit, plan, apply);
+            const auto all = insertCount (voice);
+            edit.getUndoManager().undo();
+            check (all > 0 && insertCount (voice) == 0, "audition: everything ticked adds the effects, undo takes them back");
+
+            // Another set after going back: only the voice's EQ.
+            analysis::ApplyOptions some;
+            for (const auto& move : plan.moves)
+                if (! (move.trackId == voice && move.insert == fx::ModuleType::paraEq))
+                    some.off.insert (move.key);
+            analysis::applyMix (edit, plan, some);
+            check (insertCount (voice) == 1 && daw::Edit::getInserts (edit.getTrack (voice)).getChild (0)[daw::ids::type].toString() == "paraEq",
+                   "audition: a different subset can be heard after going back");
+            edit.getUndoManager().undo();
+        }
+
+        // Base volumes are set first, in the same undo step.
+        {
+            edit.setTrackVolume (rhythm, -5.0f);
+            analysis::ApplyOptions apply;
+            apply.off = keys;
+            apply.baseVolumes[rhythm] = 0.0f;
+            analysis::applyMix (edit, plan, apply);
+            check (std::abs ((float) edit.getTrack (rhythm).getProperty (daw::ids::volume, 0.0f)) < 0.01f, "audition: base volumes are restored first");
+            edit.getUndoManager().undo();
+            check (std::abs ((float) edit.getTrack (rhythm).getProperty (daw::ids::volume, 0.0f) + 5.0f) < 0.01f, "audition: and undone with the step");
+            edit.setTrackVolume (rhythm, 0.0f);
+        }
+
+        // Priority: the solo in front, the rhythm at the back.
+        {
+            analysis::MixOptions prio = options;
+            prio.priorities[solo] = analysis::Priority::front;
+            prio.priorities[rhythm] = analysis::Priority::back;
+            const auto ranked = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, prio);
+
+            const analysis::MixMove* rhythmVolume = nullptr;
+            bool soloRide = false, rhythmRide = false;
+            for (const auto& move : ranked.moves)
+            {
+                if (move.trackId == rhythm && ! move.insert.has_value() && move.ride.empty() && move.values.count ("volume") > 0)
+                    rhythmVolume = &move;
+                if (move.trackId == solo && ! move.ride.empty())
+                    soloRide = true;
+                if (move.trackId == rhythm && ! move.ride.empty())
+                    rhythmRide = true;
+            }
+            check (rhythmVolume != nullptr && std::abs (rhythmVolume->values.at ("volume") + 2.5f) < 0.01f,
+                   "priority: a Back guitar sits 2.5 LU lower than where it is");
+            check (! soloRide, "priority: a Front guitar is not ducked");
+            // A guitar that plays in the lead's gaps ducks; a Back one ducks deeper than a Normal one.
+            bool normalRide = false;
+            for (const auto& move : plan.moves)
+                if (move.trackId == rhythm && ! move.ride.empty())
+                    normalRide = true;
+            std::cout << "        rhythm ride: normal " << (int) normalRide << ", back " << (int) rhythmRide << "\n";
+            check (! normalRide || rhythmRide, "priority: a Back guitar still ducks under the lead when a Normal one does");
+
+            // The Back level is from the level it has now: no extra volume move when nothing is Back.
+            bool plainVolume = false;
+            for (const auto& move : plan.moves)
+                if (move.trackId == rhythm && ! move.insert.has_value() && move.ride.empty() && move.values.count ("volume") > 0)
+                    plainVolume = true;
+            check (! plainVolume, "priority: all Normal changes nothing about the instruments' levels");
+        }
+
+        folder.deleteRecursively();
+    }
+
     void testAutoMixPlacement()
     {
         std::cout << "\nAuto Mix: placement (pan)\n";
@@ -18028,6 +18253,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=audition: just Auto Mix's review list, sliders and priority.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "audition")
+    {
+        testAutoMixAudition();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=placement: just Auto Mix's pans.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "placement")
     {
@@ -18305,6 +18538,7 @@ int main()
     testAutoMixEffects();
     testAutoMixRoles();
     testAutoMixBackingTrack();
+    testAutoMixAudition();
     testAutoMixPlacement();
     testAutoMixPhase();
     testAutoMixRides();

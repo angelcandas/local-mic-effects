@@ -286,7 +286,14 @@
       <div class="automix-roles"></div>
       <div class="automix-plan"></div>
       <div class="export-bar"><div></div></div>
-      <label class="automix-amount" hidden>Amount <input type="range" name="amount" min="0" max="100" step="1" value="100"> <span class="automix-amount-value">100%</span></label>
+      <label class="automix-amount" hidden title="How far the whole plan goes: the master of the five sliders below">Amount <input type="range" name="amount" min="0" max="100" step="1" value="100"> <span class="automix-amount-value">100%</span></label>
+      <div class="automix-sliders" hidden role="group" aria-label="How much of each kind of move">
+        <label title="EQ, cuts and boosts, de-esser-style tone fixes, saturation and air">Tone <input type="range" data-group="tone" min="0" max="100" step="1" value="100"> <span>100%</span></label>
+        <label title="Compressors, rides and other level control">Dynamics <input type="range" data-group="dynamics" min="0" max="100" step="1" value="100"> <span>100%</span></label>
+        <label title="Reverb, echo and sends">Space <input type="range" data-group="space" min="0" max="100" step="1" value="100"> <span>100%</span></label>
+        <label title="Pan and stereo width">Width <input type="range" data-group="width" min="0" max="100" step="1" value="100"> <span>100%</span></label>
+        <label title="How far the voice's level moves toward its target">Vocal level <input type="range" data-group="vocal" min="0" max="100" step="1" value="100"> <span>100%</span></label>
+      </div>
       <div class="export-footer">
         <button class="text-button automix-reference" title="Match the mix's tone and loudness to a song you like">Match a reference…</button>
         <span class="export-result automix-result"></span>
