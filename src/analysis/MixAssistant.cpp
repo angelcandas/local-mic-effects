@@ -2181,7 +2181,11 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
         if (! measured.mix.has_value())
             plan.notes.add ("Listen again in Master mode: it measures the whole mix as it plays.");
         else
-            plan = planMaster (*measured.mix, options.masterLufs, currentMasterVolume, options.smooth);
+        {
+            const auto* found = findMasterTemplate (options.masterTemplate);
+            plan = planMaster (*measured.mix, found != nullptr ? *found : getLoudnessTemplate (options.masterLufs), currentMasterVolume,
+                               options.smooth, options.sectionMoves, options.sections);
+        }
         return plan;
     }
 
@@ -2861,6 +2865,13 @@ MixPlan planMix (const SessionAnalyser::Result& measured, const std::map<int, Ro
 //==============================================================================
 MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVolume, bool smooth)
 {
+    return planMaster (mix, getLoudnessTemplate (targetLufs), currentMasterVolume, smooth);
+}
+
+MixPlan planMaster (const Profile& mix, const MasterTemplate& target, float currentMasterVolume, bool smooth,
+                    bool sectionMoves, const std::vector<MixOptions::Section>& sections)
+{
+    const auto targetLufs = target.lufs;
     MixPlan plan;
     if (mix.getActiveSeconds() <= 0.0 || mix.integratedLufs <= -150.0f)
     {
@@ -2930,8 +2941,9 @@ MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVol
     };
     const auto gain = [] (double db, double limit) { return roundTo (juce::jlimit (-limit, limit, 0.6 * db), 0.5); };
 
-    const auto lowGain = gain (meanOver (40.0, 120.0), 3.0);
-    const auto highGain = gain (meanOver (6000.0, 12000.0), 3.0);
+    // The template's lean on top (a darker lo-fi master, a vinyl cut that tames the top).
+    const auto lowGain = juce::jlimit (-3.0f, 3.0f, gain (meanOver (40.0, 120.0), 3.0) + target.lowLean);
+    const auto highGain = juce::jlimit (-3.0f, 3.0f, gain (meanOver (6000.0, 12000.0), 3.0) + target.highLean);
     const auto airGain = juce::jmin (2.0f, gain (meanOver (12500.0, 18000.0), 3.0));
     int midBand = -1;
     for (int b = 0; b < numBands; ++b)
@@ -2956,6 +2968,9 @@ MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVol
     describe (airGain, "air (16 kHz)");
     if (eq.reasons.size() == 1)
         eq.reasons.add ("The tonal balance is already close to a finished master");
+    if (target.lowLean != 0.0f || target.highLean != 0.0f)
+        eq.reasons.add ("Leaning " + juce::String (target.highLean < 0.0f || target.lowLean > 0.0f ? "warmer" : "brighter")
+                        + " for " + target.name);
 
     // Narrow peaks that stick out of the mix, taken down gently after the EQ.
     if (smooth)
@@ -2969,7 +2984,7 @@ MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVol
     // Loudness: the master fader goes to 0 dB (it comes after the limiter, so anything
     // else would move the ceiling); the master chain's input gain brings the mix up (or
     // down) to the target, less the limiter's drive, which is as much as this kind of
-    // master takes: 9 dB for loud, 5 for streaming, 2 for dynamic.
+    // master takes (the template's: 9 dB for loud, 5 for streaming, 2 for dynamic).
     const auto eqDb = [&]
     {
         fx::ParametricEq::Settings s;
@@ -2980,8 +2995,7 @@ MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVol
     }();
     const auto loudness = mix.integratedLufs - currentMasterVolume + loudnessChangeDb (spectrum, eqDb); // with the fader at 0 dB
     const auto gap = targetLufs - loudness;
-    const auto maxDrive = targetLufs >= -11.0f ? 9.0 : targetLufs <= -15.0f ? 2.0 : 5.0;
-    const auto drive = (float) maxDrive;
+    const auto drive = juce::jlimit (0.0f, 24.0f, target.maxDrive);
     const auto trim = roundTo (juce::jlimit (-24.0, 24.0, gap - drive), 0.5);
 
     // Glue: a gentle 2:1 on each band, from the level the band reaches its loudest fifth of the time.
@@ -2999,20 +3013,25 @@ MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVol
         // Measured with the fader where it is now; the chain hears the mix at 0 dB plus the trim.
         const auto offset = trim - currentMasterVolume;
         const auto threshold = [&] (size_t k) { return juce::jlimit (-60.0f, 0.0f, roundTo (percentile (levels[k], 0.8) + 3.0 + offset, 1.0)); };
+        const auto ratio = juce::jlimit (1.0f, 10.0f, target.ratio);
         auto& mb = add (fx::ModuleType::multiband, { { "mbOn", 1.0f }, { "mbLowFreq", 200.0f }, { "mbHighFreq", 3000.0f },
                                                      { "mbLowThreshold", threshold (0) }, { "mbMidThreshold", threshold (1) },
-                                                     { "mbHighThreshold", threshold (2) }, { "mbRatio", 2.0f }, { "mbAttack", 20.0f },
+                                                     { "mbHighThreshold", threshold (2) }, { "mbRatio", ratio }, { "mbAttack", 20.0f },
                                                      { "mbRelease", 200.0f }, { "mbMakeup", 0.0f } });
-        mb.reasons.add ("Multiband 2:1 on the loudest moments of each band (lows " + juce::String (threshold (0), 0) + ", mids "
+        mb.reasons.add ("Multiband " + juce::String (ratio, ratio == std::round (ratio) ? 0 : 1) + ":1 on the loudest moments of each band (lows " + juce::String (threshold (0), 0) + ", mids "
                         + juce::String (threshold (1), 0) + ", highs " + juce::String (threshold (2), 0)
                         + " dB): holds the mix together without squashing it");
     }
 
     // Width: a little wider, with a mono low end (what vinyl cutters and club systems want).
+    const auto width = juce::jlimit (0.0f, 200.0f, target.width);
     {
-        const auto width = targetLufs >= -11.0f ? 115.0f : targetLufs <= -15.0f ? 105.0f : 110.0f;
-        auto& imager = add (fx::ModuleType::imager, { { "imgOn", 1.0f }, { "imgWidth", width }, { "imgMonoBelow", 120.0f } });
-        imager.reasons.add ("Stereo width " + juce::String (width, 0) + "%, mono under 120 Hz: open on top, solid bass");
+        auto& imager = add (fx::ModuleType::imager, { { "imgOn", 1.0f }, { "imgWidth", width }, { "imgMonoBelow", target.monoBelow } });
+        if (target.monoBelow > 0.0f)
+            imager.reasons.add ("Stereo width " + juce::String (width, 0) + "%, mono under " + juce::String (target.monoBelow, 0)
+                                + " Hz: open on top, solid bass");
+        else
+            imager.reasons.add ("Stereo width " + juce::String (width, 0) + "%, the low end left as it is");
     }
 
     if (std::abs (currentMasterVolume) >= 0.05f)
@@ -3033,16 +3052,228 @@ MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVol
         plan.moves.insert (plan.moves.begin(), move);
     }
 
-    auto& limiter = add (fx::ModuleType::limiter, { { "limOn", 1.0f }, { "limDrive", drive }, { "limCeiling", -1.0f }, { "limRelease", 120.0f } });
-    limiter.reasons.add ("Limiter, ceiling -1 dB" + (drive > 0.0f ? ", " + formatDb (drive) + " of drive: up to "
-                                                                    + juce::String (targetLufs, 0) + " LUFS"
-                                                              : juce::String (": catches the peaks")));
+    const auto ceiling = juce::jlimit (-12.0f, 0.0f, target.ceiling);
+    const auto ceilingText = juce::String (ceiling, ceiling == std::round (ceiling) ? 0 : 1);
+    auto& limiter = add (fx::ModuleType::limiter, { { "limOn", 1.0f }, { "limDrive", drive }, { "limCeiling", ceiling }, { "limRelease", 120.0f } });
+    limiter.reasons.add ("Limiter, ceiling " + ceilingText + " dB" + (drive > 0.0f ? ", " + formatDb (drive) + " of drive: up to "
+                                                                                    + juce::String (targetLufs, 0) + " LUFS"
+                                                                              : juce::String (": catches the peaks")));
+    if (target.key.isNotEmpty())
+        limiter.reasons.add (target.name + ": " + juce::String (targetLufs, 0) + " LUFS, peaks under " + ceilingText + " dB");
+
+    // Section moves: the choruses open up and the verses settle back, as automation on
+    // the master's effects (ramping in over half a second before each one starts).
+    if (sectionMoves)
+    {
+        const auto parts = findLiftedParts (mix, sections);
+        if (! parts.empty())
+        {
+            const auto lane = [&parts] (float base, float lifted)
+            {
+                std::vector<std::pair<double, float>> points;
+                for (const auto& [start, end] : parts)
+                {
+                    points.push_back ({ juce::jmax (0.0, start - 0.5), base });
+                    points.push_back ({ start, lifted });
+                    points.push_back ({ juce::jmax (start, end - 0.3), lifted });
+                    points.push_back ({ end, base });
+                }
+                return points;
+            };
+
+            juce::StringArray times;
+            for (const auto& part : parts)
+                times.add (juce::String ((int) part.first / 60) + ":" + juce::String ((int) part.first % 60).paddedLeft ('0', 2));
+            const auto when = (parts.size() == 1 ? "the chorus at " : "the choruses at ") + times.joinIntoString (", ");
+
+            const auto findMove = [&plan] (fx::ModuleType type) -> MixMove*
+            {
+                for (auto& move : plan.moves)
+                    if (move.insert == type)
+                        return &move;
+                return nullptr;
+            };
+
+            // Wider (only on a master that's widened at all: not a mono-safe broadcast one).
+            if (auto* imager = findMove (fx::ModuleType::imager); imager != nullptr && width >= 104.0f)
+            {
+                const auto lifted = juce::jmin (140.0f, width + 8.0f);
+                imager->automation["imgWidth"] = lane (width, lifted);
+                imager->reasons.add ("Width up to " + juce::String (lifted, 0) + "% in " + when);
+            }
+            // More air.
+            if (auto* masterEq = findMove (fx::ModuleType::masterEq))
+            {
+                const auto air = masterEq->values["meqAirGain"];
+                const auto lifted = juce::jmin (4.0f, air + 1.0f);
+                masterEq->automation["meqAirGain"] = lane (air, lifted);
+                masterEq->reasons.add ("Air up " + formatDb (lifted - air) + " in " + when);
+            }
+            // Denser and a little louder (a master that's limited at all).
+            if (drive >= 1.0f)
+            {
+                const auto lifted = juce::jmin (24.0f, drive + 1.0f);
+                limiter.automation["limDrive"] = lane (drive, lifted);
+                limiter.reasons.add ("1 dB more drive in " + when + ": they lift without moving the ceiling");
+            }
+        }
+    }
 
     auto& meter = add (fx::ModuleType::loudness, { { "loudOn", 1.0f }, { "loudTarget", targetLufs } });
     meter.reasons.add ("Loudness meter at the end, aiming at " + juce::String (targetLufs, 0) + " LUFS: play the song to check it");
 
     plan.mixLufs = (float) (loudness + trim + drive);
     return plan;
+}
+
+//==============================================================================
+const std::vector<MasterTemplate>& getMasterTemplates()
+{
+    //                         key            name                                   group       LUFS   ceil  drive width mono  ratio low  high  about
+    static const std::vector<MasterTemplate> templates = []
+    {
+        std::vector<MasterTemplate> list;
+        const auto add = [&list] (const char* key, const char* name, const char* group, float lufs, float ceiling, float drive,
+                                  float width, float mono, float ratio, float low, float high, const char* about)
+        {
+            list.push_back ({ key, name, group, lufs, ceiling, drive, width, mono, ratio, low, high, about });
+        };
+        // Platforms: what each one turns a song to (louder gets turned down, so this is
+        // where a master keeps the most punch), and the peaks their encoders need.
+        add ("streaming", "Spotify, YouTube, Tidal", "Platform", -14.0f, -1.0f, 5.0f, 110.0f, 120.0f, 2.0f, 0.0f, 0.0f,
+             "-14 LUFS, peaks under -1 dB: what most streaming services play at");
+        add ("apple", "Apple Music", "Platform", -16.0f, -1.0f, 3.0f, 110.0f, 120.0f, 2.0f, 0.0f, 0.0f,
+             "-16 LUFS, peaks under -1 dB: Sound Check's level, more room for dynamics");
+        add ("amazon", "Amazon Music", "Platform", -14.0f, -2.0f, 5.0f, 110.0f, 120.0f, 2.0f, 0.0f, 0.0f,
+             "-14 LUFS, peaks under -2 dB: its encoder needs a little more headroom");
+        add ("deezer", "Deezer", "Platform", -15.0f, -1.0f, 4.0f, 110.0f, 120.0f, 2.0f, 0.0f, 0.0f, "-15 LUFS, peaks under -1 dB");
+        add ("soundcloud", "SoundCloud", "Platform", -11.0f, -1.0f, 7.0f, 112.0f, 120.0f, 2.0f, 0.0f, 0.0f,
+             "-11 LUFS, peaks under -1 dB: it doesn't turn songs down, so loud masters stand out");
+        add ("podcast", "Podcast / spoken word", "Platform", -16.0f, -1.0f, 3.0f, 100.0f, 150.0f, 2.5f, 0.0f, 0.5f,
+             "-16 LUFS, peaks under -1 dB: what podcast apps ask for; mono-safe, voice forward");
+        add ("ebu", "Broadcast (EBU R128)", "Platform", -23.0f, -1.0f, 0.0f, 100.0f, 0.0f, 1.5f, 0.0f, 0.0f,
+             "-23 LUFS, peaks under -1 dB: TV and radio in Europe");
+        add ("atsc", "Broadcast (ATSC A/85, US)", "Platform", -24.0f, -2.0f, 0.0f, 100.0f, 0.0f, 1.5f, 0.0f, 0.0f,
+             "-24 LUFS, peaks under -2 dB: TV in the US");
+        add ("cd", "CD / download", "Platform", -9.0f, -0.3f, 9.0f, 112.0f, 120.0f, 2.0f, 0.0f, 0.0f,
+             "-9 LUFS, peaks under -0.3 dB: loud, for files nobody turns down");
+        add ("club", "Club / DJ", "Platform", -8.0f, -0.3f, 10.0f, 105.0f, 150.0f, 2.5f, 0.5f, 0.0f,
+             "-8 LUFS, peaks under -0.3 dB: as loud as the tracks around it, mono bass for the PA");
+        add ("vinyl", "Vinyl pre-master", "Platform", -12.0f, -3.0f, 3.0f, 100.0f, 150.0f, 2.0f, 0.0f, -1.0f,
+             "-12 LUFS, peaks under -3 dB: headroom for the cutter, mono bass, a softer top");
+        // Styles: where records of that kind usually sit.
+        add ("pop", "Pop", "Style", -10.0f, -1.0f, 8.0f, 112.0f, 120.0f, 2.0f, 0.0f, 0.5f, "-10 LUFS: loud and bright");
+        add ("edm", "EDM / dance", "Style", -8.0f, -1.0f, 10.0f, 115.0f, 150.0f, 2.5f, 0.5f, 0.5f, "-8 LUFS: very loud, wide on top, mono bass");
+        add ("hiphop", "Hip-hop / trap", "Style", -9.0f, -1.0f, 9.0f, 110.0f, 150.0f, 2.0f, 1.0f, 0.0f, "-9 LUFS: heavy low end, mono under 150 Hz");
+        add ("rock", "Rock / metal", "Style", -9.0f, -1.0f, 9.0f, 112.0f, 120.0f, 2.5f, 0.0f, 0.0f, "-9 LUFS: dense and firm");
+        add ("rnb", "R&B / soul", "Style", -11.0f, -1.0f, 7.0f, 110.0f, 120.0f, 2.0f, 0.5f, 0.0f, "-11 LUFS: warm and smooth");
+        add ("acoustic", "Acoustic / folk", "Style", -14.0f, -1.0f, 3.0f, 105.0f, 100.0f, 1.5f, 0.0f, 0.0f, "-14 LUFS: natural, room to breathe");
+        add ("jazz", "Jazz", "Style", -16.0f, -1.0f, 2.0f, 105.0f, 100.0f, 1.5f, 0.0f, 0.0f, "-16 LUFS: dynamic, barely limited");
+        add ("classical", "Classical / orchestral", "Style", -18.0f, -1.0f, 1.0f, 100.0f, 0.0f, 1.2f, 0.0f, 0.0f,
+             "-18 LUFS: the full dynamics, nothing narrowed");
+        add ("lofi", "Lo-fi / chill", "Style", -13.0f, -1.0f, 4.0f, 105.0f, 120.0f, 2.0f, 0.5f, -1.5f, "-13 LUFS: soft top, warm");
+        add ("ambient", "Ambient / cinematic", "Style", -16.0f, -1.0f, 2.0f, 115.0f, 100.0f, 1.5f, 0.0f, 0.0f, "-16 LUFS: wide and open");
+        return list;
+    }();
+    return templates;
+}
+
+const MasterTemplate* findMasterTemplate (const juce::String& key)
+{
+    for (const auto& t : getMasterTemplates())
+        if (t.key == key)
+            return &t;
+    return nullptr;
+}
+
+MasterTemplate getLoudnessTemplate (float targetLufs)
+{
+    MasterTemplate t;
+    t.lufs = targetLufs;
+    t.name = juce::String (targetLufs, 0) + " LUFS";
+    t.maxDrive = targetLufs >= -11.0f ? 9.0f : targetLufs <= -15.0f ? 2.0f : 5.0f;
+    t.width = targetLufs >= -11.0f ? 115.0f : targetLufs <= -15.0f ? 105.0f : 110.0f;
+    return t;
+}
+
+std::vector<std::pair<double, double>> findLiftedParts (const Profile& mix, const std::vector<MixOptions::Section>& sections)
+{
+    std::vector<std::pair<double, double>> parts;
+    const auto frames = mix.getNumFrames();
+    if (frames == 0)
+        return parts;
+
+    // Loudness over a stretch of the song (power mean of the active hops), -200 when silent.
+    const auto loudnessOver = [&mix, frames] (double from, double to)
+    {
+        double power = 0.0;
+        int count = 0;
+        for (auto i = juce::jmax (0, (int) (from / Profile::hopSeconds)); i < juce::jmin (frames, (int) (to / Profile::hopSeconds)); ++i)
+            if (mix.active[(size_t) i] && mix.momentaryLufs[(size_t) i] > -150.0f)
+                power += std::pow (10.0, mix.momentaryLufs[(size_t) i] / 10.0), ++count;
+        return count > 0 ? 10.0 * std::log10 (power / count) : -200.0;
+    };
+    const auto songSeconds = frames * Profile::hopSeconds;
+    const auto song = loudnessOver (0.0, songSeconds);
+    if (song <= -150.0)
+        return parts;
+
+    // The song's sections: its choruses, else the sections clearly louder than the song.
+    if (! sections.empty())
+    {
+        for (const auto& section : sections)
+            if (section.kind == "chorus" && section.length > 0.0)
+                parts.push_back ({ section.start, section.start + section.length });
+        if (parts.empty())
+            for (const auto& section : sections)
+                if (section.length >= 6.0 && loudnessOver (section.start, section.start + section.length) >= song + 1.5)
+                    parts.push_back ({ section.start, section.start + section.length });
+    }
+    else
+    {
+        // No sections: the stretches of 8 s or more where the mix (over 4 s) is 2 dB or
+        // more over its middle level.
+        std::vector<float> smooth ((size_t) frames, -200.0f), active;
+        const auto half = (int) std::lround (2.0 / Profile::hopSeconds);
+        for (int i = 0; i < frames; ++i)
+        {
+            smooth[(size_t) i] = (float) loudnessOver ((i - half) * Profile::hopSeconds, (i + half) * Profile::hopSeconds);
+            if (mix.active[(size_t) i] && smooth[(size_t) i] > -150.0f)
+                active.push_back (smooth[(size_t) i]);
+        }
+        if (active.size() < 100) // under 10 s playing
+            return parts;
+        const auto middle = percentile (active, 0.5);
+
+        int startFrame = -1, lastHigh = -1;
+        const auto gapFrames = (int) std::lround (2.0 / Profile::hopSeconds);
+        const auto close = [&]
+        {
+            if (startFrame >= 0 && (lastHigh - startFrame + 1) * Profile::hopSeconds >= 8.0)
+                parts.push_back ({ startFrame * Profile::hopSeconds, (lastHigh + 1) * Profile::hopSeconds });
+            startFrame = -1;
+        };
+        for (int i = 0; i < frames; ++i)
+        {
+            if (smooth[(size_t) i] >= middle + 2.0f)
+            {
+                if (startFrame < 0)
+                    startFrame = i;
+                lastHigh = i;
+            }
+            else if (startFrame >= 0 && i - lastHigh > gapFrames)
+                close();
+        }
+        close();
+    }
+
+    // Lifting most of the song isn't a lift.
+    double lifted = 0.0;
+    for (const auto& [start, end] : parts)
+        lifted += end - start;
+    if (lifted > 0.6 * songSeconds)
+        parts.clear();
+    return parts;
 }
 
 //==============================================================================
@@ -3268,31 +3499,32 @@ void applyMix (daw::Edit& edit, const MixPlan& plan, float amount, const char* u
         }
 
         const auto id = (int) insert[daw::ids::id];
+        const auto scale = [amount] (const juce::String& valueId, float value)
+        {
+            if (valueId == "limDrive")
+                return value * amount; // from no drive
+            if (valueId == "gateThreshold")
+                return -80.0f + (value + 80.0f) * amount; // from fully open
+            if (valueId.endsWith ("Gain") || valueId.endsWith ("Threshold") || valueId.endsWith ("Mix") || valueId == "exciterAmount")
+                return value * amount; // from 0 dB: no boost or cut, no compression; from a dry mix
+            if (valueId == "compRatio")
+                return 1.0f + (value - 1.0f) * amount;
+            if (valueId == "widthAmount" || valueId == "imgWidth")
+                return 100.0f + (value - 100.0f) * amount; // from as it is
+            return value;
+        };
+
+        // Automation scales like the knob's own value below.
         for (const auto& [valueId, points] : move.automation)
         {
-            // Mixes (the only values automated) scale from dry, like the knob's own value below.
             std::vector<daw::Edit::AutomationPoint> scaled;
             for (const auto& [time, value] : points)
-                scaled.push_back ({ time, value * amount });
+                scaled.push_back ({ time, scale (valueId, value) });
             edit.setInsertAutomation (id, valueId, scaled);
         }
 
         for (const auto& [valueId, value] : move.values)
-        {
-            auto scaled = value;
-            if (valueId == "limDrive")
-                scaled = value * amount; // from no drive
-            else if (valueId == "gateThreshold")
-                scaled = -80.0f + (value + 80.0f) * amount; // from fully open
-            else if (valueId.endsWith ("Gain") || valueId.endsWith ("Threshold") || valueId.endsWith ("Mix") || valueId == "exciterAmount")
-                scaled = value * amount; // from 0 dB: no boost or cut, no compression; from a dry mix
-            else if (valueId == "compRatio")
-                scaled = 1.0f + (value - 1.0f) * amount;
-            else if (valueId == "widthAmount")
-                scaled = 100.0f + (value - 100.0f) * amount; // from as it is
-
-            edit.setInsertValue (id, valueId, scaled);
-        }
+            edit.setInsertValue (id, valueId, scale (valueId, value));
     }
 }
 }

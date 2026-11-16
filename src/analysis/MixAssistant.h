@@ -127,7 +127,16 @@ struct MixOptions
 {
     MixMode mode = MixMode::mix;
     int focusTrackId = 0; // the track fit and clean work on (0: the lead voice)
-    float masterLufs = -14.0f; // master mode's target: -14 streaming, -10 loud, -16 dynamic
+    float masterLufs = -14.0f; // master mode's target when there's no template: -14 streaming, -10 loud, -16 dynamic
+    juce::String masterTemplate; // master mode: a MasterTemplate key (getMasterTemplates); empty: masterLufs alone
+
+    // Master mode, section moves: the master's effects follow the song (automation on the
+    // master's inserts). The choruses (the song's sections, or else its loudest stretches)
+    // open up: a little wider, a touch more air and more drive into the limiter, back
+    // down for the verses.
+    bool sectionMoves = true;
+    struct Section { double start = 0.0, length = 0.0; juce::String kind; juce::String name; };
+    std::vector<Section> sections; // the session's song sections (Edit::getSongSections), in time order
 
     bool eq = true, compressor = true, deEsser = true, reverb = true;
     bool saturation = true, echo = true, exciter = true, width = true; // used when the style asks for them
@@ -288,6 +297,38 @@ MixPlan planMix (const SessionAnalyser::Result& analysis, const std::map<int, Ro
 // (mastering EQ towards a typical finished master's tonal balance, a gentle multiband,
 // width with a mono low end, a limiter towards the loudness target, a loudness meter).
 MixPlan planMaster (const Profile& mix, float targetLufs, float currentMasterVolume, bool smooth = true);
+
+// Where a master goes for a platform or a style: its loudness, the limiter's ceiling,
+// how much limiting that kind of master takes, its width and mono low end, how firmly
+// the multiband holds it, and a lean in its tonal balance.
+struct MasterTemplate
+{
+    juce::String key, name, group; // group: "Platform" or "Style"
+    float lufs = -14.0f;           // integrated loudness target
+    float ceiling = -1.0f;         // limiter ceiling, dB (where the peaks stop)
+    float maxDrive = 5.0f;         // limiter drive, dB: as much as this kind of master takes
+    float width = 110.0f;          // stereo width, % (100: as it is)
+    float monoBelow = 120.0f;      // Hz under which the master is mono (0: none)
+    float ratio = 2.0f;            // multiband ratio
+    float lowLean = 0.0f, highLean = 0.0f; // dB added to the low and top end EQ moves (+ more, - less)
+    juce::String about;            // one line for the UI
+};
+
+// The templates, platforms first, then styles.
+const std::vector<MasterTemplate>& getMasterTemplates();
+// A template by key; nullptr when there's none.
+const MasterTemplate* findMasterTemplate (const juce::String& key);
+// A template from a loudness alone (what master mode did before templates).
+MasterTemplate getLoudnessTemplate (float targetLufs);
+
+// With a template and (optionally) section moves over the song's sections.
+MixPlan planMaster (const Profile& mix, const MasterTemplate&, float currentMasterVolume, bool smooth = true,
+                    bool sectionMoves = false, const std::vector<MixOptions::Section>& sections = {});
+
+// The stretches of the song a master lifts (the choruses): the sections of kind "chorus",
+// else the sections clearly louder than the rest, else (no sections) the mix's loudest
+// stretches of 8 s or more. Pairs of start and end, seconds, in time order.
+std::vector<std::pair<double, double>> findLiftedParts (const Profile& mix, const std::vector<MixOptions::Section>& sections);
 
 MixPlan planReferenceMatch (const Profile& mix, const Profile& reference, float currentMasterVolume);
 

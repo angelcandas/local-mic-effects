@@ -354,6 +354,7 @@ Under *Mastering* in Add effect and the library (DAW only): **Mastering EQ**, **
 Automation makes a setting move over time: the voice comes up in the chorus, the echo opens on the last word, the guitar pans across.
 
 - Click the **curve button** in a track's header (or **Show automation lanes** in the track's right-click menu) to unfold its lanes. A dot on the button means the track has automation.
+- **Returns and the master** have lanes too: the same curve button sits next to their name. Their lanes move volume, pan (balance on the master), any effect value on them or their macros. A master volume lane comes after the limiter, so it's the place for a fade-out.
 - Each lane moves one thing, picked in the menu at its left: **Volume** (a ride in dB on top of the fader), **Pan**, a **send** to a return, any **effect value** on the track (racks included) or one of the track's **macros** (every value mapped to the macro follows; a value's own lane wins).
 - **Click** in a lane to add a point; it snaps to the grid (hold **Alt** for free placement). **Drag a point** to move it, together with any other selected points (hold **Shift** while dragging to move only up and down). **Drag across empty space** to select the points in that range, **Shift+click** a point to add it to the selection, and press **Delete** to remove them. **Double-click** or **right-click** a point to delete it.
 - **Ctrl+drag**, or drag with the **Draw tool** (P), to draw a curve freehand over what was there. Straight stretches are kept as few points.
@@ -468,6 +469,13 @@ Every smart tool is also in the **Assist** menu on the toolbar, grouped by what 
    - **Phase**: microphones that recorded the same sound are lined up (time offset and polarity) when that lowers cancellation. Switch it off with *Line up mics (phase)*. The track menu also has *Align to…*, *Invert polarity* and *Reset alignment*.
    - **Master**: towards −14 LUFS without clipping.
 5. **Apply** writes it all as one undo step. **Hear before / Hear after** switches while the song plays. **Amount** makes it gentler. Everything it changed is an ordinary insert or fader you can adjust.
+
+**Master the song** (the Master mode of Auto Mix) puts a mastering chain on the master: Mastering EQ, Smooth where the mix rings, Multiband, Stereo Imager, Limiter and Loudness Meter. Pick a **Target**:
+
+- **Platforms**: Spotify, YouTube, Tidal (−14 LUFS, peaks under −1 dB), Apple Music (−16, −1), Amazon Music (−14, −2), Deezer (−15, −1), SoundCloud (−11, −1), Podcast (−16, −1, mono-safe), Broadcast EBU R128 (−23, −1), Broadcast ATSC A/85 (−24, −2), CD / download (−9, −0.3), Club / DJ (−8, −0.3) and Vinyl pre-master (−12, −3, mono bass, softer top).
+- **Styles**: Pop (−10), EDM (−8), Hip-hop (−9), Rock / metal (−9), R&B (−11), Acoustic (−14), Jazz (−16), Classical (−18), Lo-fi (−13, darker top) and Ambient (−16, wider).
+
+Each target sets the loudness, the limiter's ceiling, how much limiting it takes, the width and mono low end, how firmly the multiband holds and a small lean in the tone. With **Section moves** on, the choruses open up as automation on the master: a little wider, 1 dB more air and 1 dB more drive into the limiter, ramping in half a second before each chorus and back for the verses. It uses the song's sections from the song map when they're on the ruler (their choruses, or else the sections that are clearly louder), otherwise the mix's loudest stretches of 8 s or more. The lanes show under the master.
 
 **Match a reference…** picks a song you like and matches the master to it: a gentle master EQ towards its tonal balance and a master volume towards its loudness.
 

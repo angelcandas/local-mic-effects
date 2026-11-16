@@ -934,7 +934,8 @@ juce::var DawBridge::describeSession()
                                { "mute", (bool) bus[ids::mute] }, { "solo", (bool) bus[ids::solo] },
                                { "group", daw::Edit::isGroup (bus) }, { "folded", (bool) bus.getProperty (ids::folded, false) },
                                { "sends", describeSends (bus) },
-                               { "inserts", describeInserts (bus) }, { "macros", describeMacros (bus) } }));
+                               { "inserts", describeInserts (bus) }, { "macros", describeMacros (bus) },
+                               { "lanes", describeLanes (bus) } }));
 
     if (lastInputNames.isEmpty())
         lastInputNames = getInputNames();
@@ -1005,7 +1006,8 @@ juce::var DawBridge::describeSession()
         { "view", state[ids::viewState].toString() },
         { "returns", returns },
         { "master", object ({ { "volume", number (master, ids::volume) }, { "pan", number (master, ids::pan) }, { "inGain", number (master, ids::inGain) },
-                              { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) }, { "macros", describeMacros (master) } }) },
+                              { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) }, { "macros", describeMacros (master) },
+                              { "lanes", describeLanes (master) } }) },
         { "tracks", tracks },
         { "patterns", describePatterns() },
         { "patternClips", describePatternClips() },
@@ -1395,7 +1397,7 @@ void DawBridge::pasteLanesWith (const juce::var& args, const juce::ValueTree& cl
 
 void DawBridge::recordMove (int trackId, const juce::String& target, float knob)
 {
-    if (engine.isPlaying() && edit.getTrack (trackId).isValid())
+    if (engine.isPlaying() && edit.getChannel (trackId).isValid())
         automationRecorder.moved (trackId, target, knob, (double) engine.getPosition() / juce::jmax (1.0, engine.getSampleRate()));
 }
 
@@ -2787,6 +2789,11 @@ void DawBridge::replanAutoMix()
 
     options.alignments = autoMixAlignments;
 
+    // The song's sections, for the master's section moves.
+    for (const auto& section : edit.getSongSections())
+        options.sections.push_back ({ (double) section[ids::time], (double) section.getProperty (ids::length, 0.0),
+                                      section[ids::section].toString(), section[ids::name].toString() });
+
     // The shared reverb: the first return with a reverb on it.
     for (const auto& ret : edit.getReturns())
     {
@@ -2865,6 +2872,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("smooth", autoMixOptions.smooth);
     read ("pan", autoMixOptions.pan);
     read ("phase", autoMixOptions.phase);
+    read ("sectionMoves", autoMixOptions.sectionMoves);
     read ("split", autoMixSplit);
 }
 
@@ -2876,6 +2884,25 @@ void DawBridge::readAutoMixMode (const juce::var& args)
         autoMixOptions.focusTrackId = (int) args["focus"];
     if (args.hasProperty ("masterLufs"))
         autoMixOptions.masterLufs = juce::jlimit (-24.0f, -6.0f, (float) args["masterLufs"]);
+    if (args.hasProperty ("sectionMoves"))
+        autoMixOptions.sectionMoves = (bool) args["sectionMoves"];
+    if (args.hasProperty ("masterTemplate"))
+    {
+        const auto key = args["masterTemplate"].toString();
+        autoMixOptions.masterTemplate = analysis::findMasterTemplate (key) != nullptr ? key : juce::String();
+        if (const auto* found = analysis::findMasterTemplate (key))
+            autoMixOptions.masterLufs = found->lufs;
+    }
+}
+
+// The mastering templates for the Auto Mix panel: [{ key, name, group, lufs, ceiling, about }].
+juce::var DawBridge::describeMasterTemplates()
+{
+    juce::Array<juce::var> list;
+    for (const auto& t : analysis::getMasterTemplates())
+        list.add (object ({ { "key", t.key }, { "name", t.name }, { "group", t.group }, { "lufs", t.lufs },
+                            { "ceiling", t.ceiling }, { "about", t.about } }));
+    return list;
 }
 
 // Every track's tag before Auto Mix listens: the one you picked (tagged), or the guess
@@ -2907,7 +2934,7 @@ juce::var DawBridge::describeAutoMixTags() const
     for (auto role : analysis::allRoles)
         roles.add (object ({ { "key", analysis::getRoleKey (role) }, { "name", analysis::getRoleName (role) } }));
 
-    return object ({ { "ok", true }, { "tracks", tracks }, { "roles", roles } });
+    return object ({ { "ok", true }, { "tracks", tracks }, { "roles", roles }, { "masterTemplates", describeMasterTemplates() } });
 }
 
 juce::var DawBridge::describeAutoMix() const
@@ -2976,11 +3003,13 @@ juce::var DawBridge::describeAutoMix() const
                                    { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour }, { "sends", autoMixOptions.sends }, { "throws", autoMixOptions.throws },
                                    { "dynamicEq", autoMixOptions.dynamicEq }, { "transients", autoMixOptions.transients },
                                    { "smooth", autoMixOptions.smooth }, { "pan", autoMixOptions.pan }, { "phase", autoMixOptions.phase },
+                                   { "sectionMoves", autoMixOptions.sectionMoves },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
                      { "style", styleKey (autoMixStyle) }, { "mode", analysis::getModeKey (autoMixOptions.mode) },
-                     { "focus", autoMixOptions.focusTrackId }, { "masterLufs", autoMixOptions.masterLufs }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
+                     { "focus", autoMixOptions.focusTrackId }, { "masterLufs", autoMixOptions.masterLufs },
+                     { "masterTemplate", autoMixOptions.masterTemplate }, { "masterTemplates", describeMasterTemplates() }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
                      { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs } });
 }
 
@@ -4806,7 +4835,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         const auto trackId = arg (args, "track", -1);
         const auto target = arg (args, "target", juce::String());
-        const auto track = edit.getTrack (trackId);
+        const auto track = edit.getChannel (trackId);
         const auto points = daw::Edit::getLane (track, target);
         const auto thinned = daw::Edit::thinPoints (points, daw::Edit::getThinTolerance (track, target, points));
         if (thinned.size() < points.size())
