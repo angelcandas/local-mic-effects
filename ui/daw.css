@@ -886,7 +886,7 @@ body.is-daw .chip--live { display: none; }
 .automix-roles { display: grid; gap: 6px; margin-top: 10px; }
 .automix-roles:empty { display: none; }
 .automix-roles-head { color: var(--muted); font-size: 12px; }
-.automix-role { display: grid; grid-template-columns: 1fr 150px; align-items: center; gap: 8px; }
+.automix-role { display: grid; grid-template-columns: 1fr 136px 92px; align-items: center; gap: 8px; }
 .automix-role span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .automix-role small { color: var(--faint); font-family: var(--mono); font-size: 10.5px; margin-left: 6px; }
 .automix-plan { display: grid; gap: 8px; margin-top: 12px; }
@@ -2783,3 +2783,18 @@ body.is-daw .library-hint { display: none; }
 .live-macros.is-open .live-macros-toggle::before { content: "\25BE  "; }
 /* A Live control a macro drives follows the macro, not the mouse (Map mode still clicks it). */
 .chain-grid:not(.is-macro-mapping) [data-param].is-macro-mapped { pointer-events: none; }
+
+/* Auto Mix review list: tick boxes per move, the five sliders, Front / Normal / Back. */
+.automix-track-head { margin: 8px 0 2px; font-weight: 650; color: var(--text); }
+.automix-move { transition: opacity 0.12s; }
+.automix-move.is-off { opacity: 0.45; }
+.automix-move header { align-items: center; }
+.automix-move .automix-tick { display: inline-flex; align-items: center; gap: 8px; min-width: 0; cursor: pointer; font-weight: 650; }
+.automix-move .automix-tick input { accent-color: var(--accent); }
+.automix-move .automix-taste { margin-left: 6px; padding: 0 6px; border-radius: 8px; border: 1px solid var(--line); color: var(--muted); font-size: 10.5px; font-weight: 500; }
+.automix-list-head { display: flex; justify-content: space-between; align-items: center; margin: 6px 0 2px; color: var(--muted); font-size: 12px; }
+.automix-sliders { display: grid; gap: 6px; margin: 8px 0 4px; }
+.automix-sliders[hidden] { display: none; }
+.automix-sliders label { display: grid; grid-template-columns: 82px 1fr 40px; align-items: center; gap: 8px; color: var(--muted); }
+.automix-sliders input { accent-color: var(--accent); }
+.automix-sliders span { text-align: right; font-family: var(--mono); color: var(--text); }

@@ -295,6 +295,25 @@ private:
     bool autoMixReference = false; // the plan matches a reference song
     std::vector<analysis::TrackPairAlignment> autoMixAlignments; // measured with the last analysis
     std::map<int, float> autoMixPans;  // pans the last applied plan set (not yours: planned again)
+
+    // The review list: which moves are ticked (only the ones changed from their default:
+    // taste moves start off, the rest on), the five sliders, the Amount, and whether the plan
+    // is written into the session now. Saved with the project (ids::autoMixAudition).
+    std::map<juce::String, bool> autoMixTicks;
+    std::array<float, analysis::numMixGroups> autoMixGroups { 1.0f, 1.0f, 1.0f, 1.0f, 1.0f, 1.0f };
+    float autoMixAmount = 1.0f;
+    bool autoMixApplied = false;
+    std::map<int, float> autoMixBaseVolumes;    // track volumes before the plan was written
+    std::map<int, float> autoMixAppliedVolumes; // and after: a volume still at that is Auto Mix's, not yours
+    juce::String autoMixSaved;                  // the saved state last written or read
+    float getAutoMixBaseVolume (int trackId, float current) const;
+    analysis::ApplyOptions getAutoMixApplyOptions() const;
+    bool isAutoMixTicked (const analysis::MixMove&) const;
+    void saveAutoMixState();
+    void restoreAutoMixState();
+    void readAutoMixAudition (const juce::var& args); // ticks, groups, amount
+    juce::var applyAutoMix (bool replace);
+    bool autoMixDirty = false; // the plan changed since it was written
     std::map<juce::String, bool> stereoFiles; // audio files by path: a real stereo image (hasStereoImage)
     bool hasStereoImage (const juce::ValueTree& track);
     bool autoMixSplit = false;
