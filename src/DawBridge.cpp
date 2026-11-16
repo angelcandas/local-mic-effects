@@ -444,6 +444,12 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
         actions->onEvent (event, payload);
         inner (event, payload);
     };
+    if (isAvailable() && settings.getBoolValue ("dawMcpOn", false))
+    {
+        if (settings.getValue ("mcpToken").isEmpty())
+            settings.setValue ("mcpToken", McpServer::makeToken());
+        startMcpServer();
+    }
 
     // Pick up where the app left off: the mode, and the last project if none is open.
     if (isAvailable())
@@ -473,6 +479,8 @@ DawBridge::DawBridge (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::
 DawBridge::~DawBridge()
 {
     *alive = false;
+    mcpServer.reset(); // first: its connections may be waiting for the message thread
+    McpServer::removeDiscoveryFile();
     edit.getState().removeListener (this);
     processor.getPluginHost().onScanFinished = nullptr;
     instrumentWindows.clear();
@@ -4576,6 +4584,105 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
     return error ("Unknown Auto Mix action: " + action);
 }
 
+// The local MCP server (src/McpServer.h), for AI programs that drive the app through the actions.
+bool DawBridge::startMcpServer()
+{
+    mcp::Backend backend;
+    backend.serverName = "micfx";
+    backend.serverVersion = "1";
+    backend.instructions = "MicFX is a voice-first recording and mixing app. Call session.summary first to see the project, then use the "
+                           "actions. Tracks can be named by number, name, role (voice, instrumental, guitar...) or \"selected\". "
+                           "Every change is one undo step (history.undo).";
+    backend.listActions = [this]
+    {
+        // The catalogue never changes after start-up, so it is safe to read from a connection thread.
+        return actions->list();
+    };
+    backend.runAction = [this, aliveFlag = alive] (const juce::String& name, const juce::var& args)
+    {
+        struct Call { juce::WaitableEvent done; juce::var result; };
+        auto call = std::make_shared<Call>();
+        juce::MessageManager::callAsync ([this, aliveFlag, call, name, args]
+        {
+            if (! *aliveFlag) { call->result = juce::var(); call->done.signal(); return; }
+            actions->run (name, args, [call] (juce::var r) { call->result = std::move (r); call->done.signal(); });
+        });
+
+        // Long actions (Auto Mix listening) can take minutes; give up when the app is closing.
+        for (int waited = 0; waited < 30 * 60 * 10; ++waited)
+        {
+            if (call->done.wait (100))
+                return call->result.isVoid() ? object ({ { "ok", false }, { "error", "MicFX is closing." } }) : call->result;
+            if (! *aliveFlag)
+                break;
+        }
+        return object ({ { "ok", false }, { "error", "The action didn't finish in time. It may still be running in MicFX." } });
+    };
+
+    auto server = std::make_unique<McpServer> (std::move (backend));
+    if (! server->start (settings.getIntValue ("mcpPort", 0), settings.getValue ("mcpToken")))
+        if (! server->start (0, settings.getValue ("mcpToken")))
+            return false;
+
+    settings.setValue ("mcpPort", server->getPort());
+    if (! McpServer::writeDiscoveryFile (server->getPort(), settings.getValue ("mcpToken")))
+        return false;
+    mcpServer = std::move (server);
+    return true;
+}
+
+// { action: "state" } | { action: "set", on } | { action: "copy" } | { action: "newToken" }
+juce::var DawBridge::handleAiControl (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+    auto problem = juce::String();
+
+    if (settings.getValue ("mcpToken").isEmpty())
+        settings.setValue ("mcpToken", McpServer::makeToken());
+
+    if (action == "set")
+    {
+        const auto on = (bool) args["on"];
+        settings.setValue ("dawMcpOn", on);
+        if (! on)
+        {
+            mcpServer.reset();
+            McpServer::removeDiscoveryFile();
+        }
+        else if (mcpServer == nullptr && ! startMcpServer())
+            problem = "Couldn't start the local server (no free port, or the folder for its key file isn't writable).";
+        settings.saveIfNeeded();
+    }
+    else if (action == "newToken")
+    {
+        // A new key: AI programs that held the old one are refused until they read the file again.
+        settings.setValue ("mcpToken", McpServer::makeToken());
+        if (mcpServer != nullptr)
+        {
+            mcpServer.reset();
+            if (! startMcpServer())
+                problem = "Couldn't restart the local server.";
+        }
+        settings.saveIfNeeded();
+    }
+
+    const auto helper = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getSiblingFile ("micfx-mcp");
+    auto* config = new juce::DynamicObject();
+    auto* server = new juce::DynamicObject();
+    server->setProperty ("command", helper.getFullPathName());
+    auto* servers = new juce::DynamicObject();
+    servers->setProperty ("micfx", juce::var (server));
+    config->setProperty ("mcpServers", juce::var (servers));
+    const auto configText = juce::JSON::toString (juce::var (config), false);
+
+    if (action == "copy")
+        juce::SystemClipboard::copyTextToClipboard (configText);
+
+    return object ({ { "ok", problem.isEmpty() }, { "error", problem }, { "on", mcpServer != nullptr },
+                     { "port", mcpServer != nullptr ? mcpServer->getPort() : 0 },
+                     { "helperFound", helper.existsAsFile() }, { "command", helper.getFullPathName() }, { "config", configText } });
+}
+
 void DawBridge::handle (const juce::String& command, const juce::var& args, Complete complete)
 {
     // Failures show in the page as a toast; log them too, so they're in the terminal.
@@ -4599,6 +4706,8 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         complete (object ({ { "ok", true } }));
         return;
     }
+
+    if (command == "aiControl") { complete (handleAiControl (args)); return; }
 
     // The action layer: its actions make their own undo step.
     if (command == "actions.list") { complete (actions->list()); return; }

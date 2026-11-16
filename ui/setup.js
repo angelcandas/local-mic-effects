@@ -219,6 +219,29 @@ function createSettings(getState, show, firstRun) {
   });
   row(look, "UI size", scale);
 
+  // AI control: lets an AI program (Claude Desktop, Claude Code...) drive MicFX through the local MCP
+  // server. Off until you turn it on; only programs on this computer that hold the key can reach it.
+  const ai = section("AI control");
+  const aiBox = Object.assign(html("input"), { type: "checkbox" });
+  const aiLabel = html("label", "setup-check");
+  aiLabel.append(aiBox, html("span", "", "Let AI programs on this computer control MicFX"));
+  row(ai, "AI control", aiLabel);
+  const aiStatus = html("span", "setup-value");
+  const aiCopy = action("Copy setup", "Copies the snippet to paste into your AI program's MCP settings", () => aiCall({ action: "copy" }));
+  const aiKey = action("New key", "Makes a new key: AI programs that were connected must be restarted", () => aiCall({ action: "newToken" }));
+  row(ai, "Connection", aiStatus, aiCopy, aiKey);
+  ai.append(html("p", "setup-note", "Turn it on, press Copy setup, and paste the snippet into your AI program's MCP servers. It can then do what you can do here: add tracks and effects, change levels, run Auto Mix. Every change is one undo step. Nothing leaves your computer."));
+  const nativeDaw = Juce.getNativeFunction("daw");
+  const aiShow = (state) => {
+    if (!state || typeof state !== "object") return;
+    aiBox.checked = Boolean(state.on);
+    aiStatus.textContent = state.on ? `On, port ${state.port}${state.helperFound ? "" : " · helper not found next to the app"}` : "Off";
+    aiCopy.disabled = aiKey.disabled = !state.on;
+    if (state.error) aiStatus.textContent = state.error;
+  };
+  const aiCall = (args) => nativeDaw("aiControl", args).then(aiShow).catch(() => {});
+  aiBox.addEventListener("change", () => aiCall({ action: "set", on: aiBox.checked }));
+
   const help = section("Help");
   row(help, "First steps", action("Show the welcome card", "Audio, Mic check and Sound check, step by step", () => { api.toggle(false); firstRun.open(); }));
   row(help, "Manual", action("User manual", `Opens the manual (${keyText("F1")})`, () => Juce.getNativeFunction("help")("manual")));
@@ -231,6 +254,7 @@ function createSettings(getState, show, firstRun) {
       deviceText.textContent = state?.device ? describeAudio(state) : "No audio device";
       folderText.textContent = document.querySelector(".record-path")?.textContent || "—";
       dryBox.checked = document.querySelector(".record-dry")?.getAttribute("aria-pressed") === "true";
+      aiCall({ action: "state" });
       uiPref("uiScale").then((value) => { scale.value = String(Number(value) || 100); }).catch(() => {});
     },
   };

@@ -7692,6 +7692,128 @@ namespace
         data.deleteRecursively();
     }
 
+    // The local MCP server: the protocol (both eras), the tool shapes, and the HTTP door.
+    void testMcp()
+    {
+        std::cout << "\nMCP server (AI control)\n";
+
+        const auto obj = [] (std::initializer_list<std::pair<const char*, juce::var>> properties)
+        {
+            auto* o = new juce::DynamicObject();
+            for (const auto& [name, value] : properties) o->setProperty (name, value);
+            return juce::var (o);
+        };
+        const auto param = [&] (const char* name, const char* type, bool required)
+        {
+            return obj ({ { "name", name }, { "type", type }, { "description", "d" }, { "required", required }, { "min", -1.0 }, { "max", 1.0 } });
+        };
+
+        mcp::Backend backend;
+        backend.listActions = [&]
+        {
+            return obj ({ { "ok", true }, { "actions", juce::Array<juce::var> {
+                obj ({ { "name", "track.pan" }, { "description", "Pan" }, { "readOnly", false },
+                       { "params", juce::Array<juce::var> { param ("tracks", "tracks", true), param ("pan", "number", true) } } }),
+                obj ({ { "name", "session.summary" }, { "description", "Look" }, { "readOnly", true }, { "params", juce::Array<juce::var>() } }) } } });
+        };
+        backend.runAction = [&] (const juce::String& name, const juce::var& args)
+        {
+            if (name == "track.pan" && (double) args["pan"] > 0.5)
+                return obj ({ { "ok", false }, { "error", "Too wide." } });
+            return obj ({ { "ok", true }, { "summary", "Done " + name }, { "tracks", 2 } });
+        };
+
+        const auto request = [&] (const char* method, juce::var params = {}, bool withId = true)
+        {
+            auto r = obj ({ { "jsonrpc", "2.0" }, { "method", method } });
+            if (withId) r.getDynamicObject()->setProperty ("id", 7);
+            if (! params.isVoid()) r.getDynamicObject()->setProperty ("params", params);
+            return r;
+        };
+
+        const auto discover = mcp::handle (request ("server/discover"), backend);
+        check (discover["result"]["supportedVersions"].size() >= 2 && discover["result"]["supportedVersions"][0].toString() == mcp::latestVersion
+                   && discover["result"]["resultType"].toString() == "complete" && (int) discover["id"] == 7,
+               "MCP: server/discover names the versions it speaks");
+
+        const auto legacy = mcp::handle (request ("initialize", obj ({ { "protocolVersion", "2025-06-18" } })), backend);
+        check (legacy["result"]["protocolVersion"].toString() == "2025-06-18" && legacy["result"]["serverInfo"]["name"].toString() == "micfx"
+                   && legacy["result"]["capabilities"].hasProperty ("tools"),
+               "MCP: the older initialize handshake still works");
+        check (mcp::handle (request ("notifications/initialized", {}, false), backend).isVoid(), "MCP: a notification gets no answer");
+
+        const auto old = mcp::handle (request ("tools/list", obj ({ { "_meta", obj ({ { "io.modelcontextprotocol/protocolVersion", "2024-01-01" } }) } })), backend);
+        check ((int) old["error"]["code"] == -32022, "MCP: an unknown protocol version is refused with its list");
+
+        const auto list = mcp::handle (request ("tools/list"), backend);
+        const auto& tool = list["result"]["tools"][0];
+        check (list["result"]["tools"].size() == 2 && tool["name"].toString() == "track.pan"
+                   && tool["inputSchema"]["required"].size() == 2 && tool["inputSchema"]["properties"]["pan"]["maximum"].isDouble()
+                   && tool["inputSchema"]["properties"]["tracks"]["oneOf"].size() == 3
+                   && (bool) list["result"]["tools"][1]["annotations"]["readOnlyHint"] && ! (bool) tool["annotations"]["readOnlyHint"],
+               "MCP: tools/list gives typed input schemas and read-only hints");
+
+        const auto fine = mcp::handle (request ("tools/call", obj ({ { "name", "track.pan" }, { "arguments", obj ({ { "tracks", 1 }, { "pan", 0.2 } }) } })), backend);
+        check (! (bool) fine["result"]["isError"] && fine["result"]["content"][0]["text"].toString().startsWith ("Done track.pan"), "MCP: tools/call runs the action");
+        const auto bad = mcp::handle (request ("tools/call", obj ({ { "name", "track.pan" }, { "arguments", obj ({ { "tracks", 1 }, { "pan", 0.9 } }) } })), backend);
+        check ((bool) bad["result"]["isError"] && bad["result"]["content"][0]["text"].toString() == "Too wide.", "MCP: a failed action is a tool error with its reason");
+        check ((int) mcp::handle (request ("tools/call", obj ({ { "name", "nope" } })), backend)["error"]["code"] == -32602, "MCP: an unknown tool is an invalid-params error");
+        check ((int) mcp::handle (request ("resources/list"), backend)["error"]["code"] == -32601, "MCP: unknown methods are method-not-found");
+
+        backend.hidden = [] (const juce::String& n) { return n == "track.pan"; };
+        check (mcp::handle (request ("tools/list"), backend)["result"]["tools"].size() == 1
+                   && (int) mcp::handle (request ("tools/call", obj ({ { "name", "track.pan" } })), backend)["error"]["code"] == -32602,
+               "MCP: hidden actions are neither listed nor callable");
+        backend.hidden = nullptr;
+
+        // The HTTP door, over a real loopback connection.
+        McpServer server (backend);
+        const auto token = McpServer::makeToken();
+        check (token.length() >= 24, "MCP: a token is long and random");
+        if (! server.start (0, token))
+        {
+            check (false, "MCP: the server listens on a free local port");
+            return;
+        }
+
+        const auto post = [&] (const juce::String& extraHeaders, const juce::String& body, const juce::String& verb = "POST")
+        {
+            juce::StreamingSocket socket;
+            if (! socket.connect ("127.0.0.1", server.getPort(), 3000))
+                return std::make_pair (0, juce::String());
+            const auto text = verb + " /mcp HTTP/1.1\r\nHost: 127.0.0.1:" + juce::String (server.getPort()) + "\r\n" + extraHeaders
+                            + "Content-Length: " + juce::String ((int) body.getNumBytesAsUTF8()) + "\r\nConnection: close\r\n\r\n" + body;
+            socket.write (text.toRawUTF8(), (int) text.getNumBytesAsUTF8());
+            std::string data;
+            char chunk[4096];
+            while (socket.waitUntilReady (true, 3000) == 1)
+            {
+                const auto n = socket.read (chunk, sizeof (chunk), false);
+                if (n <= 0) break;
+                data.append (chunk, (size_t) n);
+            }
+            const auto end = data.find ("\r\n\r\n");
+            if (end == std::string::npos) return std::make_pair (-1, juce::String());
+            return std::make_pair (juce::String::fromUTF8 (data.data(), (int) end).fromFirstOccurrenceOf (" ", false, false).getIntValue(),
+                                   juce::String::fromUTF8 (data.data() + end + 4));
+        };
+        const auto auth = "Authorization: Bearer " + token + "\r\n";
+        const auto listBody = juce::JSON::toString (request ("tools/list"), true);
+
+        const auto okReply = post (auth, listBody);
+        check (okReply.first == 200 && juce::JSON::parse (okReply.second)["result"]["tools"].size() == 2, "MCP server: a POST with the token gets the tools");
+        check (post ("", listBody).first == 401, "MCP server: no token, no entry");
+        check (post ("Authorization: Bearer wrong\r\n", listBody).first == 401, "MCP server: a wrong token is refused");
+        check (post (auth + "Origin: https://evil.example\r\n", listBody).first == 403, "MCP server: a web page's Origin is refused");
+        check (post (auth + "Origin: http://localhost:3000\r\n", listBody).first == 200, "MCP server: a page on this machine's own Origin passes (token still needed)");
+        check (post (auth, juce::JSON::toString (request ("notifications/initialized", {}, false), true)).first == 202, "MCP server: a notification gets 202");
+        check (post (auth, listBody, "GET").first == 405, "MCP server: GET is not allowed");
+        check (post (auth, "not json").first == 400, "MCP server: text that isn't JSON is a 400");
+        const auto host = server.getPort();
+        server.stop();
+        check (! server.isRunning() && host > 0, "MCP server: stops");
+    }
+
     void testDawBridge()
     {
         std::cout << "\nDAW screen commands (DawBridge)\n";
@@ -17980,6 +18102,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "bridge")
     {
         testDawBridge();
+        testMcp();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -18169,6 +18292,7 @@ int main()
     testBackingVocals();
     testTrackTools();
     testDawBridge();
+    testMcp();
     testPatterns();
     testLoops();
     testLiveControls();
