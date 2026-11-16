@@ -382,6 +382,21 @@ void DawActions::onEvent (const juce::Identifier& event, const juce::var& payloa
         }
         finish (done (autoMixApply ? "Auto Mix listened and applied its plan." : "Auto Mix listened; the plan is ready (not applied).", { { "plan", payload } }));
     }
+    else if (event.toString() == "dawToMidi" && waitingToMidi)
+    {
+        if (state == "analysing")
+            return;
+
+        auto finish = std::move (waitingToMidi);
+        waitingToMidi = nullptr;
+        if (state != "done")
+        {
+            finish (fail (state == "cancelled" ? juce::String ("The conversion was cancelled.") : orElse (payload["error"].toString(), "The conversion failed.")));
+            return;
+        }
+        finish (done ("Converted to " + juce::String ((int) payload["count"]) + " MIDI notes on " + trackLabel ((int) payload["track"]) + ".",
+                      { { "track", payload["track"] }, { "count", payload["count"] } }));
+    }
     else if (event.toString() == "dawMixCheck" && waitingMixCheck)
     {
         if (state == "analysing" || state == "fixed")
@@ -396,6 +411,216 @@ void DawActions::onEvent (const juce::Identifier& event, const juce::var& payloa
         }
         finish (done ("Mix Check finished.", { { "report", payload } }));
     }
+}
+
+
+//==============================================================================
+// Composition helpers (B3)
+namespace
+{
+    // "C4" is 60 (middle C), "F#3", "Bb2"; or a number 0-127.
+    std::optional<int> parsePitch (const juce::var& v)
+    {
+        if (v.isInt() || v.isInt64() || v.isDouble())
+        {
+            const auto n = (int) std::lround ((double) v);
+            return n >= 0 && n <= 127 ? std::optional<int> (n) : std::nullopt;
+        }
+        const auto text = v.toString().trim();
+        if (text.isEmpty()) return std::nullopt;
+        if (text.containsOnly ("0123456789"))
+        {
+            const auto n = text.getIntValue();
+            return n <= 127 ? std::optional<int> (n) : std::nullopt;
+        }
+
+        static const int base[] { 9, 11, 0, 2, 4, 5, 7 }; // A B C D E F G
+        const auto letter = juce::CharacterFunctions::toUpperCase (text[0]);
+        if (letter < 'A' || letter > 'G') return std::nullopt;
+        auto pitchClass = base[letter - 'A'];
+        auto i = 1;
+        while (i < text.length() && (text[i] == '#' || text[i] == 'b'))
+            pitchClass += text[i++] == '#' ? 1 : -1;
+        const auto octave = text.substring (i);
+        if (octave.isEmpty() || ! octave.containsOnly ("0123456789-")) return std::nullopt;
+        const auto n = (octave.getIntValue() + 1) * 12 + pitchClass;
+        return n >= 0 && n <= 127 ? std::optional<int> (n) : std::nullopt;
+    }
+
+    juce::String pitchName (int pitch)
+    {
+        return juce::String (noteNames[((pitch % 12) + 12) % 12]) + juce::String (pitch / 12 - 1);
+    }
+
+    struct AbsNote { juce::ValueTree note; int trackId; double start, end; int pitch; };
+
+    // Every note of a MIDI track that starts in [from, to), with its absolute time in seconds.
+    std::vector<AbsNote> notesIn (const juce::ValueTree& track, double from, double to)
+    {
+        std::vector<AbsNote> out;
+        for (const auto& clip : track)
+        {
+            if (! clip.hasType (ids::CLIP) || ! daw::Edit::isMidiClip (clip)) continue;
+            const auto clipStart = number (clip, ids::start), offset = number (clip, ids::offset), clipLength = number (clip, ids::length);
+            for (const auto& note : clip)
+            {
+                if (! note.hasType (ids::NOTE)) continue;
+                const auto time = number (note, ids::time);
+                if (time < offset || time >= offset + clipLength) continue;
+                const auto start = clipStart + time - offset;
+                if (start < from || start >= to) continue;
+                out.push_back ({ note, (int) track[ids::id], start, start + number (note, ids::length), (int) number (note, ids::pitch) });
+            }
+        }
+        std::sort (out.begin(), out.end(), [] (const AbsNote& a, const AbsNote& b) { return a.start < b.start || (a.start == b.start && a.pitch < b.pitch); });
+        return out;
+    }
+}
+
+std::optional<std::pair<double, double>> DawActions::resolveSpan (const juce::var& args, juce::String& problem) const
+{
+    auto& edit = processor.getDawEdit();
+    auto& engine = processor.getDawEngine();
+    const auto songEnd = (double) engine.getLength() / engine.getSampleRate();
+    const auto tempo = edit.getTempoMap();
+
+    if (! args.hasProperty ("from"))
+        return std::make_pair (0.0, juce::jmax (songEnd, 1.0e-3));
+
+    double from = 0.0, to = songEnd;
+    if (args.hasProperty ("to"))
+    {
+        const auto a = resolveTime (args["from"], problem);
+        if (! a) return std::nullopt;
+        const auto b = resolveTime (args["to"], problem);
+        if (! b) return std::nullopt;
+        from = *a; to = *b;
+    }
+    else if (args.hasProperty ("bars"))
+    {
+        const auto a = resolveTime (args["from"], problem);
+        if (! a) return std::nullopt;
+        from = *a;
+        to = tempo.toSeconds (tempo.toBeats (from) + (double) args["bars"] * edit.getBeatsPerBar());
+    }
+    else
+    {
+        juce::String rangeProblem;
+        if (const auto range = resolveRange (args["from"], rangeProblem)) { from = range->first; to = range->second; }
+        else if (const auto a = resolveTime (args["from"], problem)) { from = *a; problem = {}; to = songEnd > from ? songEnd : from + 60.0; }
+        else return std::nullopt;
+    }
+
+    if (to <= from) { problem = "The range must end after it starts."; return std::nullopt; }
+    return std::make_pair (from, to);
+}
+
+std::vector<int> DawActions::resolveMidiTracks (const juce::var& spec, juce::String& problem) const
+{
+    auto found = resolveTracks (spec, problem);
+    std::vector<int> midi;
+    for (const auto id : found)
+        if (daw::Edit::isMidiTrack (processor.getDawEdit().getTrack (id)))
+            midi.push_back (id);
+    if (problem.isEmpty() && midi.empty())
+        problem = "That isn't a MIDI track. Notes live on MIDI tracks (track.add with kind midi).";
+    return midi;
+}
+
+juce::var DawActions::chooseInstrument (const juce::String& wantedText, juce::String& note, juce::String& problem) const
+{
+    const auto listing = bridge.describeInstruments();
+    const auto* list = listing["instruments"].getArray();
+    const auto wanted = lower (wantedText);
+    juce::StringArray names;
+    if (list != nullptr)
+        for (const auto& i : *list) names.add (i["name"].toString());
+
+    const auto find = [&] (const juce::String& what) -> juce::var
+    {
+        if (list == nullptr) return {};
+        for (const auto& i : *list) if (lower (i["id"].toString()) == what || lower (i["name"].toString()) == what) return i["id"];
+        for (const auto& i : *list) if (what.isNotEmpty() && lower (i["name"].toString()).contains (what)) return i["id"];
+        return {};
+    };
+
+    if (wanted.isEmpty()) return {}; // the default
+    if (const auto id = find (wanted); ! id.isVoid()) return id;
+
+    // A word for a sound the built-in set has no instrument for: the closest one, and say so.
+    static const std::pair<const char*, const char*> closest[] {
+        { "trumpet", "nova" }, { "brass", "nova" }, { "horn", "nova" }, { "trombone", "nova" }, { "sax", "nova" }, { "flute", "nova" },
+        { "clarinet", "nova" }, { "oboe", "nova" }, { "violin", "nova" }, { "cello", "nova" }, { "strings", "nova" }, { "lead", "nova" },
+        { "synth", "nova" }, { "pad", "nova" }, { "melody", "nova" }, { "bass", "nova" },
+        { "piano", "grand" }, { "keys", "grand" }, { "epiano", "tines" }, { "rhodes", "tines" }, { "organ", "drawbar" },
+        { "guitar", "pluck" }, { "harp", "pluck" }, { "banjo", "pluck" }, { "vibraphone", "mallets" }, { "marimba", "mallets" },
+        { "xylophone", "mallets" }, { "bell", "mallets" }, { "drums", "beat" }, { "kit", "kit" }, { "percussion", "kit" } };
+    for (const auto& [word, instrument] : closest)
+        if (wanted.contains (word))
+            if (const auto id = find (instrument); ! id.isVoid())
+            {
+                note = "There is no " + wantedText + " instrument; used " + juce::String (instrument).substring (0, 1).toUpperCase() + juce::String (instrument).substring (1)
+                     + " (the closest built-in sound). A hosted plug-in can be set later with track.add and its id.";
+                return id;
+            }
+
+    problem = "No instrument matches \"" + wantedText + "\". Available: " + names.joinIntoString (", ") + ".";
+    return {};
+}
+
+juce::var DawActions::chordsFromNotes (double from, double to) const
+{
+    auto& edit = processor.getDawEdit();
+    const auto tempo = edit.getTempoMap();
+    const auto beatsPerBar = (double) edit.getBeatsPerBar();
+    static const struct { const char* suffix; std::vector<int> tones; } shapes[] {
+        { "", { 0, 4, 7 } }, { "m", { 0, 3, 7 } }, { "7", { 0, 4, 7, 10 } }, { "maj7", { 0, 4, 7, 11 } },
+        { "m7", { 0, 3, 7, 10 } }, { "dim", { 0, 3, 6 } }, { "sus4", { 0, 5, 7 } }, { "5", { 0, 7 } } };
+
+    // Every melodic MIDI note (drum tracks don't have chords).
+    std::vector<AbsNote> all;
+    for (const auto& track : edit.getTracks())
+    {
+        if (! daw::Edit::isMidiTrack (track)) continue;
+        if (track.hasProperty (ids::mixRole) && analysis::getRoleFromKey (track[ids::mixRole].toString()) == analysis::Role::drums) continue;
+        for (auto& n : notesIn (track, from - 60.0, to)) all.push_back (n);
+    }
+
+    juce::Array<juce::var> bars;
+    const auto firstBar = (int) std::floor (tempo.toBeats (from) / beatsPerBar + 1.0e-9);
+    for (int bar = firstBar; tempo.toSeconds (bar * beatsPerBar) < to; ++bar)
+    {
+        const auto barStart = tempo.toSeconds (bar * beatsPerBar), barEnd = tempo.toSeconds ((bar + 1) * beatsPerBar);
+        double weight[12] {};
+        auto lowest = 128;
+        double total = 0.0;
+        for (const auto& n : all)
+        {
+            const auto overlap = juce::jmin (n.end, barEnd) - juce::jmax (n.start, barStart);
+            if (overlap <= 0.0) continue;
+            weight[n.pitch % 12] += overlap;
+            total += overlap;
+            lowest = juce::jmin (lowest, n.pitch);
+        }
+
+        juce::String name;
+        if (total > 0.0)
+        {
+            auto bestScore = -1.0e9;
+            for (int root = 0; root < 12; ++root)
+                for (const auto& shape : shapes)
+                {
+                    double inside = 0.0;
+                    for (const auto t : shape.tones) inside += weight[(root + t) % 12];
+                    auto missing = 0;
+                    for (const auto t : shape.tones) if (weight[(root + t) % 12] <= 0.0) ++missing;
+                    const auto score = inside - 0.6 * (total - inside) - 0.4 * total * missing + (lowest < 128 && lowest % 12 == root ? 0.25 * total : 0.0) - 0.02 * total * (double) shape.tones.size();
+                    if (score > bestScore) { bestScore = score; name = juce::String (noteNames[root]) + shape.suffix; }
+                }
+        }
+        bars.add (obj ({ { "bar", bar + 1 }, { "start", barStart }, { "chord", name } }));
+    }
+    return bars;
 }
 
 //==============================================================================
@@ -847,6 +1072,316 @@ void DawActions::build()
         {
             const auto result = call ("mixCheck", obj ({ { "action", "fix" }, { "index", (int) args["index"] } }));
             complete ((bool) result["ok"] ? done ("Applied fix " + juce::String ((int) args["index"]) + ".") : result);
+        });
+
+    //============================================================================ composition (B3)
+    add ("instruments.list", "The instruments a MIDI track can use (the built-in ones and any hosted plug-ins).", "", {},
+        [this] (const juce::var&, Complete complete)
+        {
+            auto listing = bridge.describeInstruments();
+            complete (obj ({ { "ok", true }, { "instruments", listing["instruments"] }, { "scanning", listing["scanning"] },
+                             { "note", "The built-in set has no brass or woodwinds: midi.write maps a word like \"trumpet\" to the closest sound and says so." } }));
+        });
+
+    add ("context.get", "What a new part has to fit: key, tempo, time signature, the bars and sections in a range, chords per bar (from the MIDI notes), and what each track plays there. Call this before writing a part.", "",
+        { P ("from", "time", "Start: seconds, \"bar 9\", or a section name (then the whole section)"), P ("to", "time", "End"),
+          withRange (P ("bars", "number", "Instead of `to`: how many bars from `from`"), 0.25, 1000) },
+        [this, &edit, &engine] (const juce::var& args, Complete complete)
+        {
+            juce::String problem;
+            const auto span = resolveSpan (args, problem);
+            if (! span) { complete (fail (problem)); return; }
+            const auto tempo = edit.getTempoMap();
+            const auto bpb = (double) edit.getBeatsPerBar();
+            const auto barOf = [&] (double seconds) { return tempo.toBeats (seconds) / bpb + 1.0; };
+
+            juce::Array<juce::var> sections, tracks;
+            for (const auto& s : edit.getSongSections())
+            {
+                const auto start = number (s, ids::time), end = start + number (s, ids::length);
+                if (end > span->first && start < span->second)
+                    sections.add (obj ({ { "name", s[ids::name].toString() }, { "start", start }, { "end", end }, { "fromBar", barOf (start) }, { "toBar", barOf (end) } }));
+            }
+
+            const auto list = edit.getTracks();
+            for (int i = 0; i < list.size(); ++i)
+            {
+                const auto& t = list[i];
+                auto entry = obj ({ { "id", (int) t[ids::id] }, { "number", i + 1 }, { "name", t[ids::name].toString() },
+                                    { "kind", daw::Edit::isMidiTrack (t) ? "midi" : "audio" }, { "role", t[ids::mixRole].toString() },
+                                    { "mute", (bool) t.getProperty (ids::mute, false) } });
+                auto* o = entry.getDynamicObject();
+                if (daw::Edit::isMidiTrack (t))
+                {
+                    const auto notes = notesIn (t, span->first, span->second);
+                    o->setProperty ("instrument", t.getChildWithName (ids::INSTRUMENT)[ids::name].toString());
+                    o->setProperty ("noteCount", (int) notes.size());
+                    if (! notes.empty())
+                    {
+                        auto low = 127, high = 0;
+                        for (const auto& n : notes) { low = juce::jmin (low, n.pitch); high = juce::jmax (high, n.pitch); }
+                        o->setProperty ("lowest", pitchName (low));
+                        o->setProperty ("highest", pitchName (high));
+                    }
+                }
+                else
+                {
+                    auto playing = false;
+                    for (const auto& clip : t)
+                        if (clip.hasType (ids::CLIP) && number (clip, ids::start) < span->second && number (clip, ids::start) + number (clip, ids::length) > span->first)
+                            playing = true;
+                    o->setProperty ("playsHere", playing);
+                }
+                tracks.add (entry);
+            }
+
+            juce::var key;
+            if (edit.getKey() >= 0)
+                key = juce::String (noteNames[edit.getKey() % 12]) + (edit.isKeyMinor() ? " minor" : " major");
+            complete (obj ({ { "ok", true }, { "summary", "Range " + juce::String (span->first, 2) + " to " + juce::String (span->second, 2) + " s, bars "
+                                                           + juce::String (barOf (span->first), 2) + " to " + juce::String (barOf (span->second), 2) + "." },
+                             { "key", key }, { "tempo", edit.getTempo() }, { "beatsPerBar", edit.getBeatsPerBar() },
+                             { "fromSeconds", span->first }, { "toSeconds", span->second }, { "fromBar", barOf (span->first) }, { "toBar", barOf (span->second) },
+                             { "sections", sections }, { "chords", chordsFromNotes (span->first, span->second) },
+                             { "chordsNote", "Chords are read from the MIDI tracks' notes only; audio tracks aren't analysed here (see audio.toMidi)." },
+                             { "tracks", tracks }, { "songLengthSeconds", (double) engine.getLength() / engine.getSampleRate() } }));
+        });
+
+    add ("midi.get", "The notes of MIDI tracks in a range, in beats from the range's start, with note names.", "",
+        { P ("tracks", "tracks", "MIDI tracks (default: all of them)"), P ("from", "time", "Start"), P ("to", "time", "End"),
+          withRange (P ("bars", "number", "Instead of `to`: how many bars"), 0.25, 1000) },
+        [this, &edit] (const juce::var& args, Complete complete)
+        {
+            juce::String problem;
+            const auto span = resolveSpan (args, problem);
+            if (! span) { complete (fail (problem)); return; }
+
+            std::vector<int> found;
+            if (args.hasProperty ("tracks")) found = resolveMidiTracks (args["tracks"], problem);
+            else for (const auto& t : edit.getTracks()) if (daw::Edit::isMidiTrack (t)) found.push_back ((int) t[ids::id]);
+            if (! problem.isEmpty()) { complete (fail (problem)); return; }
+
+            const auto tempo = edit.getTempoMap();
+            const auto fromBeat = tempo.toBeats (span->first);
+            juce::Array<juce::var> out;
+            auto total = 0;
+            for (const auto id : found)
+            {
+                juce::Array<juce::var> notes;
+                const auto all = notesIn (edit.getTrack (id), span->first, span->second);
+                for (const auto& n : all)
+                {
+                    if (notes.size() >= 2000) break;
+                    notes.add (obj ({ { "pitch", n.pitch }, { "name", pitchName (n.pitch) }, { "start", tempo.toBeats (n.start) - fromBeat },
+                                      { "length", tempo.toBeats (n.end) - tempo.toBeats (n.start) }, { "velocity", (int) number (n.note, ids::velocity) } }));
+                }
+                total += (int) all.size();
+                out.add (obj ({ { "track", id }, { "name", trackLabel (id) }, { "count", (int) all.size() }, { "truncated", (int) all.size() > notes.size() }, { "notes", notes } }));
+            }
+            complete (obj ({ { "ok", true }, { "summary", juce::String (total) + " notes." }, { "tracks", out } }));
+        });
+
+    add ("midi.write", "Write a part: notes on a MIDI track from a point in the song. Makes a new MIDI track with an instrument when no track is given. One undo step.", "Write notes",
+        { P ("track", "track", "The MIDI track to write on. Leave out to make a new one (give instrument and name)"),
+          P ("instrument", "string", "For a new track: an instrument id or name, or a word like \"trumpet\" (the closest built-in is used and reported)"),
+          P ("name", "string", "For a new track: its name"),
+          P ("from", "time", "Where the part starts: seconds, \"bar 9\", or a section name (default: the playhead)"),
+          P ("notes", "array", "[{ pitch: 60 or \"C4\", start: beats from `from`, length: beats, velocity: 1-127 (default 100) }]", true),
+          P ("replace", "boolean", "Clear the track's notes in the written range first (default true)") },
+        [this, &edit] (const juce::var& args, Complete complete)
+        {
+            const auto* given = args["notes"].getArray();
+            if (given == nullptr || given->isEmpty()) { complete (fail ("\"notes\" must be a list of notes.")); return; }
+            if (given->size() > 5000) { complete (fail ("Write at most 5000 notes at a time.")); return; }
+
+            struct N { int pitch; double start, length; int velocity; };
+            std::vector<N> notes;
+            auto endBeat = 0.0;
+            for (const auto& n : *given)
+            {
+                const auto pitch = parsePitch (n["pitch"]);
+                if (! pitch) { complete (fail ("Note " + juce::String (notes.size() + 1) + ": unknown pitch \"" + n["pitch"].toString() + "\". Use 0-127 or a name like C4, F#3, Bb2.")); return; }
+                const auto start = n.hasProperty ("start") ? (double) n["start"] : -1.0, length = n.hasProperty ("length") ? (double) n["length"] : 0.0;
+                if (start < 0.0 || length <= 0.0) { complete (fail ("Note " + juce::String (notes.size() + 1) + ": needs start (>= 0, in beats) and length (> 0, in beats).")); return; }
+                notes.push_back ({ *pitch, start, length, juce::jlimit (1, 127, n.hasProperty ("velocity") ? (int) n["velocity"] : 100) });
+                endBeat = juce::jmax (endBeat, start + length);
+            }
+
+            juce::String problem, note;
+            auto& engine = processor.getDawEngine();
+            const auto from = args.hasProperty ("from") ? resolveTime (args["from"], problem) : std::optional<double> ((double) engine.getPosition() / engine.getSampleRate());
+            if (! from) { complete (fail (problem)); return; }
+
+            const auto createNew = ! args.hasProperty ("track");
+            juce::var instrument;
+            if (createNew)
+            {
+                instrument = chooseInstrument (args["instrument"].toString(), note, problem);
+                if (problem.isNotEmpty()) { complete (fail (problem)); return; }
+            }
+            int trackId = -1;
+            if (! createNew)
+            {
+                const auto found = resolveMidiTracks (args["track"], problem);
+                if (found.empty()) { complete (fail (problem)); return; }
+                trackId = found.front();
+            }
+
+            const auto tempo = edit.getTempoMap();
+            const auto bpb = (double) edit.getBeatsPerBar();
+            const auto fromBeat = tempo.toBeats (*from);
+            const auto spanBeats = std::ceil (endBeat / bpb - 1.0e-9) * bpb;
+            const auto clipEnd = tempo.toSeconds (fromBeat + spanBeats);
+
+            if (createNew)
+            {
+                auto a = obj ({ { "name", orElse (args["name"].toString(), "Part") } });
+                if (! instrument.isVoid()) a.getDynamicObject()->setProperty ("instrument", instrument);
+                const auto id = call ("addMidiTrack", a);
+                if (! id.isInt()) { complete (fail ("Couldn't add the MIDI track.")); return; }
+                trackId = (int) id;
+            }
+
+            // Replace: out with this track's notes that start inside the range.
+            auto removed = 0;
+            if ((bool) args.getProperty ("replace", true))
+            {
+                std::map<int, juce::Array<juce::var>> byClip;
+                for (const auto& n : notesIn (edit.getTrack (trackId), *from, clipEnd))
+                    byClip[(int) n.note.getParent()[ids::id]].add ((int) n.note[ids::id]);
+                for (const auto& [clipId, noteIds] : byClip)
+                {
+                    call ("editNotes", obj ({ { "clip", clipId }, { "remove", noteIds } }));
+                    removed += noteIds.size();
+                }
+            }
+
+            const auto clip = call ("addMidiClip", obj ({ { "track", trackId }, { "start", *from }, { "length", clipEnd - *from } }));
+            if (! clip.isInt() || (int) clip < 0) { complete (fail ("Couldn't add a clip for the notes.")); return; }
+
+            juce::Array<juce::var> add;
+            for (const auto& n : notes)
+            {
+                const auto on = tempo.toSeconds (fromBeat + n.start), off = tempo.toSeconds (fromBeat + n.start + n.length);
+                add.add (obj ({ { "pitch", n.pitch }, { "time", on - *from }, { "length", off - on }, { "velocity", n.velocity } }));
+            }
+            const auto written = call ("editNotes", obj ({ { "clip", (int) clip }, { "add", add } }));
+            if (! (bool) written["ok"]) { complete (written); return; }
+
+            const auto barOf = [&] (double seconds) { return tempo.toBeats (seconds) / bpb + 1.0; };
+            complete (done ("Wrote " + juce::String ((int) notes.size()) + " notes on " + trackLabel (trackId) + ", bars " + juce::String (barOf (*from), 2) + " to " + juce::String (barOf (clipEnd), 2)
+                                + (removed > 0 ? " (replaced " + juce::String (removed) + " earlier notes)" : juce::String()) + "." + (note.isEmpty() ? juce::String() : " " + note),
+                            { { "track", trackId }, { "clip", (int) clip }, { "count", (int) notes.size() }, { "fromSeconds", *from }, { "toSeconds", clipEnd } }));
+        });
+
+    add ("midi.clear", "Delete the notes of MIDI tracks in a range (the tracks and clips stay). One undo step.", "Clear notes",
+        { P ("tracks", "tracks", "MIDI tracks", true), P ("from", "time", "Start (default: the whole song)"), P ("to", "time", "End"),
+          withRange (P ("bars", "number", "Instead of `to`: how many bars"), 0.25, 1000) },
+        [this, &edit] (const juce::var& args, Complete complete)
+        {
+            juce::String problem;
+            const auto span = resolveSpan (args, problem);
+            const auto found = span ? resolveMidiTracks (args["tracks"], problem) : std::vector<int>();
+            if (! span || found.empty()) { complete (fail (problem)); return; }
+            auto count = 0;
+            for (const auto id : found)
+            {
+                std::map<int, juce::Array<juce::var>> byClip;
+                for (const auto& n : notesIn (edit.getTrack (id), span->first, span->second))
+                    byClip[(int) n.note.getParent()[ids::id]].add ((int) n.note[ids::id]);
+                for (const auto& [clipId, noteIds] : byClip) { call ("editNotes", obj ({ { "clip", clipId }, { "remove", noteIds } })); count += noteIds.size(); }
+            }
+            complete (done ("Removed " + juce::String (count) + " notes.", { { "count", count } }));
+        });
+
+    add ("midi.quantize", "Move note starts onto a grid (in beats: 1 is a quarter note, 0.5 an eighth, 0.25 a sixteenth). One undo step.", "Quantize notes",
+        { P ("tracks", "tracks", "MIDI tracks", true), withRange (P ("grid", "number", "Grid in beats (default 0.25)"), 0.0625, 4),
+          withRange (P ("strength", "number", "0 to 1: how far to move (default 1, fully on the grid)"), 0, 1),
+          P ("from", "time", "Start (default: the whole song)"), P ("to", "time", "End"), withRange (P ("bars", "number", "Instead of `to`: how many bars"), 0.25, 1000) },
+        [this, &edit] (const juce::var& args, Complete complete)
+        {
+            juce::String problem;
+            const auto span = resolveSpan (args, problem);
+            const auto found = span ? resolveMidiTracks (args["tracks"], problem) : std::vector<int>();
+            if (! span || found.empty()) { complete (fail (problem)); return; }
+
+            const auto tempo = edit.getTempoMap();
+            const auto grid = args.hasProperty ("grid") ? (double) args["grid"] : 0.25;
+            const auto strength = args.hasProperty ("strength") ? (double) args["strength"] : 1.0;
+            auto moved = 0;
+            for (const auto id : found)
+                for (const auto& n : notesIn (edit.getTrack (id), span->first, span->second))
+                {
+                    const auto beat = tempo.toBeats (n.start);
+                    const auto target = std::round (beat / grid) * grid;
+                    const auto newStart = tempo.toSeconds (beat + (target - beat) * strength);
+                    if (std::abs (newStart - n.start) < 1.0e-6) continue;
+                    const auto clip = n.note.getParent();
+                    edit.setNote ((int) n.note[ids::id], n.pitch, number (n.note, ids::time) + (newStart - n.start), number (n.note, ids::length), (int) number (n.note, ids::velocity));
+                    (void) clip;
+                    ++moved;
+                }
+            complete (done ("Quantized " + juce::String (moved) + " notes to " + juce::String (grid) + " beat.", { { "count", moved } }));
+        });
+
+    add ("midi.snapToKey", "Move notes that are out of key to the nearest note of the song's key (or the key you give). One undo step.", "Snap notes to key",
+        { P ("tracks", "tracks", "MIDI tracks", true), P ("tonic", "string", "Key to use instead of the song's: C, C#, D..."), P ("minor", "boolean", "With tonic: a minor key"),
+          P ("from", "time", "Start (default: the whole song)"), P ("to", "time", "End"), withRange (P ("bars", "number", "Instead of `to`: how many bars"), 0.25, 1000) },
+        [this, &edit] (const juce::var& args, Complete complete)
+        {
+            juce::String problem;
+            const auto span = resolveSpan (args, problem);
+            const auto found = span ? resolveMidiTracks (args["tracks"], problem) : std::vector<int>();
+            if (! span || found.empty()) { complete (fail (problem)); return; }
+
+            auto key = edit.getKey();
+            auto minor = edit.isKeyMinor();
+            if (args.hasProperty ("tonic"))
+            {
+                const auto pitch = parsePitch (args["tonic"].toString() + "4");
+                if (! pitch) { complete (fail ("Unknown key \"" + args["tonic"].toString() + "\".")); return; }
+                key = *pitch % 12;
+                minor = (bool) args.getProperty ("minor", false);
+            }
+            if (key < 0) { complete (fail ("The song has no key yet. Give a tonic, or set one with key.set.")); return; }
+
+            auto moved = 0;
+            for (const auto id : found)
+                for (const auto& n : notesIn (edit.getTrack (id), span->first, span->second))
+                {
+                    const auto snapped = analysis::tomidi::snapToKey ((float) n.pitch, key, minor);
+                    if (snapped == n.pitch) continue;
+                    edit.setNote ((int) n.note[ids::id], snapped, number (n.note, ids::time), number (n.note, ids::length), (int) number (n.note, ids::velocity));
+                    ++moved;
+                }
+            complete (done ("Moved " + juce::String (moved) + " notes into " + juce::String (noteNames[key]) + (minor ? " minor." : " major."), { { "count", moved } }));
+        });
+
+    add ("audio.toMidi", "Turn an audio track's clip into notes on a new MIDI track (the lead melody, a bass line, or drums). Listens first, so it takes a moment.", "Convert to MIDI",
+        { P ("track", "track", "The audio track (its first clip, or the one at `from`)", true), withChoices (P ("what", "string", "melody, bass or drums"), { "melody", "bass", "drums" }),
+          P ("from", "time", "Pick the clip playing at this time"), P ("snapKey", "boolean", "Move notes into the song's key") },
+        [this, &edit] (const juce::var& args, Complete complete)
+        {
+            if (waitingToMidi) { complete (fail ("Already converting a clip to MIDI.")); return; }
+            juce::String problem;
+            const auto found = resolveTracks (args["track"], problem);
+            if (found.empty()) { complete (fail (problem)); return; }
+            const auto at = args.hasProperty ("from") ? resolveTime (args["from"], problem) : std::optional<double>();
+            if (args.hasProperty ("from") && ! at) { complete (fail (problem)); return; }
+
+            int clipId = -1;
+            for (const auto& clip : edit.getTrack (found.front()))
+            {
+                if (! clip.hasType (ids::CLIP) || daw::Edit::isMidiClip (clip)) continue;
+                if (clipId < 0 || (at && number (clip, ids::start) <= *at && number (clip, ids::start) + number (clip, ids::length) > *at))
+                    clipId = (int) clip[ids::id];
+            }
+            if (clipId < 0) { complete (fail (trackLabel (found.front()) + " has no audio clip to convert.")); return; }
+
+            waitingToMidi = std::move (complete);
+            const auto started = call ("toMidi", obj ({ { "action", "start" }, { "id", clipId }, { "what", orElse (args["what"].toString(), "melody") },
+                                                        { "snapKey", (bool) args.getProperty ("snapKey", edit.getKey() >= 0) } }));
+            if (! (bool) started["ok"]) { auto finish = std::move (waitingToMidi); waitingToMidi = nullptr; finish (started); }
         });
 
     //============================================================================ history

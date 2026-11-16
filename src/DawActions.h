@@ -3,6 +3,7 @@
 #include <juce_core/juce_core.h>
 #include <functional>
 #include <map>
+#include <optional>
 #include <vector>
 
 class DawBridge;
@@ -80,6 +81,16 @@ private:
     std::vector<Action> actions;
     std::map<juce::String, size_t> byName;
 
-    Complete waitingAutoMix, waitingMixCheck;
+    // The range an action works on: from/to as times, or `from` alone as a section / loop name,
+    // or `from` and `bars`. Nothing given: the whole song. Fills `problem` on a miss.
+    std::optional<std::pair<double, double>> resolveSpan (const juce::var& args, juce::String& problem) const;
+    // The MIDI tracks of a target (every one must be a MIDI track).
+    std::vector<int> resolveMidiTracks (const juce::var& spec, juce::String& problem) const;
+    // The instrument to put on a new MIDI track: an id or name, or the closest built-in for a word like "trumpet".
+    juce::var chooseInstrument (const juce::String& wanted, juce::String& note, juce::String& problem) const;
+    // Chord names per bar from the MIDI notes in [from, to): "" where nothing plays.
+    juce::var chordsFromNotes (double from, double to) const;
+
+    Complete waitingAutoMix, waitingMixCheck, waitingToMidi;
     bool autoMixApply = true;
 };

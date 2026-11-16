@@ -8592,6 +8592,52 @@ namespace
             act ("history.undo");
             check (edit.getKey() != 10 || ! edit.isKeyMinor(), "history.undo undoes the last action");
 
+            // Composition (B3): a part written from notes, read back, fitted to the key and grid.
+            const auto instruments = act ("instruments.list");
+            check (ok (instruments) && instruments["instruments"].isArray(), "instruments.list answers");
+            act ("tempo.set", args ({ { "bpm", 120 } }));
+            const auto tracksBeforePart = edit.getTracks().size();
+            const auto chordNotes = [&] (std::initializer_list<const char*> bar1, std::initializer_list<const char*> bar2)
+            {
+                juce::Array<juce::var> notes;
+                for (const auto* p : bar1) notes.add (args ({ { "pitch", p }, { "start", 0.0 }, { "length", 4.0 } }));
+                for (const auto* p : bar2) notes.add (args ({ { "pitch", p }, { "start", 4.0 }, { "length", 4.0 } }));
+                return notes;
+            };
+            const auto part = act ("midi.write", args ({ { "instrument", "trumpet" }, { "name", "Trumpet" }, { "from", "bar 1" },
+                                                          { "notes", chordNotes ({ "C4", "E4", "G4" }, { "A3", "C4", "E4" }) } }));
+            check (ok (part) && (int) part["count"] == 6 && edit.getTracks().size() == tracksBeforePart + 1
+                       && daw::Edit::isMidiTrack (edit.getTrack ((int) part["track"])), "midi.write makes a MIDI track and puts the notes on it");
+            check (edit.getUndoManager().getUndoDescription() == "Write notes", "midi.write is one undo step with a name");
+            const int partTrack = part["track"];
+
+            const auto context = act ("context.get", args ({ { "from", "bar 1" }, { "bars", 2 } }));
+            check (ok (context) && context["chords"].size() >= 2 && context["chords"][0]["chord"].toString() == "C" && context["chords"][1]["chord"].toString() == "Am",
+                   "context.get reads chords per bar from the notes");
+            const auto got = act ("midi.get", args ({ { "tracks", partTrack }, { "from", "bar 1" }, { "bars", 2 } }));
+            check (ok (got) && got["tracks"][0]["count"].operator int() == 6 && got["tracks"][0]["notes"][0]["name"].toString() == "C4"
+                       && std::abs ((double) got["tracks"][0]["notes"][3]["start"] - 4.0) < 1.0e-6, "midi.get gives names and beats from the range start");
+
+            const auto again = act ("midi.write", args ({ { "track", partTrack }, { "from", "bar 1" }, { "notes", chordNotes ({ "D4" }, { "F4" }) } }));
+            const auto afterReplace = act ("midi.get", args ({ { "tracks", partTrack } }));
+            check (ok (again) && afterReplace["tracks"][0]["count"].operator int() == 2, "midi.write replaces the notes in its range");
+            check (! ok (act ("midi.write", args ({ { "track", partTrack }, { "notes", chordNotes ({ "H9" }, {}) } }))), "midi.write names the pitch it can't read");
+            check (! ok (act ("midi.write", args ({ { "track", t1 }, { "notes", chordNotes ({ "C4" }, {}) } }))), "midi.write refuses an audio track");
+
+            // Off the grid and off the key.
+            juce::Array<juce::var> loose;
+            loose.add (args ({ { "pitch", 61 }, { "start", 0.1 }, { "length", 1.0 } }));
+            act ("midi.write", args ({ { "track", partTrack }, { "from", "bar 1" }, { "notes", loose } }));
+            act ("key.set", args ({ { "tonic", "C" } }));
+            act ("midi.snapToKey", args ({ { "tracks", partTrack } }));
+            act ("midi.quantize", args ({ { "tracks", partTrack }, { "grid", 0.25 } }));
+            const auto fitted = act ("midi.get", args ({ { "tracks", partTrack }, { "from", "bar 1" }, { "bars", 1 } }));
+            check (ok (fitted) && fitted["tracks"][0]["count"].operator int() == 1 && ((int) fitted["tracks"][0]["notes"][0]["pitch"] == 60 || (int) fitted["tracks"][0]["notes"][0]["pitch"] == 62)
+                       && std::abs ((double) fitted["tracks"][0]["notes"][0]["start"]) < 1.0e-6, "midi.snapToKey and midi.quantize fit notes to the key and grid");
+            act ("midi.clear", args ({ { "tracks", partTrack } }));
+            check (act ("midi.get", args ({ { "tracks", partTrack } }))["tracks"][0]["count"].operator int() == 0, "midi.clear removes the notes");
+
+            run ("removeTrack", args ({ { "id", partTrack } }));
             run ("removeTrack", args ({ { "id", t1 } }));
             run ("removeTrack", args ({ { "id", t2 } }));
             run ("removeTrack", args ({ { "id", t3 } }));
