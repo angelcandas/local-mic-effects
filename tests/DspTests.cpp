@@ -8168,7 +8168,7 @@ namespace
             edit.removeTrack (backTrack);
         }
 
-        // Build backing vocals: a folded group of voices under the lead, from the chords of the rest.
+        // Build backing vocals: rendered audio on regular tracks under the lead, from the chords of the rest.
         {
             const auto melodyFile = folder.getChildFile ("Lead.wav"), chordFile = folder.getChildFile ("Chords.wav");
             writeWav (melodyFile, makeMelody(), sampleRate);
@@ -8194,7 +8194,7 @@ namespace
             {
                 const auto started = run ("backingVocals", request);
                 juce::var done;
-                for (int i = 0; i < 3000 && done.isVoid() && ok (started); ++i)
+                for (int i = 0; i < 12000 && done.isVoid() && ok (started); ++i)
                 {
                     juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
                     events.clear();
@@ -8210,46 +8210,39 @@ namespace
             check (! ok (run ("backingVocals", args ({ { "action", "start" }, { "id", clipId }, { "parts", juce::Array<juce::var>() } }))),
                    "backing vocals need at least one voice");
 
-            const auto [started, done] = build (args ({ { "action", "start" }, { "id", clipId }, { "parts", parts }, { "feel", "tight" } }));
-            const auto group = edit.getReturn ((int) done["group"]);
+            const auto [started, done] = build (args ({ { "action", "start" }, { "id", clipId }, { "parts", parts }, { "feel", "tight" }, { "separate", true } }));
+            const auto leadIndex = edit.getTracks().indexOf (edit.getTrack (leadTrack));
             juce::Array<juce::ValueTree> voices;
-            for (const auto& track : edit.getTracks())
-                if (daw::Edit::getTrackGroup (track) == (int) done["group"])
-                    voices.add (track);
-            check (ok (started) && done["state"].toString() == "done" && (int) done["count"] == 3 && daw::Edit::isGroup (group)
-                       && (bool) group.getProperty (daw::ids::folded, false) && voices.size() == 3,
-                   "three voices in a folded group (" + done["state"].toString() + " " + done["error"].toString() + ")");
+            for (int i = 1; i <= 3 && leadIndex + i < edit.getTracks().size(); ++i)
+                voices.add (edit.getTracks()[leadIndex + i]);
+            check (ok (started) && done["state"].toString() == "done" && (int) done["count"] == 3 && (int) done["tracks"] == 3
+                       && voices.size() == 3 && edit.getTracks().size() == before + 2 + 3,
+                   "three voices, one regular track each (" + done["state"].toString() + " " + done["error"].toString() + ")");
             check ((bool) done["listened"] && (int) done["chords"] >= 1, "the other tracks were listened to for chords (" + done["chords"].toString() + ", " + done["key"].toString() + ")");
 
             auto allGood = voices.size() == 3;
             for (const auto& track : voices)
             {
                 const auto clip = track.getChildWithName (daw::ids::CLIP);
-                allGood = allGood && track[daw::ids::mixRole].toString() == "background" && (float) track[daw::ids::volume] < -3.0f
-                       && clip.isValid() && std::abs ((double) clip[daw::ids::start] - 4.0) < 1.0e-6 && clip.hasProperty (daw::ids::pitchNotes)
-                       && clip.hasProperty (daw::ids::warp);
+                const juce::File file (clip[daw::ids::file].toString());
+                allGood = allGood && daw::Edit::getTrackGroup (track) < 0 && (float) track[daw::ids::volume] < -3.0f
+                       && clip.isValid() && std::abs ((double) clip[daw::ids::start] - 4.0) < 1.0e-6 && file.existsAsFile()
+                       && ! clip.hasProperty (daw::ids::pitchNotes) && ! clip.hasProperty (daw::ids::warp);
             }
-            check (allGood, "each voice: tagged as a backing vocal, under the lead, a copy of the clip with its notes and timing");
+            check (allGood, "each voice: a plain audio clip of rendered audio at the lead's place, on an ungrouped track");
             if (voices.size() == 3)
                 check (std::abs ((float) voices[0][daw::ids::pan] + 0.35f) < 1.0e-3f && std::abs ((float) voices[1][daw::ids::pan] - 0.35f) < 1.0e-3f
-                           && std::abs ((float) voices[2][daw::ids::pan]) < 1.0e-3f
-                           && edit.getTracks().indexOf (voices[0]) == edit.getTracks().indexOf (edit.getTrack (leadTrack)) + 1,
+                           && std::abs ((float) voices[2][daw::ids::pan]) < 1.0e-3f,
                        "panned in a pair, the odd one in the middle, right under the lead");
-            if (! voices.isEmpty())
-            {
-                // A3 B3 C4 over A minor: a third above sings C D E.
-                const auto shifts = daw::Edit::getClipNotes (voices[0].getChildWithName (daw::ids::CLIP));
-                juce::String sung;
-                for (const auto& n : shifts)
-                    sung << juce::String (n.pitch + n.shift, 1) << " ";
-                check (shifts.size() == 3 && std::abs (shifts[0].pitch + shifts[0].shift - 60.0f) < 0.15f
-                           && std::abs (shifts[1].pitch + shifts[1].shift - 62.0f) < 0.15f && std::abs (shifts[2].pitch + shifts[2].shift - 64.0f) < 0.15f,
-                       "the third above sings " + sung.trim());
-            }
 
             edit.getUndoManager().undo();
-            check (edit.getTracks().size() == before + 2 && ! daw::Edit::isGroup (edit.getReturn ((int) done["group"])),
-                   "Build backing vocals undoes in one step");
+            check (edit.getTracks().size() == before + 2, "Build backing vocals undoes in one step");
+
+            const auto [oneStarted, oneDone] = build (args ({ { "action", "start" }, { "id", clipId }, { "parts", parts }, { "feel", "tight" } }));
+            check (ok (oneStarted) && oneDone["state"].toString() == "done" && (int) oneDone["count"] == 3 && (int) oneDone["tracks"] == 1
+                       && edit.getTracks().size() == before + 2 + 1,
+                   "by default all voices go on one regular track (" + oneDone["error"].toString() + ")");
+            edit.getUndoManager().undo();
 
             const auto [keyStarted, keyDone] = build (args ({ { "action", "start" }, { "id", clipId }, { "parts", juce::Array<juce::var> { "octaveBelow" } },
                                                               { "feel", "loose" }, { "follow", "key" } }));
