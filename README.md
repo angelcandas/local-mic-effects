@@ -338,7 +338,8 @@ backing track for you, locally, with the effects you already have:
      and a De-esser if the S's stand out.
    - **Backing**: a small EQ dip where it covers your voice the most.
    - **Balance**: your volume so the voice sits the style's amount over the backing.
-   - The **master** is left alone: mastering is its own flow.
+   - The **master** is left alone: mastering is its own flow, **Master the song…** in the Assist menu
+     (its own panel: target, section moves, Try on the master, Keep changes).
 5. **Try on the mix** puts the ticked changes in the mix so you can hear them (the song keeps
    playing); tick moves, move the sliders or **Amount** and it follows. **Hear original / Hear Auto
    Mix** switches between your mix as it was and with the changes. Nothing is final until you press

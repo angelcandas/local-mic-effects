@@ -3095,12 +3095,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
 void DawBridge::readAutoMixMode (const juce::var& args)
 {
     if (args.hasProperty ("mode"))
-    {
-        // Mastering is its own flow: Auto Mix works on the tracks and leaves the master alone.
-        autoMixOptions.mode = analysis::getModeFromKey (args["mode"].toString());
-        if (autoMixOptions.mode == analysis::MixMode::master)
-            autoMixOptions.mode = analysis::MixMode::mix;
-    }
+        autoMixOptions.mode = analysis::getModeFromKey (args["mode"].toString()); // "master" is the Master panel's flow
     if (args.hasProperty ("focus"))
         autoMixOptions.focusTrackId = (int) args["focus"];
     if (args.hasProperty ("masterLufs"))

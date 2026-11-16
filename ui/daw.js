@@ -5443,6 +5443,9 @@ class DawScreen {
     about.textContent = picked?.about ?? "";
     panel.classList.toggle("is-clean", mode === "clean");
     panel.classList.toggle("is-master", mode === "master");
+    // Mastering is its own flow with its own title; the mix modes' tabs hide.
+    panel.querySelector(".ai-title strong").textContent = mode === "master" ? "Master" : "Auto Mix";
+    panel.querySelector(".ai-title small").textContent = mode === "master" ? "Mastering · listens offline, one undo" : "AI mixer · listens offline, one undo";
     const intro = panel.querySelector(".automix-mode-intro");
     intro.hidden = mode === "mix";
     intro.textContent = mode === "fit"
@@ -6422,6 +6425,7 @@ class DawScreen {
       heading("The song");
       item("Auto Mix…", () => this.openAutoMix("mix"), { indent: true, disabled: songEmpty, hint: songEmpty ? "Record or import something first" : "Listen to the tracks and set EQ, compression, space and levels" });
       item("Mix Check…", () => this.mixCheck.toggle(true), { indent: true, disabled: songEmpty, hint: "A report on the mix in plain words, with Fix buttons" });
+      item("Master the song…", () => this.openAutoMix("master"), { indent: true, disabled: songEmpty, hint: "Mastering EQ, multiband, width and a limiter up to the loudness you pick" });
       item("Song key…", () => this.toggleKeyPanel(true), { indent: true, hint: "Find or set the song's key" });
       item("Song map…", () => this.songMap.toggle(true), { indent: true, hint: "Find the intro, verses, choruses and bars" });
       heading(audioTrack ? `Track “${audioTrack.name}”` : "The selected track");

@@ -2803,3 +2803,4 @@ body.is-daw .library-hint { display: none; }
 .automix-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px; border: 1px solid var(--warn); border-radius: 10px; background: #0f1218; }
 .automix-ask[hidden] { display: none; }
 .automix-ask-text { flex: 1 1 220px; color: var(--text); font-size: 12px; line-height: 1.45; }
+.automix-panel.is-master .ai-modes, .automix-panel.is-master .ai-about { display: none; }
