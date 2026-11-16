@@ -26,6 +26,7 @@
 #include "analysis/MixCheck.h"
 #include "analysis/MixBench.h"
 #include "analysis/MixCorrect.h"
+#include "analysis/MixSections.h"
 #include "analysis/TakeComp.h"
 #include "Presets.h"
 #include "FactoryChains.h"
@@ -13021,6 +13022,137 @@ namespace
         folder.deleteRecursively();
     }
 
+    // Mix by section: the voice follows each section's density, the band lifts in the
+    // choruses, with ramps, and nothing changes without sections or on a drawn lane.
+    void testAutoMixSections()
+    {
+        std::cout << "\nAuto Mix: mix by section\n";
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-sections", {});
+        folder.createDirectory();
+
+        // Verse 8 s, chorus 8 s, verse, chorus: the band is 6 dB louder and fuller in the choruses.
+        constexpr double rate = 48000.0, sectionSeconds = 8.0, seconds = 32.0;
+        const auto length = (int) (rate * seconds);
+        juce::AudioBuffer<float> voice (1, length), band (1, length), keys (1, length);
+        juce::Random random (11);
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+        for (int i = 0; i < length; ++i)
+        {
+            const auto t = i / rate;
+            const auto chorus = ((int) (t / sectionSeconds)) % 2 == 1;
+            double v = 0.0;
+            if (std::fmod (t, 2.0) < 1.6)
+                for (int h = 1; h <= 10; ++h)
+                    v += std::sin (twoPi * 220.0 * h * t) / h;
+            voice.setSample (0, i, (float) (0.1 * v));
+            const auto level = chorus ? 2.0 : 1.0;
+            band.setSample (0, i, (float) (level * (0.15 * std::sin (twoPi * 55.0 * t)
+                                                    + (random.nextFloat() - 0.5f) * 0.3 * std::exp (-std::fmod (t, 0.5) * 20.0))));
+            keys.setSample (0, i, (float) (level * 0.05 * (std::sin (twoPi * 330.0 * t) + std::sin (twoPi * 415.0 * t))));
+        }
+        writeWav (folder.getChildFile ("voice.wav"), voice, rate);
+        writeWav (folder.getChildFile ("band.wav"), band, rate);
+        writeWav (folder.getChildFile ("keys.wav"), keys, rate);
+
+        daw::Edit edit;
+        const auto lead = (int) edit.addTrack ("Lead vocal")[daw::ids::id];
+        const auto drums = (int) edit.addTrack ("Drums")[daw::ids::id];
+        const auto piano = (int) edit.addTrack ("Piano")[daw::ids::id];
+        edit.addClip (lead, folder.getChildFile ("voice.wav"), 0.0, seconds);
+        edit.addClip (drums, folder.getChildFile ("band.wav"), 0.0, seconds);
+        edit.addClip (piano, folder.getChildFile ("keys.wav"), 0.0, seconds);
+
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        std::map<int, analysis::Role> roles { { lead, analysis::Role::voice }, { drums, analysis::Role::drums }, { piano, analysis::Role::piano } };
+        std::map<int, float> volumes { { lead, 0.0f }, { drums, 0.0f }, { piano, 0.0f } };
+
+        analysis::MixOptions options;
+        options.tempo = 120.0;
+        for (int s = 0; s < 4; ++s)
+            options.sections.push_back ({ s * sectionSeconds, sectionSeconds, s % 2 == 1 ? "chorus" : "verse", s % 2 == 1 ? "Chorus" : "Verse" });
+
+        const auto plan = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, options);
+        for (const auto& note : plan.notes)
+            if (note.startsWith ("By section"))
+                std::cout << "        " << note << "\n";
+
+        check (plan.sections.size() == 4 && ! plan.sections[0].lifted && plan.sections[1].lifted && plan.sections[3].lifted,
+               "the four sections are listed, the choruses lifted");
+
+        const auto rideOf = [&] (int track) -> std::vector<std::pair<double, float>>
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == track && ! move.ride.empty())
+                    return move.ride;
+            return {};
+        };
+        const auto at = [] (const std::vector<std::pair<double, float>>& ride, double t)
+        {
+            if (ride.empty()) return 0.0f;
+            if (t <= ride.front().first) return ride.front().second;
+            for (size_t i = 1; i < ride.size(); ++i)
+                if (t <= ride[i].first)
+                {
+                    const auto f = (float) ((t - ride[i - 1].first) / juce::jmax (1.0e-9, ride[i].first - ride[i - 1].first));
+                    return ride[i - 1].second + f * (ride[i].second - ride[i - 1].second);
+                }
+            return ride.back().second;
+        };
+        // Averages over a section's middle (the phrase rides move inside it).
+        const auto average = [&] (const std::vector<std::pair<double, float>>& ride, double from, double to)
+        {
+            double sum = 0.0;
+            int n = 0;
+            for (auto t = from; t < to; t += 0.05, ++n)
+                sum += at (ride, t);
+            return n > 0 ? (float) (sum / n) : 0.0f;
+        };
+
+        const auto voiceRide = rideOf (lead);
+        const auto drumsRide = rideOf (drums);
+        const auto voiceVerse = average (voiceRide, 1.0, 7.0), voiceChorus = average (voiceRide, 9.0, 15.0);
+        check (voiceChorus - voiceVerse > 1.5f && plan.sections[1].voiceDb > plan.sections[0].voiceDb,
+               "the voice comes up where the band is denser (verse " + juce::String (voiceVerse, 1) + " dB, chorus "
+                   + juce::String (voiceChorus, 1) + " dB)");
+        const auto drumsVerse = average (drumsRide, 1.0, 7.0), drumsChorus = average (drumsRide, 9.0, 15.0);
+        check (std::abs (drumsChorus - drumsVerse - analysis::getSectionLiftDb (analysis::MixStyle::pop)) < 0.5f,
+               "the band lifts by the style's amount in the choruses (" + juce::String (drumsChorus - drumsVerse, 2) + " dB)");
+
+        // Half a bar at 120 BPM is 1 s: halfway up half a second before the chorus.
+        const auto before = at (drumsRide, 7.0 - 0.01), halfway = at (drumsRide, 7.5), into = at (drumsRide, 8.0 + 0.01);
+        check (halfway > before + 0.1f && halfway < into - 0.1f, "each change ramps in over half a bar");
+
+        // Written as the volume lane, which can be edited.
+        analysis::applyMix (edit, plan);
+        check (daw::Edit::getVolumeRide (edit.getTrack (drums)).size() >= 4, "written as the track's volume lane");
+
+        // A lane you drew stays.
+        options.drawnRides = { piano };
+        const auto drawn = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, options);
+        bool pianoSection = false;
+        for (const auto& move : drawn.moves)
+            if (move.trackId == piano && ! move.ride.empty())
+                for (const auto& reason : move.reasons)
+                    pianoSection = pianoSection || reason.startsWith ("By section");
+        check (! pianoSection, "a drawn volume lane isn't touched");
+
+        // No sections: nothing by section, and it says so.
+        options.sections.clear();
+        options.drawnRides.clear();
+        const auto plain = analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, options);
+        check (plain.sections.empty() && plain.notes.joinIntoString (" ").contains ("No song sections"),
+               "no sections: mixed the same all through, and the notes say so");
+
+        // Off: nothing either.
+        options.bySection = false;
+        options.sections.push_back ({ 0.0, 16.0, "verse", "Verse" });
+        options.sections.push_back ({ 16.0, 16.0, "chorus", "Chorus" });
+        check (analysis::planMix (source, roles, volumes, 0.0f, analysis::MixStyle::pop, options).sections.empty(), "the switch turns it off");
+
+        folder.deleteRecursively();
+    }
+
     void testAutoMixPlacement()
     {
         std::cout << "\nAuto Mix: placement (pan)\n";
@@ -18563,6 +18695,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=sections: just Auto Mix by section.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "sections")
+    {
+        testAutoMixSections();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=bench: just the Auto Mix test bench's smoke test.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "bench")
     {
@@ -18861,6 +19001,7 @@ int main()
     testAutoMixPlacement();
     testMixBench();
     testAutoMixListenBridge();
+    testAutoMixSections();
     testAutoMixPhase();
     testAutoMixRides();
     testAutoMixModes();

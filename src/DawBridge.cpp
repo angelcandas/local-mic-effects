@@ -2831,6 +2831,13 @@ void DawBridge::replanAutoMix()
 
     options.alignments = autoMixAlignments;
 
+    // Volume lanes you drew stay (mix by section doesn't add to them). While a plan is being
+    // tried, the lanes on the tracks are its own.
+    if (! autoMixApplied)
+        for (const auto& track : edit.getTracks())
+            if (track.hasProperty (ids::ride))
+                options.drawnRides.insert ((int) track[ids::id]);
+
     // The song's sections, for the master's section moves.
     for (const auto& section : edit.getSongSections())
         options.sections.push_back ({ (double) section[ids::time], (double) section.getProperty (ids::length, 0.0),
@@ -3147,6 +3154,7 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("pan", autoMixOptions.pan);
     read ("phase", autoMixOptions.phase);
     read ("sectionMoves", autoMixOptions.sectionMoves);
+    read ("bySection", autoMixOptions.bySection);
     read ("split", autoMixSplit);
 }
 
@@ -3210,6 +3218,16 @@ juce::var DawBridge::describeAutoMixTags() const
         roles.add (object ({ { "key", analysis::getRoleKey (role) }, { "name", analysis::getRoleName (role) } }));
 
     return object ({ { "ok", true }, { "tracks", tracks }, { "roles", roles }, { "masterTemplates", describeMasterTemplates() } });
+}
+
+// Mix by section: what changes where (MixPlan::sections), for the panel's strip.
+juce::var DawBridge::describeAutoMixSections() const
+{
+    juce::Array<juce::var> sections;
+    for (const auto& s : autoMixPlan.sections)
+        sections.add (object ({ { "name", s.name }, { "start", s.start }, { "end", s.end }, { "lifted", s.lifted },
+                                { "voiceDb", s.voiceDb }, { "liftDb", s.liftDb } }));
+    return sections;
 }
 
 juce::var DawBridge::describeAutoMix() const
@@ -3287,13 +3305,13 @@ juce::var DawBridge::describeAutoMix() const
                                    { "rides", autoMixOptions.rides }, { "colour", autoMixOptions.colour }, { "sends", autoMixOptions.sends }, { "throws", autoMixOptions.throws },
                                    { "dynamicEq", autoMixOptions.dynamicEq }, { "transients", autoMixOptions.transients },
                                    { "smooth", autoMixOptions.smooth }, { "pan", autoMixOptions.pan }, { "phase", autoMixOptions.phase },
-                                   { "sectionMoves", autoMixOptions.sectionMoves },
+                                   { "sectionMoves", autoMixOptions.sectionMoves }, { "bySection", autoMixOptions.bySection },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
                      { "style", styleKey (autoMixStyle) }, { "mode", analysis::getModeKey (autoMixOptions.mode) },
                      { "focus", autoMixOptions.focusTrackId }, { "masterLufs", autoMixOptions.masterLufs },
-                     { "masterTemplate", autoMixOptions.masterTemplate }, { "masterTemplates", describeMasterTemplates() }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes },
+                     { "masterTemplate", autoMixOptions.masterTemplate }, { "masterTemplates", describeMasterTemplates() }, { "effects", effects }, { "tracks", tracks }, { "moves", moves }, { "notes", notes }, { "sections", describeAutoMixSections() },
                      { "voiceOverBackingLu", autoMixPlan.voiceOverBackingLu }, { "mixLufs", autoMixPlan.mixLufs },
                      { "groups", groupAmounts }, { "amount", autoMixAmount },
                      { "applied", autoMixApplied && ! autoMixDirty }, { "after", autoMixApplied } });

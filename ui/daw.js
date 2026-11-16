@@ -5702,6 +5702,25 @@ class DawScreen {
     planBox.replaceChildren();
     if (event.kind === "reference") planBox.append(html("div", "automix-summary", `Matching the master to “${event.reference}”.`));
     for (const note of event.notes) planBox.append(html("div", "automix-note", note));
+    // By section: what changes where, one block per section in proportion to its length.
+    if (event.kind === "mix" && event.sections?.length > 1) {
+      const strip = html("div", "automix-sections");
+      strip.setAttribute("role", "list");
+      strip.setAttribute("aria-label", "By section");
+      for (const s of event.sections) {
+        const block = html("div", "automix-section" + (s.lifted ? " is-lifted" : ""));
+        block.setAttribute("role", "listitem");
+        block.style.flexGrow = String(Math.max(0.5, s.end - s.start));
+        const dB = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)} dB`;
+        block.append(html("strong", "", s.name || "Section"));
+        const short = (v) => `${v > 0 ? "+" : ""}${v.toFixed(1)}`; // dB, in the tooltip
+        if (s.lifted) block.append(html("span", "", `band ${short(s.liftDb)}`));
+        if (Math.abs(s.voiceDb) >= 0.05) block.append(html("span", "", `voice ${short(s.voiceDb)}`));
+        block.title = `${s.name}: ${s.lifted ? `the band lifts ${dB(s.liftDb)}, wider, more reverb` : "as planned"}${Math.abs(s.voiceDb) >= 0.05 ? `; the voice ${dB(s.voiceDb)}` : ""}`;
+        strip.append(block);
+      }
+      planBox.append(strip);
+    }
     // Every move with a tick box, grouped by track. Taste moves start unticked. Ticking
     // is live once the plan is in the mix: any set can be heard, changed and heard again.
     if (event.moves.length > 0 && event.kind === "mix")
