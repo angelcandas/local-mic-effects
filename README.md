@@ -338,13 +338,13 @@ backing track for you, locally, with the effects you already have:
      and a De-esser if the S's stand out.
    - **Backing**: a small EQ dip where it covers your voice the most.
    - **Balance**: your volume so the voice sits the style's amount over the backing.
-   - **Master**: towards −14 LUFS without clipping.
-5. **Apply** writes it as one undo step. **Hear before / Hear after** switches between the two while
-   the song plays, and **Amount** makes it gentler. Everything it changed is an ordinary insert or
-   fader you can tweak.
-
-**Match a reference…** picks a song you like and matches the master to it: a gentle master EQ
-towards its tonal balance, and the master volume towards its loudness (held below clipping).
+   - The **master** is left alone: mastering is its own flow.
+5. **Try on the mix** puts the ticked changes in the mix so you can hear them (the song keeps
+   playing); tick moves, move the sliders or **Amount** and it follows. **Hear original / Hear Auto
+   Mix** switches between your mix as it was and with the changes. Nothing is final until you press
+   **Keep changes**, which clears the panel and leaves one undo step. **Discard** takes the changes
+   back. Switching mode (or closing the panel) with changes that aren't kept asks first whether to
+   lose them. Everything it changed is an ordinary insert or fader you can tweak.
 
 ### Split into stems (DAW mode)
 

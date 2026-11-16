@@ -2638,9 +2638,9 @@ namespace
                 if (move.trackId == daw::Edit::masterId)
                     master = 1.0f;
             }
-            check (! character && std::abs (speech.voiceOverBackingLu - 10.0f) < 1.0f && duck <= -5.9f && master > 0.0f,
+            check (! character && std::abs (speech.voiceOverBackingLu - 10.0f) < 1.0f && duck <= -5.9f && master == 0.0f,
                    "speech: no reverb, echo or colour; the voice " + juce::String (speech.voiceOverBackingLu, 1)
-                       + " LU over the music, which ducks " + juce::String (-duck, 1) + " dB while you talk");
+                       + " LU over the music, which ducks " + juce::String (-duck, 1) + " dB while you talk, the master stays");
         }
     }
 
