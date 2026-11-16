@@ -116,6 +116,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/VoiceFit.h
     src/analysis/MixCheck.cpp
     src/analysis/MixCheck.h
+    src/analysis/MixBench.cpp
+    src/analysis/MixBench.h
     src/analysis/Beats.cpp
     src/analysis/Beats.h
     src/analysis/Coach.cpp
@@ -343,6 +345,43 @@ if(MICFX_BUILD_INSTRUMENT_PLUGINS)
     micfx_add_instrument_plugin(mallets Mallets Mmlt Synth)
     micfx_add_instrument_plugin(beat Beat Mbea Drum)
     micfx_add_instrument_plugin(kit Kit Mkit Drum)
+endif()
+
+# Auto Mix test bench: mixes real multitracks with Auto Mix and scores them against the
+# human mix (see tools/README-mixbench.md). Needs the audio, so it's not part of CI.
+#   cmake --build --preset release --target MicFXMixBench
+option(MICFX_BUILD_MIXBENCH "Build the Auto Mix test bench" ON)
+
+if(MICFX_BUILD_MIXBENCH)
+    juce_add_console_app(MicFXMixBench PRODUCT_NAME "MicFXMixBench")
+    target_sources(MicFXMixBench PRIVATE tools/MixBench.cpp ${MICFX_DSP_SOURCES})
+    target_include_directories(MicFXMixBench PRIVATE src)
+    target_compile_definitions(MicFXMixBench
+        PRIVATE
+            JucePlugin_Name="MicFX"
+            MICFX_HAS_DEMUCS=${MICFX_HAS_DEMUCS}
+            MICFX_HAS_COREML=${MICFX_HAS_COREML}
+            JUCE_PLUGINHOST_VST3=1
+            JUCE_PLUGINHOST_AU=1
+            JUCE_MODAL_LOOPS_PERMITTED=1
+            JUCE_USE_MP3AUDIOFORMAT=1
+            JUCE_WEB_BROWSER=0
+            JUCE_USE_CURL=0)
+    target_link_libraries(MicFXMixBench
+        PRIVATE
+            juce::juce_audio_processors
+            juce::juce_audio_utils
+            juce::juce_audio_formats
+            juce::juce_cryptography
+            juce::juce_dsp
+            ${MICFX_DEMUCS_LIBRARY}
+        PUBLIC
+            juce::juce_recommended_config_flags
+            juce::juce_recommended_warning_flags
+            micfx_quiet_warnings)
+    if(APPLE)
+        target_link_libraries(MicFXMixBench PRIVATE "-framework CoreAudioKit")
+    endif()
 endif()
 
 # The stdio side of AI control: AI programs start this as a command and it talks to the running app

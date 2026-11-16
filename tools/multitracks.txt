@@ -1,0 +1,17 @@
+# Songs for the Auto Mix test bench (tools/fetch-multitracks.sh).
+# Cambridge-MT "Mixing Secrets" free multitrack library: https://www.cambridge-mt.com/ms3/mtk/
+# Licence: free for non-commercial use. Private testing only: never commit, ship or train on the audio.
+#
+# folder | style | tempo | zip url (optional) | mix url (optional)
+# Styles are a first guess per song; change them freely. With no URL the script looks for the
+# files in <cache>/zips/ (download them from the library page in a browser).
+Al James - Schoolboy Facination | pop | |
+Actions - One Minute Smile | rock | |
+Hollow Ground - Left Blind | rock | |
+The Districts - Vermont | rock | |
+Young Griffo - Pennies | pop | |
+Lushlife - Toynbee Suite | hiphop | |
+Night Panther - Fire | electronic | |
+Clara Berry And Wooldog - Waltz For My Victims | ballad | |
+Tom McKenzie - Directions | acoustic | |
+Fergessen - Back From The Start | pop | |
