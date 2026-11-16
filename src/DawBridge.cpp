@@ -210,6 +210,25 @@ struct DawBridge::BackingJob
     std::vector<analysis::harmony::TimedChord> chords;
     analysis::KeyEstimate key; // of the other tracks, when they were listened to
     bool listened = false;     // the other tracks were listened to for chords
+    bool separate = false;     // one audio track per voice, else one track with all of them
+};
+
+// The second half of a "backingVocals" build: the voices rendered to audio files.
+struct DawBridge::BackingRender
+{
+    std::atomic<bool> cancel { false }, finished { false };
+    std::atomic<double> progress { 0.0 };
+    int trackId = 0;
+    double clipStart = 0.0;
+    bool separate = false;
+    juce::String error;
+    juce::Array<juce::File> files;       // one per voice, or one with them all
+    juce::StringArray names;
+    std::vector<float> volumes, pans;    // per file
+    std::vector<juce::String> partNames; // per voice
+    int chords = 0;
+    bool listened = false;
+    juce::String key;
 };
 
 struct DawBridge::KeyJob
@@ -472,6 +491,8 @@ DawBridge::~DawBridge()
         toMidiJob->cancel = true;
     if (backingJob != nullptr)
         backingJob->cancel = true;
+    if (backingRender != nullptr)
+        backingRender->cancel = true;
     if (takeCompJob != nullptr)
         takeCompJob->cancel = true;
 }
@@ -1607,6 +1628,14 @@ void DawBridge::tick()
             finishBackingVocals();
         else
             emit ("dawBackingVocals", object ({ { "state", "analysing" }, { "clip", backingJob->clipId }, { "progress", backingJob->progress.load() } }));
+    }
+
+    if (backingRender != nullptr)
+    {
+        if (backingRender->finished)
+            finishBackingRender();
+        else
+            emit ("dawBackingVocals", object ({ { "state", "analysing" }, { "stage", "rendering" }, { "progress", backingRender->progress.load() } }));
     }
 
     if (bounceJob != nullptr)
@@ -3071,9 +3100,11 @@ juce::var DawBridge::handleToMidi (const juce::var& args)
 // The "backingVocals" command; args.action is one of:
 //   start   { id (an audio clip with a sung lead), parts: up to 4 of analysis::harmony::getPartKeys(),
 //             feel: "tight" | "loose", follow: "chords" (the other tracks' chords, default) | "key" }
-//           listens in the background; "dawBackingVocals" brings { state: "analysing" (progress) |
-//           "done" | "cancelled" | "error", ... }. Done: a folded group of new tracks under the
-//           lead's, one per voice, one undo step.
+//             separate: true = one audio track per voice, else one track with all the voices
+//           listens in the background; "dawBackingVocals" brings { state: "analysing" (progress,
+//           stage "rendering" once the voices are being printed) | "done" | "cancelled" | "error", ... }.
+//           Done: plain audio tracks under the lead's (clips of rendered audio, a normal mixer strip),
+//           one undo step.
 //   cancel
 juce::var DawBridge::handleBackingVocals (const juce::var& args)
 {
@@ -3089,7 +3120,7 @@ juce::var DawBridge::handleBackingVocals (const juce::var& args)
 
     if (action != "start")
         return error ("Unknown backing vocals action.");
-    if (backingJob != nullptr)
+    if (backingJob != nullptr || backingRender != nullptr)
         return error ("Already building backing vocals.");
 
     const auto clip = edit.getClip (arg (args, "id", -1));
@@ -3106,6 +3137,7 @@ juce::var DawBridge::handleBackingVocals (const juce::var& args)
                 job->parts.push_back (harmony::partFromKey (part.toString()));
     if (job->parts.empty())
         return error ("Pick at least one voice.");
+    job->separate = arg (args, "separate", false);
     job->feel = args["feel"].toString() == "loose" ? harmony::Feel::loose : harmony::Feel::tight;
 
     auto source = engine.getAudioPool().loadNow (juce::File (clip[ids::file].toString()));
@@ -3227,44 +3259,195 @@ void DawBridge::finishBackingVocals()
         context.minor = guess.minor;
     }
 
-    edit.getUndoManager().beginNewTransaction ("Build backing vocals");
+    // The voices are built on a scratch copy of the session and printed to audio there, so
+    // the real session only gets plain tracks and clips.
     const auto leadVolume = (float) lead.getProperty (ids::volume, 0.0f);
-    const auto index = edit.getTracks().indexOf (lead) + 1;
     const auto count = (int) job->parts.size();
-    juce::Array<int> trackIds;
-    juce::Array<juce::var> names;
+    auto render = std::make_shared<BackingRender>();
+    render->trackId = job->trackId;
+    render->separate = job->separate;
+    render->clipStart = (double) clip[ids::start];
+    const auto clipLength = (double) clip[ids::length];
+    render->chords = (int) job->chords.size();
+    render->listened = job->listened;
+    render->key = context.tonic >= 0 ? analysis::KeyEstimate::getName (context.tonic, context.minor) : juce::String();
+
+    auto scratch = std::make_shared<daw::Edit>();
+    scratch->replaceState (edit.getState().createCopy());
+    std::vector<int> scratchTracks;
     for (int i = 0; i < count; ++i)
     {
         const auto part = job->parts[(size_t) i];
         const auto voice = harmony::makeVoice (notes, part, context, job->feel, i);
-        const auto name = (lead[ids::name].toString() + " " + harmony::getPartName (part)).substring (0, 60);
-        const auto trackId = (int) edit.addTrack (name, index + i)[ids::id];
-        edit.getTrack (trackId).setProperty (ids::mixRole, analysis::getRoleKey (analysis::Role::backingVocal), &edit.getUndoManager());
-        edit.setTrackVolume (trackId, juce::jlimit (-60.0f, 6.0f, leadVolume + voice.levelDb));
-
+        const auto trackId = (int) scratch->addTrack ("voice", scratch->getTracks().size())[ids::id];
         // In pairs, left and right, the second pair wider; an odd one out in the middle.
         const auto pair = i / 2;
         const auto alone = i == count - 1 && count % 2 == 1;
-        edit.setTrackPan (trackId, alone ? 0.0f : (i % 2 == 0 ? -1.0f : 1.0f) * (pair == 0 ? 0.35f : 0.7f));
+        render->pans.push_back (alone ? 0.0f : (i % 2 == 0 ? -1.0f : 1.0f) * (pair == 0 ? 0.35f : 0.7f));
+        render->volumes.push_back (juce::jlimit (-60.0f, 6.0f, leadVolume + voice.levelDb));
+        render->partNames.push_back (harmony::getPartName (part));
+        daw::backing::addVoiceClip (*scratch, job->clipId, trackId, voice);
+        scratchTracks.push_back (trackId);
+    }
+    for (const auto& track : scratch->getTracks())
+        if (std::find (scratchTracks.begin(), scratchTracks.end(), (int) track[ids::id]) == scratchTracks.end())
+            scratch->setTrackMute ((int) track[ids::id], true);
 
-        daw::backing::addVoiceClip (edit, job->clipId, trackId, voice);
-        trackIds.add (trackId);
-        names.add (harmony::getPartName (part));
+    engine.captureInstrumentStates();
+    daw::Exporter::Settings settings;
+    settings.sampleRate = engine.getAudioPool().getSampleRate();
+    settings.bitDepth = 32;
+    settings.start = render->clipStart;
+    settings.end = render->clipStart + clipLength;
+    settings.tail = 0.0;
+    auto exporter = std::make_shared<daw::Exporter> (*scratch, settings); // snapshot on this thread
+
+    const auto folder = getRecordingFolder();
+    const auto base = lead[ids::name].toString() + " backing";
+    juce::Array<juce::File> voiceFiles;
+    for (int i = 0; i < count; ++i)
+        voiceFiles.add (folder.getNonexistentChildFile (juce::File::createLegalFileName (base + " " + render->partNames[(size_t) i]), ".wav", false));
+
+    backingRender = render;
+    juce::Thread::launch ([render, exporter, scratch, voiceFiles, scratchTracks, base, folder]
+    {
+        const auto count = (int) scratchTracks.size();
+        for (int i = 0; i < count && render->error.isEmpty() && ! render->cancel; ++i)
+        {
+            const auto result = exporter->exportTrack (scratchTracks[(size_t) i], voiceFiles[i],
+                                                       [&] (double p) { render->progress = (i + p) / (count + (render->separate ? 0 : 0.2)); return ! render->cancel.load(); });
+            if (result.error.isNotEmpty())
+                render->error = result.error;
+        }
+
+        if (render->error.isEmpty() && ! render->cancel)
+        {
+            if (render->separate)
+            {
+                render->files = voiceFiles;
+                for (int i = 0; i < count; ++i)
+                    render->names.add (base + " " + render->partNames[(size_t) i]);
+            }
+            else
+            {
+                // All the voices into one stereo file, each at its own level and pan.
+                juce::AudioFormatManager formats;
+                formats.registerBasicFormats();
+                juce::AudioBuffer<float> sum;
+                double rate = 44100.0;
+                for (int i = 0; i < count; ++i)
+                {
+                    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (voiceFiles[i]));
+                    if (reader == nullptr)
+                        continue;
+                    rate = reader->sampleRate;
+                    juce::AudioBuffer<float> audio (2, (int) reader->lengthInSamples);
+                    reader->read (&audio, 0, audio.getNumSamples(), 0, true, true);
+                    if (sum.getNumSamples() < audio.getNumSamples())
+                        sum.setSize (2, audio.getNumSamples(), true, true, false);
+                    const auto gain = juce::Decibels::decibelsToGain (render->volumes[(size_t) i]);
+                    const auto pan = render->pans[(size_t) i];
+                    sum.addFrom (0, 0, audio, 0, 0, audio.getNumSamples(), gain * juce::jmin (1.0f, 1.0f - pan));
+                    sum.addFrom (1, 0, audio, 1, 0, audio.getNumSamples(), gain * juce::jmin (1.0f, 1.0f + pan));
+                }
+                const auto file = folder.getNonexistentChildFile (juce::File::createLegalFileName (base + " vocals"), ".wav", false);
+                if (sum.getNumSamples() > 0)
+                {
+                    juce::WavAudioFormat wav;
+                    std::unique_ptr<juce::FileOutputStream> stream (file.createOutputStream());
+                    if (stream != nullptr)
+                        if (std::unique_ptr<juce::AudioFormatWriter> writer (wav.createWriterFor (stream.get(), rate, 2, 32, {}, 0)); writer != nullptr)
+                        {
+                            stream.release();
+                            writer->writeFromAudioSampleBuffer (sum, 0, sum.getNumSamples());
+                        }
+                }
+                if (file.existsAsFile())
+                {
+                    render->files.add (file);
+                    render->names.add (base + " vocals");
+                }
+                else
+                {
+                    render->error = "The backing vocals couldn't be written.";
+                }
+                for (const auto& f : voiceFiles)
+                    f.deleteFile();
+            }
+        }
+        else if (render->cancel)
+        {
+            for (const auto& f : voiceFiles)
+                f.deleteFile();
+        }
+        render->progress = 1.0;
+        render->finished = true;
+    });
+
+    emit ("dawBackingVocals", object ({ { "state", "analysing" }, { "stage", "rendering" }, { "progress", 0.0 } }));
+}
+
+void DawBridge::finishBackingRender()
+{
+    auto render = std::move (backingRender);
+    if (render->cancel)
+    {
+        emit ("dawBackingVocals", object ({ { "state", "cancelled" } }));
+        return;
+    }
+    if (render->error.isNotEmpty() || render->files.isEmpty())
+    {
+        emit ("dawBackingVocals", object ({ { "state", "error" }, { "error", render->error.isNotEmpty() ? render->error : juce::String ("The voices couldn't be rendered.") } }));
+        return;
     }
 
-    const auto group = edit.groupTracks (trackIds, "Backing vocals");
-    if (group >= 0)
+    const auto lead = edit.getTrack (render->trackId);
+    if (! lead.isValid())
     {
-        // The voices go where the lead goes: the same reverb and echo sends, on the group.
+        emit ("dawBackingVocals", object ({ { "state", "error" }, { "error", "The lead track was removed while the voices were rendered." } }));
+        return;
+    }
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    edit.getUndoManager().beginNewTransaction ("Build backing vocals");
+    const auto leadVolume = (float) lead.getProperty (ids::volume, 0.0f);
+    auto index = edit.getTracks().indexOf (lead) + 1;
+    juce::Array<juce::var> names;
+    for (int i = 0; i < render->files.size(); ++i)
+    {
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (render->files[i]));
+        if (reader == nullptr || reader->lengthInSamples <= 0)
+            continue;
+        const auto seconds = (double) reader->lengthInSamples / reader->sampleRate;
+        reader.reset();
+
+        const auto trackId = (int) edit.addTrack (render->names[i].substring (0, 60), index++)[ids::id];
+        // Kept so Auto Mix and the chord listening know these are not the lead.
+        edit.getTrack (trackId).setProperty (ids::mixRole, analysis::getRoleKey (analysis::Role::backingVocal), &edit.getUndoManager());
+        if (lead.hasProperty (ids::colour))
+            edit.getTrack (trackId).setProperty (ids::colour, lead[ids::colour], &edit.getUndoManager());
+        if (render->separate)
+        {
+            edit.setTrackVolume (trackId, render->volumes[(size_t) i]);
+            edit.setTrackPan (trackId, render->pans[(size_t) i]);
+        }
+        else
+        {
+            edit.setTrackVolume (trackId, leadVolume);
+        }
+        edit.addClip (trackId, render->files[i], render->clipStart, seconds);
+        // Where the lead goes: the same reverb and echo sends.
         for (const auto& send : lead)
             if (send.hasType (ids::SEND))
-                edit.setSend (group, (int) send[ids::target], (float) send[ids::level]);
-        edit.setGroupFolded (group, true);
+                edit.setSend (trackId, (int) send[ids::target], (float) send[ids::level]);
+        names.add (render->separate ? render->partNames[(size_t) i] : juce::String ("Backing vocals"));
     }
+    edit.getUndoManager().beginNewTransaction();
+    sessionChanged = true;
 
-    const auto keyName = context.tonic >= 0 ? analysis::KeyEstimate::getName (context.tonic, context.minor) : juce::String();
-    emit ("dawBackingVocals", object ({ { "state", "done" }, { "count", count }, { "group", group }, { "parts", names },
-                                        { "chords", (int) job->chords.size() }, { "listened", job->listened }, { "key", keyName } }));
+    emit ("dawBackingVocals", object ({ { "state", "done" }, { "count", (int) render->partNames.size() }, { "tracks", names.size() }, { "parts", names },
+                                        { "chords", render->chords }, { "listened", render->listened }, { "key", render->key } }));
 }
 
 void DawBridge::finishToMidi()
