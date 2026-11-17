@@ -7214,11 +7214,16 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         if (saved["name"].toString().isEmpty())
             saved.getDynamicObject()->setProperty ("name", project.isOpen() ? project.getName() : juce::String ("Mix"));
 
-        juce::Array<juce::var> quality;
-        for (const auto& q : daw::Exporter::oggQualityNames())
-            quality.add (q);
+        auto qualities = new juce::DynamicObject();
+        for (const char* format : { "ogg", "mp3" })
+        {
+            juce::Array<juce::var> names;
+            for (const auto& q : daw::Exporter::qualityNames (format))
+                names.add (q);
+            qualities->setProperty (format, names);
+        }
 
-        complete (object ({ { "ok", true }, { "options", saved }, { "oggQualities", quality },
+        complete (object ({ { "ok", true }, { "options", saved }, { "qualities", juce::var (qualities) },
                             { "sampleRate", engine.getSampleRate() }, { "defaultName", project.isOpen() ? project.getName() : juce::String ("Mix") } }));
         return;
     }

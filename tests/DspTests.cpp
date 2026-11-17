@@ -7251,8 +7251,32 @@ namespace
                 }
             }
 
-            check (daw::Exporter::formatExtension ("mp3") == "wav" && daw::Exporter::oggQualityNames().size() > 4,
+            check (daw::Exporter::formatExtension ("wma") == "wav" && daw::Exporter::qualityNames ("ogg").size() > 4 && daw::Exporter::qualityNames ("mp3").size() == 7,
                    "unknown formats fall back to WAV; ogg offers quality steps");
+
+            // MP3 through LAME: about the right length and a signal in it, at 48 kHz even when asked for 96.
+            {
+                settings.format = "mp3";
+                settings.sampleRate = 96000.0;
+                settings.oggQuality = 2;
+                const auto file = folder.getChildFile ("fmt/mix.mp3");
+                const auto result = daw::Exporter (edit, settings).exportMix (file);
+                std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+                const auto ok = result.error.isEmpty() && reader != nullptr && reader->numChannels == 2 && juce::exactlyEqual (reader->sampleRate, 48000.0)
+                                && std::abs ((double) reader->lengthInSamples - 48000.0) < 3000.0;
+                check (ok, "exports MP3 at 48 kHz (" + (result.error.isEmpty() ? juce::String (reader != nullptr ? (int) reader->lengthInSamples : -1) + " samples" : result.error) + ")");
+
+                if (ok)
+                {
+                    juce::AudioBuffer<float> back (2, (int) reader->lengthInSamples);
+                    reader->read (&back, 0, back.getNumSamples(), 0, true, true);
+                    check (back.getMagnitude (0, 0, back.getNumSamples()) > 0.05f && file.getSize() > 8000 && file.getSize() < 40000,
+                           "the MP3 has the audio in it, at about 192 kbps (" + juce::String (file.getSize()) + " bytes)");
+                }
+
+                settings.format = "wav";
+                settings.sampleRate = sampleRate;
+            }
 
             auto stemSettings = settings;
             stemSettings.format = "flac";
