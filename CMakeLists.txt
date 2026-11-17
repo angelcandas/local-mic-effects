@@ -302,6 +302,19 @@ target_compile_definitions(MicFX
 # deliberate "did this parameter change?" caches and smoother snaps (exact compares of stored
 # values, not computed ones), -Wmissing-field-initializers on partly filled Spec structs and
 # -Wshadow on lambda/member names. Linked after the JUCE flags so these win.
+# LAME (libs/lame): the MP3 encoder used by Export. Plain C, built apart from the JUCE flags.
+file(GLOB MICFX_LAME_SOURCES CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/libs/lame/libmp3lame/*.c)
+add_library(micfx_lame STATIC ${MICFX_LAME_SOURCES})
+target_include_directories(micfx_lame
+    PUBLIC ${CMAKE_CURRENT_SOURCE_DIR}/libs/lame/include
+    PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/libs/lame ${CMAKE_CURRENT_SOURCE_DIR}/libs/lame/libmp3lame)
+target_compile_definitions(micfx_lame PRIVATE HAVE_CONFIG_H)
+set_target_properties(micfx_lame PROPERTIES POSITION_INDEPENDENT_CODE ON)
+if(NOT MSVC)
+    target_compile_options(micfx_lame PRIVATE -w)
+    target_link_libraries(micfx_lame PUBLIC m)
+endif()
+
 add_library(micfx_quiet_warnings INTERFACE)
 if(NOT MSVC)
     target_compile_options(micfx_quiet_warnings INTERFACE
@@ -494,3 +507,10 @@ if(MICFX_BUILD_TESTS)
         target_link_options(MicFXTests PRIVATE -rdynamic)
     endif()
 endif()
+
+# Everything that builds src/daw/Exporter.cpp encodes MP3 with LAME.
+foreach(micfx_target MicFX MicFXMixBench MicFXTests)
+    if(TARGET ${micfx_target})
+        target_link_libraries(${micfx_target} PRIVATE micfx_lame)
+    endif()
+endforeach()
