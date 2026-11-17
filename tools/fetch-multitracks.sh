@@ -20,6 +20,7 @@ flac=0
 [[ "$cache" == "--flac" ]] && cache="/mnt/project-files/ai-mixing-research/multitracks"
 mkdir -p "$cache/zips"
 
+lower() { echo "$1" | tr '[:upper:]' '[:lower:]'; }  # bash 3.2 (macOS) has no ${var,,}
 key() { echo "$1" | tr -cd '[:alnum:]' | tr '[:upper:]' '[:lower:]'; }
 trim() { local s="$1"; s="${s#"${s%%[![:space:]]*}"}"; echo "${s%"${s##*[![:space:]]}"}"; }
 
@@ -44,7 +45,7 @@ while IFS='|' read -r name style tempo zipurl mixurl; do
         [[ -f "$f" ]] || continue
         fk="$(key "$(basename "$f")")"
         [[ "$fk" == "$k"* ]] || continue
-        case "${f,,}" in
+        case "$(lower "$f")" in
             *.zip) zip="$f" ;;
             *.mp3|*.wav|*.flac|*.aif|*.aiff|*.m4a) mix="$f" ;;
         esac
@@ -61,7 +62,7 @@ while IFS='|' read -r name style tempo zipurl mixurl; do
     mkdir -p "$song/tracks"
     find "$tmp" -type f \( -iname '*.wav' -o -iname '*.aif' -o -iname '*.aiff' -o -iname '*.flac' \) -not -path '*/__MACOSX/*' -print0 |
         while IFS= read -r -d '' t; do
-            if [[ $flac == 1 && "${t,,}" == *.wav ]]; then
+            if [[ $flac == 1 && "$(lower "$t")" == *.wav ]]; then
                 flac -s --best -o "$song/tracks/$(basename "${t%.*}").flac" "$t"
             else
                 mv "$t" "$song/tracks/"
@@ -76,6 +77,28 @@ while IFS='|' read -r name style tempo zipurl mixurl; do
     } > "$song/song.txt"
     [[ -z "$mix" ]] && echo "        no mix found for $name: put it in $cache/zips/ and run again"
 done < "$here/multitracks.txt"
+
+# Zips that aren't in the list (songs you picked yourself): laid out too, in style pop; edit song.txt after.
+for f in "$cache"/zips/*; do
+    case "$(lower "$f")" in *.zip) ;; *) continue ;; esac
+    base="$(basename "$f")"; base="${base%.*}"
+    name="$(echo "$base" | sed -E 's/[_-]?(Full|Multitrack|Multitracks|Raw)$//I; s/_/ /g')"
+    song="$cache/$name"
+    [[ -d "$song/tracks" && -n "$(ls -A "$song/tracks" 2>/dev/null)" ]] && continue
+    k="$(key "$name")"
+    echo "unzip   $name (not in the list: style pop, edit $song/song.txt)"
+    tmp="$(mktemp -d)"
+    unzip -q -o "$f" -d "$tmp"
+    mkdir -p "$song/tracks"
+    find "$tmp" -type f \( -iname '*.wav' -o -iname '*.aif' -o -iname '*.aiff' -o -iname '*.flac' \) -not -path '*/__MACOSX/*' -exec mv {} "$song/tracks/" \;
+    rm -rf "$tmp"
+    for m in "$cache"/zips/*; do
+        case "$(lower "$m")" in *.mp3|*.wav|*.flac|*.aif|*.aiff|*.m4a) ;; *) continue ;; esac
+        [[ "$(key "$(basename "$m")")" == "$k"* ]] && cp "$m" "$song/mix.${m##*.}" && break
+    done
+    [[ -f "$song"/mix.* ]] 2>/dev/null || echo "        no mix found for $name"
+    printf 'name = %s\nstyle = pop\n' "$name" > "$song/song.txt"
+done
 
 if (( ${#missing[@]} )); then
     echo
