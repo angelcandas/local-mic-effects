@@ -161,6 +161,9 @@ public:
     daw::PluginHost& getPluginHost() noexcept                { return *pluginHost; }
     void setDawMode (bool on) noexcept                       { dawMode = on; updateLatency(); }
     bool isDawMode() const noexcept                          { return dawMode.load(); }
+    // Delay the effects add to the voice you hear while you sing or play (Live: the
+    // chain; DAW: the monitored tracks' path to the output), in samples. Any thread.
+    int getMonitorLatencySamples() const noexcept { return dawMode.load() ? dawEngine.getMonitorLatencySamples() : chain.getLatencySamples(); }
 
     // Peak levels (linear gain) since the UI last read them. Written by the audio
     // thread, drained with exchange (0) by the editor.

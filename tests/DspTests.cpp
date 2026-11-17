@@ -6634,6 +6634,88 @@ namespace
         folder.deleteRecursively();
     }
 
+    // What you hear yourself through while monitoring: the monitored track's chain, the
+    // returns' compensation and the master chain, and nothing from tracks you aren't on.
+    void testMonitorLatency()
+    {
+        std::cout << "\nMonitor latency (what the effects add to the voice you hear)\n";
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+
+        const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto other = (int) edit.addTrack ("Guitar")[daw::ids::id];
+        engine.rebuildNow();
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        // Plays an impulse into the input and returns where it comes out (or -1).
+        const auto impulseDelay = [&]
+        {
+            for (int b = 0; b < 8; ++b) // let ramps and old tails settle
+            {
+                buffer.clear();
+                engine.process (buffer, 2, blockSize, buffer.getReadPointer (0));
+            }
+            for (int b = 0; b < 40; ++b)
+            {
+                buffer.clear();
+                if (b == 0)
+                    buffer.setSample (0, 0, 0.5f);
+                engine.process (buffer, 2, blockSize, buffer.getReadPointer (0));
+                for (int i = 0; i < blockSize; ++i)
+                    if (std::abs (buffer.getSample (1, i)) > 0.25f)
+                        return b * blockSize + i;
+            }
+            return -1;
+        };
+        const auto processOnce = [&] { buffer.clear(); engine.process (buffer, 2, blockSize, buffer.getReadPointer (0)); };
+
+        processOnce();
+        check (engine.getMonitorLatencySamples() == 0, "nothing monitored: no monitor latency");
+
+        edit.setTrackMonitor (vocal, true);
+        engine.rebuildNow();
+        processOnce();
+        check (engine.getMonitorLatencySamples() == 0 && impulseDelay() == 0, "a monitored track with no delaying effects: heard at once");
+
+        // A slow effect on a track you're not monitoring delays playback to match, not you.
+        const auto denoise = (int) edit.addInsert (other, fx::ModuleType::denoise)[daw::ids::id];
+        edit.setInsertValue (denoise, "denoiseOn", 1.0f);
+        engine.rebuildNow();
+        processOnce();
+        check (engine.getLatencySamples() > 0 && engine.getMonitorLatencySamples() == 0 && impulseDelay() == 0,
+               "a delaying effect on another track doesn't delay what you monitor (" + juce::String (engine.getLatencySamples()) + " samples on the other track)");
+
+        // The master's limiter and a delaying effect on a return: both are heard.
+        edit.addInsert (daw::Edit::masterId, fx::ModuleType::limiter);
+        const auto bus = (int) edit.getReturns()[0][daw::ids::id];
+        const auto pitch = (int) edit.addInsert (bus, fx::ModuleType::pitch)[daw::ids::id];
+        edit.setInsertValue (pitch, "tuneOn", 0.0f);
+        edit.setInsertValue (pitch, "pitchOn", 1.0f);
+        engine.rebuildNow();
+        processOnce();
+        const auto expected = engine.getMonitorLatencySamples();
+        const auto measured = impulseDelay();
+        check (expected > 0 && measured == expected,
+               "the master's limiter and a return's pitch shifter delay the monitored voice by what is reported ("
+                   + juce::String (expected) + " samples reported, " + juce::String (measured) + " measured, "
+                   + juce::String (1000.0 * expected / sampleRate, 1) + " ms)");
+
+        // An FFT effect on the monitored track itself adds its frame.
+        const auto ownDenoise = (int) edit.addInsert (vocal, fx::ModuleType::denoise)[daw::ids::id];
+        edit.setInsertValue (ownDenoise, "denoiseOn", 1.0f);
+        engine.rebuildNow();
+        processOnce();
+        check (engine.getMonitorLatencySamples() == expected + engine.getInsertLatencySamples (ownDenoise),
+               "Denoise on the monitored track adds its FFT frame (" + juce::String (1000.0 * engine.getInsertLatencySamples (ownDenoise) / sampleRate, 1) + " ms)");
+
+        edit.setTrackMonitor (vocal, false);
+        engine.rebuildNow();
+        processOnce();
+        check (engine.getMonitorLatencySamples() == 0, "monitoring off: back to 0");
+    }
+
     void testDawRecording()
     {
         std::cout << "\nDAW recording (dry takes, monitoring, metronome)\n";
@@ -18951,6 +19033,7 @@ int main()
     testGroups();
     testMastering();
     testDawRecording();
+    testMonitorLatency();
     testTakes();
     testStereoInputs();
     testMidiTracks();
