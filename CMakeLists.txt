@@ -188,6 +188,8 @@ set(MICFX_DSP_SOURCES
     src/daw/RackInsert.h
     src/daw/Project.cpp
     src/daw/Hitpoints.cpp
+    src/daw/MidiFileIO.cpp
+    src/daw/MidiFileIO.h
     src/daw/Hitpoints.h
     src/daw/Quantize.cpp
     src/daw/Quantize.h
