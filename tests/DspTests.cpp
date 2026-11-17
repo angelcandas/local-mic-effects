@@ -6716,6 +6716,99 @@ namespace
         check (engine.getMonitorLatencySamples() == 0, "monitoring off: back to 0");
     }
 
+    // The cue mix: the monitored voice goes to the headphones without the track's effects,
+    // the returns' wait or the master's, at its own level over the music.
+    void testCueMix()
+    {
+        std::cout << "\nCue mix (headphones without the wait)\n";
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+
+        check (edit.getCue().isValid() && ! daw::Edit::isCueOn (edit.getCue()) && edit.getChannel (daw::Edit::cueId) == edit.getCue(),
+               "a new project has a cue mix, off");
+
+        const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        edit.setTrackMonitor (vocal, true);
+        const auto denoise = (int) edit.addInsert (vocal, fx::ModuleType::denoise)[daw::ids::id];
+        edit.setInsertValue (denoise, "denoiseOn", 1.0f);
+        edit.addInsert (daw::Edit::masterId, fx::ModuleType::limiter);
+        engine.rebuildNow();
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        const auto run = [&] (int blocks, float impulseAt0)
+        {
+            int at = -1;
+            float peak = 0.0f;
+            for (int b = 0; b < blocks; ++b)
+            {
+                buffer.clear();
+                if (b == 0 && impulseAt0 != 0.0f)
+                    buffer.setSample (0, 0, impulseAt0);
+                engine.process (buffer, 2, blockSize, buffer.getReadPointer (0));
+                for (int i = 0; i < blockSize; ++i)
+                {
+                    const auto v = std::abs (buffer.getSample (1, i));
+                    if (at < 0 && v > 0.05f)
+                        at = b * blockSize + i;
+                    peak = std::max (peak, v);
+                }
+            }
+            return std::pair { at, peak };
+        };
+
+        run (8, 0.0f);
+        const auto mainDelay = engine.getMonitorLatencySamples();
+        check (mainDelay >= 512, "without the cue mix the voice waits for Denoise and the limiter (" + juce::String (mainDelay) + " samples)");
+
+        edit.setCueOn (true);
+        run (8, 0.0f);
+        const auto [at, peak] = run (20, 0.5f);
+        check (engine.isCueOn() && engine.getMonitorLatencySamples() == 0 && at == 0 && std::abs (peak - 0.5f) < 1.0e-3f,
+               "cue mix on: the voice is heard at once, at its own level (at sample " + juce::String (at) + ", peak " + juce::String (peak, 3) + ")");
+
+        // Its levels: the voice down 6 dB, the phones down 6 dB more.
+        edit.setCueLevel (daw::ids::voice, -6.0f);
+        edit.setCueLevel (daw::ids::volume, -6.0f);
+        run (8, 0.0f);
+        const auto quieter = run (20, 0.5f).second;
+        check (std::abs (quieter - 0.5f * juce::Decibels::decibelsToGain (-12.0f)) < 2.0e-3f,
+               "Voice and Phones turn it down (peak " + juce::String (quieter, 3) + ")");
+        edit.setCueLevel (daw::ids::voice, 0.0f);
+        edit.setCueLevel (daw::ids::volume, 0.0f);
+
+        // Its own effects play on the voice; a delaying one shows in the readout.
+        const auto pitch = (int) edit.addInsert (daw::Edit::cueId, fx::ModuleType::pitch)[daw::ids::id];
+        edit.setInsertValue (pitch, "tuneOn", 0.0f);
+        edit.setInsertValue (pitch, "pitchOn", 1.0f);
+        engine.rebuildNow();
+        run (2, 0.0f);
+        check (engine.getMonitorLatencySamples() == engine.getInsertLatencySamples (pitch) && engine.getMonitorLatencySamples() > 0,
+               "an effect on the cue mix counts in what you hear (" + juce::String (engine.getMonitorLatencySamples()) + " samples)");
+        edit.removeInsert (pitch);
+        engine.rebuildNow();
+
+        // Off again: the voice goes back through its track.
+        edit.setCueOn (false);
+        run (2, 0.0f);
+        check (! engine.isCueOn() && engine.getMonitorLatencySamples() == mainDelay, "cue mix off: back to the main path");
+
+        // Saved and opened again; older projects get one.
+        juce::ValueTree old (daw::ids::PROJECT);
+        old.setProperty (daw::ids::version, 1, nullptr);
+        daw::Edit loaded;
+        loaded.replaceState (old);
+        check (loaded.getCue().isValid() && loaded.getCue().getChildWithName (daw::ids::INSERTS).isValid(), "an older project gets a cue mix");
+
+        // An offline engine (export) never uses it.
+        edit.setCueOn (true);
+        daw::DawEngine offline (edit, false);
+        offline.prepare (sampleRate, blockSize);
+        check (! offline.isCueOn(), "exports don't use the cue mix");
+        edit.setCueOn (false);
+    }
+
     void testDawRecording()
     {
         std::cout << "\nDAW recording (dry takes, monitoring, metronome)\n";
@@ -7969,6 +8062,19 @@ namespace
         run ("undo");
         check (trackCount (lastSession()) == 1, "Add track undoes in one step");
         run ("redo");
+
+        // The cue mix: in the session, switched and set from the page, effects on it.
+        check (ok (run ("setCue", args ({ { "on", true }, { "voice", -3.0 }, { "music", -9.0 } }))), "setCue completes");
+        session = lastSession();
+        check ((bool) session["cue"]["on"] && (int) session["cue"]["id"] == daw::Edit::cueId && std::abs ((double) session["cue"]["voice"] + 3.0) < 1.0e-6
+                   && std::abs ((double) session["cue"]["music"] + 9.0) < 1.0e-6 && processor.getDawEngine().isCueOn(),
+               "the cue mix is in the session and switches on from the page");
+        const auto cueEq = run ("addInsert", args ({ { "track", daw::Edit::cueId }, { "type", "eq" } }));
+        session = lastSession();
+        check (session["cue"]["inserts"].size() == 1, "an effect goes on the cue mix like any chain (" + juce::JSON::toString (cueEq, true) + ")");
+        run ("setCue", args ({ { "on", false } }));
+        run ("undo"); // the effect
+        check (lastSession()["cue"]["inserts"].size() == 0 && ! (bool) lastSession()["cue"]["on"], "the cue effect undoes; the switch isn't an edit");
 
         // Import (no project open): the file is used where it is, on the chosen track.
         const auto song = folder.getChildFile ("Song.wav");
@@ -19034,6 +19140,7 @@ int main()
     testMastering();
     testDawRecording();
     testMonitorLatency();
+    testCueMix();
     testTakes();
     testStereoInputs();
     testMidiTracks();

@@ -1874,6 +1874,22 @@ body.is-daw .app-project { color: var(--text); font-weight: 600; }
 }
 .strip.is-master.is-selected { box-shadow: 0 0 0 1px var(--track-color), -10px 0 18px -8px rgba(0, 0, 0, 0.55); }
 
+/* The cue (headphone) mix: pinned just left of the master (112px wide + the 8px gap). */
+.strip.is-cue {
+  width: 112px;
+  position: sticky;
+  right: 120px;
+  z-index: 2;
+  box-shadow: -10px 0 18px -8px rgba(0, 0, 0, 0.55);
+  opacity: 0.78;
+}
+.strip.is-cue.is-on { opacity: 1; border-top-color: var(--track-color); }
+.strip.is-cue.is-selected { box-shadow: 0 0 0 1px var(--track-color), -10px 0 18px -8px rgba(0, 0, 0, 0.55); }
+.strip-cue-knobs { display: flex; gap: 2px; justify-content: center; }
+.strip-cue-knobs .knob { transform: scale(0.86); transform-origin: top center; }
+.tt-cue[aria-pressed="true"] { background: var(--accent); color: #10131a; border-color: transparent; }
+.chain-cue-on[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+
 .strip.is-return { position: relative; background: linear-gradient(180deg, color-mix(in srgb, var(--track-color) 7%, var(--panel-raised)), var(--panel)); }
 .strip-remove { position: absolute; top: 4px; right: 4px; opacity: 0; }
 .strip.is-return:hover .strip-remove,

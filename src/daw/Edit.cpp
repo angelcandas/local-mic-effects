@@ -38,6 +38,18 @@ namespace
         master.appendChild (juce::ValueTree (ids::INSERTS), nullptr);
         return master;
     }
+
+    juce::ValueTree makeCue()
+    {
+        juce::ValueTree cue (ids::CUE);
+        cue.setProperty (ids::id, Edit::cueId, nullptr);
+        cue.setProperty (ids::cueOn, false, nullptr);
+        cue.setProperty (ids::voice, 0.0f, nullptr);
+        cue.setProperty (ids::music, 0.0f, nullptr);
+        cue.setProperty (ids::volume, 0.0f, nullptr);
+        cue.appendChild (juce::ValueTree (ids::INSERTS), nullptr);
+        return cue;
+    }
 }
 
 Edit::Edit() : state (ids::PROJECT)
@@ -45,6 +57,7 @@ Edit::Edit() : state (ids::PROJECT)
     state.setProperty (ids::version, formatVersion, nullptr);
     state.setProperty (ids::tempo, 120.0, nullptr);
     state.appendChild (makeMaster(), nullptr);
+    state.appendChild (makeCue(), nullptr);
     addDefaultReturns();
 }
 
@@ -80,6 +93,8 @@ void Edit::replaceState (const juce::ValueTree& newState)
 
     if (! getMaster().isValid())
         state.addChild (makeMaster(), 0, nullptr);
+    if (! getCue().isValid())
+        state.addChild (makeCue(), 1, nullptr); // projects from before the cue mix
 
     nextId = maxId (state) + 1;
 
@@ -90,7 +105,7 @@ void Edit::replaceState (const juce::ValueTree& newState)
     // track and the master an effects list, and anything without an id a fresh one.
     for (auto child : state)
     {
-        if (! child.hasType (ids::TRACK) && ! child.hasType (ids::MASTER) && ! child.hasType (ids::RETURN))
+        if (! child.hasType (ids::TRACK) && ! child.hasType (ids::MASTER) && ! child.hasType (ids::RETURN) && ! child.hasType (ids::CUE))
             continue;
 
         if (! child.getChildWithName (ids::INSERTS).isValid())
@@ -264,6 +279,8 @@ juce::ValueTree Edit::getChannel (int id) const
 {
     if (id == masterId)
         return getMaster();
+    if (id == cueId)
+        return getCue();
 
     auto channel = state.getChildWithProperty (ids::id, id);
     return channel.hasType (ids::TRACK) || channel.hasType (ids::RETURN) ? channel : juce::ValueTree();
@@ -299,6 +316,14 @@ void Edit::setTrackMute (int trackId, bool mute)        { if (trackId != masterI
 void Edit::setTrackSolo (int trackId, bool solo)        { if (trackId != masterId) getChannel (trackId).setProperty (ids::solo, solo, undoTarget); }
 void Edit::setMasterVolume (float decibels)             { getMaster().setProperty (ids::volume, decibels, undoTarget); }
 void Edit::setMasterPan (float pan)                     { getMaster().setProperty (ids::pan, juce::jlimit (-1.0f, 1.0f, pan), undoTarget); }
+
+void Edit::setCueOn (bool on)                           { getCue().setProperty (ids::cueOn, on, nullptr); }
+
+void Edit::setCueLevel (const juce::Identifier& which, float decibels)
+{
+    if (which == ids::voice || which == ids::music || which == ids::volume)
+        getCue().setProperty (which, juce::jlimit (-100.0f, 12.0f, decibels), undoTarget);
+}
 
 //==============================================================================
 juce::ValueTree Edit::addReturn (const juce::String& name, std::optional<fx::ModuleType> effect)
@@ -2580,7 +2605,7 @@ juce::ValueTree Edit::createInsertTree (fx::ModuleType type)
 juce::ValueTree Edit::getChannelOf (const juce::ValueTree& insert)
 {
     for (auto tree = insert.getParent(); tree.isValid(); tree = tree.getParent())
-        if (tree.hasType (ids::TRACK) || tree.hasType (ids::RETURN) || tree.hasType (ids::MASTER))
+        if (tree.hasType (ids::TRACK) || tree.hasType (ids::RETURN) || tree.hasType (ids::MASTER) || tree.hasType (ids::CUE))
             return tree;
     return {};
 }

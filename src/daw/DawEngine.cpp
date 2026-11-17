@@ -104,6 +104,12 @@ void DawEngine::prepare (double newSampleRate, int maximumBlockSize)
     }
 
     blockSize = juce::jmax (1, maximumBlockSize);
+    using CueGain = std::pair<juce::SmoothedValue<float>*, std::atomic<float>*>;
+    for (auto [gain, target] : { CueGain { &cueVoice, &cueVoiceTarget }, CueGain { &cueMusic, &cueMusicTarget }, CueGain { &cueVolume, &cueVolumeTarget } })
+    {
+        gain->reset (sampleRate, smoothingSeconds);
+        gain->setCurrentAndTargetValue (target->load());
+    }
     if ((int) silence.size() < blockSize)
         silence.assign ((size_t) blockSize, 0.0f);
     // Stops (and keeps) a take in progress.
@@ -464,6 +470,12 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         return;
     }
 
+    if (tree.hasType (ids::CUE))
+    {
+        updateMix(); // its switch, levels and chain gains
+        return;
+    }
+
     if (tree.hasType (ids::TRACK) || tree.hasType (ids::MASTER) || tree.hasType (ids::RETURN))
     {
         if (property == ids::volume || property == ids::pan || property == ids::mute || property == ids::solo
@@ -660,6 +672,15 @@ void DawEngine::updateMix()
 
     if (const auto it = strips.find (Edit::masterId); it != strips.end())
         setStripTargets (*it->second, edit.getMaster(), true, false);
+
+    // The cue mix: its levels, and its chain's own gains.
+    const auto cue = edit.getCue();
+    cueVoiceTarget = volumeToGain (cue.getProperty (ids::voice, 0.0f));
+    cueMusicTarget = volumeToGain (cue.getProperty (ids::music, 0.0f));
+    cueVolumeTarget = volumeToGain (cue.getProperty (ids::volume, 0.0f));
+    cueOn = realtime && Edit::isCueOn (cue);
+    if (const auto it = strips.find (Edit::cueId); it != strips.end())
+        it->second->chain.setGains ((float) cue.getProperty (ids::inGain, 0.0f), (float) cue.getProperty (ids::outGain, 0.0f));
 }
 
 void DawEngine::loadInsertFile (fx::Module& module, const juce::ValueTree& insert)
@@ -949,6 +970,8 @@ void DawEngine::rebuild()
 
     graph->master = reuse (edit.getMaster());
     buildAutomation (graph->masterAutomation, *graph->master, edit.getMaster());
+    if (realtime && edit.getCue().isValid())
+        graph->cue = reuse (edit.getCue());
     graph->tempo = edit.getTempoMap();
 
     // Pattern mode: just the pattern, as a loop (a removed pattern goes back to the song).
@@ -1217,6 +1240,8 @@ void DawEngine::rebuild()
 
     length = end;
     graph->master->latencyAtBuild = graph->master->chain.getLatencySamples();
+    if (graph->cue != nullptr)
+        graph->cue->latencyAtBuild = graph->cue->chain.getLatencySamples();
     latency = maxLatency + maxReturnLatency + graph->master->latencyAtBuild;
 
     updateMix();
@@ -2334,13 +2359,20 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 
     const auto feedSends = [&] (Track& track, bool pre) { feedSendsFrom (track.sends, *track.strip, pre); };
 
+    // With the cue mix on, the monitored inputs skip their tracks: they go through the
+    // cue's effects straight to the output.
+    const auto cue = cueOn.load (std::memory_order_relaxed) && graph.cue != nullptr ? graph.cue.get() : nullptr;
+    if (cue != nullptr)
+        cue->buffer.clear (0, numSamples);
+
     // What the monitored tracks are heard through, for the audio status.
     auto slowestMonitored = -1;
     for (const auto& track : graph.tracks)
         if (track.strip->monitoring.load (std::memory_order_relaxed) && (track.strip->isMidi || numInputs > 0))
-            slowestMonitored = juce::jmax (slowestMonitored, track.strip->latencyAtBuild);
-    monitorLatency.store (slowestMonitored < 0 ? 0 : slowestMonitored + graph.directDelay.samples + graph.master->latencyAtBuild,
-                          std::memory_order_relaxed);
+            slowestMonitored = juce::jmax (slowestMonitored, track.strip->isMidi || cue == nullptr
+                                                                 ? track.strip->latencyAtBuild + graph.directDelay.samples + graph.master->latencyAtBuild
+                                                                 : cue->latencyAtBuild);
+    monitorLatency.store (juce::jmax (0, slowestMonitored), std::memory_order_relaxed);
 
     for (auto& track : graph.tracks)
     {
@@ -2366,10 +2398,19 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
             const auto rightIndex = strip.inputRight.load (std::memory_order_relaxed);
             const auto* right = rightIndex == Edit::noInput ? left : inputChannel (rightIndex);
 
+            // Cue mix: into the cue instead, and the track's meter shows the input.
+            auto& into = cue != nullptr ? cue->buffer : strip.buffer;
             if (left != nullptr)
-                strip.buffer.addFrom (0, 0, left, numSamples);
+                into.addFrom (0, 0, left, numSamples);
             if (right != nullptr)
-                strip.buffer.addFrom (1, 0, right, numSamples);
+                into.addFrom (1, 0, right, numSamples);
+            if (cue != nullptr)
+            {
+                if (left != nullptr)
+                    updatePeak (strip.peakLeft, juce::FloatVectorOperations::findMaximum (left, numSamples)); // rough: the positive peak
+                if (right != nullptr)
+                    updatePeak (strip.peakRight, juce::FloatVectorOperations::findMaximum (right, numSamples));
+            }
         }
 
         playEffectLanes (track, isPlaying, blockStart);
@@ -2447,6 +2488,34 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     playVolumeAndPan (graph.masterAutomation, master, isPlaying, masterTime, numSamples);
     updatePeak (master.peakLeft, master.buffer.getMagnitude (0, 0, numSamples));
     updatePeak (master.peakRight, master.buffer.getMagnitude (1, 0, numSamples));
+
+    // The cue mix: the voice through the cue's effects over the main mix, at their own
+    // levels, all at the phones volume. It's what goes out (the master's meter stays the
+    // main mix's).
+    if (cue != nullptr)
+    {
+        auto cueBlock = juce::dsp::AudioBlock<float> (cue->buffer).getSubBlock (0, (size_t) numSamples);
+        cue->chain.process (fx::Module::Context (cueBlock));
+
+        const auto ramp = [numSamples] (juce::SmoothedValue<float>& gain, float target)
+        {
+            gain.setTargetValue (target);
+            const auto from = gain.getCurrentValue();
+            return std::pair { from, gain.skip (numSamples) };
+        };
+        const auto [voiceFrom, voiceTo] = ramp (cueVoice, cueVoiceTarget.load (std::memory_order_relaxed));
+        const auto [musicFrom, musicTo] = ramp (cueMusic, cueMusicTarget.load (std::memory_order_relaxed));
+        const auto [volumeFrom, volumeTo] = ramp (cueVolume, cueVolumeTarget.load (std::memory_order_relaxed));
+
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            master.buffer.applyGainRamp (ch, 0, numSamples, musicFrom, musicTo);
+            master.buffer.addFromWithRamp (ch, 0, cue->buffer.getReadPointer (ch), numSamples, voiceFrom, voiceTo);
+            master.buffer.applyGainRamp (ch, 0, numSamples, volumeFrom, volumeTo);
+        }
+        updatePeak (cue->peakLeft, master.buffer.getMagnitude (0, 0, numSamples));
+        updatePeak (cue->peakRight, master.buffer.getMagnitude (1, 0, numSamples));
+    }
 
     if (numChannels == 1)
     {

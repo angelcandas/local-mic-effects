@@ -26,6 +26,7 @@ import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, 
 
 const nativeDaw = Juce.getNativeFunction("daw");
 
+const CUE_ID = -2;                 // the cue mix's channel id (Edit::cueId)
 const HEAD_WIDTH = 244;           // track header column, px, by default (--head in daw.css); resizable
 const MIN_HEAD = 170, MAX_HEAD = 420;
 const GROUP_ROW = 56;              // a group track's header height, px (name line and mix line)
@@ -3327,7 +3328,7 @@ class DawScreen {
     const describe = (t) => `${t.id}:${t.name}:${slotKey(t.inserts)}:${t.colour}`;
     const groups = session.groups ?? [];
     const signature = session.tracks.map(describe).join("|") + `|g:${groups.map((g) => describe(g) + g.folded).join("|")}` + `|r:${returns.map(describe).join("|")}` + `|in:${(session.inputs ?? []).join(",")}`
-                      + `|m:${slotKey(session.master.inserts)}`;
+                      + `|m:${slotKey(session.master.inserts)}|c:${slotKey(session.cue?.inserts ?? [])}`;
 
     // The track headers' I/O and Sends switches show the same sections on the strips.
     this.mixer.classList.toggle("show-routing", this.showRouting);
@@ -3342,6 +3343,7 @@ class DawScreen {
       strips.push(this.createAddReturnStrip());
       // The master stays pinned at the right edge while the strips scroll under it.
       const masterStrip = this.createStrip({ ...session.master, id: 0, name: "Master" }, -1, "master");
+      if (session.cue) strips.push(this.createCueStrip(session.cue));
       this.mixer.replaceChildren(...strips, masterStrip);
     }
 
@@ -3368,6 +3370,62 @@ class DawScreen {
     master.pan.update(session.master.pan ?? 0);
     master.readout.textContent = dbText(session.master.volume);
     master.element.classList.toggle("is-selected", this.selectedTrack === 0);
+    this.strips.get(CUE_ID)?.update(session.cue);
+  }
+
+  // The cue (headphone) mix, pinned left of the master: the live voice through its own
+  // effects, at its own level over the music, with no wait for the tracks' effects.
+  createCueStrip(cue) {
+    const element = html("div", "strip is-cue");
+    element.style.setProperty("--track-color", "var(--accent)");
+    element.title = "Cue mix: what you hear in the headphones while you record. The armed tracks' inputs skip their effects, "
+                  + "the returns and the master, so you hear yourself with no delay; recordings stay dry and the main mix keeps its effects.";
+    element.addEventListener("pointerdown", (event) => {
+      if (event.target.closest(".fader, .knob, button, select")) return;
+      this.select(CUE_ID, null);
+    });
+
+    const set = (key) => (value, first) => daw("setCue", { [key]: value, continue: !first });
+    const on = button("tt tt-cue", "Cue", "Cue mix on: hear the voice straight from the input, with the cue's own effects", () =>
+      daw("setCue", { on: !this.session.cue?.on }));
+    const inserts = html("div", "strip-inserts");
+    for (const insert of cue.inserts) inserts.append(this.createStripSlot({ ...cue, id: CUE_ID }, insert));
+    inserts.append(button("strip-insert is-add", "+ Effect", "Add an effect to the voice in the headphones (pick ones with no delay)",
+                          () => this.select(CUE_ID, null, true, true)));
+    const knob = (label, key, title) => {
+      const k = new ValueKnob({ label, min: -60, max: 12, value: cue[key] ?? 0, defaultValue: 0, unit: "dB", onChange: set(key) });
+      k.element.title = title;
+      return k;
+    };
+    const voice = knob("Voice", "voice", "Voice: your live input in the headphones");
+    const music = knob("Music", "music", "Music: the rest of the mix in the headphones");
+    const knobs = html("div", "strip-cue-knobs");
+    knobs.append(voice.element, music.element);
+    const fader = new Fader({ value: cue.volume ?? 0, onChange: set("volume") });
+    const meter = new StereoLevel(CUE_ID);
+    const faderRow = html("div", "strip-fader");
+    faderRow.append(fader.element, meter.element);
+    faderRow.title = "Phones: the cue mix's overall volume";
+    const readout = html("div", "strip-readout");
+    const buttons = html("div", "strip-toggles");
+    buttons.append(on);
+    const name = html("div", "strip-name", "Cue · Phones");
+    element.append(inserts, knobs, faderRow, readout, buttons, name);
+
+    const update = (latest) => {
+      if (!latest) return;
+      on.setAttribute("aria-pressed", String(Boolean(latest.on)));
+      element.classList.toggle("is-on", Boolean(latest.on));
+      voice.update?.(latest.voice ?? 0);
+      music.update?.(latest.music ?? 0);
+      fader.update(latest.volume ?? 0);
+      readout.textContent = dbText(latest.volume ?? 0);
+      element.classList.toggle("is-selected", this.selectedTrack === CUE_ID);
+    };
+    // The meter loop and renderMixer reach strips by id.
+    this.strips.set(CUE_ID, { element, fader, pan: voice, readout, toggles: {}, meter, update });
+    update(cue);
+    return element;
   }
 
   // The dashed strip after the returns: adds a return track, empty or with an effect.
@@ -4117,6 +4175,7 @@ class DawScreen {
     const session = this.session;
     const selectedReturn = [...(session.returns ?? []), ...(session.groups ?? [])].find((r) => r.id === this.selectedTrack);
     let owner = this.selectedTrack === 0 ? { ...session.master, id: 0, name: "Master" }
+              : this.selectedTrack === CUE_ID && session.cue ? { ...session.cue, id: CUE_ID, name: "Cue mix", isCue: true }
               : selectedReturn ? { ...selectedReturn, isReturn: true }
               : session.tracks.find((t) => t.id === this.selectedTrack);
     if (!owner && session.tracks.length) {
@@ -4426,17 +4485,19 @@ class DawScreen {
   createTrackPanel(owner) {
     const element = html("section", "panel track-panel");
     const isMaster = owner.id === 0;
+    const isCue = owner.id === CUE_ID;
     const isReturn = Boolean(owner.isReturn);
     const index = isReturn ? Math.max(0, [...(this.session.returns ?? []), ...(this.session.groups ?? [])].findIndex((r) => r.id === owner.id)) : this.session.tracks.findIndex((t) => t.id === owner.id);
-    element.style.setProperty("--track-color", isMaster ? "var(--accent-2)" : isReturn ? returnColour(owner, index) : trackColour(owner, index));
+    element.style.setProperty("--track-color", isMaster ? "var(--accent-2)" : isCue ? "var(--accent)" : isReturn ? returnColour(owner, index) : trackColour(owner, index));
 
     // A slim header: whose chain this is, and the chain's menu (presets, copy, paste).
     const head = html("div", "panel-head chain-head");
     head.title = isMaster ? "Master effects: applied to the whole mix, after the tracks and returns."
+      : isCue ? "Cue effects: on your live voice in the headphones only, while the cue mix is on. Pick effects with no delay (EQ, compressor, reverb): a delay badge means you'd hear yourself late."
       : isReturn ? "Return effects: shared by every track that sends here. Keep them fully wet; the dry sound stays on the tracks."
       : owner.kind === "midi" ? `Effects after the instrument (${owner.instrument?.name ?? "none"}). Change them any time.`
       : "Effects play on top of the take, which is recorded dry: change them any time.";
-    const name = html("strong", "chain-title", isMaster ? "Master" : owner.name);
+    const name = html("strong", "chain-title", isMaster ? "Master" : isCue ? "Cue mix" : owner.name);
     const menuButton = button("tool chain-menu-button", "Chain", "Presets, copy and paste for this chain", (event) => this.openChainMenu(owner, event.currentTarget));
     // Macros: shown while you want them, or while one is in use.
     const macrosUsed = (owner.macros ?? []).some((m) => m.maps.length);
@@ -4447,7 +4508,13 @@ class DawScreen {
       this.renderInspector();
     });
     macroButton.setAttribute("aria-pressed", String(macrosShown));
-    head.append(html("span", "chain-kind", isMaster ? "Mix effects" : isReturn ? "Return effects" : "Effects"), name, menuButton, macroButton);
+    head.append(html("span", "chain-kind", isMaster ? "Mix effects" : isCue ? "Headphone effects" : isReturn ? "Return effects" : "Effects"), name, menuButton, macroButton);
+    if (isCue) {
+      const cueOn = button("tool chain-cue-on", owner.on ? "Cue on" : "Cue off", "Cue mix on or off: with it on, the armed tracks' inputs play through these effects only",
+                           () => daw("setCue", { on: !this.session.cue?.on }));
+      cueOn.setAttribute("aria-pressed", String(Boolean(owner.on)));
+      head.append(cueOn);
+    }
     element.append(head);
 
     const list = html("div", "insert-list");
@@ -4460,7 +4527,7 @@ class DawScreen {
       const column = html("div", `chain-gain is-${key}`);
       const knob = new ValueKnob({
         label: "Gain", min: -24, max: 24, value: owner[key] ?? 0, defaultValue: 0, bipolar: true, unit: "dB",
-        onChange: (v, first) => daw(isMaster ? "setMaster" : "setTrack", { ...(isMaster ? {} : { id: owner.id }), [key]: v, continue: !first }),
+        onChange: (v, first) => daw(isMaster ? "setMaster" : isCue ? "setCue" : "setTrack", { ...(isMaster || isCue ? {} : { id: owner.id }), [key]: v, continue: !first }),
       });
       const meter = new Level(true);
       column.title = caption;
@@ -4474,7 +4541,7 @@ class DawScreen {
     const chain = html("div", "chain-row");
     // Before the chain: the inputs an audio track records from.
     this.panelInput = null;
-    if (!isMaster && !isReturn && owner.kind !== "midi") {
+    if (!isMaster && !isCue && !isReturn && owner.kind !== "midi") {
       const picker = this.createInputPicker(owner, { panel: true });
       this.panelInput = { id: owner.id, update: picker.update };
       const box = html("div", "panel-input");
@@ -4501,6 +4568,7 @@ class DawScreen {
   async openChainMenu(owner, anchor) {
     // The session is newer than the header's, after the chain changed without a rebuild.
     owner = owner.id === 0 ? this.session.master
+      : owner.id === CUE_ID ? { ...this.session.cue, id: CUE_ID }
       : [...this.session.tracks, ...(this.session.returns ?? []), ...(this.session.groups ?? [])].find((t) => t.id === owner.id) ?? owner;
     const box = anchor.getBoundingClientRect();
     const clipboard = this.effectsClipboard;
@@ -5831,7 +5899,8 @@ class DawScreen {
     if (this.reveal && tracks.some((t) => t.id === this.reveal.track)) {
       this.selectedTrack = this.reveal.track;
       this.selectedClip = this.reveal.clip ?? null;
-    } else if (this.selectedTrack !== 0 && !tracks.some((t) => t.id === this.selectedTrack) && !session.groups.some((g) => g.id === this.selectedTrack)) {
+    } else if (this.selectedTrack !== 0 && this.selectedTrack !== CUE_ID && !tracks.some((t) => t.id === this.selectedTrack)
+               && !session.groups.some((g) => g.id === this.selectedTrack) && !(session.returns ?? []).some((r) => r.id === this.selectedTrack)) {
       this.selectedTrack = tracks[0]?.id ?? null;
       this.selectedClip = null;
     }

@@ -345,6 +345,15 @@ If a plug-in is missing when you open a project, the insert stays in place marke
 - An **output picker** on a track can send the whole track into a return instead of the master, which makes a group bus.
 - The **master** bus has its own inserts, volume and balance. Returns and master scroll along with the tracks.
 
+### Cue mix (headphones with no delay)
+
+The **Cue** strip, left of the master, is what you hear in your headphones while you record. Press **Cue** to switch it on. Your armed tracks' inputs then skip their own effects, the returns and the master, so you hear yourself with no delay even when the track has slow effects such as Denoise, Smooth or a look-ahead limiter. The recording stays dry and the main mix keeps all its effects.
+
+- **Voice**: your live input in the headphones. **Music**: the rest of the mix. The fader is the **Phones** volume.
+- Click the strip to give the cue its own effects in the Effects panel (an EQ, a compressor, a reverb). Pick effects with no delay badge.
+- The audio status at the bottom shows what the effects you hear yourself through add, for example "5.3 ms round trip + 10.7 ms effects". With the cue mix on and no slow effects on it, that extra part is gone.
+- Exports never use the cue mix.
+
 ### Mastering effects
 
 Under *Mastering* in Add effect and the library (DAW only): **Mastering EQ**, **Multiband Compressor** (three bands), **Stereo Imager** (width with mono bass and a correlation readout), **Limiter** (look-ahead brickwall) and a **Loudness Meter** (momentary, short-term and integrated LUFS against a target). Put them on the master.

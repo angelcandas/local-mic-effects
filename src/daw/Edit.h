@@ -21,6 +21,8 @@
 //              ranges can adopt these as they are)
 //     MASTER  volume (dB)
 //       INSERTS
+//     CUE  id (cueId), cueOn, voice, music, volume (dB): the headphone (cue) mix, see "Cue mix"
+//       INSERTS ...   (its own effects on the live voice; keep them free of delay)
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value,
 //                 file (the impulse response a cab or IR reverb plays through; missing = none)
 //         INSERT  type "plugin", id, pluginOn, pluginInGain, pluginOutGain, plugin, name, format,
@@ -130,6 +132,7 @@ namespace ids
     MICFX_DAW_ID (min) MICFX_DAW_ID (max) MICFX_DAW_ID (value) MICFX_DAW_ID (index)
     MICFX_DAW_ID (panAutomation) // a TRACK's pan over time, see setLane
     MICFX_DAW_ID (CHAIN) // a rack's chain (INSERT type "rack", see RackInsert.h)
+    MICFX_DAW_ID (CUE) MICFX_DAW_ID (cueOn) MICFX_DAW_ID (voice) MICFX_DAW_ID (music) // the cue mix
 #undef MICFX_DAW_ID
 }
 
@@ -144,6 +147,20 @@ public:
     juce::ValueTree& getState() noexcept           { return state; }
     juce::UndoManager& getUndoManager() noexcept   { return undoManager; }
     juce::ValueTree getMaster() const              { return state.getChildWithName (ids::MASTER); }
+
+    //==============================================================================
+    // Cue mix: what you hear in the headphones while you record, made apart from the main
+    // mix so it has no wait in it. With it on, the monitored audio tracks' inputs don't go
+    // through their own effects, the returns and the master; the raw inputs go through the
+    // cue's own effects instead (zero-delay ones: EQ, compressor, reverb) at the Voice level,
+    // over the main mix (without them) at the Music level, all at the Phones volume.
+    // Recordings stay dry and the main mix keeps its effects. Every project has one (off).
+    static constexpr int cueId = -2;
+    juce::ValueTree getCue() const                 { return state.getChildWithName (ids::CUE); }
+    void setCueOn (bool on);                       // not undoable, like arm and monitor
+    // "voice", "music" or "volume", in dB (-inf is off). Undoable.
+    void setCueLevel (const juce::Identifier& which, float decibels);
+    static bool isCueOn (const juce::ValueTree& cue) { return (bool) cue.getProperty (ids::cueOn, false); }
 
     // Replaces the whole session (e.g. when opening a project). Clears the undo history.
     void replaceState (const juce::ValueTree& newState);
@@ -218,7 +235,7 @@ public:
     void setTrackOutput (int trackId, int returnIdOrMaster);
     static int getTrackOutput (const juce::ValueTree& track) { return (int) track.getProperty (ids::output, masterId); }
 
-    // A track, return or the master by id (whatever the mixer shows as a strip).
+    // A track, return, the master or the cue mix by id (whatever the mixer shows as a strip).
     juce::ValueTree getChannel (int id) const;
 
     // The insert chain's input and output gain (before and after its effects), in dB,
@@ -688,7 +705,7 @@ public:
     juce::ValueTree addPluginInsert (int trackId, const InstrumentInfo& plugin, int index = -1);
     static bool isPluginInsert (const juce::ValueTree& insert) { return insert[ids::type].toString() == "plugin"; }
     static bool isRackInsert (const juce::ValueTree& insert) { return insert[ids::type].toString() == "rack"; }
-    // The track, return, group or master an insert is on (through any racks it's in).
+    // The track, return, group, master or cue an insert is on (through any racks it's in).
     static juce::ValueTree getChannelOf (const juce::ValueTree& insert);
     // Racks (RackInsert.h): parallel chains of effects as one insert.
     // The inserts become one rack, in the first one's place, as its first chain. -> the rack.
