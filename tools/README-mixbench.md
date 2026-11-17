@@ -12,7 +12,7 @@ whose licence allows non-commercial use only. Private testing only, no training,
 1. Open the Cambridge-MT library (https://www.cambridge-mt.com/ms3/mtk/) in a browser and
    download, for each song in `tools/multitracks.txt`, the full multitrack zip and the mix
    (mp3 or wav). Put them all in one folder, `<cache>/zips/`.
-2. `tools/fetch-multitracks.sh <cache>` lays them out as song folders (add `--flac` to save space).
+2. `tools/fetch-multitracks.sh <cache>` lays them out as song folders (add `--flac` to save space). Zips of songs that aren't in the list are laid out too (style pop; edit the song's `song.txt`). Works with macOS's own bash.
 
 A song folder can also be made by hand:
 
