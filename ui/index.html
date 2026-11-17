@@ -60,6 +60,9 @@
       <button class="chip loop-toggle" type="button" aria-pressed="false" title="Show or hide the looper">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M12.5 6.2A5 5 0 1 0 13 9" /><path d="M13.2 3.2v3.3H9.9" /></svg>Looper
       </button>
+      <button class="chip loop-toggle inst-toggle-chip" type="button" aria-pressed="false" title="Instruments: play a MIDI keyboard or drum kit with your voice">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="2" y="3" width="12" height="10" rx="1" /><path d="M5.5 3v6M8 3v6M10.5 3v6" /></svg>Instruments
+      </button>
       <button class="chip practice-toggle" type="button" aria-pressed="false" title="Practice: sing along to any song and see how close you get">
         <svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2 12h3M6 8h4M11 4h3" /><path d="M2 14c3-1 5-5 7-7s3-3 5-3" stroke-dasharray="1.5 2" /></svg>Practice
       </button>
@@ -394,6 +397,8 @@
   <footer class="recorder studio" aria-label="Tracks and recorder">
     <!-- The looper: built by looper.js. -->
     <section class="looper" aria-label="Looper" hidden></section>
+    <!-- The Live instruments: built by liveinstruments.js. -->
+    <section class="live-instruments" aria-label="Instruments" hidden></section>
     <div class="transport">
       <button class="transport-button" data-transport="stop" title="Back to the start" aria-label="Back to the start">
         <svg viewBox="0 0 16 16" aria-hidden="true"><rect x="3" y="3" width="2" height="10" rx="0.5" /><path d="M13 3.5v9a.5.5 0 0 1-.8.4L6.3 8.4a.5.5 0 0 1 0-.8l5.9-4.5a.5.5 0 0 1 .8.4z" /></svg>

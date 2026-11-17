@@ -65,6 +65,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/backing.js
         ui/capture.js
         ui/computer.js
+        ui/liveinstruments.js
         ui/looper.js
         ui/midilearn.js
         ui/scenes.js
@@ -150,6 +151,8 @@ set(MICFX_DSP_SOURCES
     src/CaptureRing.h
     src/ComputerAudio.cpp
     src/ComputerAudio.h
+    src/LiveInstruments.cpp
+    src/LiveInstruments.h
     src/dsp/DriftRing.h
     src/Looper.cpp
     src/Looper.h
