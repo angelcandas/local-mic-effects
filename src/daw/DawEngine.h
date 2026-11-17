@@ -109,6 +109,14 @@ public:
     // through the cue's effects (see Edit::getCue). Any thread.
     bool isCueOn() const noexcept { return cueOn.load (std::memory_order_relaxed); }
 
+    // Low latency (Cubase's "constrain delay compensation"): effects that delay the sound
+    // more than lowLatencyMs sit out on the monitored tracks, the returns, the master and
+    // the cue mix, so what you hear while recording isn't late. Other tracks keep theirs
+    // (and stay lined up). Message thread. Realtime engines only.
+    static constexpr double lowLatencyMs = 3.0;
+    void setLowLatency (bool on);
+    bool isLowLatency() const noexcept { return lowLatency.load(); }
+
     // The chord the harmonizer inserts follow (Chords mode), heard from the tracks
     // without pitch inserts and the MIDI being played; invalid when none follows. Any thread.
     analysis::Chord getHarmonyChord() const noexcept { return analysis::Chord::unpack (harmonyChord.load (std::memory_order_relaxed)); }
@@ -485,6 +493,7 @@ private:
     void timerCallback() override     { collectGarbage(); collectPreviews(); drainRecordedMidi(); collectPatternNotes(); syncCapture(); }
 
     void rebuild();
+    static bool isMonitored (const juce::ValueTree& track); // hears its input live (Edit's monitor / arm)
     void requestRebuild(); // realtime: on the next message loop pass; offline: before the next block
     std::shared_ptr<Strip> getStrip (const juce::ValueTree& trackOrMaster);
     static void loadInsertFile (fx::Module&, const juce::ValueTree& insert);
@@ -578,7 +587,8 @@ private:
     std::atomic<int> latency { 0 }, monitorLatency { 0 };
 
     // The cue mix (Edit::getCue), set by updateMix. Never on in an offline engine.
-    std::atomic<bool> cueOn { false };
+    std::atomic<bool> cueOn { false }, lowLatency { false };
+    std::set<int> lowLatencyTracks; // the monitored tracks the last graph held back (message thread)
     std::atomic<float> cueVoiceTarget { 1.0f }, cueMusicTarget { 1.0f }, cueVolumeTarget { 1.0f };
     juce::SmoothedValue<float> cueVoice, cueMusic, cueVolume; // audio thread
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);

@@ -1595,6 +1595,23 @@ body.is-daw .setlist-drawer, body.is-daw .stage-view { display: none; }
 .audio-status.is-warn { color: var(--warn); }
 .audio-status.is-error { color: var(--hot); }
 .audio-status[hidden] { display: none; }
+.audio-low-latency {
+  margin-left: auto;
+  flex: none;
+  padding: 0 7px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: none;
+  color: var(--faint);
+  font: inherit;
+  font-size: 11px;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.audio-low-latency:not([hidden]) + .audio-status { margin-left: 6px; }
+.audio-low-latency:hover { color: var(--text); }
+.audio-low-latency[aria-pressed="true"] { color: var(--accent); border-color: var(--accent); }
+.audio-low-latency[hidden] { display: none; }
 
 /* First-run card and Settings window (ui/setup.js). */
 .setup-backdrop {

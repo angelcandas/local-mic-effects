@@ -212,15 +212,21 @@ public:
         applyGain (block, inputSmoothed, inputGain);
         raisePeak (inputPeak, blockPeak (block));
 
+        // Low latency: effects that delay the sound more than the limit sit out.
+        const auto limit = latencyLimit.load (std::memory_order_relaxed);
+        const auto plays = [limit] (const Module& module) { return limit < 0 || module.getLatencySamples() <= limit; };
+
         if (playingOrder.empty())
         {
             for (auto& module : modules)
-                module->process (context);
+                if (plays (*module))
+                    module->process (context);
         }
         else
         {
             for (const auto index : playingOrder)
-                modules[(size_t) index]->process (context);
+                if (plays (*modules[(size_t) index]))
+                    modules[(size_t) index]->process (context);
         }
 
         if (orderFading != 0 || orderPending.load (std::memory_order_acquire))
@@ -232,10 +238,23 @@ public:
 
     int getLatencySamples() const noexcept
     {
+        const auto limit = latencyLimit.load (std::memory_order_relaxed);
         int total = 0;
         for (auto& module : modules)
-            total += module->getLatencySamples();
+            if (const auto latency = module->getLatencySamples(); limit < 0 || latency <= limit)
+                total += latency;
         return total;
+    }
+
+    // Low latency (like a DAW's "constrain delay compensation"): effects that delay the
+    // sound by more than this many samples are bypassed; -1 plays them all. Any thread.
+    void setLatencyLimit (int samples) noexcept { latencyLimit.store (samples, std::memory_order_relaxed); }
+    int getLatencyLimit() const noexcept        { return latencyLimit.load (std::memory_order_relaxed); }
+    // Whether a module of this chain sits out under the limit (for the cards).
+    bool isHeldBack (const Module& module) const noexcept
+    {
+        const auto limit = latencyLimit.load (std::memory_order_relaxed);
+        return limit >= 0 && module.getLatencySamples() > limit;
     }
 
 private:
@@ -297,6 +316,7 @@ private:
     }
 
     std::vector<std::shared_ptr<Module>> modules;
+    std::atomic<int> latencyLimit { -1 };
     std::vector<bool> running; // per module: added already prepared, prepare() skips it
 
     std::vector<int> wantedOrder;   // message thread

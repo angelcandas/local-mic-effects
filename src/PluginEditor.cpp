@@ -144,6 +144,10 @@ PluginEditor::PluginEditor (PluginProcessor& p)
         };
     }
 
+    // Low latency is an app preference.
+    if (settings.getBoolValue ("lowLatency", false) != processorRef.isLowLatency())
+        processorRef.setLowLatency (settings.getBoolValue ("lowLatency", false));
+
     // The looper's tempo, lock and volume are app preferences, like the recording folder.
     {
         auto& looper = processorRef.getLooper();
@@ -420,7 +424,7 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                        })
 
                        // (action) -> the audio setup, for the status strip and the first-run card (standalone app):
-                       // { available, device, rate, buffer, latencyMs, effectsMs, cpu, xruns, inputMuted }. "settings" opens the
+                       // { available, device, rate, buffer, latencyMs, effectsMs, lowLatency, cpu, xruns, inputMuted }. "settings" opens the
                        // audio settings, "headphones" unmutes the input (JUCE mutes it until you say you wear headphones).
                        .withNativeFunction ("audioSetup", [this] (const auto& args, auto complete)
                        {
@@ -432,8 +436,14 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            {
                                if (action == "settings")   holder->showAudioSettingsDialog();
                                if (action == "headphones") holder->getMuteInputValue().setValue (false);
+                               if (action == "lowLatency" && args.size() > 1)
+                               {
+                                   processorRef.setLowLatency ((bool) args[1]);
+                                   settings.setValue ("lowLatency", processorRef.isLowLatency());
+                               }
 
                                result->setProperty ("available", true);
+                               result->setProperty ("lowLatency", processorRef.isLowLatency());
                                result->setProperty ("inputMuted", (bool) holder->getMuteInputValue().getValue());
                                result->setProperty ("cpu", holder->deviceManager.getCpuUsage() * 100.0);
                                if (auto* device = holder->deviceManager.getCurrentAudioDevice())

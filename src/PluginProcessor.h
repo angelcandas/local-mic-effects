@@ -161,6 +161,10 @@ public:
     daw::PluginHost& getPluginHost() noexcept                { return *pluginHost; }
     void setDawMode (bool on) noexcept                       { dawMode = on; updateLatency(); }
     bool isDawMode() const noexcept                          { return dawMode.load(); }
+    // Low latency: effects that delay the voice more than daw::DawEngine::lowLatencyMs sit
+    // out, in the Live chain and on the DAW's monitored path. Message thread.
+    void setLowLatency (bool on);
+    bool isLowLatency() const noexcept                       { return lowLatency.load(); }
     // Delay the effects add to the voice you hear while you sing or play (Live: the
     // chain; DAW: the monitored tracks' path to the output), in samples. Any thread.
     int getMonitorLatencySamples() const noexcept { return dawMode.load() ? dawEngine.getMonitorLatencySamples() : chain.getLatencySamples(); }
@@ -229,7 +233,7 @@ private:
     daw::Edit dawEdit;
     daw::DawEngine dawEngine { dawEdit };
     daw::Project dawProject { dawEdit };
-    std::atomic<bool> dawMode { false };
+    std::atomic<bool> dawMode { false }, lowLatency { false };
 
     // Live mode's chord for the harmonizer (Chords mode): from the backing track's
     // chord list, or by listening to the instrument input (the interface's 2nd input).

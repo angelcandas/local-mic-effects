@@ -29,7 +29,7 @@ export function describeAudio(state) {
 
 export function initSetup() {
   let state = null, lastXruns = null, dropoutAt = -Infinity;
-  const strips = [];
+  const strips = [], lowButtons = [];
 
   // One strip in each hint line (DAW and Live); both show the same.
   for (const line of document.querySelectorAll(".hint-line")) {
@@ -38,8 +38,17 @@ export function initSetup() {
     strip.hidden = true;
     strip.title = "Audio: device, sample rate, buffer, round-trip latency (plus what the effects you hear yourself through add) and CPU. Click: audio settings";
     strip.addEventListener("click", () => audioSetup("settings").then(show));
-    line.append(strip);
+    // Low latency: effects that delay your voice more than 3 ms sit out while you sing.
+    const low = html("button", "audio-low-latency", "Low latency");
+    low.type = "button";
+    low.hidden = true;
+    low.title = "Low latency: effects that delay your voice by more than 3 ms (Denoise, Smooth, slow plug-ins) sit out "
+              + "in Live and on what you monitor in the DAW, so you don't hear yourself late. Other tracks keep theirs.";
+    low.setAttribute("aria-pressed", "false");
+    low.addEventListener("click", () => audioSetup("lowLatency", !state?.lowLatency).then(show));
+    line.append(low, strip);
     strips.push(strip);
+    lowButtons.push(low);
   }
 
   const show = (next) => {
@@ -54,6 +63,10 @@ export function initSetup() {
       strip.textContent = text;
       strip.classList.toggle("is-warn", dropout || Boolean(next.inputMuted));
       strip.classList.toggle("is-error", Boolean(next.available && !next.device));
+    }
+    for (const low of lowButtons) {
+      low.hidden = !next.available;
+      low.setAttribute("aria-pressed", String(Boolean(next.lowLatency)));
     }
     firstRun.update();
   };

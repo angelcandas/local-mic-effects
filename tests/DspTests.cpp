@@ -6809,6 +6809,78 @@ namespace
         edit.setCueOn (false);
     }
 
+    // Low latency: slow effects sit out on what you hear live, the rest stay lined up.
+    void testLowLatency()
+    {
+        std::cout << "\nLow latency (slow effects sit out while you monitor)\n";
+
+        // The Live chain.
+        {
+            fx::FxChain chain (fx::FxChain::getAllTypes());
+            chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+            auto* denoise = chain.find<fx::modules::Denoise>();
+            auto* pitch = chain.find<fx::modules::Pitch>();
+            check (denoise != nullptr && pitch != nullptr, "the Live chain has Denoise and Pitch");
+            if (denoise == nullptr || pitch == nullptr)
+                return;
+            denoise->on.store (1.0f);
+            pitch->tuneOn.store (1.0f);
+            const auto full = chain.getLatencySamples();
+            chain.setLatencyLimit (juce::roundToInt (daw::DawEngine::lowLatencyMs * 0.001 * sampleRate));
+            const auto low = chain.getLatencySamples();
+            check (low == pitch->getLatencySamples() && full == low + denoise->getLatencySamples() && chain.isHeldBack (*denoise) && ! chain.isHeldBack (*pitch),
+                   "Live: Denoise sits out, autotune stays (" + juce::String (1000.0 * full / sampleRate, 1) + " ms -> " + juce::String (1000.0 * low / sampleRate, 1) + " ms)");
+            chain.setLatencyLimit (-1);
+            check (chain.getLatencySamples() == full, "off: everything plays again");
+        }
+
+        daw::Edit edit;
+        daw::DawEngine engine (edit);
+        engine.prepare (sampleRate, blockSize);
+        const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto other = (int) edit.addTrack ("Guitar")[daw::ids::id];
+        edit.setInsertValue ((int) edit.addInsert (vocal, fx::ModuleType::denoise)[daw::ids::id], "denoiseOn", 1.0f);
+        edit.setInsertValue ((int) edit.addInsert (other, fx::ModuleType::denoise)[daw::ids::id], "denoiseOn", 1.0f);
+        const auto smooth = (int) edit.addInsert (daw::Edit::masterId, fx::ModuleType::smooth)[daw::ids::id];
+        edit.setInsertValue (smooth, "smoothOn", 1.0f);
+        edit.addInsert (daw::Edit::masterId, fx::ModuleType::limiter);
+        edit.setTrackMonitor (vocal, true);
+        engine.rebuildNow();
+
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        const auto processOnce = [&] { buffer.clear(); engine.process (buffer, 2, blockSize, buffer.getReadPointer (0)); };
+        processOnce();
+        const auto before = engine.getMonitorLatencySamples();
+
+        engine.setLowLatency (true);
+        engine.rebuildNow();
+        processOnce();
+        const auto limiter = juce::roundToInt (daw::DawEngine::lowLatencyMs * 0.001 * sampleRate); // what may stay
+        check (engine.getMonitorLatencySamples() <= limiter && before > 1000,
+               "DAW: the monitored voice skips Denoise and Smooth, keeps the limiter (" + juce::String (1000.0 * before / sampleRate, 1) + " ms -> "
+                   + juce::String (1000.0 * engine.getMonitorLatencySamples() / sampleRate, 1) + " ms)");
+        check (engine.getLatencySamples() >= 512,
+               "a track you aren't monitoring keeps its Denoise, and playback stays lined up with it (" + juce::String (engine.getLatencySamples()) + " samples)");
+
+        // Monitoring another track follows on the next graph.
+        edit.setTrackMonitor (vocal, false);
+        edit.setTrackMonitor (other, true);
+        engine.rebuildNow();
+        processOnce();
+        check (engine.getMonitorLatencySamples() <= limiter, "monitoring another track: its slow effects sit out instead");
+
+        engine.setLowLatency (false);
+        edit.setTrackMonitor (other, false);
+        edit.setTrackMonitor (vocal, true);
+        engine.rebuildNow();
+        processOnce();
+        check (engine.getMonitorLatencySamples() == before, "off: back to every effect");
+
+        daw::DawEngine offline (edit, false);
+        offline.setLowLatency (true);
+        check (! offline.isLowLatency(), "exports always play every effect");
+    }
+
     void testDawRecording()
     {
         std::cout << "\nDAW recording (dry takes, monitoring, metronome)\n";
@@ -19141,6 +19213,7 @@ int main()
     testDawRecording();
     testMonitorLatency();
     testCueMix();
+    testLowLatency();
     testTakes();
     testStereoInputs();
     testMidiTracks();
