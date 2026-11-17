@@ -53,6 +53,7 @@
 #include "daw/Hitpoints.h"
 #include "daw/Patterns.h"
 #include "daw/Loops.h"
+#include "daw/MidiFileIO.h"
 #include "analysis/Beats.h"
 #include "analysis/ToMidi.h"
 #include "analysis/Structure.h"
@@ -7339,6 +7340,82 @@ namespace
         }
 
         return out;
+    }
+
+    void testMidiFiles()
+    {
+        std::cout << "\nMIDI files (import and export)\n";
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-midifile", {});
+        folder.createDirectory();
+
+        // A project at 100 BPM with a Keys clip (bar 2) and a drum clip.
+        daw::Edit edit;
+        edit.setTempo (100.0);
+        const auto keys = (int) edit.addMidiTrack ("Keys", *daw::instruments::findBuiltin ("builtin:keys"))[daw::ids::id];
+        const auto drums = (int) edit.addMidiTrack ("Drums", *daw::instruments::findBuiltin ("builtin:beat"))[daw::ids::id];
+        const auto map = edit.getTempoMap();
+        const auto bar2 = map.toSeconds (4.0);
+        const auto clip = (int) edit.addMidiClip (keys, bar2, map.toSeconds (8.0) - bar2, "Chords")[daw::ids::id];
+        edit.addNote (clip, 60, 0.0, map.toSeconds (5.0) - bar2, 90);
+        edit.addNote (clip, 64, map.toSeconds (5.0) - bar2, map.toSeconds (6.0) - map.toSeconds (5.0), 110);
+        const auto kick = (int) edit.addMidiClip (drums, 0.0, bar2, "Kick")[daw::ids::id];
+        edit.addNote (kick, 36, 0.0, 0.1, 120);
+
+        const auto song = daw::midifile::fromClip (edit, clip);
+        check (song.parts.size() == 1 && song.parts[0].notes.size() == 2, "a clip exports its notes");
+        check (song.parts[0].notes[0].beat == 0.0 && std::abs (song.parts[0].notes[1].beat - 1.0) < 1.0e-6,
+               "the notes start from the bar line before the first one");
+        check (! song.tempo.empty() && std::abs (song.tempo[0].bpm - 100.0) < 1.0e-6, "the project's tempo is in the file");
+
+        const auto file = folder.getChildFile ("chords.mid");
+        juce::String reason;
+        check (daw::midifile::write (file, song, reason) && file.getSize() > 0, "the file is written");
+
+        daw::midifile::Song back;
+        check (daw::midifile::read (file, back, reason), "the file reads back: " + reason);
+        check (back.parts.size() == 1 && back.parts[0].notes.size() == 2 && back.parts[0].notes[1].pitch == 64
+                   && back.parts[0].notes[1].velocity == 110 && std::abs (back.parts[0].notes[1].beat - 1.0) < 1.0e-6
+                   && std::abs (back.parts[0].notes[0].beats - 1.0) < 1.0e-6 && back.parts[0].name == "Chords",
+               "notes, velocities, lengths and the name survive");
+        check (back.tempo.size() == 1 && std::abs (back.tempo[0].bpm - 100.0) < 0.01, "the tempo survives");
+
+        const auto drumSong = daw::midifile::fromTrack (edit, drums);
+        const auto drumFile = folder.getChildFile ("kick.mid");
+        daw::midifile::Song drumBack;
+        check (drumSong.parts.size() == 1 && drumSong.parts[0].drums && daw::midifile::write (drumFile, drumSong, reason)
+                   && daw::midifile::read (drumFile, drumBack, reason) && drumBack.parts[0].drums,
+               "drum parts go on channel 10 and come back as drums");
+
+        // Into an empty project: it takes the file's tempo; the notes keep their bars.
+        {
+            daw::Edit fresh;
+            const daw::midifile::Instruments instruments { *daw::instruments::findBuiltin ("builtin:keys"), *daw::instruments::findBuiltin ("builtin:beat") };
+            const auto placed = daw::midifile::addToEdit (fresh, back, 0.0, -1, instruments, "x");
+            check (placed.tracks.size() == 1 && placed.clips.size() == 1 && std::abs (placed.tempo - 100.0) < 0.01
+                       && std::abs (fresh.getTempo() - 100.0) < 0.01,
+                   "an empty project takes the file's tempo");
+            const auto placedClip = fresh.getClip (placed.clips[0]);
+            check (daw::Edit::isMidiClip (placedClip) && placedClip.getNumChildren() == 2
+                       && std::abs ((double) placedClip[daw::ids::length] - fresh.getTempoMap().toSeconds (4.0)) < 1.0e-6,
+                   "the clip is a whole bar and holds the notes");
+
+            // A project with something in it keeps its tempo; the clip lands where asked, by beats.
+            fresh.setTempo (150.0);
+            const auto again = daw::midifile::addToEdit (fresh, back, 2.0, placed.tracks[0], instruments, "x");
+            const auto second = fresh.getClip (again.clips[0]);
+            check (std::abs (fresh.getTempo() - 150.0) < 1.0e-6 && again.tempo == 0.0 && again.tracks[0] == placed.tracks[0]
+                       && std::abs ((double) second[daw::ids::start] - 2.0) < 1.0e-6,
+                   "a project with clips keeps its tempo, and the first part goes on the picked track");
+            const auto noteAt = fresh.getNote ((int) second.getChild (1)[daw::ids::id]);
+            check (std::abs ((double) noteAt[daw::ids::time] - fresh.getTempoMap().toSeconds (1.0)) < 1.0e-6, "notes keep their beats at the new tempo");
+        }
+
+        // Not a MIDI file, and a file with no notes.
+        const auto junk = folder.getChildFile ("junk.mid");
+        junk.replaceWithText ("not midi");
+        check (! daw::midifile::read (junk, back, reason) && reason.isNotEmpty(), "a file that isn't MIDI is refused");
+
+        folder.deleteRecursively();
     }
 
     void testMidiTracks()
@@ -19092,6 +19169,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=midifiles: just MIDI file import and export.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "midifiles")
+    {
+        testMidiFiles();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=songmap: just the song map.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "songmap")
     {
@@ -19144,6 +19229,7 @@ int main()
     testTakes();
     testStereoInputs();
     testMidiTracks();
+    testMidiFiles();
     testInstruments();
     testKit();
     testPluginHosting();

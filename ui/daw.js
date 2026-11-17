@@ -1504,6 +1504,7 @@ class DawScreen {
       item("Save as…", () => daw("saveAs"), { shortcut: "Ctrl+Shift+S" });
       rule();
       item("Import audio…", () => this.importAudio(), { shortcut: "Ctrl+I" });
+      item("Import MIDI file…", () => this.importMidi(), { hint: "A .mid file: each of its parts becomes a MIDI track with a clip (drag one in from the library too)" });
       item("Export…", () => this.toggleExportPanel(true), { shortcut: "Ctrl+Shift+R" });
     }, anchor);
   }
@@ -2135,6 +2136,21 @@ class DawScreen {
     const result = await daw("import", { track: this.selectedTrack ?? -1 });
     if (result?.ok && typeof result.track === "number") this.showWhenDrawn({ track: result.track, clip: result.clip, start: result.start });
     if (result?.loop) toast(loopText(result.loop), "", "undo");
+  }
+
+  async importMidi() {
+    const track = this.session?.tracks.find((t) => t.id === this.selectedTrack);
+    const result = await daw("importMidi", { track: track?.kind === "midi" ? track.id : -1 });
+    if (!result?.ok) return;
+    this.showWhenDrawn({ track: result.track, clip: result.clip, start: result.start });
+    if (result.tempo) toast(`The project's tempo is now ${result.tempo} BPM, from the file.`, "", "undo");
+  }
+
+  // Writes a MIDI clip or a MIDI track's notes to a .mid file.
+  async exportMidi(args) {
+    const result = await daw("exportMidi", args);
+    if (result?.ok) toast(`Saved ${String(result.file).split(/[\\/]/).pop()}.`);
+    else if (result && !result.cancelled && result.error) toast(result.error, "is-error");
   }
 
   // Selects a track (and clip) that was just added, once a session that holds it arrives.
@@ -6446,6 +6462,7 @@ class DawScreen {
       item("Mute", () => daw("setTrack", { id: track.id, mute: !track.mute }), { checked: track.mute, shortcut: "0" });
       item("Solo", () => daw("setTrack", { id: track.id, solo: !track.solo }), { checked: track.solo, shortcut: "S" });
       item("Arm for recording", () => daw("setTrack", { id: track.id, arm: !track.arm }), { checked: track.arm, shortcut: "A" });
+      if (track.kind === "midi") item("Export as MIDI file…", () => this.exportMidi({ track: track.id }), { hint: "All of this track's notes (clips and pattern blocks) as a .mid file" });
       rule();
       const picked = this.tracksFor(track.id).filter((id) => tracks.some((t) => t.id === id));
       const groups = this.session.groups ?? [];
@@ -6760,6 +6777,7 @@ class DawScreen {
       item("Delete", () => this.deleteSelected(), { danger: true, shortcut: "Delete" });
       rule();
       item("Mute", () => this.run("muteClip"), { checked: Boolean(clip.mute), shortcut: "Shift+M" });
+      if (!audio) item("Export as MIDI file…", () => this.exportMidi({ clip: clip.id }), { hint: "Save this clip's notes as a .mid file" });
       item("Loop this clip", () => this.run("loopClip"), { shortcut: "Ctrl+L" });
       item("Zoom to the clip", () => this.run("zoomClip"), { shortcut: "Z" });
       if (audio) {

@@ -85,6 +85,8 @@ public:
     // daw/Loops.h) starts on the nearest bar and plays at the project's tempo (musical mode).
     // `continueStep`: part of the previous command's undo step (the Draw tool's stroke).
     juce::var importAudio (const juce::File& file, int trackId, double start = -1.0, bool match = false, bool continueStep = false);
+    // A .mid file: each of its parts becomes a MIDI track with a clip (see daw/MidiFileIO.h).
+    juce::var importMidi (const juce::File& file, int trackId, double start = -1.0);
     // Missing audio files: `picked` is a file (it replaces `path` when given, and its folder
     // is searched for the others) or a folder, searched with its subfolders for each missing
     // file by name. Every clip and take on a found file is pointed at it, one undo step.
