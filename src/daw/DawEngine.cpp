@@ -622,7 +622,7 @@ void DawEngine::updateMix()
             it->second->targetDirect = Edit::getTrackOutput (track) != Edit::masterId || ! anyReturnSolo || (bool) track[ids::solo] ? 1.0f : 0.0f;
             // MIDI tracks play the MIDI input when armed too, so you hear what you record.
             // Auto monitoring hears the input only while the track is armed.
-            it->second->monitoring = (bool) track[ids::monitor] || ((bool) track[ids::arm] && (Edit::isMidiTrack (track) || (bool) track.getProperty (ids::monitorAuto, false)));
+            it->second->monitoring = (bool) track[ids::monitor] || ((bool) track[ids::arm] && (Edit::isMidiTrack (track) || (bool) track.getProperty (ids::monitorAuto, true)));
             const auto input = Edit::getTrackInput (track);
             it->second->inputLeft = input.left;
             it->second->inputRight = input.right;

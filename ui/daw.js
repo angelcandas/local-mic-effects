@@ -6118,7 +6118,13 @@ class DawScreen {
     return this.session?.tracks.find((t) => t.id === this.selectedTrack);
   }
 
+  // Like Cubase and Live, the playhead is locked while recording: moving it would leave a
+  // hole in the take. Stop first, then move it.
   seek(seconds) {
+    if (this.status.recording) {
+      toast("Recording: stop first to move the playhead.");
+      return;
+    }
     daw("transport", { action: "seek", time: Math.max(0, seconds) });
     this.status.position = Math.max(0, seconds); // so repeated key presses add up before the next status
     this.movePlayhead(true);
