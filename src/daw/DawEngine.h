@@ -105,6 +105,10 @@ public:
     // nothing is monitored. Any thread.
     int getMonitorLatencySamples() const noexcept { return monitorLatency.load (std::memory_order_relaxed); }
 
+    // The cue mix is on: the monitored inputs skip their tracks and go to the headphones
+    // through the cue's effects (see Edit::getCue). Any thread.
+    bool isCueOn() const noexcept { return cueOn.load (std::memory_order_relaxed); }
+
     // The chord the harmonizer inserts follow (Chords mode), heard from the tracks
     // without pitch inserts and the MIDI being played; invalid when none follows. Any thread.
     analysis::Chord getHarmonyChord() const noexcept { return analysis::Chord::unpack (harmonyChord.load (std::memory_order_relaxed)); }
@@ -428,6 +432,7 @@ private:
         std::vector<Bus> returns;
         std::shared_ptr<Strip> master;
         Automation masterAutomation;
+        std::shared_ptr<Strip> cue; // the cue mix's effects (realtime engines only)
         // How far behind the timeline the returns and the master hear the tracks (their
         // chains and the returns' latency compensation), so their lanes line up.
         juce::int64 returnsBehind = 0, masterBehind = 0;
@@ -571,6 +576,11 @@ private:
     std::atomic<bool> playing { false };
     std::atomic<juce::int64> position { 0 }, length { 0 };
     std::atomic<int> latency { 0 }, monitorLatency { 0 };
+
+    // The cue mix (Edit::getCue), set by updateMix. Never on in an offline engine.
+    std::atomic<bool> cueOn { false };
+    std::atomic<float> cueVoiceTarget { 1.0f }, cueMusicTarget { 1.0f }, cueVolumeTarget { 1.0f };
+    juce::SmoothedValue<float> cueVoice, cueMusic, cueVolume; // audio thread
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
 
     // Audio takes: one recorder per input the armed tracks use. Made when first needed

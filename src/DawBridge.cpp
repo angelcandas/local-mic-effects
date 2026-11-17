@@ -1028,6 +1028,14 @@ juce::var DawBridge::describeSession()
         { "master", object ({ { "volume", number (master, ids::volume) }, { "pan", number (master, ids::pan) }, { "inGain", number (master, ids::inGain) },
                               { "outGain", number (master, ids::outGain) }, { "inserts", describeInserts (master) }, { "macros", describeMacros (master) },
                               { "lanes", describeLanes (master) } }) },
+        { "cue", [&]
+          {
+              const auto cue = edit.getCue();
+              return object ({ { "id", daw::Edit::cueId }, { "on", daw::Edit::isCueOn (cue) }, { "voice", number (cue, ids::voice) },
+                               { "music", number (cue, ids::music) }, { "volume", number (cue, ids::volume) },
+                               { "inGain", number (cue, ids::inGain) }, { "outGain", number (cue, ids::outGain) },
+                               { "inserts", describeInserts (cue) }, { "macros", describeMacros (cue) } });
+          }() },
         { "tracks", tracks },
         { "patterns", describePatterns() },
         { "patternClips", describePatternClips() },
@@ -1151,12 +1159,14 @@ juce::var DawBridge::describeStatus()
     }
 
     const auto masterPeak = addPeaks (daw::Edit::masterId);
+    addPeaks (daw::Edit::cueId); // what goes to the headphones while the cue mix is on
+    addChain (daw::Edit::cueId);
 
     addChain (daw::Edit::masterId);
 
     // The live readings of the inserts on screen (one track's, or the master's).
     auto* inserts = new juce::DynamicObject();
-    if (watchedTrack >= 0)
+    if (watchedTrack >= 0 || watchedTrack == daw::Edit::cueId)
         engine.forEachInsert (watchedTrack, [&] (int insertId, fx::Module& module)
         {
             inserts->setProperty (juce::String (insertId), fx::describeMeter (module, spectrumAnalyser));
@@ -5214,6 +5224,19 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("outGain")) edit.setChainGain (id, true, args["outGain"]);
         }
 
+        ok();
+        return;
+    }
+
+    // The cue mix: on, and its voice, music and phones levels (dB).
+    if (command == "setCue")
+    {
+        if (args.hasProperty ("on"))      edit.setCueOn (args["on"]);
+        if (args.hasProperty ("voice"))   edit.setCueLevel (ids::voice, args["voice"]);
+        if (args.hasProperty ("music"))   edit.setCueLevel (ids::music, args["music"]);
+        if (args.hasProperty ("volume"))  edit.setCueLevel (ids::volume, args["volume"]);
+        if (args.hasProperty ("inGain"))  edit.setChainGain (daw::Edit::cueId, false, args["inGain"]);
+        if (args.hasProperty ("outGain")) edit.setChainGain (daw::Edit::cueId, true, args["outGain"]);
         ok();
         return;
     }
