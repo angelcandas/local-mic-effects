@@ -19035,6 +19035,38 @@ static void testFactoryChains()
     check (! factory::makeInserts ("No such chain").isValid(), "an unknown name gives no chain");
 }
 
+void testLiveInput()
+{
+    std::cout << "\nLive mic input\n";
+
+    const auto fill = [] (juce::AudioBuffer<float>& buffer)
+    {
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+                buffer.setSample (ch, i, (float) (ch + 1) + 0.001f * (float) i);
+    };
+
+    juce::AudioBuffer<float> buffer (4, 64);
+    fill (buffer);
+    PluginProcessor::swapLiveInput (buffer, 0, 64);
+    check (juce::approximatelyEqual (buffer.getSample (0, 5), 1.005f), "input 1 stays where it is");
+
+    PluginProcessor::swapLiveInput (buffer, 2, 64);
+    check (juce::approximatelyEqual (buffer.getSample (0, 5), 3.005f) && juce::approximatelyEqual (buffer.getSample (2, 5), 1.005f)
+               && juce::approximatelyEqual (buffer.getSample (1, 5), 2.005f) && juce::approximatelyEqual (buffer.getSample (3, 5), 4.005f),
+           "input 3 swaps places with input 1 and the others stay");
+
+    fill (buffer);
+    PluginProcessor::swapLiveInput (buffer, 9, 64);
+    check (juce::approximatelyEqual (buffer.getSample (0, 5), 1.005f), "an input the interface doesn't have is ignored");
+
+    PluginProcessor processor;
+    processor.setLiveInput (3);
+    check (processor.getLiveInput() == 3, "the processor remembers the choice");
+    processor.setLiveInput (-4);
+    check (processor.getLiveInput() == 0, "and never goes below input 1");
+}
+
 
 int main()
 {
@@ -19420,6 +19452,7 @@ int main()
     testCabAndIrReverb();
     testGuitarAmp();
     testSmoothing();
+    testLiveInput();
     testStems();
 #if MICFX_HAS_DEMUCS
     testStemPipeline();

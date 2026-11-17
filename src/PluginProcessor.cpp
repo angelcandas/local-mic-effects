@@ -310,6 +310,11 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     // Mapped pedals, knobs and keys (MIDI learn). Looper pedals act before this block's audio.
     midiMap.process (midi);
 
+    // The app's Live mic can be any of the interface's inputs: swap it into input 1, where the
+    // rest of this block (and the effects) expect it.
+    if (numIn > 1 && juce::JUCEApplicationBase::isStandaloneApp())
+        swapLiveInput (buffer, juce::jmin (liveInput.load (std::memory_order_relaxed), numIn - 1), numSamples);
+
     // Keep the raw mic for the recorder before anything touches it.
     const auto recording = recorder.isRecording();
     const auto dryLength = juce::jmin (numSamples, dryInput.getNumSamples());

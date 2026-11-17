@@ -176,6 +176,22 @@ public:
     std::atomic<float> inputPeak  { 0.0f };
     std::atomic<int> inputChannels { 0 }; // DAW mode: how many inputs the engine gets
 
+    // Live mode in the app: which of the interface's inputs is the mic (0-based; 0 = input 1).
+    // The chosen input swaps places with input 1, so the instrument input for chord following
+    // is then the old input 1. Plugins have a single mic input, so it changes nothing there.
+    // Any thread.
+    void setLiveInput (int index) noexcept { liveInput = juce::jmax (0, index); }
+    int getLiveInput() const noexcept      { return liveInput.load(); }
+    std::atomic<int> liveInput { 0 };
+
+    // Swaps input `chosen` with input 1 in the first numSamples of the buffer (nothing for input 1
+    // or an input the buffer doesn't have).
+    static void swapLiveInput (juce::AudioBuffer<float>& buffer, int chosen, int numSamples) noexcept
+    {
+        if (chosen > 0 && chosen < buffer.getNumChannels())
+            std::swap_ranges (buffer.getWritePointer (0), buffer.getWritePointer (0) + numSamples, buffer.getWritePointer (chosen));
+    }
+
     // The most audio interface inputs the app opens (DAW tracks pick from them).
     static constexpr int maxAppInputs = 16;
     std::atomic<float> outputPeak { 0.0f };
