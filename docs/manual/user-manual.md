@@ -488,7 +488,7 @@ Every smart tool is also in the **Assist** menu on the toolbar, grouped by what 
 
 1. Pick a **style**: Pop, Ballad, Rock, or Voice up front (the voice further up front so you can hear yourself).
 2. Press **Listen**. It renders every track offline and measures loudness (EBU R128), tone, when each track plays, your lowest notes and where the backing covers your words.
-3. It guesses which track is the **voice** and which is the **backing**. Change a role and the plan updates.
+3. When you open Auto Mix with tracks nobody has tagged yet, a window asks **who is who**: which instrument each track is, and whether it sits **Front**, **Normal** or **Back**. The same list stays at the top of the panel; change a role and the plan updates. (The other options, what it may add, are folded under *More options*.) Switching between Mix, Fit and Clean with unkept changes asks in a window before it throws them away.
 4. It shows every change with the reason, for example "Cut 3.5 dB at 315 Hz: muddy":
    - **Voice**: a Parametric EQ (low cut, mud and harshness cuts or a presence lift, boom and air shelves), a **Smooth** resonance suppressor where it rings, a Compressor if your level swings (with the **Punch** character for Pop, Hip-hop, Rock and Electronic, and an **Opto** after it for Ballad, R&B, Acoustic and Jazz), a **Smart** De-esser if the S's stand out. On a dry voice the space is a **Plate** with its pre-delay set from the song's tempo and ducking while you sing, and an echo that follows the tempo and ducks too. Background vocals also get a micro-shift **Doubler**.
    - **Backing**: a small EQ dip where it covers your voice.
