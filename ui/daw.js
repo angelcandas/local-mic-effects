@@ -4789,7 +4789,8 @@ class DawScreen {
     const panel = this.exportPanel;
     const value = (name) => panel.querySelector(`[name=${name}]`);
     // Bit depth for the lossless formats, quality for ogg; each format's own depths.
-    const DEPTHS = { wav: [16, 24, 32], aiff: [16, 24], flac: [16, 24], ogg: [] };
+    const DEPTHS = { wav: [16, 24, 32], aiff: [16, 24], flac: [16, 24], ogg: [], mp3: [] };
+    const QUALITY_DEFAULT = { ogg: 8, mp3: 2 }; // OGG about 256 kbps, MP3 192 kbps
     const syncFormat = () => {
       const format = value("format").value;
       const depths = DEPTHS[format] ?? DEPTHS.wav;
@@ -4797,7 +4798,18 @@ class DawScreen {
       for (const option of depth.options) option.hidden = option.disabled = !depths.includes(Number(option.value));
       if (!depths.includes(Number(depth.value)) && depths.length) depth.value = String(depths.includes(24) ? 24 : depths[0]);
       panel.querySelector(".export-depth").hidden = !depths.length;
-      panel.querySelector(".export-quality").hidden = format !== "ogg";
+      const lossy = format === "ogg" || format === "mp3";
+      panel.querySelector(".export-quality").hidden = !lossy;
+      if (lossy && this.exportQualities?.[format]) {
+        const quality = value("quality");
+        if (quality.dataset.format !== format) {
+          quality.replaceChildren(...this.exportQualities[format].map((label, index) => new Option(label, String(index))));
+          quality.dataset.format = format;
+          quality.value = String(QUALITY_DEFAULT[format]);
+        }
+      }
+      for (const option of value("sampleRate").options) option.hidden = option.disabled = format === "mp3" && Number(option.value) > 48000;
+      if (format === "mp3" && Number(value("sampleRate").value) > 48000) value("sampleRate").value = "0";
       this.exportOverwrite = false;
       panel.querySelector(".export-go").textContent = "Export";
     };
@@ -4859,12 +4871,12 @@ class DawScreen {
     if (!setup?.options) return;
     const panel = this.exportPanel;
     const value = (name) => panel.querySelector(`[name=${name}]`);
-    const quality = value("quality");
-    if (!quality.options.length && setup.oggQualities?.length)
-      for (const [index, label] of setup.oggQualities.entries()) quality.append(new Option(label, String(index)));
+    this.exportQualities = setup.qualities;
     const o = setup.options;
     const set = (name, v) => { if (v !== undefined && v !== null && v !== "") value(name).value = String(v); };
-    for (const name of ["kind", "format", "bitDepth", "quality", "sampleRate", "name", "folder"]) set(name, o[name]);
+    for (const name of ["kind", "format", "bitDepth", "sampleRate", "name", "folder"]) set(name, o[name]);
+    this.syncExportFormat(); // fills the quality list for the format
+    set("quality", o.quality);
     set("tail", o.tail);
     if (o.normalise !== undefined) value("normalise").checked = Boolean(o.normalise);
     value("name").placeholder = setup.defaultName ?? "Mix";

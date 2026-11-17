@@ -1,6 +1,7 @@
 #include "Exporter.h"
 
 #include "DawEngine.h"
+#include "Mp3Writer.h"
 
 namespace daw
 {
@@ -32,11 +33,12 @@ namespace
         if (format == "aiff")      writer = juce::AiffAudioFormat().createWriterFor (stream, options);
         else if (format == "flac") writer = juce::FlacAudioFormat().createWriterFor (stream, options);
         else if (format == "ogg")  writer = juce::OggVorbisAudioFormat().createWriterFor (stream, options);
+        else if (format == "mp3")  writer = Mp3Writer::create (stream, sampleRate, 2, oggQuality);
         else                       writer = juce::WavAudioFormat().createWriterFor (stream, options);
 
         if (writer == nullptr)
         {
-            error = "Couldn't create a " + format.toUpperCase() + " writer" + (format == "ogg" ? juce::String() : " for " + juce::String (bitDepth) + "-bit") + ".";
+            error = "Couldn't create a " + format.toUpperCase() + " writer" + (format == "ogg" || format == "mp3" ? juce::String() : " for " + juce::String (bitDepth) + "-bit") + ".";
             file.deleteFile();
         }
 
@@ -46,19 +48,19 @@ namespace
 
 juce::String Exporter::formatExtension (const juce::String& format)
 {
-    return format == "aiff" ? "aiff" : format == "flac" ? "flac" : format == "ogg" ? "ogg" : "wav";
+    return format == "aiff" ? "aiff" : format == "flac" ? "flac" : format == "ogg" ? "ogg" : format == "mp3" ? "mp3" : "wav";
 }
 
 juce::Array<int> Exporter::formatBitDepths (const juce::String& format)
 {
     return format == "aiff" || format == "flac" ? juce::Array<int> { 16, 24 }
-         : format == "ogg"                       ? juce::Array<int> { 16 }
+         : format == "ogg" || format == "mp3"    ? juce::Array<int> { 16 }
                                                  : juce::Array<int> { 16, 24, 32 };
 }
 
-juce::StringArray Exporter::oggQualityNames()
+juce::StringArray Exporter::qualityNames (const juce::String& format)
 {
-    return juce::OggVorbisAudioFormat().getQualityOptions();
+    return format == "mp3" ? Mp3Writer::qualityNames() : format == "ogg" ? juce::OggVorbisAudioFormat().getQualityOptions() : juce::StringArray();
 }
 
 Exporter::Exporter (Edit& edit, Settings s) : snapshot (edit.getState().createCopy()), settings (s)
@@ -67,7 +69,9 @@ Exporter::Exporter (Edit& edit, Settings s) : snapshot (edit.getState().createCo
     const auto depths = formatBitDepths (settings.format);
     if (! depths.contains (settings.bitDepth))
         settings.bitDepth = depths.contains (24) ? 24 : depths.getFirst();
-    settings.oggQuality = juce::jlimit (0, juce::jmax (0, oggQualityNames().size() - 1), settings.oggQuality);
+    settings.oggQuality = juce::jlimit (0, juce::jmax (0, qualityNames (settings.format).size() - 1), settings.oggQuality);
+    if (settings.format == "mp3" && settings.sampleRate > 48000.0)
+        settings.sampleRate = 48000.0; // MP3 stops at 48 kHz
     settings.sampleRate = settings.sampleRate > 0.0 ? settings.sampleRate : 48000.0;
 }
 
@@ -113,7 +117,7 @@ Exporter::Result Exporter::render (const juce::ValueTree& session, const juce::F
 
             if (writer != nullptr)
             {
-                if (settings.bitDepth == 16 && settings.format != "ogg") // triangular dither, one LSB
+                if (settings.bitDepth == 16 && settings.format != "ogg" && settings.format != "mp3") // triangular dither, one LSB
                     for (int ch = 0; ch < 2; ++ch)
                         for (int i = 0; i < numSamples; ++i)
                             buffer.addSample (ch, i, (dither.nextFloat() - dither.nextFloat()) * ditherStep);
