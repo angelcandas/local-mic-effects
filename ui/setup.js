@@ -21,8 +21,10 @@ const rateText = (rate) => `${Number.isInteger(rate / 1000) ? rate / 1000 : (rat
 export function describeAudio(state) {
   if (!state?.available) return "";
   if (!state.device) return "No audio device · click to pick one";
-  return [state.device, rateText(state.rate), String(state.buffer), `${Number(state.latencyMs).toFixed(1)} ms round trip`,
-          `CPU ${Math.round(state.cpu)} %`].join(" · ");
+  // The effects in the monitored path (lookahead, FFT frames, plug-ins) add to what you hear.
+  const effects = Number(state.effectsMs) || 0;
+  const roundTrip = `${Number(state.latencyMs).toFixed(1)} ms round trip` + (effects >= 0.5 ? ` + ${effects.toFixed(1)} ms effects` : "");
+  return [state.device, rateText(state.rate), String(state.buffer), roundTrip, `CPU ${Math.round(state.cpu)} %`].join(" · ");
 }
 
 export function initSetup() {
@@ -34,7 +36,7 @@ export function initSetup() {
     const strip = html("button", "audio-status");
     strip.type = "button";
     strip.hidden = true;
-    strip.title = "Audio: device, sample rate, buffer, round-trip latency and CPU. Click: audio settings";
+    strip.title = "Audio: device, sample rate, buffer, round-trip latency (plus what the effects you hear yourself through add) and CPU. Click: audio settings";
     strip.addEventListener("click", () => audioSetup("settings").then(show));
     line.append(strip);
     strips.push(strip);

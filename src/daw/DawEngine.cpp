@@ -2334,6 +2334,14 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 
     const auto feedSends = [&] (Track& track, bool pre) { feedSendsFrom (track.sends, *track.strip, pre); };
 
+    // What the monitored tracks are heard through, for the audio status.
+    auto slowestMonitored = -1;
+    for (const auto& track : graph.tracks)
+        if (track.strip->monitoring.load (std::memory_order_relaxed) && (track.strip->isMidi || numInputs > 0))
+            slowestMonitored = juce::jmax (slowestMonitored, track.strip->latencyAtBuild);
+    monitorLatency.store (slowestMonitored < 0 ? 0 : slowestMonitored + graph.directDelay.samples + graph.master->latencyAtBuild,
+                          std::memory_order_relaxed);
+
     for (auto& track : graph.tracks)
     {
         auto& strip = *track.strip;

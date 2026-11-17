@@ -420,9 +420,9 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                        })
 
                        // (action) -> the audio setup, for the status strip and the first-run card (standalone app):
-                       // { available, device, rate, buffer, latencyMs, cpu, xruns, inputMuted }. "settings" opens the
+                       // { available, device, rate, buffer, latencyMs, effectsMs, cpu, xruns, inputMuted }. "settings" opens the
                        // audio settings, "headphones" unmutes the input (JUCE mutes it until you say you wear headphones).
-                       .withNativeFunction ("audioSetup", [] (const auto& args, auto complete)
+                       .withNativeFunction ("audioSetup", [this] (const auto& args, auto complete)
                        {
                            const auto action = args.size() > 0 ? args[0].toString() : juce::String();
                            auto* result = new juce::DynamicObject();
@@ -446,11 +446,13 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                    // Round trip: the interface's own latency both ways plus a buffer each way.
                                    const auto samples = device->getInputLatencyInSamples() + device->getOutputLatencyInSamples() + 2 * buffer;
                                    result->setProperty ("latencyMs", rate > 0.0 ? 1000.0 * samples / rate : 0.0);
+                                   // On top of that, what the effects in the monitored path add.
+                                   result->setProperty ("effectsMs", rate > 0.0 ? 1000.0 * processorRef.getMonitorLatencySamples() / rate : 0.0);
                                    result->setProperty ("xruns", device->getXRunCount());
                                }
                            }
                           #else
-                           juce::ignoreUnused (action);
+                           juce::ignoreUnused (action, this);
                           #endif
                            complete (juce::var (result));
                        })

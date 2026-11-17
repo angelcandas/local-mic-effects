@@ -100,6 +100,11 @@ public:
     // Delay the inserts add (the slowest track's chain plus the master chain), in samples.
     int getLatencySamples() const noexcept   { return latency.load(); }
 
+    // Delay the effects add to what's monitored live (mic or MIDI in): the slowest
+    // monitored track's chain, the returns' compensation and the master chain. 0 when
+    // nothing is monitored. Any thread.
+    int getMonitorLatencySamples() const noexcept { return monitorLatency.load (std::memory_order_relaxed); }
+
     // The chord the harmonizer inserts follow (Chords mode), heard from the tracks
     // without pitch inserts and the MIDI being played; invalid when none follows. Any thread.
     analysis::Chord getHarmonyChord() const noexcept { return analysis::Chord::unpack (harmonyChord.load (std::memory_order_relaxed)); }
@@ -565,7 +570,7 @@ private:
 
     std::atomic<bool> playing { false };
     std::atomic<juce::int64> position { 0 }, length { 0 };
-    std::atomic<int> latency { 0 };
+    std::atomic<int> latency { 0 }, monitorLatency { 0 };
     std::shared_ptr<bool> alive = std::make_shared<bool> (true);
 
     // Audio takes: one recorder per input the armed tracks use. Made when first needed
