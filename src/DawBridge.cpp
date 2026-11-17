@@ -6860,6 +6860,16 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         const auto action = args["action"].toString();
         const auto rate = engine.getSampleRate();
 
+        // Stop (or pause) ends a recording too and keeps the take; the playhead is locked
+        // while recording, as in Cubase and Live, so a seek is ignored.
+        if ((action == "pause" || action == "stop") && engine.isRecording())
+            engine.stopRecording();
+        else if (action == "seek" && engine.isRecording())
+        {
+            ok();
+            return;
+        }
+
         if (action == "play")
         {
             if (engine.getLength() > 0 && engine.getPosition() >= engine.getLength())

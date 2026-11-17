@@ -6653,6 +6653,8 @@ namespace
 
         check (engine.startRecording (folder).isNotEmpty() && ! engine.isRecording(), "refuses to record with no armed track");
 
+        check (daw::Edit::getTrackMonitorMode (edit.getTrack (second)) == "auto", "a new audio track monitors its input while armed (Auto), so it is not silent while recording");
+
         edit.setTrackArm (vocal, true);
         edit.setTrackArm (second, true);
         edit.setTrackMonitor (vocal, true);

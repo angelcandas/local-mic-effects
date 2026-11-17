@@ -555,7 +555,7 @@ void Edit::setTrackMonitorMode (int trackId, const juce::String& mode)
 
 juce::String Edit::getTrackMonitorMode (const juce::ValueTree& track)
 {
-    return (bool) track[ids::monitor] ? "in" : (bool) track.getProperty (ids::monitorAuto, false) ? "auto" : "off";
+    return (bool) track[ids::monitor] ? "in" : (bool) track.getProperty (ids::monitorAuto, true) ? "auto" : "off";
 }
 
 void Edit::setTrackInput (int trackId, Input input)
