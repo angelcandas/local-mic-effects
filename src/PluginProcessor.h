@@ -5,6 +5,7 @@
 
 #include "Parameters.h"
 #include "CaptureRing.h"
+#include "ComputerAudio.h"
 #include "Looper.h"
 #include "MidiMap.h"
 #include "PitchTap.h"
@@ -152,6 +153,11 @@ public:
     // isn't processed or recorded with the voice). Message thread only.
     Multitrack& getMultitrack() noexcept                    { return multitrack; }
 
+    // Live mode: the computer's own sound (a video, any app) mixed in after the voice chain,
+    // to hear and, while computerInRecordings is on, in the takes and Capture too.
+    ComputerAudio& getComputerAudio() noexcept              { return computerAudio; }
+    std::atomic<bool> computerInRecordings { true };
+
     // DAW mode (standalone app): the mic feeds the DAW engine's tracks instead of the
     // Live chain. The session, its engine and its project file. Message thread.
     daw::Edit& getDawEdit() noexcept                         { return dawEdit; }
@@ -205,6 +211,10 @@ private:
     juce::dsp::Limiter<float> limiter;
 
     Recorder recorder;
+    ComputerAudio computerAudio;
+    juce::AudioBuffer<float> computerMonitor, computerRecord, recordMix;
+    float recordGuardGain = 1.0f;
+    void limitRecordMix (int numSamples) noexcept;
     CaptureRing liveCapture;
     std::atomic<double> captureSeconds { defaultCaptureSeconds };
     Multitrack multitrack;

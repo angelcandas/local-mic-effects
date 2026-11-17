@@ -198,6 +198,17 @@ Live mode always keeps the last few minutes of your voice (processed and raw) in
 
 In DAW mode the **Capture** button does the same for the armed audio tracks (right-click for how much). MIDI input is not captured yet.
 
+### Computer audio: sing over a video or any app *(standalone app)*
+
+Turn on **Computer audio** in the transport bar to mix the sound of your other apps (a YouTube video, a song in your music player, a call) with your voice. You hear both together, and recordings and Capture get your voice with the computer audio under it. The slider sets its level (double-click for -6 dB; all the way down is off) and the small meter shows what is coming in.
+
+The **▾** button picks where it comes from:
+
+- **Computer audio (all apps)**, on macOS 14.2 or later: every app's sound, taken straight from the Mac. MicFX leaves itself out, so it never hears its own output. The first time, macOS asks to allow MicFX to record system audio; if you hear nothing, allow it in System Settings › Privacy & Security › Screen & System Audio Recording. **Mute the apps on the speakers** (on by default) silences them on the Mac's own output while MicFX listens, so you hear them once, through MicFX, in time with your voice. They come back as soon as you turn Computer audio off.
+- **A loopback device**: route the computer's sound to a virtual device (BlackHole or Loopback on a Mac, Stereo Mix on Windows, a PipeWire/Pulse monitor on Linux) and pick it here. MicFX itself must play to another output (your interface or headphones), otherwise it would feed back; it tells you if it does.
+
+**In recordings** (on by default) decides whether takes and Capture include it. The computer audio in a take is delayed by the audio round trip, the same amount takes are moved on the timeline, so it lines up with the voice you sang to it. Computer audio pauses in DAW mode and comes back when you return to Live.
+
 ## 3.3 Looper
 
 ![The looper in its different states](images/looper-states.png)

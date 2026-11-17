@@ -60,6 +60,12 @@ private:
     // part of the plugin state, so they survive across sessions and projects.
     juce::File getRecordingFolder();
     juce::var describeCapture();
+    // Live mode's computer audio (ComputerAudio.h): its state and sources for the page, and
+    // (re)starting it from the saved settings. The app's audio driver opens device sources.
+    juce::var describeComputerAudio();
+    void applyComputerAudio (bool restart);
+    juce::String computerAudioError;
+    bool computerAudioWanted = false; // on in Live mode (it pauses in the DAW)
     juce::var describeRecorderSettings();
     juce::var describeLiveHistory();
     juce::var describeTracks();

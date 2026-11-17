@@ -130,6 +130,10 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     chain.prepare (spec); // starts every module from its current values
 
     recorder.prepare (sampleRate, (int) spec.numChannels);
+    computerAudio.prepare (sampleRate, samplesPerBlock);
+    computerMonitor.setSize (2, juce::jmax (samplesPerBlock, 4096));
+    computerRecord.setSize (2, juce::jmax (samplesPerBlock, 4096));
+    recordMix.setSize (2, juce::jmax (samplesPerBlock, 4096));
     liveCapture.configure (sampleRate, 3, captureSeconds.load());
     multitrack.prepare (sampleRate);
     looper.prepare (sampleRate);
@@ -378,6 +382,12 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     // voice is recorded, so takes contain only the voice.
     const auto timelinePosition = multitrack.getPosition();
 
+    // The computer's sound: now for the ears, and delayed by the round trip for the takes
+    // (so it lines up with the voice that was sung to it).
+    const auto computer = computerAudio.read (computerMonitor.getArrayOfWritePointers(),
+                                              computerRecord.getArrayOfWritePointers(), numSamples);
+    const auto computerInTakes = computer && computerInRecordings.load();
+
     if (recording || capturing)
     {
         // Write in chunks the dry buffer can cover so both files stay sample-aligned.
@@ -388,6 +398,18 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
             const auto length = juce::jmin (dryInput.getNumSamples(), numSamples - start);
             std::array<const float*, 2> output { buffer.getReadPointer (0, start),
                                                  buffer.getReadPointer (juce::jmin (1, numOut - 1), start) };
+
+            if (computerInTakes)
+            {
+                // The take is the voice with the computer audio under it.
+                for (int ch = 0; ch < 2; ++ch)
+                {
+                    juce::FloatVectorOperations::add (recordMix.getWritePointer (ch), output[(size_t) ch],
+                                                      computerRecord.getReadPointer (ch, start), length);
+                    output[(size_t) ch] = recordMix.getReadPointer (ch);
+                }
+                limitRecordMix (length);
+            }
 
             if (recording)
                 recorder.write (output.data(), dryInput.getReadPointer (0), length, timelinePosition + start);
@@ -400,6 +422,19 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
                 liveCapture.write (kept.data(), length, playingBacking ? timelinePosition + start : -1);
             }
         }
+    }
+
+    if (computer)
+    {
+        if (numOut == 1)
+        {
+            buffer.addFrom (0, 0, computerMonitor, 0, 0, numSamples, 0.5f);
+            buffer.addFrom (0, 0, computerMonitor, 1, 0, numSamples, 0.5f);
+        }
+        else
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.addFrom (ch, 0, computerMonitor, ch, 0, numSamples);
+        applyPeakGuard (buffer, numOut, numSamples);
     }
 
     if (multitrack.isPlaying())
@@ -505,6 +540,30 @@ void PluginProcessor::applyPeakGuard (juce::AudioBuffer<float>& buffer, int numC
         if (mixGuardGain < 0.9999f)
             for (int ch = 0; ch < numChannels; ++ch)
                 buffer.setSample (ch, i, buffer.getSample (ch, i) * mixGuardGain);
+    }
+}
+
+void PluginProcessor::limitRecordMix (int numSamples) noexcept
+{
+    // The same transparent -1 dB guard as the output's, with its own gain (the take's mix
+    // isn't the one you hear: its computer audio is delayed).
+    constexpr auto ceiling = 0.89125f;
+    auto* left = recordMix.getWritePointer (0);
+    auto* right = recordMix.getWritePointer (1);
+
+    for (int i = 0; i < numSamples; ++i)
+    {
+        const auto peak = juce::jmax (std::abs (left[i]), std::abs (right[i]));
+        if (peak * recordGuardGain > ceiling)
+            recordGuardGain = ceiling / peak;
+        else
+            recordGuardGain += (1.0f - recordGuardGain) * mixGuardRelease;
+
+        if (recordGuardGain < 0.9999f)
+        {
+            left[i] *= recordGuardGain;
+            right[i] *= recordGuardGain;
+        }
     }
 }
 

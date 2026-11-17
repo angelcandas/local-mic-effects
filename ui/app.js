@@ -14,6 +14,7 @@ import { PracticeView } from "./practice.js";
 import { SCENE_KEYS, SceneBar } from "./scenes.js";
 import { SETLIST_KEYS, SetlistPanel } from "./setlist.js";
 import { CapturePanel } from "./capture.js";
+import { ComputerAudioPanel } from "./computer.js";
 import { SoundCheckPanel } from "./soundcheck.js";
 import { initSetup } from "./setup.js";
 
@@ -1596,6 +1597,7 @@ class Tracks {
 
 const recorderBar = new RecorderBar(document.querySelector(".recorder"));
 const capturePanel = new CapturePanel(document.querySelector(".record-folder"), (text, className) => recorderBar.setStatus(text, className));
+const computerAudioPanel = new ComputerAudioPanel(document.querySelector(".record-folder"), (text, className) => recorderBar.setStatus(text, className));
 const tracks = new Tracks(document.querySelector(".studio"));
 
 const practiceView = new PracticeView({ section: document.querySelector(".practice"),
@@ -1631,6 +1633,7 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   presetBar.syncFromHost(status.preset);
   recorderBar.update(status.recording);
   capturePanel.setAvailable(status.capture);
+  computerAudioPanel.setReading(status.computer);
   tracks.update(status.transport);
   setlistPanel.followPosition(status.transport?.position);
   if (status.looper) loopPanel.update(status.looper);

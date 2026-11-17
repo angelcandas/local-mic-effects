@@ -154,6 +154,11 @@ PluginEditor::PluginEditor (PluginProcessor& p)
 
     // Capture keeps the last few minutes of the voice (0 = off); the choice is an app preference.
     processorRef.setCaptureSeconds (60.0 * settings.getDoubleValue ("capture.minutes", PluginProcessor::defaultCaptureSeconds / 60.0));
+    // Computer audio: its level and options are remembered; it starts only when you turn it on.
+    processorRef.getComputerAudio().setGainDecibels ((float) settings.getDoubleValue ("computerAudio.level", -6.0));
+    processorRef.getComputerAudio().setMuteOnSpeakers (settings.getBoolValue ("computerAudio.mute", true));
+    processorRef.computerInRecordings = settings.getBoolValue ("computerAudio.inRecordings", true);
+    computerAudioWanted = processorRef.getComputerAudio().isOn();
 
     addAndMakeVisible (*webView);
     webView->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
@@ -763,6 +768,59 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            });
                        })
 
+                       // (action, options) -> the computer audio's state (describeComputerAudio). "status";
+                       // "set" { on?, source?, level? (dB), inRecordings?, muteOnSpeakers? } (saved for next time,
+                       // and the capture restarts when on, source or muting changed).
+                       .withNativeFunction ("computerAudio", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           const auto options = args.size() > 1 ? args[1] : juce::var();
+                           auto& computer = processorRef.getComputerAudio();
+
+                           if (action == "set")
+                           {
+                               auto restart = false;
+
+                               if (options.hasProperty ("level"))
+                               {
+                                   const auto level = juce::jlimit (-60.0f, 12.0f, (float) (double) options["level"]);
+                                   settings.setValue ("computerAudio.level", level);
+                                   computer.setGainDecibels (level);
+                               }
+
+                               if (options.hasProperty ("inRecordings"))
+                               {
+                                   settings.setValue ("computerAudio.inRecordings", (bool) options["inRecordings"]);
+                                   processorRef.computerInRecordings = (bool) options["inRecordings"];
+                               }
+
+                               if (options.hasProperty ("muteOnSpeakers"))
+                               {
+                                   const auto mute = (bool) options["muteOnSpeakers"];
+                                   restart = restart || mute != computer.getMuteOnSpeakers();
+                                   settings.setValue ("computerAudio.mute", mute);
+                                   computer.setMuteOnSpeakers (mute);
+                               }
+
+                               if (options.hasProperty ("source"))
+                               {
+                                   restart = restart || options["source"].toString() != settings.getValue ("computerAudio.source");
+                                   settings.setValue ("computerAudio.source", options["source"].toString());
+                               }
+
+                               if (options.hasProperty ("on"))
+                               {
+                                   restart = restart || (bool) options["on"] != computerAudioWanted;
+                                   computerAudioWanted = (bool) options["on"];
+                               }
+
+                               if (restart)
+                                   applyComputerAudio (true);
+                           }
+
+                           complete (describeComputerAudio());
+                       })
+
                        // (includeDry) -> { ok, error }
                        .withNativeFunction ("startRecording", [this] (const auto& args, auto complete)
                        {
@@ -1155,6 +1213,22 @@ void PluginEditor::timerCallback()
     transport->setProperty ("loading", multitrack.getNumLoading());
     status->setProperty ("transport", juce::var (transport));
 
+    // The computer audio: paused in the DAW (a muting tap would silence the apps there), its
+    // takes' delay kept to the round trip, and its level for the meter.
+    {
+        auto& computer = processorRef.getComputerAudio();
+        if (computerAudioWanted && computer.isOn() == processorRef.isDawMode())
+            applyComputerAudio (false);
+        if (computer.isOn())
+        {
+            computer.setRecordDelay ((int) getRoundTripLatency());
+            auto* reading = new juce::DynamicObject();
+            reading->setProperty ("peak", computer.getPeak());
+            reading->setProperty ("receiving", computer.isReceiving());
+            status->setProperty ("computer", juce::var (reading));
+        }
+    }
+
     webView->emitEventIfBrowserIsVisible ("meters", juce::var (status));
 }
 
@@ -1431,6 +1505,86 @@ juce::var PluginEditor::describeCapture()
     result->setProperty ("minutes", processorRef.getCaptureSeconds() / 60.0);
     result->setProperty ("seconds", ring.getAvailableSeconds());
     result->setProperty ("on", ring.isOn());
+    return juce::var (result);
+}
+
+void PluginEditor::applyComputerAudio (bool restart)
+{
+    auto& computer = processorRef.getComputerAudio();
+    const auto wanted = computerAudioWanted && ! processorRef.isDawMode();
+
+    if (! wanted)
+    {
+        computer.stop();
+        if (! computerAudioWanted)
+            computerAudioError = {};
+        return;
+    }
+
+    if (computer.isOn() && ! restart)
+        return;
+
+    juce::AudioIODeviceType* type = nullptr;
+    juce::String outputDevice;
+   #if JucePlugin_Build_Standalone
+    if (auto* holder = juce::JUCEApplicationBase::isStandaloneApp() ? juce::StandalonePluginHolder::getInstance() : nullptr)
+    {
+        type = holder->deviceManager.getCurrentDeviceTypeObject();
+        outputDevice = holder->deviceManager.getAudioDeviceSetup().outputDeviceName;
+    }
+   #endif
+
+    auto source = settings.getValue ("computerAudio.source");
+    if (source.isEmpty())
+        source = ComputerAudio::isSystemCaptureAvailable() ? juce::String (ComputerAudio::systemSource) : juce::String();
+
+    computer.setRecordDelay ((int) getRoundTripLatency());
+    computerAudioError = source.isEmpty() ? juce::String ("Pick where the computer's sound comes from.")
+                                          : computer.start (source, type, outputDevice);
+    if (computerAudioError.isNotEmpty())
+        computerAudioWanted = false;
+}
+
+juce::var PluginEditor::describeComputerAudio()
+{
+    auto& computer = processorRef.getComputerAudio();
+    auto* result = new juce::DynamicObject();
+
+    juce::AudioIODeviceType* type = nullptr;
+    juce::String inputDevice;
+    auto available = false;
+   #if JucePlugin_Build_Standalone
+    if (auto* holder = juce::JUCEApplicationBase::isStandaloneApp() ? juce::StandalonePluginHolder::getInstance() : nullptr)
+    {
+        available = true;
+        type = holder->deviceManager.getCurrentDeviceTypeObject();
+        inputDevice = holder->deviceManager.getAudioDeviceSetup().inputDeviceName;
+    }
+   #endif
+
+    juce::Array<juce::var> sources;
+    for (const auto& source : ComputerAudio::listSources (type, inputDevice))
+    {
+        auto* item = new juce::DynamicObject();
+        item->setProperty ("id", source.id);
+        item->setProperty ("name", source.name);
+        sources.add (juce::var (item));
+    }
+
+    auto source = settings.getValue ("computerAudio.source");
+    if (source.isEmpty() && ComputerAudio::isSystemCaptureAvailable())
+        source = ComputerAudio::systemSource;
+
+    result->setProperty ("available", available);
+    result->setProperty ("on", computerAudioWanted);
+    result->setProperty ("running", computer.isOn());
+    result->setProperty ("source", source);
+    result->setProperty ("sources", sources);
+    result->setProperty ("system", ComputerAudio::isSystemCaptureAvailable());
+    result->setProperty ("level", computer.getGainDecibels());
+    result->setProperty ("inRecordings", processorRef.computerInRecordings.load());
+    result->setProperty ("muteOnSpeakers", computer.getMuteOnSpeakers());
+    result->setProperty ("error", computerAudioError);
     return juce::var (result);
 }
 
