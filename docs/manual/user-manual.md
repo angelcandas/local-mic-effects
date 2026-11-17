@@ -354,6 +354,10 @@ The **Cue** strip, left of the master, is what you hear in your headphones while
 - The audio status at the bottom shows what the effects you hear yourself through add, for example "5.3 ms round trip + 10.7 ms effects". With the cue mix on and no slow effects on it, that extra part is gone.
 - Exports never use the cue mix.
 
+### Low latency
+
+The **Low latency** button next to the audio status (bottom right, in Live and in the DAW) makes effects that delay your voice by more than 3 ms sit out while you sing: Denoise, Smooth and slow plug-ins such as linear-phase EQs. Autotune, the limiter and everything quick keep playing. In the DAW it acts on the tracks you monitor, the returns, the master and the cue mix; the other tracks keep their effects and stay in time. Switch it off to mix with every effect. Exports always use every effect.
+
 ### Mastering effects
 
 Under *Mastering* in Add effect and the library (DAW only): **Mastering EQ**, **Multiband Compressor** (three bands), **Stereo Imager** (width with mono bass and a correlation readout), **Limiter** (look-ahead brickwall) and a **Loudness Meter** (momentary, short-term and integrated LUFS against a target). Put them on the master.

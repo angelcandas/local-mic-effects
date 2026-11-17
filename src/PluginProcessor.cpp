@@ -83,6 +83,15 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
     startTimerHz (5);
 }
 
+void PluginProcessor::setLowLatency (bool on)
+{
+    lowLatency = on;
+    const auto rate = getSampleRate() > 0.0 ? getSampleRate() : 48000.0;
+    chain.setLatencyLimit (on ? juce::roundToInt (daw::DawEngine::lowLatencyMs * 0.001 * rate) : -1);
+    dawEngine.setLowLatency (on);
+    updateLatency();
+}
+
 void PluginProcessor::updateLatency()
 {
     const auto latency = dawMode.load() ? dawEngine.getLatencySamples() : chain.getLatencySamples();
@@ -128,6 +137,7 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     updateDspParameters();
     chain.prepare (spec); // starts every module from its current values
+    chain.setLatencyLimit (lowLatency.load() ? juce::roundToInt (daw::DawEngine::lowLatencyMs * 0.001 * sampleRate) : -1);
 
     recorder.prepare (sampleRate, (int) spec.numChannels);
     liveCapture.configure (sampleRate, 3, captureSeconds.load());

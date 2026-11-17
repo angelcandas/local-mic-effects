@@ -612,6 +612,21 @@ void DawEngine::setStripTargets (Strip& strip, const juce::ValueTree& tree, bool
     }
 }
 
+bool DawEngine::isMonitored (const juce::ValueTree& track)
+{
+    // MIDI tracks play the MIDI input when armed too, so you hear what you record.
+    // Auto monitoring hears the input only while the track is armed.
+    return (bool) track[ids::monitor] || ((bool) track[ids::arm] && (Edit::isMidiTrack (track) || (bool) track.getProperty (ids::monitorAuto, true)));
+}
+
+void DawEngine::setLowLatency (bool on)
+{
+    if (! realtime || lowLatency.load() == on)
+        return;
+    lowLatency = on;
+    requestRebuild();
+}
+
 void DawEngine::updateMix()
 {
     const auto tracks = edit.getTracks();
@@ -632,9 +647,10 @@ void DawEngine::updateMix()
         {
             setStripTargets (*it->second, track, audible, false);
             it->second->targetDirect = Edit::getTrackOutput (track) != Edit::masterId || ! anyReturnSolo || (bool) track[ids::solo] ? 1.0f : 0.0f;
-            // MIDI tracks play the MIDI input when armed too, so you hear what you record.
-            // Auto monitoring hears the input only while the track is armed.
-            it->second->monitoring = (bool) track[ids::monitor] || ((bool) track[ids::arm] && (Edit::isMidiTrack (track) || (bool) track.getProperty (ids::monitorAuto, true)));
+            it->second->monitoring = isMonitored (track);
+            // Low latency follows which tracks you hear live: a new graph for the new ones.
+            if (lowLatency.load() && it->second->monitoring.load() != (lowLatencyTracks.count (trackId) > 0))
+                requestRebuild();
             const auto input = Edit::getTrackInput (track);
             it->second->inputLeft = input.left;
             it->second->inputRight = input.right;
@@ -1198,6 +1214,29 @@ void DawEngine::rebuild()
         }
 
         graph->tracks.push_back (std::move (track));
+    }
+
+    // Low latency: the monitored tracks, the returns, the master and the cue drop their
+    // slow effects (before the compensation is worked out from what's left).
+    {
+        const auto limit = lowLatency.load() ? juce::roundToInt (lowLatencyMs * 0.001 * sampleRate) : -1;
+        lowLatencyTracks.clear();
+        for (const auto& trackTree : edit.getTracks())
+            if (const auto it = strips.find ((int) trackTree[ids::id]); it != strips.end())
+            {
+                const auto held = limit >= 0 && isMonitored (trackTree);
+                it->second->chain.setLatencyLimit (held ? limit : -1);
+                if (held)
+                    lowLatencyTracks.insert ((int) trackTree[ids::id]);
+            }
+        for (auto& bus : graph->returns)
+            bus.strip->chain.setLatencyLimit (limit);
+        graph->master->chain.setLatencyLimit (limit);
+        if (graph->cue != nullptr)
+            graph->cue->chain.setLatencyLimit (limit);
+        maxLatency = 0;
+        for (auto& track : graph->tracks)
+            maxLatency = juce::jmax (maxLatency, track.strip->getLatency());
     }
 
     // Delay every track to line up with the slowest chain.
