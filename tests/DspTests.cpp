@@ -46,6 +46,8 @@
 #include "PitchTap.h"
 #include "SoundCheck.h"
 #include "CaptureRing.h"
+#include "ComputerAudio.h"
+#include "dsp/DriftRing.h"
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
 #include "instruments/Kit.h"
@@ -3809,6 +3811,179 @@ namespace
         folder.deleteRecursively();
     }
     //==========================================================================
+    // Computer audio: the drift ring between two clocks, and the mix into Live mode.
+    void testComputerAudio()
+    {
+        std::cout << "\nComputer audio\n";
+
+        // Runs a source pushing 1 kHz at `sourceRate` (its clock off by `drift`) in chunks of
+        // `chunk`, against a consumer pulling `block` at 48 kHz, for `seconds`. Returns the
+        // pulled audio (left channel).
+        const auto run = [] (fx::DriftRing& ring, double sourceRate, double drift, int chunk, int block, double seconds,
+                             double stopFrom = -1.0, double stopTo = -1.0)
+        {
+            constexpr double destRate = 48000.0;
+            ring.prepare (sourceRate, destRate);
+            std::vector<float> out, l ((size_t) chunk), r ((size_t) chunk), pl ((size_t) block), pr ((size_t) block);
+            double producerTime = 0.0, consumerTime = 0.0;
+            juce::int64 produced = 0;
+            const auto twoPi = juce::MathConstants<double>::twoPi;
+
+            while (consumerTime < seconds)
+            {
+                if (producerTime <= consumerTime)
+                {
+                    const auto silent = producerTime >= stopFrom && producerTime < stopTo;
+                    for (int i = 0; i < chunk; ++i)
+                    {
+                        l[(size_t) i] = (float) (0.5 * std::sin (twoPi * 1000.0 * (double) (produced + i) / sourceRate));
+                        r[(size_t) i] = -l[(size_t) i];
+                    }
+                    if (! silent)
+                        ring.push (l.data(), r.data(), chunk);
+                    produced += chunk;
+                    producerTime += chunk / (sourceRate * (1.0 + drift));
+                }
+                else
+                {
+                    ring.pull (pl.data(), pr.data(), block);
+                    out.insert (out.end(), pl.begin(), pl.end());
+                    consumerTime += block / destRate;
+                }
+            }
+            return out;
+        };
+
+        // Frequency (zero crossings) and the largest jump between samples in [from, to) seconds.
+        const auto measure = [] (const std::vector<float>& audio, double from, double to)
+        {
+            const auto a = (size_t) (from * 48000.0), b = juce::jmin (audio.size(), (size_t) (to * 48000.0));
+            int crossings = 0;
+            float jump = 0.0f;
+            for (auto i = a + 1; i < b; ++i)
+            {
+                crossings += (audio[i - 1] < 0.0f) != (audio[i] < 0.0f) ? 1 : 0;
+                jump = juce::jmax (jump, std::abs (audio[i] - audio[i - 1]));
+            }
+            return std::pair<double, float> { crossings / (2.0 * (to - from)), jump };
+        };
+
+        {
+            fx::DriftRing ring;
+            const auto out = run (ring, 48000.0, 0.0, 480, 256, 6.0);
+            const auto [frequency, jump] = measure (out, 1.0, 6.0);
+            check (ring.getUnderruns() == 0 && ring.getOverflows() == 0, "same clock: no dropouts");
+            check (std::abs (frequency - 1000.0) < 1.0, "same clock: the pitch is kept (" + juce::String (frequency, 2) + " Hz)");
+            // A 0.5 sine at 1 kHz moves at most 0.065 per sample at 48 kHz.
+            check (jump < 0.075f, "same clock: no clicks (largest step " + juce::String (jump, 3) + ")");
+            check (ring.getFill() < 2000.0, "same clock: little delay (" + juce::String (ring.getFill(), 0) + " frames)");
+        }
+
+        {
+            // 44.1 kHz, its clock 300 ppm fast, into 48 kHz.
+            fx::DriftRing ring;
+            const auto out = run (ring, 44100.0, 3.0e-4, 512, 128, 40.0);
+            const auto [frequency, jump] = measure (out, 20.0, 40.0);
+            check (ring.getUnderruns() == 0 && ring.getOverflows() == 0, "44.1 to 48 kHz with drift: no dropouts");
+            check (std::abs (frequency - 1000.3) < 0.5, "44.1 to 48 kHz: follows the source's clock (" + juce::String (frequency, 2) + " Hz)");
+            check (jump < 0.075f, "44.1 to 48 kHz: no clicks");
+            check (std::abs (ring.getRatio() / ring.getBaseRatio() - 1.0003) < 2.0e-4, "44.1 to 48 kHz: the ratio settles on the drift");
+        }
+
+        {
+            // The source stops for half a second: silence, then it comes back.
+            fx::DriftRing ring;
+            const auto out = run (ring, 48000.0, -2.0e-4, 1024, 256, 4.0, 1.5, 2.0);
+            check (ring.getUnderruns() >= 1, "a stalled source runs dry");
+            const auto silentPart = measure (out, 1.7, 2.0);
+            check (silentPart.second == 0.0f, "silence while it waits (" + juce::String (silentPart.second) + ")");
+            check (std::abs (measure (out, 2.5, 4.0).first - 1000.0) < 2.0, "and the sound comes back");
+        }
+
+        struct FakeBackend final : ComputerAudio::Backend
+        {
+            double getSampleRate() const override   { return 48000.0; }
+            juce::String getName() const override   { return "Fake"; }
+            juce::String startCapture() override    { return {}; }
+        };
+
+        {
+            ComputerAudio computer;
+            computer.prepare (48000.0, 256);
+            computer.setGainDecibels (-6.0f);
+            computer.setRecordDelay (100);
+            check (computer.start (std::make_unique<FakeBackend>(), "fake").isEmpty() && computer.isOn(), "starts from a backend");
+
+            std::vector<float> ones (256, 1.0f);
+            juce::AudioBuffer<float> monitor (2, 256), record (2, 256);
+            float firstRecorded = 0.0f;
+            int firstMonitorIndex = -1, firstRecordIndex = -1;
+            auto allRead = true;
+            for (int block = 0; block < 40; ++block)
+            {
+                computer.push (ones.data(), ones.data(), 256);
+                allRead = computer.read (monitor.getArrayOfWritePointers(), record.getArrayOfWritePointers(), 256) && allRead;
+                for (int i = 0; i < 256; ++i)
+                {
+                    if (firstMonitorIndex < 0 && monitor.getSample (0, i) > 0.0f) firstMonitorIndex = block * 256 + i;
+                    if (firstRecordIndex < 0 && record.getSample (0, i) > 0.0f) { firstRecordIndex = block * 256 + i; }
+                }
+                firstRecorded = record.getSample (1, 255);
+            }
+            check (allRead, "reads every block while on");
+            check (firstMonitorIndex >= 0 && firstRecordIndex - firstMonitorIndex == 100, "the takes get it delayed by the round trip");
+            check (std::abs (firstRecorded - 0.501f) < 0.01f && std::abs (monitor.getSample (0, 255) - 0.501f) < 0.01f, "the level applies");
+            computer.stop();
+            check (! computer.isOn() && ! computer.read (monitor.getArrayOfWritePointers(), record.getArrayOfWritePointers(), 256), "off after stop");
+        }
+
+        {
+            // In the Live processor: heard over a silent mic, and in Capture (the takes' mix).
+            PluginProcessor processor;
+            processor.setRateAndBufferSizeDetails (48000.0, 256);
+            processor.setCaptureSeconds (30.0);
+            processor.prepareToPlay (48000.0, 256);
+            auto& computer = processor.getComputerAudio();
+            computer.setGainDecibels (0.0f);
+            computer.setRecordDelay (0);
+            computer.start (std::make_unique<FakeBackend>(), "fake");
+
+            std::vector<float> tone (256);
+            juce::AudioBuffer<float> buffer (2, 256);
+            juce::MidiBuffer midi;
+            float heard = 0.0f;
+            for (int block = 0; block < 200; ++block)
+            {
+                for (int i = 0; i < 256; ++i)
+                    tone[(size_t) i] = 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * (block * 256 + i) / 48000.0);
+                computer.push (tone.data(), tone.data(), 256);
+                buffer.clear();
+                processor.processBlock (buffer, midi);
+                if (block > 100)
+                    heard = juce::jmax (heard, buffer.getMagnitude (0, 0, 256));
+            }
+            check (std::abs (heard - 0.3f) < 0.02f, "Live: the computer audio is heard (" + juce::String (heard, 3) + ")");
+
+            auto captured = processor.getCapture().take (1.0);
+            check (captured.audio.getNumSamples() > 0 && captured.audio.getMagnitude (0, 0, captured.audio.getNumSamples()) > 0.25f,
+                   "Live: Capture keeps it with the voice");
+
+            processor.computerInRecordings = false;
+            processor.setCaptureSeconds (0.0);
+            processor.setCaptureSeconds (30.0);
+            for (int block = 0; block < 100; ++block)
+            {
+                computer.push (tone.data(), tone.data(), 256);
+                buffer.clear();
+                processor.processBlock (buffer, midi);
+            }
+            captured = processor.getCapture().take (1.0);
+            check (captured.audio.getMagnitude (0, 0, captured.audio.getNumSamples()) < 0.01f, "Live: left out of the takes when asked");
+            computer.stop();
+            processor.releaseResources();
+        }
+    }
+
     void testCapture()
     {
         std::cout << "\nCapture\n";
@@ -18891,6 +19066,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "looper")
     {
         testCapture();
+        testComputerAudio();
     testLooper();
         testMidiLearn();
         testScenes();
@@ -19049,6 +19225,7 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "capture")
     {
         testCapture();
+        testComputerAudio();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }

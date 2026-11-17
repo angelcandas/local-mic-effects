@@ -27,6 +27,8 @@ juce_add_plugin(MicFX
     NEEDS_CURL FALSE
     MICROPHONE_PERMISSION_ENABLED TRUE
     MICROPHONE_PERMISSION_TEXT "MicFX processes your microphone in real time to apply audio effects."
+    # Live mode's computer audio (src/ComputerAudioMac.mm) asks for this on macOS 14.2+.
+    PLIST_TO_MERGE "<plist><dict><key>NSAudioCaptureUsageDescription</key><string>MicFX mixes the sound of your other apps (a video, a song) with your voice, to hear and record them together.</string></dict></plist>"
     VST3_CATEGORIES Fx
     AU_MAIN_TYPE kAudioUnitType_Effect)
 
@@ -62,6 +64,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/automation.js
         ui/backing.js
         ui/capture.js
+        ui/computer.js
         ui/looper.js
         ui/midilearn.js
         ui/scenes.js
@@ -145,6 +148,9 @@ set(MICFX_DSP_SOURCES
     src/Practice.h
     src/CaptureRing.cpp
     src/CaptureRing.h
+    src/ComputerAudio.cpp
+    src/ComputerAudio.h
+    src/dsp/DriftRing.h
     src/Looper.cpp
     src/Looper.h
     src/MidiMap.cpp
@@ -199,6 +205,12 @@ set(MICFX_DSP_SOURCES
     src/dsp/PsolaShifter.h
     src/stems/StemSplitter.cpp
     src/stems/StemSplitter.h)
+
+# Computer audio in Live mode: the Mac captures every app's sound with a Core Audio process tap.
+if(APPLE)
+    list(APPEND MICFX_DSP_SOURCES src/ComputerAudioMac.mm)
+    set_source_files_properties(src/ComputerAudioMac.mm PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+endif()
 
 # Stem splitting (Split into stems in DAW mode) runs Demucs with demucs.cpp (MIT) on
 # Eigen (MPL 2.0), both git submodules. Without them the app still builds; the split
