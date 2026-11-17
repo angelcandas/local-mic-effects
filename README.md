@@ -272,7 +272,7 @@ tracks instead of one live chain:
   any two inputs as left and right (Input at the top of the mixer strip, or the Input column in
   the Effects panel). Tracks on different inputs record at the same time, each into its own WAV
   (stereo for a stereo track). Every strip, the returns and the master have left/right meters;
-  sends and returns are stereo. Live mode uses input 1.
+  sends and returns are stereo. Live mode uses input 1 unless you pick another with the input menu next to **Hold for dry** (shown when the interface has more than one input open); the chosen input swaps places with input 1.
 - **Editing**: drag clips to move them (also to another track), drag the edges to trim, the top
   corners to fade, **Ctrl+E** splits at the playhead, **Ctrl+D** duplicates, **Delete** removes. Edits
   snap to the beat at the project tempo (hold **Alt** to drag freely). Drag on the ruler to mark a

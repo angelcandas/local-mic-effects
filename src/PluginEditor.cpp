@@ -47,6 +47,24 @@ namespace
         return options;
     }
 
+   #if JucePlugin_Build_Standalone
+    // The app's audio interface: its open inputs by name (the ones the app receives).
+    juce::StringArray getActiveInputNames()
+    {
+        juce::StringArray names;
+        if (auto* holder = juce::StandalonePluginHolder::getInstance())
+            if (auto* device = holder->deviceManager.getCurrentAudioDevice())
+            {
+                const auto all = device->getInputChannelNames();
+                const auto active = device->getActiveInputChannels();
+                for (int i = 0; i < all.size(); ++i)
+                    if (active[i] && names.size() < PluginProcessor::maxAppInputs)
+                        names.add (all[i]);
+            }
+        return names;
+    }
+   #endif
+
     float toDecibels (std::atomic<float>& peak)
     {
         return juce::Decibels::gainToDecibels (peak.exchange (0.0f), -100.0f);
@@ -100,20 +118,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
    #if JucePlugin_Build_Standalone
     // The app's audio interface: its open inputs by name, for the tracks' input pickers.
     if (juce::JUCEApplicationBase::isStandaloneApp())
-        daw->inputNames = []
-        {
-            juce::StringArray names;
-            if (auto* holder = juce::StandalonePluginHolder::getInstance())
-                if (auto* device = holder->deviceManager.getCurrentAudioDevice())
-                {
-                    const auto all = device->getInputChannelNames();
-                    const auto active = device->getActiveInputChannels();
-                    for (int i = 0; i < all.size(); ++i)
-                        if (active[i] && names.size() < PluginProcessor::maxAppInputs)
-                            names.add (all[i]);
-                }
-            return names;
-        };
+        daw->inputNames = [] { return getActiveInputNames(); };
    #endif
 
     processorRef.getSoundCheck().onChange = [this] (const juce::var& status)
@@ -151,6 +156,9 @@ PluginEditor::PluginEditor (PluginProcessor& p)
         looper.setTempoLocked (settings.getBoolValue ("looper.locked", false));
         looper.setVolume ((float) settings.getDoubleValue ("looper.volume", 1.0));
     }
+
+    // Which of the interface's inputs is the Live mic is an app preference too.
+    processorRef.setLiveInput (settings.getIntValue ("liveInput", 0));
 
     // Capture keeps the last few minutes of the voice (0 = off); the choice is an app preference.
     processorRef.setCaptureSeconds (60.0 * settings.getDoubleValue ("capture.minutes", PluginProcessor::defaultCaptureSeconds / 60.0));
@@ -432,9 +440,18 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            {
                                if (action == "settings")   holder->showAudioSettingsDialog();
                                if (action == "headphones") holder->getMuteInputValue().setValue (false);
+                               if (action == "liveInput" && args.size() > 1)
+                               {
+                                   const auto chosen = juce::jlimit (0, PluginProcessor::maxAppInputs - 1, (int) args[1]);
+                                   processorRef.setLiveInput (chosen);
+                                   settings.setValue ("liveInput", chosen);
+                               }
 
                                result->setProperty ("available", true);
                                result->setProperty ("inputMuted", (bool) holder->getMuteInputValue().getValue());
+                               // The inputs Live mode can take its mic from, and the one it takes.
+                               result->setProperty ("inputs", juce::var (getActiveInputNames()));
+                               result->setProperty ("liveInput", processorRef.getLiveInput());
                                result->setProperty ("cpu", holder->deviceManager.getCpuUsage() * 100.0);
                                if (auto* device = holder->deviceManager.getCurrentAudioDevice())
                                {
