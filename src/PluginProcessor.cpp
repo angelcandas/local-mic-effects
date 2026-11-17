@@ -131,6 +131,9 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
 
     recorder.prepare (sampleRate, (int) spec.numChannels);
     computerAudio.prepare (sampleRate, samplesPerBlock);
+    liveInstruments.prepare (sampleRate, samplesPerBlock);
+    removeMappedMidi = [this] (juce::MidiBuffer& notes) { midiMap.removeMapped (notes); };
+    instrumentBuffer.setSize (2, juce::jmax (samplesPerBlock, 4096));
     computerMonitor.setSize (2, juce::jmax (samplesPerBlock, 4096));
     computerRecord.setSize (2, juce::jmax (samplesPerBlock, 4096));
     recordMix.setSize (2, juce::jmax (samplesPerBlock, 4096));
@@ -354,14 +357,37 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
 
     outputGain.process (context);
 
-    // The looper hears the voice before the limiter; its layers are added after it.
+    // The MIDI instruments (a keyboard, a drum kit): not through the voice's effects or limiter.
+    const auto playing = numSamples <= instrumentBuffer.getNumSamples()
+                         && liveInstruments.render (instrumentBuffer, numSamples, &midi, removeMappedMidi);
+
+    // The looper hears the voice before the limiter (and the instruments); its layers are added after it.
     const auto looping = looper.getState() != Looper::State::empty || looper.hasPendingCommands();
     const auto loopChunk = loopInput.getNumSamples();
     if (looping)
         for (int ch = 0; ch < juce::jmin (2, numOut); ++ch)
+        {
             loopInput.copyFrom (ch, 0, buffer, ch, 0, juce::jmin (numSamples, loopChunk));
+            if (playing)
+                loopInput.addFrom (ch, 0, instrumentBuffer, ch, 0, juce::jmin (numSamples, loopChunk));
+        }
 
     limiter.process (context);
+
+    if (playing)
+    {
+        if (numOut == 1)
+        {
+            buffer.addFrom (0, 0, instrumentBuffer, 0, 0, numSamples, 0.5f);
+            buffer.addFrom (0, 0, instrumentBuffer, 1, 0, numSamples, 0.5f);
+        }
+        else
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.addFrom (ch, 0, instrumentBuffer, ch, 0, numSamples);
+
+        if (! looping)
+            applyPeakGuard (buffer, numOut, numSamples); // with the looper, its own guard comes next
+    }
 
     if (looping)
     {

@@ -6,6 +6,7 @@
 #include "Parameters.h"
 #include "CaptureRing.h"
 #include "ComputerAudio.h"
+#include "LiveInstruments.h"
 #include "Looper.h"
 #include "MidiMap.h"
 #include "PitchTap.h"
@@ -158,6 +159,10 @@ public:
     ComputerAudio& getComputerAudio() noexcept              { return computerAudio; }
     std::atomic<bool> computerInRecordings { true };
 
+    // Live mode: MIDI keyboards and drum kits playing the MicFX instruments, mixed in with
+    // the voice (after the voice's limiter), heard, looped and recorded with it.
+    LiveInstruments& getLiveInstruments() noexcept          { return liveInstruments; }
+
     // DAW mode (standalone app): the mic feeds the DAW engine's tracks instead of the
     // Live chain. The session, its engine and its project file. Message thread.
     daw::Edit& getDawEdit() noexcept                         { return dawEdit; }
@@ -212,6 +217,9 @@ private:
 
     Recorder recorder;
     ComputerAudio computerAudio;
+    LiveInstruments liveInstruments;
+    juce::AudioBuffer<float> instrumentBuffer;
+    std::function<void (juce::MidiBuffer&)> removeMappedMidi;
     juce::AudioBuffer<float> computerMonitor, computerRecord, recordMix;
     float recordGuardGain = 1.0f;
     void limitRecordMix (int numSamples) noexcept;

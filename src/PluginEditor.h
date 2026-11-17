@@ -65,6 +65,13 @@ private:
     juce::var describeComputerAudio();
     void applyComputerAudio (bool restart);
     juce::String computerAudioError;
+    // Live mode's MIDI instruments (LiveInstruments.h): their state for the page, saving each
+    // slot (with its sound) as an app preference, and their own windows.
+    juce::var describeLiveInstruments();
+    void saveLiveInstrument (int slot);
+    void restoreLiveInstruments();
+    void showLiveInstrumentWindow (int slot);
+    std::array<std::unique_ptr<juce::DocumentWindow>, LiveInstruments::numSlots> liveInstrumentWindows;
     bool computerAudioWanted = false; // on in Live mode (it pauses in the DAW)
     juce::var describeRecorderSettings();
     juce::var describeLiveHistory();

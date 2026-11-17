@@ -615,13 +615,50 @@ namespace
         juce::AudioDeviceManager& manager;
     };
 
+    // Live mode's MIDI instruments: each message goes to the processor with the device it
+    // came from, so a keyboard and a drum kit can play different instruments.
+    class LiveMidiRouter final : private juce::MidiInputCallback
+    {
+    public:
+        LiveMidiRouter (juce::AudioDeviceManager& m, juce::AudioProcessor* processor)
+            : manager (m), instruments (getInstruments (processor))
+        {
+            if (instruments == nullptr)
+                return;
+            instruments->setUsesDeviceMidi (true);
+            manager.addMidiInputDeviceCallback ({}, this);
+        }
+
+        ~LiveMidiRouter() override
+        {
+            if (instruments != nullptr)
+                manager.removeMidiInputDeviceCallback ({}, this);
+        }
+
+    private:
+        static LiveInstruments* getInstruments (juce::AudioProcessor* processor)
+        {
+            auto* micfx = dynamic_cast<PluginProcessor*> (processor);
+            return micfx != nullptr ? &micfx->getLiveInstruments() : nullptr;
+        }
+
+        void handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& message) override
+        {
+            instruments->handleMidi (source != nullptr ? source->getIdentifier() : juce::String(), message);
+        }
+
+        juce::AudioDeviceManager& manager;
+        LiveInstruments* instruments = nullptr;
+    };
+
     class MicFXWindow final : public juce::StandaloneFilterWindow,
                               private juce::MenuBarModel
     {
     public:
         MicFXWindow (const juce::String& title, juce::Colour background, std::unique_ptr<juce::StandalonePluginHolder> holder)
             : StandaloneFilterWindow (title, background, std::move (holder)),
-              inputOpener (pluginHolder->deviceManager)
+              inputOpener (pluginHolder->deviceManager),
+              midiRouter (pluginHolder->deviceManager, pluginHolder->processor.get())
         {
             setTitleBarButtonsRequired (juce::DocumentWindow::allButtons, false);
 
@@ -646,6 +683,7 @@ namespace
 
     private:
         InputOpener inputOpener;
+        LiveMidiRouter midiRouter;
         static constexpr int checkForUpdatesId = 100;
         static constexpr int favouritesId = 101;
         static constexpr int firstMenuItemId = 1000;

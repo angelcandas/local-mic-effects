@@ -1,4 +1,6 @@
 #include "PluginEditor.h"
+#include "instruments/InstrumentProcessor.h"
+#include "instruments/Registry.h"
 #include "Presets.h"
 #include "FactoryChains.h"
 #include "analysis/Key.h"
@@ -159,6 +161,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
     processorRef.getComputerAudio().setMuteOnSpeakers (settings.getBoolValue ("computerAudio.mute", true));
     processorRef.computerInRecordings = settings.getBoolValue ("computerAudio.inRecordings", true);
     computerAudioWanted = processorRef.getComputerAudio().isOn();
+    restoreLiveInstruments();
 
     addAndMakeVisible (*webView);
     webView->goToURL (juce::WebBrowserComponent::getResourceProviderRoot());
@@ -821,6 +824,47 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            complete (describeComputerAudio());
                        })
 
+                       // (action, options) -> describeLiveInstruments. "status"; "set" { slot, on?, key?, input?,
+                       // channel?, level? } (saved); "preset" { slot, name }; "edit" { slot } opens its window.
+                       .withNativeFunction ("liveInstruments", [this] (const auto& args, auto complete)
+                       {
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String();
+                           const auto options = args.size() > 1 ? args[1] : juce::var();
+                           const auto slot = (int) options.getProperty ("slot", -1);
+                           auto& instruments = processorRef.getLiveInstruments();
+
+                           if (juce::isPositiveAndBelow (slot, LiveInstruments::numSlots))
+                           {
+                               if (action == "set")
+                               {
+                                   auto current = instruments.getSettings (slot);
+                                   if (options.hasProperty ("on"))      current.on = (bool) options["on"];
+                                   if (options.hasProperty ("input"))   current.input = options["input"].toString();
+                                   if (options.hasProperty ("channel")) current.channel = (int) options["channel"];
+                                   if (options.hasProperty ("level"))   current.levelDb = (float) (double) options["level"];
+                                   if (options.hasProperty ("key") && micfx::inst::findSpec (options["key"].toString()) != nullptr)
+                                   {
+                                       if (options["key"].toString() != current.key)
+                                           liveInstrumentWindows[(size_t) slot].reset(); // the window shows the old one
+                                       current.key = options["key"].toString();
+                                   }
+                                   instruments.setSettings (slot, current);
+                                   saveLiveInstrument (slot);
+                               }
+                               else if (action == "preset")
+                               {
+                                   instruments.loadPreset (slot, options["name"].toString());
+                                   saveLiveInstrument (slot);
+                               }
+                               else if (action == "edit")
+                               {
+                                   showLiveInstrumentWindow (slot);
+                               }
+                           }
+
+                           complete (describeLiveInstruments());
+                       })
+
                        // (includeDry) -> { ok, error }
                        .withNativeFunction ("startRecording", [this] (const auto& args, auto complete)
                        {
@@ -1229,6 +1273,21 @@ void PluginEditor::timerCallback()
         }
     }
 
+    // The Live instruments' levels and note activity.
+    if (! processorRef.isDawMode())
+    {
+        auto& instruments = processorRef.getLiveInstruments();
+        juce::Array<juce::var> readings;
+        for (int slot = 0; slot < LiveInstruments::numSlots; ++slot)
+        {
+            auto* reading = new juce::DynamicObject();
+            reading->setProperty ("peak", instruments.getPeak (slot));
+            reading->setProperty ("active", instruments.takeActivity (slot));
+            readings.add (juce::var (reading));
+        }
+        status->setProperty ("instruments", readings);
+    }
+
     webView->emitEventIfBrowserIsVisible ("meters", juce::var (status));
 }
 
@@ -1505,6 +1564,157 @@ juce::var PluginEditor::describeCapture()
     result->setProperty ("minutes", processorRef.getCaptureSeconds() / 60.0);
     result->setProperty ("seconds", ring.getAvailableSeconds());
     result->setProperty ("on", ring.isOn());
+    return juce::var (result);
+}
+
+namespace
+{
+    // A Live instrument's own window. Keeps the instrument alive while it's open; saves its
+    // sound when it closes.
+    class LiveInstrumentWindow final : public juce::DocumentWindow
+    {
+    public:
+        LiveInstrumentWindow (std::shared_ptr<juce::AudioProcessor> instrumentToShow, std::function<void()> onClose)
+            : DocumentWindow (instrumentToShow->getName(), juce::Colours::black, juce::DocumentWindow::closeButton),
+              instrument (std::move (instrumentToShow)), closed (std::move (onClose))
+        {
+            setUsingNativeTitleBar (true);
+            auto* editor = instrument->hasEditor() ? instrument->createEditorAndMakeActive() : nullptr;
+            if (editor == nullptr)
+                editor = new juce::GenericAudioProcessorEditor (*instrument);
+            setContentOwned (editor, true);
+            setResizable (editor->isResizable(), false);
+            centreWithSize (getWidth(), getHeight());
+            setVisible (true);
+            toFront (true);
+        }
+
+        ~LiveInstrumentWindow() override { clearContentComponent(); } // the editor goes before the instrument
+
+        void closeButtonPressed() override
+        {
+            // closed() deletes this window.
+            juce::MessageManager::callAsync ([callback = closed] { callback(); });
+        }
+
+    private:
+        std::shared_ptr<juce::AudioProcessor> instrument;
+        std::function<void()> closed;
+    };
+}
+
+void PluginEditor::showLiveInstrumentWindow (int slot)
+{
+    auto& window = liveInstrumentWindows[(size_t) slot];
+    if (window != nullptr)
+    {
+        window->toFront (true);
+        return;
+    }
+
+    auto instrument = processorRef.getLiveInstruments().getInstrument (slot);
+    if (instrument == nullptr)
+        return;
+
+    juce::Component::SafePointer<PluginEditor> safe (this);
+    window = std::make_unique<LiveInstrumentWindow> (instrument, [safe, slot]
+    {
+        if (safe != nullptr)
+        {
+            safe->saveLiveInstrument (slot);
+            safe->liveInstrumentWindows[(size_t) slot].reset();
+            safe->webView->emitEventIfBrowserIsVisible ("liveInstruments", safe->describeLiveInstruments());
+        }
+    });
+}
+
+void PluginEditor::saveLiveInstrument (int slot)
+{
+    auto& instruments = processorRef.getLiveInstruments();
+    const auto current = instruments.getSettings (slot);
+    auto* saved = new juce::DynamicObject();
+    saved->setProperty ("on", current.on);
+    saved->setProperty ("key", current.key);
+    saved->setProperty ("input", current.input);
+    saved->setProperty ("channel", current.channel);
+    saved->setProperty ("level", current.levelDb);
+    saved->setProperty ("state", instruments.getState (slot).toBase64Encoding());
+    settings.setValue ("liveInstruments." + juce::String (slot), juce::JSON::toString (juce::var (saved), true));
+}
+
+void PluginEditor::restoreLiveInstruments()
+{
+    auto& instruments = processorRef.getLiveInstruments();
+    for (int slot = 0; slot < LiveInstruments::numSlots; ++slot)
+    {
+        if (instruments.getInstrument (slot) != nullptr)
+            continue; // already set up (the editor was opened before)
+
+        const auto saved = juce::JSON::parse (settings.getValue ("liveInstruments." + juce::String (slot)));
+        if (! saved.isObject())
+            continue;
+
+        auto current = instruments.getSettings (slot);
+        current.on = (bool) saved["on"];
+        if (micfx::inst::findSpec (saved["key"].toString()) != nullptr)
+            current.key = saved["key"].toString();
+        current.input = saved.getProperty ("input", LiveInstruments::anyInput).toString();
+        current.channel = (int) saved.getProperty ("channel", current.channel);
+        current.levelDb = (float) (double) saved.getProperty ("level", 0.0);
+
+        juce::MemoryBlock state;
+        state.fromBase64Encoding (saved["state"].toString());
+        instruments.setSettings (slot, current, state);
+    }
+}
+
+juce::var PluginEditor::describeLiveInstruments()
+{
+    auto& instruments = processorRef.getLiveInstruments();
+    auto* result = new juce::DynamicObject();
+
+    juce::Array<juce::var> slots;
+    for (int slot = 0; slot < LiveInstruments::numSlots; ++slot)
+    {
+        const auto current = instruments.getSettings (slot);
+        auto* item = new juce::DynamicObject();
+        item->setProperty ("on", current.on);
+        item->setProperty ("key", current.key);
+        item->setProperty ("preset", instruments.getPresetName (slot));
+        item->setProperty ("input", current.input);
+        item->setProperty ("channel", current.channel);
+        item->setProperty ("level", current.levelDb);
+        item->setProperty ("windowOpen", liveInstrumentWindows[(size_t) slot] != nullptr);
+        slots.add (juce::var (item));
+    }
+
+    juce::Array<juce::var> list;
+    for (const auto* spec : micfx::inst::getAllSpecs())
+    {
+        auto* item = new juce::DynamicObject();
+        item->setProperty ("key", spec->key);
+        item->setProperty ("name", spec->name);
+        item->setProperty ("category", spec->category);
+        juce::Array<juce::var> presets;
+        for (const auto& preset : spec->presets)
+            presets.add (preset.name);
+        item->setProperty ("presets", presets);
+        list.add (juce::var (item));
+    }
+
+    juce::Array<juce::var> inputs;
+    for (const auto& device : juce::MidiInput::getAvailableDevices())
+    {
+        auto* item = new juce::DynamicObject();
+        item->setProperty ("id", device.identifier);
+        item->setProperty ("name", device.name);
+        inputs.add (juce::var (item));
+    }
+
+    result->setProperty ("slots", slots);
+    result->setProperty ("instruments", list);
+    result->setProperty ("inputs", inputs);
+    result->setProperty ("deviceInputs", juce::JUCEApplicationBase::isStandaloneApp());
     return juce::var (result);
 }
 

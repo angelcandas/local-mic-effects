@@ -1234,6 +1234,21 @@ body.is-daw .learn-banner { top: auto; bottom: 40px; }
 .loop-toggle[data-state="recording"], .loop-toggle[data-state="closing"], .loop-toggle[data-state="overdubbing"] { color: var(--hot); border-color: var(--hot); }
 .loop-toggle[data-state="playing"] { color: var(--accent-2); border-color: color-mix(in srgb, var(--accent-2) 60%, transparent); }
 
+.live-instruments { display: flex; flex-direction: column; gap: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--line); }
+.live-instruments[hidden] { display: none; }
+.inst-head { display: flex; align-items: baseline; gap: 10px; }
+.inst-head h2 { margin: 0; font-size: 12px; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.inst-hint { color: var(--faint); font-size: 12px; }
+.inst-rows { display: flex; flex-direction: column; gap: 6px; }
+.inst-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; color: var(--muted); }
+.inst-row .pill { flex: none; min-width: 92px; }
+.inst-row:not(.is-on) .inst-level, .inst-row:not(.is-on) .computer-readout { opacity: 0.5; }
+.inst-activity { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: none; }
+.inst-activity.is-lit { background: var(--accent-2); box-shadow: 0 0 6px var(--accent-2); }
+.inst-instrument { width: 90px; }
+.inst-preset { width: 150px; }
+.inst-input { width: 180px; }
+
 .looper {
   --loop-1: #8c7bff;
   --loop-2: #3fd9c6;

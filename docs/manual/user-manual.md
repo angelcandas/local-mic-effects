@@ -209,6 +209,14 @@ The **▾** button picks where it comes from:
 
 **In recordings** (on by default) decides whether takes and Capture include it. The computer audio in a take is delayed by the audio round trip, the same amount takes are moved on the timeline, so it lines up with the voice you sang to it. Computer audio pauses in DAW mode and comes back when you return to Live.
 
+### Instruments: play a keyboard or drum kit with your voice
+
+Press **Instruments** at the top to show two rows, **Keys** and **Drums**. Each plays one of the MicFX instruments (Grand, Nova, Beat, ...) from MIDI, next to your voice: you hear it, the looper loops it, and recordings and Capture include it. It doesn't go through your voice's effects.
+
+On each row: the switch turns it on, then pick the instrument and its sound (**Edit sound…** opens the instrument's own window; your changes are kept), the **MIDI** input and channel, and the level. **Any input** means every MIDI device that the other row hasn't picked, so pick your keyboard on Keys and your drum kit on Drums. Drums starts on channel 10, where most drum kits send; set it to **All ch.** if yours uses another. Use **Beat** for drums: the **Kit** sampler starts empty until you load your own samples into it. The light flashes when notes come in.
+
+Notes and controls you mapped with MIDI learn don't play the instruments.
+
 ## 3.3 Looper
 
 ![The looper in its different states](images/looper-states.png)

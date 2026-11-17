@@ -47,6 +47,7 @@
 #include "SoundCheck.h"
 #include "CaptureRing.h"
 #include "ComputerAudio.h"
+#include "LiveInstruments.h"
 #include "dsp/DriftRing.h"
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
@@ -3981,6 +3982,120 @@ namespace
             check (captured.audio.getMagnitude (0, 0, captured.audio.getNumSamples()) < 0.01f, "Live: left out of the takes when asked");
             computer.stop();
             processor.releaseResources();
+        }
+    }
+
+    // Live MIDI instruments: which slot each device plays, and the sound in the Live mix.
+    void testLiveInstruments()
+    {
+        std::cout << "\nLive instruments\n";
+
+        const auto noteOn = [] (int channel, int note)
+        {
+            auto message = juce::MidiMessage::noteOn (channel, note, (juce::uint8) 100);
+            message.setTimeStamp (juce::Time::getMillisecondCounterHiRes() * 0.001);
+            return message;
+        };
+
+        // Plays a block and returns each slot's peak.
+        const auto play = [] (LiveInstruments& instruments, const juce::MidiBuffer* midi = nullptr)
+        {
+            juce::AudioBuffer<float> out (2, 512);
+            for (int i = 0; i < 20; ++i)
+                instruments.render (out, 512, i == 0 ? midi : nullptr, {});
+            return std::pair<float, float> { instruments.getPeak (0), instruments.getPeak (1) };
+        };
+
+        {
+            LiveInstruments instruments;
+            instruments.prepare (48000.0, 512);
+            instruments.setUsesDeviceMidi (true);
+            check (instruments.getSettings (0).key == "grand" && instruments.getSettings (1).key == "beat"
+                   && instruments.getSettings (1).channel == 10, "a keyboard and a drum kit (channel 10) to start with");
+
+            auto keys = instruments.getSettings (0);
+            keys.on = true;
+            instruments.setSettings (0, keys);
+            auto drums = instruments.getSettings (1);
+            drums.on = true;
+            drums.channel = 0;
+            drums.input = "drum-kit";
+            instruments.setSettings (1, drums);
+            check (instruments.getInstrument (0) != nullptr && instruments.getInstrument (1) != nullptr, "turned on, they get their instruments");
+
+            instruments.handleMidi ("keyboard", noteOn (1, 60));
+            auto [keysPeak, drumsPeak] = play (instruments);
+            check (keysPeak > 0.01f && drumsPeak == 0.0f, "the keyboard plays the slot on any input only");
+
+            instruments.handleMidi ("drum-kit", noteOn (10, 38));
+            std::tie (keysPeak, drumsPeak) = play (instruments);
+            check (drumsPeak > 0.01f, "the drum kit plays its own slot");
+            check (instruments.takeActivity (1) && ! instruments.takeActivity (1), "a note shows as activity once");
+
+            drums.input = LiveInstruments::anyInput;
+            drums.channel = 10;
+            instruments.setSettings (1, drums);
+            keys.channel = 1;
+            instruments.setSettings (0, keys);
+            auto off = juce::MidiMessage::allNotesOff (1);
+            off.setTimeStamp (juce::Time::getMillisecondCounterHiRes() * 0.001);
+            instruments.handleMidi ("keyboard", off);
+            for (int i = 0; i < 100; ++i)
+                play (instruments); // let the notes ring out
+            instruments.handleMidi ("anything", noteOn (10, 36));
+            std::tie (keysPeak, drumsPeak) = play (instruments);
+            check (keysPeak < 1.0e-4f && drumsPeak > 0.01f, "on one input, the channels split them (" + juce::String (keysPeak) + ", " + juce::String (drumsPeak) + ")");
+
+            keys.levelDb = -60.0f;
+            instruments.setSettings (0, keys);
+            play (instruments); // the level glides down
+            instruments.handleMidi ("anything", noteOn (1, 64));
+            std::tie (keysPeak, drumsPeak) = play (instruments);
+            check (keysPeak == 0.0f, "level all the way down is silent");
+            instruments.handleMidi ("anything", off);
+
+            keys.on = false;
+            keys.levelDb = 0.0f;
+            instruments.setSettings (0, keys);
+            instruments.handleMidi ("anything", noteOn (1, 64));
+            check (play (instruments).first == 0.0f, "off: silent");
+
+            check (instruments.loadPreset (1, micfx::inst::getBeatSpec().presets.back().name)
+                   && instruments.getPresetName (1) == micfx::inst::getBeatSpec().presets.back().name, "loads a preset");
+            const auto state = instruments.getState (1);
+            LiveInstruments restored;
+            restored.prepare (48000.0, 512);
+            restored.setSettings (1, drums, state);
+            check (restored.getPresetName (1) == instruments.getPresetName (1), "a saved sound comes back");
+        }
+
+        {
+            // A plug-in: the block's MIDI plays them, in the Live mix, not through the voice's effects.
+            PluginProcessor processor;
+            processor.setRateAndBufferSizeDetails (48000.0, 256);
+            processor.prepareToPlay (48000.0, 256);
+            auto& instruments = processor.getLiveInstruments();
+            auto keys = instruments.getSettings (0);
+            keys.on = true;
+            instruments.setSettings (0, keys);
+
+            juce::AudioBuffer<float> buffer (2, 256);
+            float heard = 0.0f;
+            for (int block = 0; block < 40; ++block)
+            {
+                juce::MidiBuffer midi;
+                if (block == 2)
+                    midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 10);
+                buffer.clear();
+                processor.processBlock (buffer, midi);
+                heard = juce::jmax (heard, buffer.getMagnitude (0, 0, 256));
+            }
+            check (heard > 0.02f, "Live: a MIDI note plays the instrument (" + juce::String (heard, 3) + ")");
+
+            auto captured = processor.getCapture().take (1.0);
+            check (captured.audio.getNumSamples() > 0 && captured.audio.getMagnitude (0, 0, captured.audio.getNumSamples()) > 0.02f,
+                   "Live: Capture (the takes' mix) has it");
+            check (captured.audio.getMagnitude (2, 0, captured.audio.getNumSamples()) == 0.0f, "Live: the dry mic file doesn't");
         }
     }
 
@@ -19043,6 +19158,7 @@ int main()
     {
         testCapture();
         testComputerAudio();
+        testLiveInstruments();
     testLooper();
         testMidiLearn();
         testScenes();
@@ -19202,6 +19318,7 @@ int main()
     {
         testCapture();
         testComputerAudio();
+        testLiveInstruments();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
