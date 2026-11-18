@@ -6,6 +6,8 @@ is HTML/CSS/JS running in a native WebView.
 
 Builds as a **standalone app**, plus **AU** and **VST3** plugins from the same code.
 
+![MicFX in DAW mode: a backing track, a lead vocal with two takes and a harmony track](docs/manual/images/daw-tracks.png)
+
 **User manual:** [docs/manual/user-manual.md](docs/manual/user-manual.md) (and a PDF next to it; **Help → User manual** or **F1** in the app). Names used in the UI: [docs/glossary.md](docs/glossary.md).
 
 ## What's inside
