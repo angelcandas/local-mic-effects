@@ -8,6 +8,7 @@ haven't seen yet. To add an entry for your change, see "Adding entries" in
 ## 2026-11-18
 
 - **Live key and speed in Practice.** Changing the song's speed or key in Practice is heard within a moment, right where the song is, while the rest of the song is prepared behind it; settings you've used before load instantly. (#211)
+- **Auto Mix starts fresh.** Closing Auto Mix forgets the last run, so it opens with the default style and options every time. Changes you tried and didn't keep yet are still shown so you can keep or discard them. (#212)
 - **Practice upgrades.** Exit Practice with a button or Esc, reopen saved songs from a Library without splitting again, and change the speed (50-150%) and key (up to 12 semitones plus cents) of the whole song independently. (#208)
 - **Computer audio in Live.** Mix sound from your computer (a backing track from a browser, a video call) with your voice, hear it and record it. (#194)
 - **Pick your mic input.** In Live, choose which interface input is the microphone. (#195)

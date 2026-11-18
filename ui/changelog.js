@@ -1,6 +1,6 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 211,
+ "latest": 212,
  "days": [
   {
    "date": "2026-11-18",
@@ -10,6 +10,13 @@ export const CHANGELOG = {
      "text": "Changing the song's speed or key in Practice is heard within a moment, right where the song is, while the rest of the song is prepared behind it; settings you've used before load instantly.",
      "prs": [
       211
+     ]
+    },
+    {
+     "title": "Auto Mix starts fresh",
+     "text": "Closing Auto Mix forgets the last run, so it opens with the default style and options every time. Changes you tried and didn't keep yet are still shown so you can keep or discard them.",
+     "prs": [
+      212
      ]
     },
     {

@@ -51,3 +51,21 @@ like the app does; override a wrong guess in `song.txt`.
 The per-role numbers of a mix, the human one included, come from fitting the mix's band energy
 over time as a sum of the raw tracks' energies with one gain per track, so no stems are needed.
 A mix with heavy processing fits less well; check `fit_human_db` before trusting its role numbers.
+
+## Learn
+
+Auto Mix's targets (levels per role, EQ, compression, de-essing, reverb, pan, loudness) are
+learned from the human mixes of the bench's songs in two steps, so the audio never has to
+leave the computer it is on:
+
+1. `tools/learn-mix.sh <songs folder>` builds the bench, scores today's Auto Mix on every song
+   (`bench/results.csv`, `bench/summary.md`) and writes each song's measurements
+   (`learn/<song>.mlf`, see `src/analysis/MixLearn.h`): band energy per 100 ms of every raw
+   track and of the human mix, per channel. No audio. It packs them as `learn-out.zip`.
+   (`MicFXMixBench <songs> --learn <folder> --learn-only` writes the measurements alone.)
+2. `python3 tools/mixlearn/learn.py <learn folder> --out learned.json` (numpy, scipy) explains
+   each human mix as a sum of its raw tracks, each with a level, an EQ curve (a gain per
+   octave), a compressor (gain falling by a slope per dB over the track's median loudness),
+   an extra slope on 5-8 kHz for voices (de-essing), a reverb tail with a decay time, and
+   left/right gains (pan); then pools the per-track numbers by role and checks them song by
+   song with that song left out of the pooling (`held_out` in the output).
