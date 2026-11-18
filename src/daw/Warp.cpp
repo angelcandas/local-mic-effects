@@ -1141,45 +1141,56 @@ juce::AudioBuffer<float> Render::cutPiece (size_t index, const juce::AudioBuffer
     return part;
 }
 
+std::pair<int, int> Render::getPieceSpan (size_t index) const
+{
+    if (index >= pieces.size())
+        return { 0, 0 };
+    const auto fade = (int) std::round (crossfadeSeconds * context->sampleRate);
+    const auto first = (int) std::llround (starts[index] * context->sampleRate);
+    const auto fadeOut = index + 1 < pieces.size();
+    const auto next = fadeOut ? (int) std::llround (starts[index + 1] * context->sampleRate) : length;
+    return { first, next - first + (fadeOut ? fade : 0) };
+}
+
+void Render::addPiece (size_t k, const juce::AudioBuffer<float>& part, float* const* dest, int numDestChannels) const
+{
+    if (k >= pieces.size() || part.getNumChannels() == 0)
+        return;
+
+    const auto fade = (int) std::round (crossfadeSeconds * context->sampleRate);
+    const auto first = (int) std::llround (starts[k] * context->sampleRate);
+    const auto next = k + 1 < pieces.size() ? (int) std::llround (starts[k + 1] * context->sampleRate) : length;
+    const auto fadeIn = k > 0, fadeOut = k + 1 < pieces.size();
+    const auto count = juce::jmin (part.getNumSamples(), next - first + (fadeOut ? fade : 0));
+
+    // Complementary fades (they sum to one): the pieces mostly agree at the seam, so
+    // this keeps the level steady where an equal-power fade would bump it.
+    const auto gainAt = [&] (int i)
+    {
+        auto gain = 1.0f;
+        if (fadeIn && i < fade)
+            gain *= (float) std::pow (std::sin (juce::MathConstants<double>::halfPi * (i + 0.5) / fade), 2.0);
+        if (fadeOut && i >= next - first)
+            gain *= (float) std::pow (std::cos (juce::MathConstants<double>::halfPi * (i - (next - first) + 0.5) / fade), 2.0);
+        return gain;
+    };
+
+    for (int ch = 0; ch < numDestChannels; ++ch)
+    {
+        const auto* in = part.getReadPointer (juce::jmin (ch, part.getNumChannels() - 1));
+        auto* out = dest[ch];
+        for (int i = juce::jmax (0, -first); i < count && first + i < length; ++i)
+            out[first + i] += in[i] * gainAt (i);
+    }
+}
+
 juce::AudioBuffer<float> Render::assemble (const std::vector<std::shared_ptr<const juce::AudioBuffer<float>>>& parts) const
 {
-    const auto& c = *context;
     juce::AudioBuffer<float> out (getNumChannels(), length);
     out.clear();
-
-    const auto fade = (int) std::round (crossfadeSeconds * c.sampleRate);
     for (size_t k = 0; k < pieces.size() && k < parts.size(); ++k)
-    {
-        if (parts[k] == nullptr)
-            continue;
-
-        const auto& part = *parts[k];
-        const auto first = (int) std::llround (starts[k] * c.sampleRate);
-        const auto next = k + 1 < pieces.size() ? (int) std::llround (starts[k + 1] * c.sampleRate) : length;
-        const auto fadeIn = k > 0, fadeOut = k + 1 < pieces.size();
-        const auto count = juce::jmin (part.getNumSamples(), next - first + (fadeOut ? fade : 0));
-
-        // Complementary fades (they sum to one): the pieces mostly agree at the seam, so
-        // this keeps the level steady where an equal-power fade would bump it.
-        const auto gainAt = [&] (int i)
-        {
-            auto gain = 1.0f;
-            if (fadeIn && i < fade)
-                gain *= (float) std::pow (std::sin (juce::MathConstants<double>::halfPi * (i + 0.5) / fade), 2.0);
-            if (fadeOut && i >= next - first)
-                gain *= (float) std::pow (std::cos (juce::MathConstants<double>::halfPi * (i - (next - first) + 0.5) / fade), 2.0);
-            return gain;
-        };
-
-        for (int ch = 0; ch < out.getNumChannels(); ++ch)
-        {
-            const auto* in = part.getReadPointer (juce::jmin (ch, part.getNumChannels() - 1));
-            auto* dest = out.getWritePointer (ch);
-            for (int i = juce::jmax (0, -first); i < count && first + i < length; ++i)
-                dest[first + i] += in[i] * gainAt (i);
-        }
-    }
-
+        if (parts[k] != nullptr)
+            addPiece (k, *parts[k], out.getArrayOfWritePointers(), out.getNumChannels());
     return out;
 }
 

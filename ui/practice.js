@@ -24,7 +24,6 @@ const PLAYHEAD = 0.28; // where "now" sits across the lane
 const TRAIL_SECONDS = 12;
 
 const SPEEDS = [0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5];
-const WHOLE_SONG = -2; // the engine's marker for "the whole song at another speed"
 const nearestSpeed = (speed) => SPEEDS.reduce((a, b) => (Math.abs(b - speed) < Math.abs(a - speed) ? b : a));
 
 const PHASES = {
@@ -33,6 +32,26 @@ const PHASES = {
   loading: "Loading the separation model…",
   splitting: "Taking the voice out of the song…",
   listening: "Listening to the melody…",
+};
+
+// "75% speed", "+2 st" for a key and speed change (nothing for the original).
+export const describeShift = (shift) => {
+  const parts = [];
+  if (!shift) return parts;
+  if (Math.abs(shift.speed - 1) > 0.001) parts.push(`${Math.round(shift.speed * 100)}% speed`);
+  if (Math.abs(shift.semitones) > 0.004) parts.push(`${shift.semitones > 0 ? "+" : "−"}${Math.abs(shift.semitones).toFixed(2).replace(/\.?0+$/, "")} st`);
+  return parts;
+};
+
+// "A minor" moved by semitones (whole ones; a few cents leave the name alone).
+const KEY_NAMES = ["C", "C♯", "D", "E♭", "E", "F", "F♯", "G", "A♭", "A", "B♭", "B"];
+const KEY_ALIASES = { "C#": 1, "Db": 1, "D♭": 1, "D#": 3, "Eb": 3, "D♯": 3, "F#": 6, "Gb": 6, "G♭": 6, "G#": 8, "Ab": 8, "G♯": 8, "A#": 10, "Bb": 10, "A♯": 10 };
+export const transposeKey = (key, semitones) => {
+  const match = /^([A-G][#♯b♭]?)\s*(.*)$/.exec(key ?? "");
+  if (!match) return key;
+  const index = KEY_NAMES.indexOf(match[1]) >= 0 ? KEY_NAMES.indexOf(match[1]) : KEY_ALIASES[match[1]] ?? KEY_NAMES.indexOf(match[1][0]);
+  const moved = ((index + Math.round(semitones)) % 12 + 12) % 12;
+  return `${KEY_NAMES[moved]}${match[2] ? ` ${match[2]}` : ""}`;
 };
 
 // Score colours, shared with the CSS.
@@ -180,9 +199,9 @@ export class PracticeView {
     this.progressText = html("span", "practice-progress-text");
     this.progressBar = html("div", "practice-progress-bar");
     this.progressBar.append(html("div"));
-    const cancel = Object.assign(html("button", "text-button", "Cancel"), { type: "button" });
-    cancel.addEventListener("click", () => practice("cancel"));
-    this.progress.append(this.progressText, this.progressBar, cancel);
+    this.progressCancel = Object.assign(html("button", "text-button", "Cancel"), { type: "button" });
+    this.progressCancel.addEventListener("click", () => practice("cancel"));
+    this.progress.append(this.progressText, this.progressBar, this.progressCancel);
 
     // The lane: target notes scrolling past, your pitch on top.
     this.stage = html("div", "practice-stage");
@@ -217,9 +236,10 @@ export class PracticeView {
   onSpeedChange() {
     this.loopSpeed = Number(this.speedSelect.value);
     this.loopKey = Number(this.keySelect.value) + Number(this.centsSelect.value) / 100;
-    const loop = this.song?.loop;
-    if (loop && loop.section !== WHOLE_SONG) this.relooped();
-    else practice("speed", { speed: this.loopSpeed, semitones: this.loopKey });
+    // The whole song changes (heard as soon as the part at the playhead is ready); a loop
+    // playing now is rendered again to match.
+    practice("speed", { speed: this.loopSpeed, semitones: this.loopKey });
+    if (this.song?.loop) this.relooped();
   }
 
   async toggleLibrary(on = this.library.hidden) {
@@ -300,22 +320,20 @@ export class PracticeView {
       : "Open a song and sing its melody";
     this.empty.hidden = Boolean(this.song);
     const loop = this.song?.loop;
-    const whole = loop?.section === WHOLE_SONG;
-    this.loopBar.hidden = !loop || whole;
-    this.section.classList.toggle("is-looping", Boolean(loop) && !whole);
+    const shift = this.song?.shift;
+    const whole = !loop && shift && (Math.abs(shift.speed - 1) > 0.001 || Math.abs(shift.semitones) > 0.004);
+    this.loopBar.hidden = !loop;
+    this.section.classList.toggle("is-looping", Boolean(loop));
     this.speedSelect.disabled = this.keySelect.disabled = this.centsSelect.disabled = !this.song;
-    this.loopSpeed = loop ? loop.speed : 1;
-    this.loopKey = loop ? loop.semitones : 0;
+    const heard = shift?.pending && shift.target ? shift.target : shift;
+    this.loopSpeed = loop ? loop.speed : heard?.speed ?? 1;
+    this.loopKey = loop ? loop.semitones : heard?.semitones ?? 0;
     this.speedSelect.value = String(nearestSpeed(this.loopSpeed));
     const semis = Math.round(this.loopKey);
     this.keySelect.value = String(semis);
     this.centsSelect.value = String(Math.max(-50, Math.min(50, Math.round((this.loopKey - semis) * 10) * 10)));
-    if (whole) {
-      const parts = [];
-      if (Math.abs(loop.speed - 1) > 0.001) parts.push(`${Math.round(loop.speed * 100)}% speed`);
-      if (Math.abs(loop.semitones) > 0.004) parts.push(`${loop.semitones > 0 ? "+" : "−"}${Math.abs(loop.semitones).toFixed(2).replace(/\.?0+$/, "")} st`);
-      this.songInfo.textContent = parts.join(" · ");
-    }
+    if (whole) this.songInfo.textContent = [this.song.key ? `${this.song.key} → ${transposeKey(this.song.key, shift.semitones)}` : "",
+                                            ...describeShift(shift)].filter(Boolean).join(" · ");
     else if (loop) {
       const section = loop.section >= 0 && Array.isArray(this.sections) ? this.sections[loop.section] : null;
       const phrases = loop.lastPhrase > loop.phrase ? `phrases ${loop.phrase + 1}–${loop.lastPhrase + 1}` : loop.phrase >= 0 ? `phrase ${loop.phrase + 1}` : "no singing";
@@ -367,8 +385,26 @@ export class PracticeView {
   showProgress(job) {
     this.progress.hidden = !job;
     if (!job) return;
+    this.progressCancel.hidden = false;
     this.progressText.textContent = `${job.name ? `${job.name}: ` : ""}${PHASES[job.phase] ?? "Preparing…"}`;
     this.progressBar.firstChild.style.width = `${Math.round(clamp(job.progress) * 100)}%`;
+  }
+
+  // A key or speed change: on its way (the part at the playhead first, so it's heard in a
+  // moment), then the rest of the song filling in behind it.
+  showShift(shift) {
+    if (!shift) return;
+    if (this.song) this.song.shift = shift;
+    const busy = shift.pending || shift.progress < 1;
+    this.shifting = busy;
+    this.progress.hidden = !busy;
+    if (!busy) return;
+    const percent = `${Math.round(clamp(shift.progress) * 100)}%`;
+    const target = shift.pending ? shift.target : shift;
+    const what = describeShift(target ?? shift).join(", ") || "the original key and speed";
+    this.progressText.textContent = shift.pending ? `Changing to ${what}…` : `Playing ${what}. Preparing the rest of the song… ${percent}`;
+    this.progressCancel.hidden = !shift.pending;
+    this.progressBar.firstChild.style.width = percent;
   }
 
   onPractice(event) {
@@ -385,10 +421,15 @@ export class PracticeView {
       return;
     }
     if (event.state === "rendering") {
-      this.setMessage("Changing the speed…");
+      this.setMessage("Preparing the loop…");
       return;
     }
-    this.showProgress(null);
+    if (event.state === "shifting") {
+      this.showShift(event.shift);
+      return;
+    }
+    if (event.song?.shift && (event.song.shift.pending || event.song.shift.progress < 1)) this.showShift(event.song.shift);
+    else this.showProgress(null);
     if (event.state === "loop") {
       this.setSong(event.song);
       this.setMessage(event.song?.loop?.section >= 0 ? "Sing the section each time it comes round. Each phrase's score is the last time round."

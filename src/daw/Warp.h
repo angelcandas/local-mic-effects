@@ -165,6 +165,17 @@ public:
     // past the copy's end.
     juce::AudioBuffer<float> cutPiece (size_t index, const juce::AudioBuffer<float>& copy) const;
 
+    // Where a piece goes in the finished copy: { first sample, number of samples } (the
+    // count includes its crossfade into the next piece; first may be below 0, the end past
+    // the copy's length, so clamp).
+    std::pair<int, int> getPieceSpan (size_t index) const;
+
+    // Adds one rendered piece into the finished copy (`dest`: one pointer per channel, each
+    // getLength() samples, zeroed before the first piece), faded at its seams the way
+    // assemble() does. Pieces can go in in any order; the faded overlaps sum to the joined
+    // copy. Not thread-safe for pieces that touch (neighbours share a seam).
+    void addPiece (size_t index, const juce::AudioBuffer<float>& part, float* const* dest, int numDestChannels) const;
+
     // The finished copy from every piece (in order), joined with crossfades at the seams.
     juce::AudioBuffer<float> assemble (const std::vector<std::shared_ptr<const juce::AudioBuffer<float>>>&) const;
 
