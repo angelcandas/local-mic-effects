@@ -126,6 +126,7 @@ private:
     juce::var describeMacros (const juce::ValueTree& channel) const;
     juce::var describeInstrument (const juce::ValueTree& track) const;
     juce::var describeNotes (const juce::ValueTree& clip) const;
+    juce::var describeControllers (const juce::ValueTree& clip) const;
 
     // MIDI tracks, notes and instruments (see the commands in DawBridge.cpp). Returns
     // false if `command` isn't one of them.

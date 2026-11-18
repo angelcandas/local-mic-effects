@@ -22,11 +22,21 @@ struct Note
     double beat = 0.0, beats = 1.0; // from the start of the part; length
 };
 
+// A controller point: a CC, pitch bend or channel pressure (Edit::controllerCC and the like),
+// valued as in the project's CTRL (bend -8192..8191).
+struct Controller
+{
+    juce::String kind;
+    int number = 0, value = 0;
+    double beat = 0.0;
+};
+
 struct Part
 {
     juce::String name;
     bool drums = false; // MIDI channel 10
     std::vector<Note> notes;
+    std::vector<Controller> controllers;
 };
 
 struct Song

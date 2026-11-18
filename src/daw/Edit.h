@@ -46,6 +46,8 @@
 //             take (the TAKE this piece of the comp came from; missing when none)
 //       CLIP  kind "midi", id, name, start, offset, length, mute          (MIDI clips)
 //         NOTE  id, pitch (0..127), time, length, velocity (1..127)
+//         CTRL  id, kind ("cc", "bend" or "pressure"), number (the CC; 0 for the others), time (as a NOTE's),
+//               value (CC and pressure 0..127; bend -8192..8191)
 //       TAKE  id, name                    (take lanes, see "Takes and comping" below)
 //         CLIP ...
 //       (a track in a group also has `group`, the group's RETURN id, and `output` = that id)
@@ -114,7 +116,7 @@ namespace ids
     MICFX_DAW_ID (hitpoints) MICFX_DAW_ID (hitFilter) MICFX_DAW_ID (grooves) // hitpoints: see Hitpoints.h
     MICFX_DAW_ID (beatMap) // a clip's tempo definition, see Edit::BeatMap
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
-    MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
+    MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (CTRL) MICFX_DAW_ID (number) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
     MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (mixPriority) MICFX_DAW_ID (autoMixAudition) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
@@ -339,6 +341,16 @@ public:
     void setNote (int noteId, int pitch, double time, double length, int velocity);
     void removeNote (int noteId);
     juce::ValueTree getNote (int noteId) const;
+
+    // Controller points in a MIDI clip: CC, pitch bend and channel pressure, `time` as a
+    // note's. kind is controllerCC, controllerBend or controllerPressure; the value is
+    // clamped to the kind's range. Returns the new CTRL, or an invalid tree.
+    static const juce::String controllerCC, controllerBend, controllerPressure;
+    static int clampControllerValue (const juce::String& kind, int value);
+    juce::ValueTree addController (int clipId, const juce::String& kind, int number, double time, int value);
+    void setController (int id, double time, int value);
+    void removeController (int id);
+    juce::ValueTree getController (int id) const;
 
     //==============================================================================
     juce::ValueTree addClip (int trackId, const juce::File&, double startSeconds, double lengthSeconds,

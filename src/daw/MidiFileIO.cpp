@@ -50,6 +50,7 @@ bool read (const juce::File& file, Song& song, juce::String& error)
 
         juce::String trackName;
         std::map<int, std::vector<Note>> byChannel;
+        std::map<int, std::vector<Controller>> controllersByChannel;
 
         for (int i = 0; i < sequence.getNumEvents(); ++i)
         {
@@ -76,6 +77,12 @@ bool read (const juce::File& file, Song& song, juce::String& error)
                 song.beatsPerBar = juce::jlimit (2, 12, (int) std::lround (numerator * 4.0 / juce::jmax (1, denominator)));
                 signatureFound = true;
             }
+            else if (m.isController() && m.getControllerNumber() < 120)
+                controllersByChannel[m.getChannel()].push_back ({ Edit::controllerCC, m.getControllerNumber(), m.getControllerValue(), beat });
+            else if (m.isPitchWheel())
+                controllersByChannel[m.getChannel()].push_back ({ Edit::controllerBend, 0, m.getPitchWheelValue() - 8192, beat });
+            else if (m.isChannelPressure())
+                controllersByChannel[m.getChannel()].push_back ({ Edit::controllerPressure, 0, m.getChannelPressureValue(), beat });
             else if (m.isNoteOn())
             {
                 Note note;
@@ -96,6 +103,17 @@ bool read (const juce::File& file, Song& song, juce::String& error)
             if (byChannel.size() > 1)
                 part.name << " ch " << channel;
             part.notes = std::move (notes);
+
+            // The channel's controllers, without the repeats (a wheel move is a point per value).
+            std::map<std::pair<juce::String, int>, int> last;
+            for (const auto& c : controllersByChannel[channel])
+            {
+                const auto key = std::make_pair (c.kind, c.number);
+                if (const auto it = last.find (key); it != last.end() && it->second == c.value)
+                    continue;
+                last[key] = c.value;
+                part.controllers.push_back (c);
+            }
             song.parts.push_back (std::move (part));
         }
     }
@@ -145,6 +163,17 @@ bool write (const juce::File& file, const Song& song, juce::String& error)
             sequence.addEvent (juce::MidiMessage::noteOn (channel, juce::jlimit (0, 127, n.pitch), (juce::uint8) juce::jlimit (1, 127, n.velocity)), on);
             sequence.addEvent (juce::MidiMessage::noteOff (channel, juce::jlimit (0, 127, n.pitch)), off);
             end = juce::jmax (end, off);
+        }
+        for (const auto& c : part.controllers)
+        {
+            const auto at = ticks (juce::jmax (0.0, c.beat));
+            if (c.kind == Edit::controllerBend)
+                sequence.addEvent (juce::MidiMessage::pitchWheel (channel, juce::jlimit (0, 16383, c.value + 8192)), at);
+            else if (c.kind == Edit::controllerPressure)
+                sequence.addEvent (juce::MidiMessage::channelPressureChange (channel, juce::jlimit (0, 127, c.value)), at);
+            else
+                sequence.addEvent (juce::MidiMessage::controllerEvent (channel, juce::jlimit (0, 127, c.number), juce::jlimit (0, 127, c.value)), at);
+            end = juce::jmax (end, at);
         }
         sequence.addEvent (juce::MidiMessage::endOfTrack(), end);
         // Note-offs before note-ons at the same tick, so a repeated note restarts.
@@ -230,6 +259,8 @@ Placed addToEdit (Edit& edit, const Song& song, double startSeconds, int firstTr
             continue;
 
         const auto clipId = (int) clip[ids::id];
+        for (const auto& c : part.controllers)
+            edit.addController (clipId, c.kind, c.number, juce::jmax (0.0, map.toSeconds (startBeat + c.beat) - start), c.value);
         for (const auto& n : part.notes)
         {
             const auto on = map.toSeconds (startBeat + n.beat) - start;
@@ -248,11 +279,22 @@ Placed addToEdit (Edit& edit, const Song& song, double startSeconds, int firstTr
 namespace
 {
     struct Timed { int pitch, velocity; double on, off; }; // seconds on the timeline
+    struct TimedController { juce::String kind; int number, value; double at; };
 
-    void addClipNotes (const juce::ValueTree& clip, int trackTranspose, std::vector<Timed>& out)
+    void addClipNotes (const juce::ValueTree& clip, int trackTranspose, std::vector<Timed>& out, std::vector<TimedController>& controllers)
     {
         const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
         const auto shift = trackTranspose + (int) std::lround ((double) clip.getProperty (ids::transpose, 0.0));
+        for (const auto& point : clip)
+        {
+            if (! point.hasType (ids::CTRL))
+                continue;
+            const auto time = (double) point[ids::time];
+            if (time < offset || time >= offset + length)
+                continue;
+            controllers.push_back ({ point[ids::kind].toString(), (int) point[ids::number], (int) point[ids::value], start + time - offset });
+        }
+
         for (const auto& note : clip)
         {
             if (! note.hasType (ids::NOTE))
@@ -267,7 +309,7 @@ namespace
     }
 
     // Beats from the bar line at or before the first note.
-    Song build (const Edit& edit, const std::vector<Timed>& notes, const juce::String& name, bool drums)
+    Song build (const Edit& edit, const std::vector<Timed>& notes, const std::vector<TimedController>& controllers, const juce::String& name, bool drums)
     {
         Song song;
         song.beatsPerBar = edit.getBeatsPerBar();
@@ -290,6 +332,9 @@ namespace
             part.notes.push_back ({ n.pitch, n.velocity, beat, juce::jmax (minNoteBeats, map.toBeats (n.off) - map.toBeats (n.on)) });
         }
         std::sort (part.notes.begin(), part.notes.end(), [] (const Note& a, const Note& b) { return a.beat < b.beat; });
+        for (const auto& c : controllers)
+            part.controllers.push_back ({ c.kind, c.number, c.value, juce::jmax (0.0, map.toBeats (c.at) - origin) });
+        std::stable_sort (part.controllers.begin(), part.controllers.end(), [] (const Controller& a, const Controller& b) { return a.beat < b.beat; });
         song.parts.push_back (std::move (part));
 
         // The tempo from the bar line on: what's in force there, then the points after it.
@@ -315,8 +360,9 @@ Song fromClip (const Edit& edit, int clipId)
 
     const auto track = Edit::getOwnerTrack (clip);
     std::vector<Timed> notes;
-    addClipNotes (clip, (int) std::lround ((double) track.getProperty (ids::transpose, 0.0)), notes);
-    return build (edit, notes, clip[ids::name].toString(), isDrumTrack (track));
+    std::vector<TimedController> controllers;
+    addClipNotes (clip, (int) std::lround ((double) track.getProperty (ids::transpose, 0.0)), notes, controllers);
+    return build (edit, notes, controllers, clip[ids::name].toString(), isDrumTrack (track));
 }
 
 Song fromTrack (const Edit& edit, int trackId)
@@ -327,13 +373,14 @@ Song fromTrack (const Edit& edit, int trackId)
 
     const auto transpose = (int) std::lround ((double) track.getProperty (ids::transpose, 0.0));
     std::vector<Timed> notes;
+    std::vector<TimedController> controllers;
     for (const auto& child : track)
         if (child.hasType (ids::CLIP) && Edit::isMidiClip (child) && ! (bool) child.getProperty (ids::mute, false))
-            addClipNotes (child, transpose, notes);
+            addClipNotes (child, transpose, notes, controllers);
 
     for (const auto& e : patterns::getBlockEvents (track.getParent(), trackId, edit.getTempoMap()))
         notes.push_back ({ juce::jlimit (0, 127, e.pitch + transpose), e.velocity, e.on, e.off });
 
-    return build (edit, notes, track[ids::name].toString(), isDrumTrack (track));
+    return build (edit, notes, controllers, track[ids::name].toString(), isDrumTrack (track));
 }
 }

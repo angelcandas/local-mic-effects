@@ -11,6 +11,11 @@
 //   Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste notes (pasted at the playhead)
 //   the song key's rows are tinted, its root a little more (Song key panel)
 //
+// Under the roll, a controller lane (picked in the head: mod wheel, expression, pitch bend,
+// pressure, any CC) shows the clip's CTRL points as a stepped line. Drag on empty space to
+// draw (it replaces the points under the stroke), drag a point to move it, double-click or
+// Delete to remove it. One "editControllers" command (one undo step) per gesture.
+//
 // Notes live in C++ (the clip's NOTE children); every gesture is one "editNotes" command
 // (one undo step), and the roll redraws from the session that comes back. Note times are
 // seconds from the start of the clip's content (see src/daw/Edit.h).
@@ -25,7 +30,23 @@ const EDGE = 6;          // px: grabbing a note this close to its end resizes it
 
 export const noteName = (pitch) => `${NAMES[pitch % 12]}${Math.floor(pitch / 12) - 1}`;
 
+const LANE_HEIGHT = 110;   // px
+const LANES = [
+  { id: "off", name: "Controller lane: off" },
+  { id: "cc:1", name: "Mod wheel (CC 1)", kind: "cc", number: 1 },
+  { id: "cc:11", name: "Expression (CC 11)", kind: "cc", number: 11 },
+  { id: "cc:7", name: "Volume (CC 7)", kind: "cc", number: 7 },
+  { id: "cc:10", name: "Pan (CC 10)", kind: "cc", number: 10 },
+  { id: "cc:64", name: "Sustain pedal (CC 64)", kind: "cc", number: 64 },
+  { id: "cc:74", name: "Brightness (CC 74)", kind: "cc", number: 74 },
+  { id: "bend", name: "Pitch bend", kind: "bend", number: 0 },
+  { id: "pressure", name: "Pressure (aftertouch)", kind: "pressure", number: 0 },
+];
+const laneId = (point) => (point.kind === "cc" ? `cc:${point.number}` : point.kind);
+const laneRange = (kind) => (kind === "bend" ? [-8192, 8191] : [0, 127]);
+
 let savedGrid = 0.25;
+let savedLane = "off";
 let noteClipboard = null; // copied notes, times from the first one: [{ pitch, time, length, velocity }]
 const SCALES = { major: new Set([0, 2, 4, 5, 7, 9, 11]), minor: new Set([0, 2, 3, 5, 7, 8, 10]) };
 
@@ -39,6 +60,10 @@ export class PianoRoll {
     this.track = track;
     this.session = session;
     this.notes = clip.notes.map((n) => ({ ...n }));
+    this.hasLanes = Array.isArray(clip.controllers); // not for a pattern's part
+    this.controllers = (clip.controllers ?? []).map((p) => ({ ...p }));
+    this.lane = this.hasLanes ? savedLane : "off";
+    this.laneSelected = new Set();
     this.selected = new Set();
     this.grid = savedGrid;
     this.lastLength = null;   // seconds; null: one grid step
@@ -51,10 +76,16 @@ export class PianoRoll {
     this.element.tabIndex = 0;
     this.buildHead();
 
+    this.stage = html("div", "roll-stage");
     this.view = html("div", "roll-view");
     this.canvas = html("canvas", "roll-canvas");
     this.view.append(this.canvas);
-    this.element.append(this.view);
+    this.laneView = html("div", "roll-view roll-lane");
+    this.laneCanvas = html("canvas", "roll-canvas");
+    this.laneView.append(this.laneCanvas);
+    this.laneView.hidden = true;
+    this.stage.append(this.view, this.laneView);
+    this.element.append(this.stage);
 
     this.zoom = null;     // px per second; fitted on first layout
     this.scrollX = 0;     // seconds into the clip's window
@@ -64,10 +95,16 @@ export class PianoRoll {
     this.canvas.addEventListener("dblclick", (e) => this.onDoubleClick(e));
     this.canvas.addEventListener("pointermove", (e) => { if (!this.gesture) this.updateCursor(e); });
     this.view.addEventListener("wheel", (e) => this.onWheel(e), { passive: false });
+    this.laneView.addEventListener("wheel", (e) => this.onWheel(e, true), { passive: false });
+    this.laneCanvas.addEventListener("pointerdown", (e) => this.onLaneDown(e));
+    this.laneCanvas.addEventListener("dblclick", (e) => this.onLaneDouble(e));
+    this.laneCanvas.addEventListener("pointermove", (e) => { if (!this.gesture) this.laneCanvas.style.cursor = this.lanePointAt(this.local(e, true)) ? "grab" : "crosshair"; });
     this.element.addEventListener("keydown", (e) => this.onKey(e));
 
     this.resizeObserver = new ResizeObserver(() => this.draw());
     this.resizeObserver.observe(this.view);
+    this.resizeObserver.observe(this.laneView);
+    this.showLane();
   }
 
   get beat() { return 60 / (this.session.tempo || 120); }
@@ -124,9 +161,60 @@ export class PianoRoll {
                 tool("▼", "Down a semitone (↓; Shift+↓ an octave)", () => this.transpose(-1)),
                 tool("Delete", "Delete the selected notes (Delete)", () => this.removeSelected()));
 
+    if (this.hasLanes) {
+      this.laneSelect = html("select", "dropdown roll-lane-select");
+      this.laneSelect.title = "A controller lane under the notes: draw mod wheel, expression, pitch bend...";
+      this.laneSelect.addEventListener("change", () => {
+        this.laneSelected.clear();
+        if (this.laneSelect.value === "other") { this.laneNumber.hidden = false; this.laneNumber.focus(); return; }
+        this.lane = savedLane = this.laneSelect.value;
+        this.showLane();
+      });
+      this.laneNumber = html("input", "dropdown roll-lane-number");
+      Object.assign(this.laneNumber, { type: "number", min: 0, max: 127, placeholder: "CC", title: "The controller number (0 to 127)" });
+      this.laneNumber.hidden = true;
+      this.laneNumber.addEventListener("change", () => {
+        const number = Math.round(Number(this.laneNumber.value));
+        if (!(number >= 0 && number <= 127)) return;
+        this.lane = savedLane = `cc:${number}`;
+        this.fillLaneSelect();
+        this.showLane();
+      });
+      this.laneRow = html("div", "roll-row");
+      this.laneRow.append(this.laneSelect, this.laneNumber);
+      this.fillLaneSelect();
+      head.append(title, this.instrumentRow, row1, row2, velocity, this.laneRow);
+    } else head.append(title, this.instrumentRow, row1, row2, velocity);
+
     this.hint = html("p", "panel-caption roll-hint", "Click to add notes · drag to move · drag the end to resize · double-click deletes");
-    head.append(title, this.instrumentRow, row1, row2, velocity, this.hint);
-    this.element.append(head);
+    head.append(this.hint);
+    this.element.prepend(head);
+  }
+
+  // The standard lanes, plus a lane for every other CC the clip has points on.
+  fillLaneSelect() {
+    if (!this.laneSelect) return;
+    const known = new Set(LANES.map((l) => l.id));
+    const extra = [...new Set(this.controllers.map(laneId))].filter((id) => !known.has(id)).sort();
+    if (!known.has(this.lane) && !extra.includes(this.lane) && this.lane.startsWith("cc:")) extra.push(this.lane);
+    this.laneSelect.replaceChildren();
+    for (const lane of LANES) this.laneSelect.append(new Option(lane.name, lane.id));
+    for (const id of extra) this.laneSelect.append(new Option(`CC ${id.slice(3)}`, id));
+    this.laneSelect.append(new Option("Other CC…", "other"));
+    this.laneSelect.value = this.lane;
+  }
+
+  get laneSpec() {
+    if (this.lane === "off") return null;
+    return LANES.find((l) => l.id === this.lane) ?? { id: this.lane, kind: "cc", number: Number(this.lane.slice(3)) };
+  }
+
+  showLane() {
+    if (this.laneSelect) this.laneSelect.value = this.lane;
+    if (this.laneNumber) this.laneNumber.hidden = true;
+    this.laneView.hidden = this.lane === "off";
+    this.laneView.style.flex = `0 0 ${LANE_HEIGHT}px`;
+    this.draw();
   }
 
   async loadInstruments() {
@@ -165,6 +253,12 @@ export class PianoRoll {
     this.session = session;
     this.nameLabel.textContent = clip.name;
     if (!this.gesture) {
+      if (this.hasLanes) {
+        this.controllers = (clip.controllers ?? []).map((p) => ({ ...p }));
+        const ids = new Set(this.controllers.map((p) => p.id));
+        for (const id of [...this.laneSelected]) if (!ids.has(id)) this.laneSelected.delete(id);
+        this.fillLaneSelect();
+      }
       this.notes = clip.notes.map((n) => ({ ...n }));
       const ids = new Set(this.notes.map((n) => n.id));
       for (const id of [...this.selected]) if (!ids.has(id)) this.selected.delete(id);
@@ -228,8 +322,8 @@ export class PianoRoll {
     return null;
   }
 
-  local(event) {
-    const box = this.canvas.getBoundingClientRect();
+  local(event, lane = false) {
+    const box = (lane ? this.laneCanvas : this.canvas).getBoundingClientRect();
     return { x: event.clientX - box.left, y: event.clientY - box.top };
   }
 
@@ -342,6 +436,240 @@ export class PianoRoll {
     }
     c.fillStyle = "rgba(255,255,255,0.15)";
     c.fillRect(KEYS - 1, 0, 1, height);
+    this.drawLane();
+  }
+
+  //============================================================================ controller lane
+  lanePoints() {
+    const spec = this.laneSpec;
+    if (!spec) return [];
+    return this.controllers.filter((p) => p.kind === spec.kind && (spec.kind !== "cc" || p.number === spec.number))
+      .sort((a, b) => a.time - b.time);
+  }
+
+  laneY(value, kind, height) {
+    const [lo, hi] = laneRange(kind);
+    return 6 + (1 - (value - lo) / (hi - lo)) * (height - 12);
+  }
+
+  laneValue(y, kind, height) {
+    const [lo, hi] = laneRange(kind);
+    return Math.round(clamp(lo + (1 - (y - 6) / (height - 12)) * (hi - lo), lo, hi));
+  }
+
+  drawLane() {
+    const spec = this.laneSpec;
+    if (!spec || this.laneView.hidden) return;
+    const width = this.laneView.clientWidth, height = this.laneView.clientHeight;
+    if (width <= 0 || height <= 0) return;
+
+    const ratio = window.devicePixelRatio || 1;
+    const canvas = this.laneCanvas;
+    if (canvas.width !== Math.round(width * ratio) || canvas.height !== Math.round(height * ratio)) {
+      canvas.width = Math.round(width * ratio);
+      canvas.height = Math.round(height * ratio);
+      canvas.style.width = `${width}px`;
+      canvas.style.height = `${height}px`;
+    }
+    const c = canvas.getContext("2d");
+    c.setTransform(ratio, 0, 0, ratio, 0, 0);
+    c.clearRect(0, 0, width, height);
+    const clip = this.clip;
+    const [lo, hi] = laneRange(spec.kind);
+    const rest = spec.kind === "bend" ? 0 : lo;
+    const yRest = this.laneY(rest, spec.kind, height);
+
+    c.fillStyle = "#1a1c25";
+    c.fillRect(KEYS, 0, width - KEYS, height);
+    const windowEnd = this.xOf(clip.offset + clip.length);
+    if (windowEnd < width) { c.fillStyle = "rgba(0,0,0,0.35)"; c.fillRect(Math.max(KEYS, windowEnd), 0, width, height); }
+
+    // Beat and bar lines, as in the roll.
+    const beat = this.beat, bar = beat * (this.session.beatsPerBar || 4);
+    const songAt = (x) => clip.start + this.timeOf(x) - clip.offset;
+    const first = Math.floor(songAt(KEYS) / beat), last = Math.ceil(songAt(width) / beat);
+    if (last - first < 2000) {
+      for (let i = first; i <= last; ++i) {
+        const x = Math.round(this.xOf(i * beat - clip.start + clip.offset)) + 0.5;
+        if (x < KEYS) continue;
+        const onBar = Math.abs(i * beat / bar - Math.round(i * beat / bar)) < 1e-6;
+        c.fillStyle = onBar ? "rgba(255,255,255,0.22)" : "rgba(255,255,255,0.08)";
+        c.fillRect(x - 0.5, 0, 1, height);
+      }
+    }
+
+    // The resting value's line.
+    c.fillStyle = "rgba(255,255,255,0.16)";
+    c.fillRect(KEYS, Math.round(yRest), width - KEYS, 1);
+
+    // The points as a stepped line with a faint fill; what a stroke is drawing replaces its range.
+    let points = this.lanePoints();
+    const stroke = this.gesture?.type === "lane-draw" ? this.gesture : null;
+    if (stroke?.points.length) {
+      const t0 = stroke.points[0].time, t1 = stroke.points[stroke.points.length - 1].time;
+      points = points.filter((p) => p.time < Math.min(t0, t1) - 1e-6 || p.time > Math.max(t0, t1) + 1e-6).concat(stroke.points)
+        .sort((a, b) => a.time - b.time);
+    }
+    c.save();
+    c.beginPath();
+    c.rect(KEYS, 0, width - KEYS, height);
+    c.clip();
+    if (points.length) {
+      c.beginPath();
+      let y = this.laneY(points[0].value, spec.kind, height);
+      c.moveTo(KEYS, yRest);
+      c.lineTo(Math.max(KEYS, this.xOf(points[0].time)), yRest);
+      for (const p of points) {
+        const x = this.xOf(p.time), py = this.laneY(p.value, spec.kind, height);
+        c.lineTo(x, y);
+        c.lineTo(x, py);
+        y = py;
+      }
+      c.lineTo(Math.max(this.xOf(clip.offset + clip.length), this.xOf(points[points.length - 1].time)), y);
+      c.strokeStyle = this.colour;
+      c.lineWidth = 1.5;
+      c.stroke();
+      c.lineTo(Math.max(this.xOf(clip.offset + clip.length), this.xOf(points[points.length - 1].time)), yRest);
+      c.closePath();
+      c.globalAlpha = 0.16;
+      c.fillStyle = this.colour;
+      c.fill();
+      c.globalAlpha = 1;
+      for (const p of points) {
+        const inside = p.time >= clip.offset && p.time < clip.offset + clip.length;
+        c.beginPath();
+        c.arc(this.xOf(p.time), this.laneY(p.value, spec.kind, height), 3, 0, Math.PI * 2);
+        c.fillStyle = this.laneSelected.has(p.id) ? "#ffffff" : this.colour;
+        c.globalAlpha = inside ? 1 : 0.4;
+        c.fill();
+        c.globalAlpha = 1;
+      }
+    }
+    c.restore();
+
+    if (this.position >= clip.start && this.position <= clip.start + clip.length) {
+      const x = Math.round(this.xOf(this.position - clip.start + clip.offset)) + 0.5;
+      if (x >= KEYS) { c.fillStyle = "#ffffff"; c.fillRect(x - 0.5, 0, 1, height); }
+    }
+
+    // The left gutter: the lane's name and its scale.
+    c.fillStyle = "#20222c";
+    c.fillRect(0, 0, KEYS, height);
+    c.fillStyle = "#9aa0b4";
+    c.font = "9px system-ui, sans-serif";
+    c.fillText(spec.kind === "cc" ? `CC ${spec.number}` : spec.kind === "bend" ? "Bend" : "Press.", 4, 12);
+    c.fillText(String(hi), 4, 6 + 18);
+    c.fillText(String(rest), 4, Math.min(height - 4, Math.round(yRest) + 3));
+    if (spec.kind === "bend") c.fillText(String(lo), 4, height - 4);
+    c.fillStyle = "rgba(255,255,255,0.15)";
+    c.fillRect(KEYS - 1, 0, 1, height);
+  }
+
+  lanePointAt({ x, y }) {
+    const spec = this.laneSpec;
+    if (!spec || x <= KEYS) return null;
+    const height = this.laneView.clientHeight;
+    let best = null, bestDistance = 8;
+    for (const p of this.lanePoints()) {
+      const d = Math.hypot(this.xOf(p.time) - x, this.laneY(p.value, spec.kind, height) - y);
+      if (d <= bestDistance) { best = p; bestDistance = d; }
+    }
+    return best;
+  }
+
+  async sendController(edits) {
+    const result = await this.daw("editControllers", { clip: this.clip.id, ...edits });
+    if (result?.ok && Array.isArray(result.added) && result.added.length === 1) {
+      this.laneSelected = new Set(result.added);
+      this.draw();
+    }
+    return result;
+  }
+
+  onLaneDown(event) {
+    if (event.button !== 0 || !this.laneSpec) return;
+    this.element.focus({ preventScroll: true });
+    event.preventDefault();
+    const spec = this.laneSpec;
+    const where = this.local(event, true);
+    const height = this.laneView.clientHeight;
+    if (where.x <= KEYS) return;
+    this.laneCanvas.setPointerCapture(event.pointerId);
+    const clip = this.clip;
+    const clampTime = (t) => clamp(t, clip.offset, clip.offset + clip.length - 0.001);
+    const point = this.lanePointAt(where);
+
+    if (point) {
+      // Move a point.
+      this.laneSelected = new Set([point.id]);
+      const original = { time: point.time, value: point.value };
+      this.gesture = { type: "lane-move" };
+      this.draw();
+      this.trackLane(event, (dx, dy) => {
+        point.time = clampTime(original.time + dx / this.zoom);
+        point.value = this.laneValue(this.laneY(original.value, spec.kind, height) + dy, spec.kind, height);
+        this.draw();
+      }, (moved) => {
+        if (moved) this.sendController({ change: [{ id: point.id, time: point.time, value: point.value }] });
+      });
+      return;
+    }
+
+    // Draw: points along the stroke (one per few pixels), replacing what was under it.
+    const sample = (e) => {
+      const at = this.local(e, true);
+      return { id: -1, kind: spec.kind, number: spec.number, time: clampTime(this.timeOf(at.x)), value: this.laneValue(at.y, spec.kind, height) };
+    };
+    const first = sample(event);
+    const g = { type: "lane-draw", points: [first] };
+    this.gesture = g;
+    this.laneSelected.clear();
+    this.draw();
+    this.trackLane(event, (dx, dy, e) => {
+      const next = sample(e);
+      const last = g.points[g.points.length - 1];
+      if (Math.abs(next.time - last.time) * this.zoom < 5) { if (next.time >= last.time) last.value = next.value; }
+      else g.points.push(next);
+      this.draw();
+    }, () => {
+      const times = g.points.map((p) => p.time);
+      const t0 = Math.min(...times), t1 = Math.max(...times);
+      const remove = g.points.length > 1 ? this.lanePoints().filter((p) => p.time >= t0 - 1e-6 && p.time <= t1 + 1e-6).map((p) => p.id) : [];
+      const add = g.points.map(({ kind, number, time, value }) => ({ kind, number, time, value }));
+      this.gesture = null;
+      this.sendController({ remove, add });
+    });
+  }
+
+  trackLane(event, move, end) {
+    const startX = event.clientX, startY = event.clientY;
+    let moved = false;
+    const onMove = (e) => {
+      const dx = e.clientX - startX, dy = e.clientY - startY;
+      if (!moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+      moved = true;
+      move(dx, dy, e);
+    };
+    const onUp = () => {
+      this.laneCanvas.removeEventListener("pointermove", onMove);
+      this.laneCanvas.removeEventListener("pointerup", onUp);
+      this.laneCanvas.removeEventListener("pointercancel", onUp);
+      end(moved);
+      this.gesture = null;
+      this.draw();
+    };
+    this.laneCanvas.addEventListener("pointermove", onMove);
+    this.laneCanvas.addEventListener("pointerup", onUp);
+    this.laneCanvas.addEventListener("pointercancel", onUp);
+  }
+
+  onLaneDouble(event) {
+    const point = this.lanePointAt(this.local(event, true));
+    if (!point) return;
+    this.controllers = this.controllers.filter((p) => p.id !== point.id);
+    this.laneSelected.delete(point.id);
+    this.draw();
+    this.sendController({ remove: [point.id] });
   }
 
   updateCursor(event) {
@@ -489,10 +817,11 @@ export class PianoRoll {
     this.send({ remove: [hit.note.id] });
   }
 
-  onWheel(event) {
+  onWheel(event, lane = false) {
     event.preventDefault();
+    if (lane && !event.ctrlKey && !event.metaKey && !event.shiftKey && Math.abs(event.deltaX) <= Math.abs(event.deltaY)) return;
     if (event.ctrlKey || event.metaKey) {
-      const { x } = this.local(event);
+      const { x } = this.local(event, lane);
       const at = this.timeOf(Math.max(KEYS, x));
       this.zoom = clamp(this.zoom * Math.exp(-event.deltaY * 0.0015), 10, 4000);
       this.scrollX = at - this.clip.offset - (Math.max(KEYS, x) - KEYS) / this.zoom;
@@ -577,7 +906,14 @@ export class PianoRoll {
     const some = this.selected.size > 0; // without a selection, the screen's own keys apply
     let handled = true;
 
-    if (some && (key === "Delete" || key === "Backspace")) this.removeSelected();
+    if (!some && this.laneSelected.size && (key === "Delete" || key === "Backspace")) {
+      const remove = [...this.laneSelected];
+      this.controllers = this.controllers.filter((p) => !this.laneSelected.has(p.id));
+      this.laneSelected.clear();
+      this.draw();
+      this.sendController({ remove });
+    }
+    else if (some && (key === "Delete" || key === "Backspace")) this.removeSelected();
     else if (some && key === "ArrowUp") this.transpose(event.shiftKey ? 12 : 1);
     else if (some && key === "ArrowDown") this.transpose(event.shiftKey ? -12 : -1);
     else if (some && key === "ArrowLeft") this.nudge(-1);
