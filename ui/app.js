@@ -18,6 +18,7 @@ import { ComputerAudioPanel } from "./computer.js";
 import { LiveInstrumentsPanel } from "./liveinstruments.js";
 import { SoundCheckPanel } from "./soundcheck.js";
 import { initSetup } from "./setup.js";
+import { initWhatsNew } from "./whatsnew.js";
 
 // Uncaught errors go to the app's log (VS Code debug console / terminal). In debug
 // builds you can also right-click the UI -> Inspect Element for Safari's Web Inspector.
@@ -1771,3 +1772,4 @@ Juce.getNativeFunction("getParameterDefaults")().then((defaults) => {
 
 initDaw();
 initSetup(); // after initDaw: the status strip goes into both hint lines
+initWhatsNew();

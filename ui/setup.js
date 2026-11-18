@@ -104,7 +104,7 @@ function applyScale(percent) {
 }
 
 // A modal panel with a head and a close button. Esc or a click outside closes it.
-function modal(className, title, onClose) {
+export function modal(className, title, onClose) {
   const backdrop = html("div", `setup-backdrop ${className}`);
   backdrop.hidden = true;
   const panel = html("div", "setup-panel");
@@ -272,6 +272,8 @@ function createSettings(getState, show, firstRun) {
 
   const help = section("Help");
   row(help, "First steps", action("Show the welcome card", "Audio, Mic check and Sound check, step by step", () => { api.toggle(false); firstRun.open(); }));
+  row(help, "What's new", action("What's new", "What changed since you last looked", () => { api.toggle(false); document.dispatchEvent(new CustomEvent("micfx:whatsNew")); }),
+      action("Changelog", "Everything that changed, newest first", () => { api.toggle(false); document.dispatchEvent(new CustomEvent("micfx:changelog")); }));
   row(help, "Manual", action("User manual", `Opens the manual (${keyText("F1")})`, () => Juce.getNativeFunction("help")("manual")));
 
   const api = {
