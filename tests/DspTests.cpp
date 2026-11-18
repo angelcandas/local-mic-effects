@@ -47,6 +47,9 @@
 #include "PitchTap.h"
 #include "SoundCheck.h"
 #include "CaptureRing.h"
+#include "ComputerAudio.h"
+#include "LiveInstruments.h"
+#include "dsp/DriftRing.h"
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
 #include "instruments/Kit.h"
@@ -54,6 +57,7 @@
 #include "daw/Hitpoints.h"
 #include "daw/Patterns.h"
 #include "daw/Loops.h"
+#include "daw/MidiFileIO.h"
 #include "analysis/Beats.h"
 #include "analysis/ToMidi.h"
 #include "analysis/Structure.h"
@@ -3810,6 +3814,293 @@ namespace
         folder.deleteRecursively();
     }
     //==========================================================================
+    // Computer audio: the drift ring between two clocks, and the mix into Live mode.
+    void testComputerAudio()
+    {
+        std::cout << "\nComputer audio\n";
+
+        // Runs a source pushing 1 kHz at `sourceRate` (its clock off by `drift`) in chunks of
+        // `chunk`, against a consumer pulling `block` at 48 kHz, for `seconds`. Returns the
+        // pulled audio (left channel).
+        const auto run = [] (fx::DriftRing& ring, double sourceRate, double drift, int chunk, int block, double seconds,
+                             double stopFrom = -1.0, double stopTo = -1.0)
+        {
+            constexpr double destRate = 48000.0;
+            ring.prepare (sourceRate, destRate);
+            std::vector<float> out, l ((size_t) chunk), r ((size_t) chunk), pl ((size_t) block), pr ((size_t) block);
+            double producerTime = 0.0, consumerTime = 0.0;
+            juce::int64 produced = 0;
+            const auto twoPi = juce::MathConstants<double>::twoPi;
+
+            while (consumerTime < seconds)
+            {
+                if (producerTime <= consumerTime)
+                {
+                    const auto silent = producerTime >= stopFrom && producerTime < stopTo;
+                    for (int i = 0; i < chunk; ++i)
+                    {
+                        l[(size_t) i] = (float) (0.5 * std::sin (twoPi * 1000.0 * (double) (produced + i) / sourceRate));
+                        r[(size_t) i] = -l[(size_t) i];
+                    }
+                    if (! silent)
+                        ring.push (l.data(), r.data(), chunk);
+                    produced += chunk;
+                    producerTime += chunk / (sourceRate * (1.0 + drift));
+                }
+                else
+                {
+                    ring.pull (pl.data(), pr.data(), block);
+                    out.insert (out.end(), pl.begin(), pl.end());
+                    consumerTime += block / destRate;
+                }
+            }
+            return out;
+        };
+
+        // Frequency (zero crossings) and the largest jump between samples in [from, to) seconds.
+        const auto measure = [] (const std::vector<float>& audio, double from, double to)
+        {
+            const auto a = (size_t) (from * 48000.0), b = juce::jmin (audio.size(), (size_t) (to * 48000.0));
+            int crossings = 0;
+            float jump = 0.0f;
+            for (auto i = a + 1; i < b; ++i)
+            {
+                crossings += (audio[i - 1] < 0.0f) != (audio[i] < 0.0f) ? 1 : 0;
+                jump = juce::jmax (jump, std::abs (audio[i] - audio[i - 1]));
+            }
+            return std::pair<double, float> { crossings / (2.0 * (to - from)), jump };
+        };
+
+        {
+            fx::DriftRing ring;
+            const auto out = run (ring, 48000.0, 0.0, 480, 256, 6.0);
+            const auto [frequency, jump] = measure (out, 1.0, 6.0);
+            check (ring.getUnderruns() == 0 && ring.getOverflows() == 0, "same clock: no dropouts");
+            check (std::abs (frequency - 1000.0) < 1.0, "same clock: the pitch is kept (" + juce::String (frequency, 2) + " Hz)");
+            // A 0.5 sine at 1 kHz moves at most 0.065 per sample at 48 kHz.
+            check (jump < 0.075f, "same clock: no clicks (largest step " + juce::String (jump, 3) + ")");
+            check (ring.getFill() < 2000.0, "same clock: little delay (" + juce::String (ring.getFill(), 0) + " frames)");
+        }
+
+        {
+            // 44.1 kHz, its clock 300 ppm fast, into 48 kHz.
+            fx::DriftRing ring;
+            const auto out = run (ring, 44100.0, 3.0e-4, 512, 128, 40.0);
+            const auto [frequency, jump] = measure (out, 20.0, 40.0);
+            check (ring.getUnderruns() == 0 && ring.getOverflows() == 0, "44.1 to 48 kHz with drift: no dropouts");
+            check (std::abs (frequency - 1000.3) < 0.5, "44.1 to 48 kHz: follows the source's clock (" + juce::String (frequency, 2) + " Hz)");
+            check (jump < 0.075f, "44.1 to 48 kHz: no clicks");
+            check (std::abs (ring.getRatio() / ring.getBaseRatio() - 1.0003) < 2.0e-4, "44.1 to 48 kHz: the ratio settles on the drift");
+        }
+
+        {
+            // The source stops for half a second: silence, then it comes back.
+            fx::DriftRing ring;
+            const auto out = run (ring, 48000.0, -2.0e-4, 1024, 256, 4.0, 1.5, 2.0);
+            check (ring.getUnderruns() >= 1, "a stalled source runs dry");
+            const auto silentPart = measure (out, 1.7, 2.0);
+            check (silentPart.second == 0.0f, "silence while it waits (" + juce::String (silentPart.second) + ")");
+            check (std::abs (measure (out, 2.5, 4.0).first - 1000.0) < 2.0, "and the sound comes back");
+        }
+
+        struct FakeBackend final : ComputerAudio::Backend
+        {
+            double getSampleRate() const override   { return 48000.0; }
+            juce::String getName() const override   { return "Fake"; }
+            juce::String startCapture() override    { return {}; }
+        };
+
+        {
+            ComputerAudio computer;
+            computer.prepare (48000.0, 256);
+            computer.setGainDecibels (-6.0f);
+            computer.setRecordDelay (100);
+            check (computer.start (std::make_unique<FakeBackend>(), "fake").isEmpty() && computer.isOn(), "starts from a backend");
+
+            std::vector<float> ones (256, 1.0f);
+            juce::AudioBuffer<float> monitor (2, 256), record (2, 256);
+            float firstRecorded = 0.0f;
+            int firstMonitorIndex = -1, firstRecordIndex = -1;
+            auto allRead = true;
+            for (int block = 0; block < 40; ++block)
+            {
+                computer.push (ones.data(), ones.data(), 256);
+                allRead = computer.read (monitor.getArrayOfWritePointers(), record.getArrayOfWritePointers(), 256) && allRead;
+                for (int i = 0; i < 256; ++i)
+                {
+                    if (firstMonitorIndex < 0 && monitor.getSample (0, i) > 0.0f) firstMonitorIndex = block * 256 + i;
+                    if (firstRecordIndex < 0 && record.getSample (0, i) > 0.0f) { firstRecordIndex = block * 256 + i; }
+                }
+                firstRecorded = record.getSample (1, 255);
+            }
+            check (allRead, "reads every block while on");
+            check (firstMonitorIndex >= 0 && firstRecordIndex - firstMonitorIndex == 100, "the takes get it delayed by the round trip");
+            check (std::abs (firstRecorded - 0.501f) < 0.01f && std::abs (monitor.getSample (0, 255) - 0.501f) < 0.01f, "the level applies");
+            computer.stop();
+            check (! computer.isOn() && ! computer.read (monitor.getArrayOfWritePointers(), record.getArrayOfWritePointers(), 256), "off after stop");
+        }
+
+        {
+            // In the Live processor: heard over a silent mic, and in Capture (the takes' mix).
+            PluginProcessor processor;
+            processor.setRateAndBufferSizeDetails (48000.0, 256);
+            processor.setCaptureSeconds (30.0);
+            processor.prepareToPlay (48000.0, 256);
+            auto& computer = processor.getComputerAudio();
+            computer.setGainDecibels (0.0f);
+            computer.setRecordDelay (0);
+            computer.start (std::make_unique<FakeBackend>(), "fake");
+
+            std::vector<float> tone (256);
+            juce::AudioBuffer<float> buffer (2, 256);
+            juce::MidiBuffer midi;
+            float heard = 0.0f;
+            for (int block = 0; block < 200; ++block)
+            {
+                for (int i = 0; i < 256; ++i)
+                    tone[(size_t) i] = 0.3f * (float) std::sin (juce::MathConstants<double>::twoPi * 440.0 * (block * 256 + i) / 48000.0);
+                computer.push (tone.data(), tone.data(), 256);
+                buffer.clear();
+                processor.processBlock (buffer, midi);
+                if (block > 100)
+                    heard = juce::jmax (heard, buffer.getMagnitude (0, 0, 256));
+            }
+            check (std::abs (heard - 0.3f) < 0.02f, "Live: the computer audio is heard (" + juce::String (heard, 3) + ")");
+
+            auto captured = processor.getCapture().take (1.0);
+            check (captured.audio.getNumSamples() > 0 && captured.audio.getMagnitude (0, 0, captured.audio.getNumSamples()) > 0.25f,
+                   "Live: Capture keeps it with the voice");
+
+            processor.computerInRecordings = false;
+            processor.setCaptureSeconds (0.0);
+            processor.setCaptureSeconds (30.0);
+            for (int block = 0; block < 100; ++block)
+            {
+                computer.push (tone.data(), tone.data(), 256);
+                buffer.clear();
+                processor.processBlock (buffer, midi);
+            }
+            captured = processor.getCapture().take (1.0);
+            check (captured.audio.getMagnitude (0, 0, captured.audio.getNumSamples()) < 0.01f, "Live: left out of the takes when asked");
+            computer.stop();
+            processor.releaseResources();
+        }
+    }
+
+    // Live MIDI instruments: which slot each device plays, and the sound in the Live mix.
+    void testLiveInstruments()
+    {
+        std::cout << "\nLive instruments\n";
+
+        const auto noteOn = [] (int channel, int note)
+        {
+            auto message = juce::MidiMessage::noteOn (channel, note, (juce::uint8) 100);
+            message.setTimeStamp (juce::Time::getMillisecondCounterHiRes() * 0.001);
+            return message;
+        };
+
+        // Plays a block and returns each slot's peak.
+        const auto play = [] (LiveInstruments& instruments, const juce::MidiBuffer* midi = nullptr)
+        {
+            juce::AudioBuffer<float> out (2, 512);
+            for (int i = 0; i < 20; ++i)
+                instruments.render (out, 512, i == 0 ? midi : nullptr, {});
+            return std::pair<float, float> { instruments.getPeak (0), instruments.getPeak (1) };
+        };
+
+        {
+            LiveInstruments instruments;
+            instruments.prepare (48000.0, 512);
+            instruments.setUsesDeviceMidi (true);
+            check (instruments.getSettings (0).key == "grand" && instruments.getSettings (1).key == "beat"
+                   && instruments.getSettings (1).channel == 10, "a keyboard and a drum kit (channel 10) to start with");
+
+            auto keys = instruments.getSettings (0);
+            keys.on = true;
+            instruments.setSettings (0, keys);
+            auto drums = instruments.getSettings (1);
+            drums.on = true;
+            drums.channel = 0;
+            drums.input = "drum-kit";
+            instruments.setSettings (1, drums);
+            check (instruments.getInstrument (0) != nullptr && instruments.getInstrument (1) != nullptr, "turned on, they get their instruments");
+
+            instruments.handleMidi ("keyboard", noteOn (1, 60));
+            auto [keysPeak, drumsPeak] = play (instruments);
+            check (keysPeak > 0.01f && drumsPeak == 0.0f, "the keyboard plays the slot on any input only");
+
+            instruments.handleMidi ("drum-kit", noteOn (10, 38));
+            std::tie (keysPeak, drumsPeak) = play (instruments);
+            check (drumsPeak > 0.01f, "the drum kit plays its own slot");
+            check (instruments.takeActivity (1) && ! instruments.takeActivity (1), "a note shows as activity once");
+
+            drums.input = LiveInstruments::anyInput;
+            drums.channel = 10;
+            instruments.setSettings (1, drums);
+            keys.channel = 1;
+            instruments.setSettings (0, keys);
+            auto off = juce::MidiMessage::allNotesOff (1);
+            off.setTimeStamp (juce::Time::getMillisecondCounterHiRes() * 0.001);
+            instruments.handleMidi ("keyboard", off);
+            for (int i = 0; i < 100; ++i)
+                play (instruments); // let the notes ring out
+            instruments.handleMidi ("anything", noteOn (10, 36));
+            std::tie (keysPeak, drumsPeak) = play (instruments);
+            check (keysPeak < 1.0e-4f && drumsPeak > 0.01f, "on one input, the channels split them (" + juce::String (keysPeak) + ", " + juce::String (drumsPeak) + ")");
+
+            keys.levelDb = -60.0f;
+            instruments.setSettings (0, keys);
+            play (instruments); // the level glides down
+            instruments.handleMidi ("anything", noteOn (1, 64));
+            std::tie (keysPeak, drumsPeak) = play (instruments);
+            check (keysPeak == 0.0f, "level all the way down is silent");
+            instruments.handleMidi ("anything", off);
+
+            keys.on = false;
+            keys.levelDb = 0.0f;
+            instruments.setSettings (0, keys);
+            instruments.handleMidi ("anything", noteOn (1, 64));
+            check (play (instruments).first == 0.0f, "off: silent");
+
+            check (instruments.loadPreset (1, micfx::inst::getBeatSpec().presets.back().name)
+                   && instruments.getPresetName (1) == micfx::inst::getBeatSpec().presets.back().name, "loads a preset");
+            const auto state = instruments.getState (1);
+            LiveInstruments restored;
+            restored.prepare (48000.0, 512);
+            restored.setSettings (1, drums, state);
+            check (restored.getPresetName (1) == instruments.getPresetName (1), "a saved sound comes back");
+        }
+
+        {
+            // A plug-in: the block's MIDI plays them, in the Live mix, not through the voice's effects.
+            PluginProcessor processor;
+            processor.setRateAndBufferSizeDetails (48000.0, 256);
+            processor.prepareToPlay (48000.0, 256);
+            auto& instruments = processor.getLiveInstruments();
+            auto keys = instruments.getSettings (0);
+            keys.on = true;
+            instruments.setSettings (0, keys);
+
+            juce::AudioBuffer<float> buffer (2, 256);
+            float heard = 0.0f;
+            for (int block = 0; block < 40; ++block)
+            {
+                juce::MidiBuffer midi;
+                if (block == 2)
+                    midi.addEvent (juce::MidiMessage::noteOn (1, 60, (juce::uint8) 110), 10);
+                buffer.clear();
+                processor.processBlock (buffer, midi);
+                heard = juce::jmax (heard, buffer.getMagnitude (0, 0, 256));
+            }
+            check (heard > 0.02f, "Live: a MIDI note plays the instrument (" + juce::String (heard, 3) + ")");
+
+            auto captured = processor.getCapture().take (1.0);
+            check (captured.audio.getNumSamples() > 0 && captured.audio.getMagnitude (0, 0, captured.audio.getNumSamples()) > 0.02f,
+                   "Live: Capture (the takes' mix) has it");
+            check (captured.audio.getMagnitude (2, 0, captured.audio.getNumSamples()) == 0.0f, "Live: the dry mic file doesn't");
+        }
+    }
+
     void testCapture()
     {
         std::cout << "\nCapture\n";
@@ -7364,6 +7655,82 @@ namespace
         }
 
         return out;
+    }
+
+    void testMidiFiles()
+    {
+        std::cout << "\nMIDI files (import and export)\n";
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-midifile", {});
+        folder.createDirectory();
+
+        // A project at 100 BPM with a Keys clip (bar 2) and a drum clip.
+        daw::Edit edit;
+        edit.setTempo (100.0);
+        const auto keys = (int) edit.addMidiTrack ("Keys", *daw::instruments::findBuiltin ("builtin:keys"))[daw::ids::id];
+        const auto drums = (int) edit.addMidiTrack ("Drums", *daw::instruments::findBuiltin ("builtin:beat"))[daw::ids::id];
+        const auto map = edit.getTempoMap();
+        const auto bar2 = map.toSeconds (4.0);
+        const auto clip = (int) edit.addMidiClip (keys, bar2, map.toSeconds (8.0) - bar2, "Chords")[daw::ids::id];
+        edit.addNote (clip, 60, 0.0, map.toSeconds (5.0) - bar2, 90);
+        edit.addNote (clip, 64, map.toSeconds (5.0) - bar2, map.toSeconds (6.0) - map.toSeconds (5.0), 110);
+        const auto kick = (int) edit.addMidiClip (drums, 0.0, bar2, "Kick")[daw::ids::id];
+        edit.addNote (kick, 36, 0.0, 0.1, 120);
+
+        const auto song = daw::midifile::fromClip (edit, clip);
+        check (song.parts.size() == 1 && song.parts[0].notes.size() == 2, "a clip exports its notes");
+        check (song.parts[0].notes[0].beat == 0.0 && std::abs (song.parts[0].notes[1].beat - 1.0) < 1.0e-6,
+               "the notes start from the bar line before the first one");
+        check (! song.tempo.empty() && std::abs (song.tempo[0].bpm - 100.0) < 1.0e-6, "the project's tempo is in the file");
+
+        const auto file = folder.getChildFile ("chords.mid");
+        juce::String reason;
+        check (daw::midifile::write (file, song, reason) && file.getSize() > 0, "the file is written");
+
+        daw::midifile::Song back;
+        check (daw::midifile::read (file, back, reason), "the file reads back: " + reason);
+        check (back.parts.size() == 1 && back.parts[0].notes.size() == 2 && back.parts[0].notes[1].pitch == 64
+                   && back.parts[0].notes[1].velocity == 110 && std::abs (back.parts[0].notes[1].beat - 1.0) < 1.0e-6
+                   && std::abs (back.parts[0].notes[0].beats - 1.0) < 1.0e-6 && back.parts[0].name == "Chords",
+               "notes, velocities, lengths and the name survive");
+        check (back.tempo.size() == 1 && std::abs (back.tempo[0].bpm - 100.0) < 0.01, "the tempo survives");
+
+        const auto drumSong = daw::midifile::fromTrack (edit, drums);
+        const auto drumFile = folder.getChildFile ("kick.mid");
+        daw::midifile::Song drumBack;
+        check (drumSong.parts.size() == 1 && drumSong.parts[0].drums && daw::midifile::write (drumFile, drumSong, reason)
+                   && daw::midifile::read (drumFile, drumBack, reason) && drumBack.parts[0].drums,
+               "drum parts go on channel 10 and come back as drums");
+
+        // Into an empty project: it takes the file's tempo; the notes keep their bars.
+        {
+            daw::Edit fresh;
+            const daw::midifile::Instruments instruments { *daw::instruments::findBuiltin ("builtin:keys"), *daw::instruments::findBuiltin ("builtin:beat") };
+            const auto placed = daw::midifile::addToEdit (fresh, back, 0.0, -1, instruments, "x");
+            check (placed.tracks.size() == 1 && placed.clips.size() == 1 && std::abs (placed.tempo - 100.0) < 0.01
+                       && std::abs (fresh.getTempo() - 100.0) < 0.01,
+                   "an empty project takes the file's tempo");
+            const auto placedClip = fresh.getClip (placed.clips[0]);
+            check (daw::Edit::isMidiClip (placedClip) && placedClip.getNumChildren() == 2
+                       && std::abs ((double) placedClip[daw::ids::length] - fresh.getTempoMap().toSeconds (4.0)) < 1.0e-6,
+                   "the clip is a whole bar and holds the notes");
+
+            // A project with something in it keeps its tempo; the clip lands where asked, by beats.
+            fresh.setTempo (150.0);
+            const auto again = daw::midifile::addToEdit (fresh, back, 2.0, placed.tracks[0], instruments, "x");
+            const auto second = fresh.getClip (again.clips[0]);
+            check (std::abs (fresh.getTempo() - 150.0) < 1.0e-6 && again.tempo == 0.0 && again.tracks[0] == placed.tracks[0]
+                       && std::abs ((double) second[daw::ids::start] - 2.0) < 1.0e-6,
+                   "a project with clips keeps its tempo, and the first part goes on the picked track");
+            const auto noteAt = fresh.getNote ((int) second.getChild (1)[daw::ids::id]);
+            check (std::abs ((double) noteAt[daw::ids::time] - fresh.getTempoMap().toSeconds (1.0)) < 1.0e-6, "notes keep their beats at the new tempo");
+        }
+
+        // Not a MIDI file, and a file with no notes.
+        const auto junk = folder.getChildFile ("junk.mid");
+        junk.replaceWithText ("not midi");
+        check (! daw::midifile::read (junk, back, reason) && reason.isNotEmpty(), "a file that isn't MIDI is refused");
+
+        folder.deleteRecursively();
     }
 
     void testMidiTracks()
@@ -18929,6 +19296,38 @@ static void testFactoryChains()
     check (! factory::makeInserts ("No such chain").isValid(), "an unknown name gives no chain");
 }
 
+void testLiveInput()
+{
+    std::cout << "\nLive mic input\n";
+
+    const auto fill = [] (juce::AudioBuffer<float>& buffer)
+    {
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch)
+            for (int i = 0; i < buffer.getNumSamples(); ++i)
+                buffer.setSample (ch, i, (float) (ch + 1) + 0.001f * (float) i);
+    };
+
+    juce::AudioBuffer<float> buffer (4, 64);
+    fill (buffer);
+    PluginProcessor::swapLiveInput (buffer, 0, 64);
+    check (juce::approximatelyEqual (buffer.getSample (0, 5), 1.005f), "input 1 stays where it is");
+
+    PluginProcessor::swapLiveInput (buffer, 2, 64);
+    check (juce::approximatelyEqual (buffer.getSample (0, 5), 3.005f) && juce::approximatelyEqual (buffer.getSample (2, 5), 1.005f)
+               && juce::approximatelyEqual (buffer.getSample (1, 5), 2.005f) && juce::approximatelyEqual (buffer.getSample (3, 5), 4.005f),
+           "input 3 swaps places with input 1 and the others stay");
+
+    fill (buffer);
+    PluginProcessor::swapLiveInput (buffer, 9, 64);
+    check (juce::approximatelyEqual (buffer.getSample (0, 5), 1.005f), "an input the interface doesn't have is ignored");
+
+    PluginProcessor processor;
+    processor.setLiveInput (3);
+    check (processor.getLiveInput() == 3, "the processor remembers the choice");
+    processor.setLiveInput (-4);
+    check (processor.getLiveInput() == 0, "and never goes below input 1");
+}
+
 
 int main()
 {
@@ -18962,6 +19361,8 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "looper")
     {
         testCapture();
+        testComputerAudio();
+        testLiveInstruments();
     testLooper();
         testMidiLearn();
         testScenes();
@@ -19120,6 +19521,8 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "capture")
     {
         testCapture();
+        testComputerAudio();
+        testLiveInstruments();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -19187,6 +19590,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=midifiles: just MIDI file import and export.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "midifiles")
+    {
+        testMidiFiles();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=songmap: just the song map.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "songmap")
     {
@@ -19239,6 +19650,7 @@ int main()
     testTakes();
     testStereoInputs();
     testMidiTracks();
+    testMidiFiles();
     testInstruments();
     testKit();
     testStarterContent();
@@ -19315,6 +19727,7 @@ int main()
     testCabAndIrReverb();
     testGuitarAmp();
     testSmoothing();
+    testLiveInput();
     testStems();
 #if MICFX_HAS_DEMUCS
     testStemPipeline();

@@ -9,6 +9,7 @@
 #include "daw/ClipTools.h"
 #include "daw/Patterns.h"
 #include "daw/Loops.h"
+#include "daw/MidiFileIO.h"
 #include "CaptureRing.h"
 #include "instruments/InstrumentProcessor.h"
 #include "instruments/Kit.h"
@@ -1922,6 +1923,34 @@ juce::var DawBridge::importAudio (const juce::File& file, int trackId, double st
     return reply;
 }
 
+juce::var DawBridge::importMidi (const juce::File& file, int trackId, double start)
+{
+    daw::midifile::Song song;
+    juce::String reason;
+    if (! daw::midifile::read (file, song, reason))
+        return error (reason);
+
+    auto& host = processor.getPluginHost();
+    const auto keys = host.findInstrument ("builtin:keys").value_or (daw::instruments::getDefault());
+    const auto drums = host.findInstrument ("builtin:beat").value_or (keys);
+
+    edit.getUndoManager().beginNewTransaction ("Import MIDI");
+    if (start < 0.0)
+        start = (double) engine.getPosition() / engine.getSampleRate();
+
+    const auto placed = daw::midifile::addToEdit (edit, song, start, trackId, { keys, drums }, file.getFileNameWithoutExtension());
+    if (placed.clips.isEmpty())
+        return error ("Couldn't add " + file.getFileName() + " to the project.");
+
+    // The same tempo map the clips were placed on (an empty project took the file's tempo).
+    const auto clip = edit.getClip (placed.clips.getFirst());
+    auto reply = object ({ { "ok", true }, { "error", juce::String() }, { "track", placed.tracks.getFirst() }, { "clip", placed.clips.getFirst() },
+                           { "start", number (clip, ids::start) }, { "parts", (int) song.parts.size() } });
+    if (placed.tempo > 0.0)
+        reply.getDynamicObject()->setProperty ("tempo", std::round (placed.tempo * 10.0) / 10.0);
+    return reply;
+}
+
 juce::var DawBridge::addStemTracks (const juce::ValueTree& clip, int trackId,
                                     const std::vector<juce::File>& files)
 {
@@ -2429,6 +2458,11 @@ namespace
 {
     constexpr int maxBrowseEntries = 2000;
 
+    bool isMidiFile (const juce::File& file)
+    {
+        return file.hasFileExtension ("mid;midi");
+    }
+
     bool isAudioFile (const juce::File& file)
     {
         static const auto extensions = []
@@ -2494,7 +2528,7 @@ juce::var DawBridge::browseFolder (const juce::File& folder) const
             continue;
         if (entry.isDirectory())
             folders.add (file);
-        else if (isAudioFile (file))
+        else if (isAudioFile (file) || isMidiFile (file))
             files.add (file);
     }
 
@@ -7035,6 +7069,57 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    // "importMidi" { track?, start? }: pick a .mid file and add its parts as MIDI tracks
+    // with clips. { file } skips the picker.
+    if (command == "importMidi")
+    {
+        const auto trackId = arg (args, "track", -1);
+        const auto start = arg (args, "start", -1.0);
+        if (args["file"].toString().isNotEmpty())
+        {
+            const juce::File file (args["file"].toString());
+            complete (file.existsAsFile() ? importMidi (file, trackId, start) : error ("That file isn't there any more."));
+            return;
+        }
+        withChooser ("Import a MIDI file", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "*.mid;*.midi",
+                     Flags::openMode | Flags::canSelectFiles,
+                     [this, trackId, start] (const juce::File& file) { return importMidi (file, trackId, start); },
+                     complete);
+        return;
+    }
+
+    // "exportMidi" { clip } or { track }: writes a MIDI clip, or all of a MIDI track's
+    // notes, to a .mid file (asks where, unless { file } is given).
+    if (command == "exportMidi")
+    {
+        const auto song = args.hasProperty ("clip") ? daw::midifile::fromClip (edit, arg (args, "clip", -1))
+                                                    : daw::midifile::fromTrack (edit, arg (args, "track", -1));
+        if (song.parts.empty())
+        {
+            complete (error ("There are no MIDI notes to export there."));
+            return;
+        }
+
+        const auto name = juce::File::createLegalFileName (song.parts.front().name.isNotEmpty() ? song.parts.front().name : juce::String ("MIDI"));
+        const auto write = [song] (const juce::File& picked)
+        {
+            const auto file = picked.hasFileExtension ("mid;midi") ? picked : picked.withFileExtension ("mid");
+            juce::String reason;
+            return daw::midifile::write (file, song, reason) ? object ({ { "ok", true }, { "error", juce::String() }, { "file", file.getFullPathName() } })
+                                                             : error (reason);
+        };
+
+        if (args["file"].toString().isNotEmpty())
+        {
+            complete (write (juce::File (args["file"].toString())));
+            return;
+        }
+        const auto folder = project.isOpen() ? project.getExportsFolder() : documents;
+        withChooser ("Export MIDI", folder.getChildFile (name + ".mid"), "*.mid",
+                     Flags::saveMode | Flags::canSelectFiles | Flags::warnAboutOverwriting, write, complete);
+        return;
+    }
+
     //================================================================ library sidebar
     if (command == "places") { complete (describePlaces()); return; }
     if (command == "browse") { complete (browseFolder (juce::File (args["path"].toString()))); return; }
@@ -7169,6 +7254,11 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "importFile")
     {
         const juce::File file (args["file"].toString());
+        if (isMidiFile (file) && file.existsAsFile())
+        {
+            complete (importMidi (file, arg (args, "track", -1), arg (args, "start", -1.0)));
+            return;
+        }
         complete (juce::File::isAbsolutePath (args["file"].toString()) && file.existsAsFile()
                       ? importAudio (file, arg (args, "track", -1), arg (args, "start", -1.0), arg (args, "match", matchLoops),
                                     arg (args, "continue", false))

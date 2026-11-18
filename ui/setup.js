@@ -42,9 +42,35 @@ export function initSetup() {
     strips.push(strip);
   }
 
+  // Live mode's mic: which of the interface's inputs it listens to. Shown beside "Hold for dry"
+  // when the interface has more than one input open (DAW tracks pick their own inputs).
+  const liveInput = html("select", "dropdown live-input");
+  liveInput.hidden = true;
+  liveInput.title = "Which input of your audio interface is the mic in Live mode. It swaps places with input 1, so an instrument on input 2 for chord following becomes the old input 1.";
+  liveInput.setAttribute("aria-label", "Live mic input");
+  liveInput.addEventListener("change", () => audioSetup("liveInput", Number(liveInput.value)).then(show));
+  document.querySelector(".chips .dry-button")?.before(liveInput);
+
+  const showLiveInput = (next) => {
+    const names = Array.isArray(next.inputs) ? next.inputs : [];
+    liveInput.hidden = !(next.available && names.length > 1);
+    const signature = names.join("\n");
+    if (liveInput.dataset.names !== signature) {
+      liveInput.dataset.names = signature;
+      liveInput.replaceChildren(...names.map((name, i) => {
+        const option = html("option");
+        option.value = String(i);
+        option.textContent = `In ${i + 1}: ${name}`;
+        return option;
+      }));
+    }
+    liveInput.value = String(Math.min(Number(next.liveInput) || 0, Math.max(0, names.length - 1)));
+  };
+
   const show = (next) => {
     if (!next || typeof next !== "object") return;
     state = next;
+    showLiveInput(next);
     if (lastXruns !== null && next.xruns > lastXruns) dropoutAt = performance.now();
     lastXruns = next.xruns ?? lastXruns;
     const dropout = performance.now() - dropoutAt < DROPOUT_SHOW_MS;

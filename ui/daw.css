@@ -905,7 +905,7 @@ body.is-daw .chip--live { display: none; }
 .automix-section.is-lifted { background: color-mix(in srgb, var(--accent) 28%, transparent); }
 .automix-focus[hidden], .automix-mode-intro[hidden], .automix-target[hidden], .automix-target-about[hidden] { display: none; }
 .automix-target-about { margin: 0; color: var(--muted); font-size: 12px; }
-.automix-panel.is-master .automix-effects, .automix-panel.is-master .automix-roles, .automix-panel.is-master .automix-style { display: none; }
+.automix-panel.is-master .ai-options, .automix-panel.is-master .automix-effects, .automix-panel.is-master .automix-roles, .automix-panel.is-master .automix-style { display: none; }
 .automix-mode-intro { margin: 0; color: var(--muted); font-size: 12px; line-height: 1.45; }
 .automix-panel.is-clean [data-mix-only] { display: none; }
 .automix-amount { display: flex; align-items: center; gap: 10px; margin: 10px 0 4px; color: var(--muted); }
@@ -2822,7 +2822,15 @@ body.is-daw .library-hint { display: none; }
 .automix-sliders span { text-align: right; font-family: var(--mono); color: var(--text); }
 
 /* Auto Mix: asking before changes are thrown away */
-.automix-ask { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-top: 8px; padding: 8px 10px; border: 1px solid var(--warn); border-radius: 10px; background: #0f1218; }
-.automix-ask[hidden] { display: none; }
-.automix-ask-text { flex: 1 1 220px; color: var(--text); font-size: 12px; line-height: 1.45; }
 .automix-panel.is-master .ai-modes, .automix-panel.is-master .ai-about { display: none; }
+
+/* Auto Mix: dialogs (who's who, losing changes) and the options fold */
+.automix-dialog { width: min(560px, 92vw); max-height: 86vh; display: flex; flex-direction: column; }
+.automix-dialog .automix-dialog-body { overflow-y: auto; margin: 0 0 16px; }
+.automix-dialog .automix-roles { margin: 0; }
+.automix-dialog .automix-role { grid-template-columns: 1fr 150px 92px; }
+.automix-dialog p { margin-bottom: 12px; }
+.ai-options summary { cursor: pointer; width: fit-content; margin: 2px 0 8px; color: var(--muted); font-size: 12px; }
+.ai-options summary:hover { color: var(--text); }
+.ai-options[open] > .automix-effects { margin-bottom: 8px; }
+.automix-roles-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }

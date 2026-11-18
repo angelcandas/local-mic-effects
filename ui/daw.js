@@ -1504,6 +1504,7 @@ class DawScreen {
       item("Save as…", () => daw("saveAs"), { shortcut: "Ctrl+Shift+S" });
       rule();
       item("Import audio…", () => this.importAudio(), { shortcut: "Ctrl+I" });
+      item("Import MIDI file…", () => this.importMidi(), { hint: "A .mid file: each of its parts becomes a MIDI track with a clip (drag one in from the library too)" });
       item("Export…", () => this.toggleExportPanel(true), { shortcut: "Ctrl+Shift+R" });
     }, anchor);
   }
@@ -2135,6 +2136,21 @@ class DawScreen {
     const result = await daw("import", { track: this.selectedTrack ?? -1 });
     if (result?.ok && typeof result.track === "number") this.showWhenDrawn({ track: result.track, clip: result.clip, start: result.start });
     if (result?.loop) toast(loopText(result.loop), "", "undo");
+  }
+
+  async importMidi() {
+    const track = this.session?.tracks.find((t) => t.id === this.selectedTrack);
+    const result = await daw("importMidi", { track: track?.kind === "midi" ? track.id : -1 });
+    if (!result?.ok) return;
+    this.showWhenDrawn({ track: result.track, clip: result.clip, start: result.start });
+    if (result.tempo) toast(`The project's tempo is now ${result.tempo} BPM, from the file.`, "", "undo");
+  }
+
+  // Writes a MIDI clip or a MIDI track's notes to a .mid file.
+  async exportMidi(args) {
+    const result = await daw("exportMidi", args);
+    if (result?.ok) toast(`Saved ${String(result.file).split(/[\\/]/).pop()}.`);
+    else if (result && !result.cancelled && result.error) toast(result.error, "is-error");
   }
 
   // Selects a track (and clip) that was just added, once a session that holds it arrives.
@@ -5349,8 +5365,6 @@ class DawScreen {
       if (!(await this.confirmDiscardAutoMix())) return;
       this.refreshAutoMixTags(true);
     });
-    $(".automix-ask-no").addEventListener("click", () => this.answerAutoMixAsk(false));
-    $(".automix-ask-yes").addEventListener("click", () => this.answerAutoMixAsk(true));
     // The mode tabs ask first when switching would lose the list.
     panel.beforeModeChange = () => this.confirmDiscardAutoMix();
 
@@ -5427,32 +5441,109 @@ class DawScreen {
     return Boolean(plan && plan.moves.length > 0) && !this.autoMixPanel.classList.contains("is-running") ? (applied ? "tried" : "plan") : null;
   }
 
-  // Asks before the changes are thrown away; "yes" takes back what was tried (the mix goes
-  // back to how it was) and clears the panel. Resolves true at once when there's nothing to lose.
-  confirmDiscardAutoMix() {
-    const unkept = this.hasUnkeptAutoMix();
-    if (!unkept) return Promise.resolve(true);
-    const panel = this.autoMixPanel;
-    const ask = panel.querySelector(".automix-ask");
-    ask.querySelector(".automix-ask-text").textContent = unkept === "tried"
-      ? "You tried Auto Mix's changes and haven't kept them. Switching now takes them out of the mix again. Lose these changes?"
-      : "Auto Mix has a list of changes that aren't kept. Switching now loses the list; your mix is as it was. Lose these changes?";
-    ask.hidden = false;
+  // A dialog over the whole window (not inside the panel, where it is easy to miss): resolves
+  // with the value of the button pressed, or null on Escape or a click outside.
+  autoMixDialog({ title, text, body, buttons, wide = false }) {
+    const backdrop = html("div", "confirm-backdrop");
+    const dialog = html("div", "confirm-dialog" + (wide ? " automix-dialog" : ""));
+    dialog.setAttribute("role", "alertdialog");
+    dialog.setAttribute("aria-modal", "true");
+    const heading = html("h2", "", title);
+    dialog.append(heading);
+    if (text) dialog.append(html("p", "", text));
+    if (body) dialog.append(body);
+    const row = html("div", "confirm-buttons");
+    dialog.append(row);
+    backdrop.append(dialog);
     return new Promise((resolve) => {
-      this.autoMixAskResolve?.(false);
-      this.autoMixAskResolve = resolve;
+      const done = (value) => {
+        document.removeEventListener("keydown", key, true);
+        backdrop.remove();
+        resolve(value);
+      };
+      const key = (event) => {
+        if (event.key === "Escape") { event.stopPropagation(); done(null); }
+      };
+      document.addEventListener("keydown", key, true);
+      backdrop.addEventListener("mousedown", (event) => { if (event.target === backdrop) done(null); });
+      let first = null;
+      for (const [label, value, accent] of buttons) {
+        const b = html("button", "tool" + (accent ? " is-accent" : ""), label);
+        b.type = "button";
+        b.addEventListener("click", () => done(value));
+        row.append(b);
+        if (accent || !first) first = b;
+      }
+      document.body.append(backdrop);
+      first?.focus();
     });
   }
 
-  async answerAutoMixAsk(yes) {
-    const resolve = this.autoMixAskResolve;
-    this.autoMixAskResolve = null;
-    this.autoMixPanel.querySelector(".automix-ask").hidden = true;
-    if (yes) {
-      await daw("autoMix", { action: "discard" });
-      this.resetAutoMix();
+  // Asks before the changes are thrown away; "yes" takes back what was tried (the mix goes
+  // back to how it was) and clears the panel. Resolves true at once when there's nothing to lose.
+  async confirmDiscardAutoMix() {
+    const unkept = this.hasUnkeptAutoMix();
+    if (!unkept) return true;
+    const answer = await this.autoMixDialog({
+      title: "Lose these changes?",
+      text: unkept === "tried"
+        ? "You tried Auto Mix's changes and haven't kept them. Continuing takes them out of the mix again."
+        : "Auto Mix has a list of changes that aren't kept. Continuing loses the list; your mix is as it was.",
+      buttons: [["Keep editing", false], ["Discard changes", true, true]],
+    });
+    if (!answer) return false;
+    await daw("autoMix", { action: "discard" });
+    this.resetAutoMix();
+    return true;
+  }
+
+  // On opening: who is who and who sits where, as a dialog, so no track is left to a guess
+  // without being asked. Only for tracks nobody tagged yet, and once per set of tracks.
+  async askAutoMixTracks(force = false) {
+    if (this.autoMix.plan || this.autoMixPanel.classList.contains("is-running")) return;
+    const result = await daw("autoMix", { action: "tags" });
+    if (!result?.ok || !result.tracks?.length || this.autoMix.plan) return;
+    const key = result.tracks.map((t) => t.id).join(",");
+    if (!force && (key === this.autoMixAskedKey || result.tracks.every((t) => t.tagged))) return;
+    this.autoMixAskedKey = key;
+    this.autoMixRoleNames = result.roles;
+
+    const body = html("div", "automix-dialog-body");
+    const box = html("div", "automix-roles");
+    body.append(box);
+    const names = result.roles ?? AUTOMIX_ROLES;
+    const picks = [];
+    for (const track of result.tracks) {
+      const row = html("label", "automix-role");
+      const name = html("span", "", track.name);
+      if (track.role && !track.tagged) name.append(html("small", "", "guessed"));
+      const role = html("select", "dropdown");
+      role.append(new Option("Not sure: listen", "auto"));
+      for (const r of names) role.append(new Option(r.name, r.key));
+      role.value = track.role || "auto";
+      const priority = html("select", "dropdown");
+      for (const [k, label] of [["front", "Front"], ["normal", "Normal"], ["back", "Back"]]) priority.append(new Option(label, k));
+      priority.value = track.priority || "normal";
+      priority.title = "Front: a star of the song, the others make room. Normal: as it comes. Back: filler, it sits lower.";
+      row.append(name, role, priority);
+      box.append(row);
+      picks.push({ track, role, priority });
     }
-    resolve?.(yes);
+    const answer = await this.autoMixDialog({
+      title: "Who is who in this song?",
+      text: "Say which instrument each track is and whether it sits Front, Normal or Back, so Auto Mix treats each one right. You can change this any time in the track list.",
+      body, wide: true,
+      buttons: [["Skip: let it guess", false], ["Done", true, true]],
+    });
+    if (answer) {
+      for (const { track, role, priority } of picks) {
+        if (role.value !== (track.role || "auto") || (!track.tagged && role.value !== "auto"))
+          await daw("autoMix", { action: "tag", track: track.id, role: role.value });
+        if (priority.value !== (track.priority || "normal"))
+          await daw("autoMix", { action: "tag", track: track.id, priority: priority.value });
+      }
+    }
+    this.refreshAutoMixTags(true);
   }
 
   toggleAutoMix(show = this.autoMixPanel.hidden) {
@@ -5470,7 +5561,7 @@ class DawScreen {
       this.mixCheck.panel.hidden = true;
       this.songMap.panel.hidden = true;
       this.renderAutoMixMode();
-      if (!this.autoMix.plan) this.refreshAutoMixState();
+      if (!this.autoMix.plan) this.refreshAutoMixState().then(() => this.askAutoMixTracks());
     }
   }
 
@@ -5553,7 +5644,7 @@ class DawScreen {
     rolesBox.replaceChildren();
     if (tracks.length === 0) return;
     rolesBox.append(html("div", "automix-roles-head", beforeListening
-      ? "What's on each track? Tag them so Auto Mix treats each one right."
+      ? "What's on each track, and does it sit Front, Normal or Back?"
       : "Tracks (change a role and the plan follows)"));
 
     const names = this.autoMixRoleNames ?? AUTOMIX_ROLES;
@@ -5858,7 +5949,8 @@ class DawScreen {
     const apply = panel.querySelector(".automix-apply");
     apply.disabled = !plan || plan.moves.length === 0 || applied;
     apply.textContent = applied ? "In the mix" : "Try on the mix";
-    apply.classList.toggle("is-accent", !applied);
+    apply.classList.toggle("is-accent", Boolean(plan) && !applied);
+    panel.querySelector(".automix-analyse").classList.toggle("is-accent", !plan);
     const keep = panel.querySelector(".automix-keep");
     keep.hidden = !plan || plan.moves.length === 0;
     keep.disabled = !applied || !after;
@@ -6458,6 +6550,7 @@ class DawScreen {
       item("Mute", () => daw("setTrack", { id: track.id, mute: !track.mute }), { checked: track.mute, shortcut: "0" });
       item("Solo", () => daw("setTrack", { id: track.id, solo: !track.solo }), { checked: track.solo, shortcut: "S" });
       item("Arm for recording", () => daw("setTrack", { id: track.id, arm: !track.arm }), { checked: track.arm, shortcut: "A" });
+      if (track.kind === "midi") item("Export as MIDI file…", () => this.exportMidi({ track: track.id }), { hint: "All of this track's notes (clips and pattern blocks) as a .mid file" });
       rule();
       const picked = this.tracksFor(track.id).filter((id) => tracks.some((t) => t.id === id));
       const groups = this.session.groups ?? [];
@@ -6772,6 +6865,7 @@ class DawScreen {
       item("Delete", () => this.deleteSelected(), { danger: true, shortcut: "Delete" });
       rule();
       item("Mute", () => this.run("muteClip"), { checked: Boolean(clip.mute), shortcut: "Shift+M" });
+      if (!audio) item("Export as MIDI file…", () => this.exportMidi({ clip: clip.id }), { hint: "Save this clip's notes as a .mid file" });
       item("Loop this clip", () => this.run("loopClip"), { shortcut: "Ctrl+L" });
       item("Zoom to the clip", () => this.run("zoomClip"), { shortcut: "Z" });
       if (audio) {

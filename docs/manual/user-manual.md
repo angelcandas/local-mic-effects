@@ -198,6 +198,25 @@ Live mode always keeps the last few minutes of your voice (processed and raw) in
 
 In DAW mode the **Capture** button does the same for the armed audio tracks (right-click for how much). MIDI input is not captured yet.
 
+### Computer audio: sing over a video or any app *(standalone app)*
+
+Turn on **Computer audio** in the transport bar to mix the sound of your other apps (a YouTube video, a song in your music player, a call) with your voice. You hear both together, and recordings and Capture get your voice with the computer audio under it. The slider sets its level (double-click for -6 dB; all the way down is off) and the small meter shows what is coming in.
+
+The **▾** button picks where it comes from:
+
+- **Computer audio (all apps)**, on macOS 14.2 or later: every app's sound, taken straight from the Mac. MicFX leaves itself out, so it never hears its own output. The first time, macOS asks to allow MicFX to record system audio; if you hear nothing, allow it in System Settings › Privacy & Security › Screen & System Audio Recording. **Mute the apps on the speakers** (on by default) silences them on the Mac's own output while MicFX listens, so you hear them once, through MicFX, in time with your voice. They come back as soon as you turn Computer audio off.
+- **A loopback device**: route the computer's sound to a virtual device (BlackHole or Loopback on a Mac, Stereo Mix on Windows, a PipeWire/Pulse monitor on Linux) and pick it here. MicFX itself must play to another output (your interface or headphones), otherwise it would feed back; it tells you if it does.
+
+**In recordings** (on by default) decides whether takes and Capture include it. The computer audio in a take is delayed by the audio round trip, the same amount takes are moved on the timeline, so it lines up with the voice you sang to it. Computer audio pauses in DAW mode and comes back when you return to Live.
+
+### Instruments: play a keyboard or drum kit with your voice
+
+Press **Instruments** at the top to show two rows, **Keys** and **Drums**. Each plays one of the MicFX instruments (Grand, Nova, Beat, ...) from MIDI, next to your voice: you hear it, the looper loops it, and recordings and Capture include it. It doesn't go through your voice's effects.
+
+On each row: the switch turns it on, then pick the instrument and its sound (**Edit sound…** opens the instrument's own window; your changes are kept), the **MIDI** input and channel, and the level. **Any input** means every MIDI device that the other row hasn't picked, so pick your keyboard on Keys and your drum kit on Drums. Drums starts on channel 10, where most drum kits send; set it to **All ch.** if yours uses another. Use **Beat** for drums: the **Kit** sampler starts empty until you load your own samples into it. The light flashes when notes come in.
+
+Notes and controls you mapped with MIDI learn don't play the instruments.
+
 ## 3.3 Looper
 
 ![The looper in its different states](images/looper-states.png)
@@ -469,7 +488,7 @@ Every smart tool is also in the **Assist** menu on the toolbar, grouped by what 
 
 1. Pick a **style**: Pop, Ballad, Rock, or Voice up front (the voice further up front so you can hear yourself).
 2. Press **Listen**. It renders every track offline and measures loudness (EBU R128), tone, when each track plays, your lowest notes and where the backing covers your words.
-3. It guesses which track is the **voice** and which is the **backing**. Change a role and the plan updates.
+3. When you open Auto Mix with tracks nobody has tagged yet, a window asks **who is who**: which instrument each track is, and whether it sits **Front**, **Normal** or **Back**. The same list stays at the top of the panel; change a role and the plan updates. (The other options, what it may add, are folded under *More options*.) Switching between Mix, Fit and Clean with unkept changes asks in a window before it throws them away.
 4. It shows every change with the reason, for example "Cut 3.5 dB at 315 Hz: muddy":
    - **Voice**: a Parametric EQ (low cut, mud and harshness cuts or a presence lift, boom and air shelves), a **Smooth** resonance suppressor where it rings, a Compressor if your level swings (with the **Punch** character for Pop, Hip-hop, Rock and Electronic, and an **Opto** after it for Ballad, R&B, Acoustic and Jazz), a **Smart** De-esser if the S's stand out. On a dry voice the space is a **Plate** with its pre-delay set from the song's tempo and ducking while you sing, and an echo that follows the tempo and ducks too. Background vocals also get a micro-shift **Doubler**.
    - **Backing**: a small EQ dip where it covers your voice.

@@ -5,6 +5,8 @@
 
 #include "Parameters.h"
 #include "CaptureRing.h"
+#include "ComputerAudio.h"
+#include "LiveInstruments.h"
 #include "Looper.h"
 #include "MidiMap.h"
 #include "PitchTap.h"
@@ -152,6 +154,15 @@ public:
     // isn't processed or recorded with the voice). Message thread only.
     Multitrack& getMultitrack() noexcept                    { return multitrack; }
 
+    // Live mode: the computer's own sound (a video, any app) mixed in after the voice chain,
+    // to hear and, while computerInRecordings is on, in the takes and Capture too.
+    ComputerAudio& getComputerAudio() noexcept              { return computerAudio; }
+    std::atomic<bool> computerInRecordings { true };
+
+    // Live mode: MIDI keyboards and drum kits playing the MicFX instruments, mixed in with
+    // the voice (after the voice's limiter), heard, looped and recorded with it.
+    LiveInstruments& getLiveInstruments() noexcept          { return liveInstruments; }
+
     // DAW mode (standalone app): the mic feeds the DAW engine's tracks instead of the
     // Live chain. The session, its engine and its project file. Message thread.
     daw::Edit& getDawEdit() noexcept                         { return dawEdit; }
@@ -169,6 +180,22 @@ public:
     // thread, drained with exchange (0) by the editor.
     std::atomic<float> inputPeak  { 0.0f };
     std::atomic<int> inputChannels { 0 }; // DAW mode: how many inputs the engine gets
+
+    // Live mode in the app: which of the interface's inputs is the mic (0-based; 0 = input 1).
+    // The chosen input swaps places with input 1, so the instrument input for chord following
+    // is then the old input 1. Plugins have a single mic input, so it changes nothing there.
+    // Any thread.
+    void setLiveInput (int index) noexcept { liveInput = juce::jmax (0, index); }
+    int getLiveInput() const noexcept      { return liveInput.load(); }
+    std::atomic<int> liveInput { 0 };
+
+    // Swaps input `chosen` with input 1 in the first numSamples of the buffer (nothing for input 1
+    // or an input the buffer doesn't have).
+    static void swapLiveInput (juce::AudioBuffer<float>& buffer, int chosen, int numSamples) noexcept
+    {
+        if (chosen > 0 && chosen < buffer.getNumChannels())
+            std::swap_ranges (buffer.getWritePointer (0), buffer.getWritePointer (0) + numSamples, buffer.getWritePointer (chosen));
+    }
 
     // The most audio interface inputs the app opens (DAW tracks pick from them).
     static constexpr int maxAppInputs = 16;
@@ -205,6 +232,13 @@ private:
     juce::dsp::Limiter<float> limiter;
 
     Recorder recorder;
+    ComputerAudio computerAudio;
+    LiveInstruments liveInstruments;
+    juce::AudioBuffer<float> instrumentBuffer;
+    std::function<void (juce::MidiBuffer&)> removeMappedMidi;
+    juce::AudioBuffer<float> computerMonitor, computerRecord, recordMix;
+    float recordGuardGain = 1.0f;
+    void limitRecordMix (int numSamples) noexcept;
     CaptureRing liveCapture;
     std::atomic<double> captureSeconds { defaultCaptureSeconds };
     Multitrack multitrack;

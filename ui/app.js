@@ -14,6 +14,8 @@ import { PracticeView } from "./practice.js";
 import { SCENE_KEYS, SceneBar } from "./scenes.js";
 import { SETLIST_KEYS, SetlistPanel } from "./setlist.js";
 import { CapturePanel } from "./capture.js";
+import { ComputerAudioPanel } from "./computer.js";
+import { LiveInstrumentsPanel } from "./liveinstruments.js";
 import { SoundCheckPanel } from "./soundcheck.js";
 import { initSetup } from "./setup.js";
 
@@ -1596,13 +1598,15 @@ class Tracks {
 
 const recorderBar = new RecorderBar(document.querySelector(".recorder"));
 const capturePanel = new CapturePanel(document.querySelector(".record-folder"), (text, className) => recorderBar.setStatus(text, className));
+const computerAudioPanel = new ComputerAudioPanel(document.querySelector(".record-folder"), (text, className) => recorderBar.setStatus(text, className));
 const tracks = new Tracks(document.querySelector(".studio"));
 
 const practiceView = new PracticeView({ section: document.querySelector(".practice"),
                                         toggle: document.querySelector(".practice-toggle"),
                                         workspace: document.querySelector(".workspace") });
 
-const loopPanel = new LoopPanel(document.querySelector(".looper"), document.querySelector(".loop-toggle"));
+const loopPanel = new LoopPanel(document.querySelector(".looper"), document.querySelector(".loop-toggle:not(.inst-toggle-chip)"));
+const instrumentsPanel = new LiveInstrumentsPanel(document.querySelector(".live-instruments"), document.querySelector(".inst-toggle-chip"));
 
 // MIDI learn: the stage buttons can be mapped too.
 markLearnable(document.querySelector('[data-preset-step="-1"]'), "action:preset.previous", "Previous preset");
@@ -1631,6 +1635,8 @@ window.__JUCE__.backend.addEventListener("meters", (status) => {
   presetBar.syncFromHost(status.preset);
   recorderBar.update(status.recording);
   capturePanel.setAvailable(status.capture);
+  computerAudioPanel.setReading(status.computer);
+  instrumentsPanel.setReadings(status.instruments);
   tracks.update(status.transport);
   setlistPanel.followPosition(status.transport?.position);
   if (status.looper) loopPanel.update(status.looper);
