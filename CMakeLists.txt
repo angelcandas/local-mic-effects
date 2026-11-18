@@ -128,6 +128,7 @@ set(MICFX_DSP_SOURCES
     src/analysis/MixCheck.cpp
     src/analysis/MixCheck.h
     src/analysis/MixBench.cpp
+    src/analysis/MixLearn.cpp
     src/analysis/MixBench.h
     src/analysis/MixCorrect.cpp
     src/analysis/MixCorrect.h

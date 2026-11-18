@@ -5625,7 +5625,12 @@ class DawScreen {
     }
     this.autoMixPanel.hidden = !show;
     // Closing ends the run: opened again, it starts clean from the tracks as they are now.
-    if (!show && wasOpen) this.resetAutoMix();
+    // The app forgets the run too (its list, ticks and sliders), so nothing carries over.
+    if (!show && wasOpen && !this.autoMixPanel.classList.contains("is-running")) {
+      const listed = this.hasUnkeptAutoMix() === "plan";
+      this.resetAutoMix(true);
+      if (listed) daw("autoMix", { action: "forget" });
+    }
     if (show) {
       this.toggleExportPanel(false);
       this.mixCheck.panel.hidden = true;
@@ -5635,19 +5640,26 @@ class DawScreen {
     }
   }
 
-  // The plan this project was saved with (its list, ticks and sliders), or else the tags.
+  // Every open starts fresh. The one exception: changes the project was saved with while
+  // they were being tried (in the mix, not kept yet), shown so they can be kept or discarded.
+  // A list that was only planned is dropped.
   async refreshAutoMixState() {
     const result = await daw("autoMix", { action: "state" });
-    if (result?.state === "ready" && !this.autoMix.plan) return this.onAutoMix(result);
+    if (result?.state === "ready" && !this.autoMix.plan) {
+      if (result.applied || result.after) return this.onAutoMix(result);
+      await daw("autoMix", { action: "forget" });
+    }
     this.refreshAutoMixTags(true);
   }
 
   // Forgets the last run (its plan, roles, results and amount, and its mode and track),
-  // unless it's still listening. The style and the effects it may add are kept.
-  resetAutoMix() {
+  // unless it's still listening. `everything` (closing, another project): also the style,
+  // what it may add and the sliders, so the next open starts from the defaults.
+  resetAutoMix(everything = false) {
     const panel = this.autoMixPanel;
     if (panel.classList.contains("is-running")) return;
     this.autoMix = { plan: null, applied: false, after: true };
+    if (everything) this.resetAutoMixOptions();
     panel.querySelector("[name=mode]").value = "mix";
     panel.querySelector("[name=focus]").value = "0";
     panel.querySelector("[name=masterTemplate]").value = "streaming";
@@ -5659,6 +5671,17 @@ class DawScreen {
     panel.querySelector(".automix-roles").replaceChildren();
     this.setAutoMixResult("");
     this.renderAutoMixControls();
+  }
+
+  resetAutoMixOptions() {
+    const panel = this.autoMixPanel;
+    const style = panel.querySelector("[name=style]");
+    style.value = [...style.options].find((o) => o.defaultSelected)?.value ?? style.options[0].value;
+    for (const box of panel.querySelectorAll(".automix-effects input")) box.checked = box.defaultChecked;
+    for (const range of panel.querySelectorAll(".automix-sliders input")) {
+      range.value = range.defaultValue;
+      if (range.nextElementSibling) range.nextElementSibling.textContent = `${range.value}%`;
+    }
   }
 
   // The mode's own line, and the track it works on (fit and clean only), listed from the session.
@@ -6088,7 +6111,7 @@ class DawScreen {
     if (pathChanged) this.library?.refresh();
     // Another project has its own Auto Mix list.
     if (pathChanged && this.autoMixPanel) {
-      this.resetAutoMix();
+      this.resetAutoMix(true);
       if (!this.autoMixPanel.hidden) this.refreshAutoMixState();
     }
     document.dispatchEvent(new CustomEvent("daw-session", { detail: session }));

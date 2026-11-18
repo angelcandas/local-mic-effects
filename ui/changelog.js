@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 208,
+ "latest": 212,
  "days": [
   {
    "date": "2026-11-18",
    "entries": [
+    {
+     "title": "Auto Mix starts fresh",
+     "text": "Closing Auto Mix forgets the last run, so it opens with the default style and options every time. Changes you tried and didn't keep yet are still shown so you can keep or discard them.",
+     "prs": [
+      212
+     ]
+    },
     {
      "title": "Practice upgrades",
      "text": "Exit Practice with a button or Esc, reopen saved songs from a Library without splitting again, and change the speed (50-150%) and key (up to 12 semitones plus cents) of the whole song independently.",
