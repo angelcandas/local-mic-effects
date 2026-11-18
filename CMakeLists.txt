@@ -103,6 +103,7 @@ set(MICFX_INSTRUMENT_SOURCES
     src/instruments/Mallets.cpp
     src/instruments/Beat.cpp
     src/instruments/Kit.cpp
+    src/instruments/Sampler.cpp
     src/StarterContent.cpp
     src/StarterContent.h)
 
@@ -383,6 +384,7 @@ if(MICFX_BUILD_INSTRUMENT_PLUGINS)
     micfx_add_instrument_plugin(mallets Mallets Mmlt Synth)
     micfx_add_instrument_plugin(beat Beat Mbea Drum)
     micfx_add_instrument_plugin(kit Kit Mkit Drum)
+    micfx_add_instrument_plugin(sampler Sampler Msmp Synth)
 endif()
 
 # Auto Mix test bench: mixes real multitracks with Auto Mix and scores them against the

@@ -5039,6 +5039,16 @@ class DawScreen {
     toast(`${result.slices} slice${result.slices === 1 ? "" : "s"} on the pads of a new Kit track. Rearrange the steps in the rack; Ctrl+Z puts the loop back.`);
   }
 
+  // Slices an audio clip onto the keys of a new Sampler track (key C2 = slice 1, ...) with a
+  // MIDI clip that plays them where they were. `grid` (beats): cut on that grid, not at the hits.
+  async sliceToSampler(clip, grid = 0) {
+    toast(`Slicing ${clip.name}…`);
+    const result = await daw("sliceToSampler", grid > 0 ? { id: clip.id, grid } : { id: clip.id });
+    if (!(result?.clip >= 0)) return;
+    this.selectedTrack = result.track;
+    toast(`${result.slices} slice${result.slices === 1 ? "" : "s"} on the keys of a new Sampler track (C2 is the first), with a MIDI clip that plays them. Ctrl+Z puts the loop back.`);
+  }
+
   //============================================================================ Convert to MIDI
   buildToMidi() {
     const panel = (this.toMidiPanel = this.root.querySelector(".tomidi-panel"));
@@ -6945,6 +6955,12 @@ class DawScreen {
           item(label, () => this.toggleToMidi(true, clip, what), { hint, indent: true });
         item("Slice to drum rack", () => this.sliceToKit(clip), { indent: true,
           hint: "Cut the loop at its hits onto the pads of a new Kit track, with a pattern that plays them back (the clip is muted)" });
+        item("Slice to MIDI (at the hits)", () => this.sliceToSampler(clip), { indent: true,
+          hint: "Cut the loop at its hits onto the keys of a new Sampler track, with a MIDI clip that plays them back (the clip is muted)" });
+        item("Slice to MIDI (every beat)", () => this.sliceToSampler(clip, 1), { indent: true,
+          hint: "The same, cut on every beat instead of at the hits" });
+        item("Slice to MIDI (every 16th)", () => this.sliceToSampler(clip, 0.25), { indent: true,
+          hint: "The same, cut on every 16th note" });
         heading("Vocals");
         item("Build backing vocals…", () => this.backing.toggle(true, clip),
              { hint: "Harmonies and doubles from this sung lead, as new tracks in a folded group", indent: true });

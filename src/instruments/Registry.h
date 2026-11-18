@@ -13,6 +13,7 @@ const Spec& getPluckSpec();
 const Spec& getMalletsSpec();
 const Spec& getBeatSpec();
 const Spec& getKitSpec();
+const Spec& getSamplerSpec();
 
 // In the order the library lists them.
 std::vector<const Spec*> getAllSpecs();

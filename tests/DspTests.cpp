@@ -53,6 +53,7 @@
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
 #include "instruments/Kit.h"
+#include "instruments/Sampler.h"
 #include "daw/Quantize.h"
 #include "daw/Hitpoints.h"
 #include "daw/Patterns.h"
@@ -15551,7 +15552,7 @@ namespace
 
         for (const auto* spec : specs)
         {
-            if (spec->key == "kit") // a sampler with no samples of its own: testKit
+            if (spec->key == "kit" || spec->key == "sampler") // samplers with no samples of their own: testKit, testSampler
                 continue;
             auto created = micfx::inst::createInstrument (spec->key);
             auto& instrument = dynamic_cast<micfx::inst::InstrumentProcessor&> (*created);
@@ -15874,6 +15875,178 @@ static void testStarterContent()
     check (categories.contains ("Drums") && categories.contains ("Bass") && categories.contains ("Chords") && categories.contains ("Melody"),
            "drums, bass, chords and melody are all there");
 }
+
+    void testSampler()
+    {
+        std::cout << "\nSampler (a sample over the keys, or sliced)\n";
+
+        const auto folder = juce::File::createTempFile ("micfx-sampler");
+        folder.createDirectory();
+        // 2 s of a 220 Hz tone that doesn't die away (a long decay), and a 1 s file of four bursts.
+        const auto tone = writeTestSample (folder, "Tone.wav", 44100.0, 2.0, 220.0f, false, 100.0f);
+        const auto burstFile = folder.getChildFile ("Bursts.wav");
+        {
+            juce::WavAudioFormat wav;
+            std::unique_ptr<juce::OutputStream> stream (burstFile.createOutputStream());
+            auto writer = wav.createWriterFor (stream, juce::AudioFormatWriterOptions().withSampleRate (44100.0).withNumChannels (1).withBitsPerSample (16));
+            juce::AudioBuffer<float> buffer (1, 44100);
+            buffer.clear();
+            for (int b = 0; b < 4; ++b) // burst b has its own pitch; each 0.25 s long
+                for (int i = 0; i < 44100 / 4; ++i)
+                    buffer.setSample (0, b * 44100 / 4 + i, 0.6f * std::sin (juce::MathConstants<float>::twoPi * (200.0f + 200.0f * (float) b) * (float) i / 44100.0f));
+            writer->writeFromAudioSampleBuffer (buffer, 0, 44100);
+        }
+
+        auto make = [] (std::unique_ptr<juce::AudioProcessor>& owner) -> micfx::inst::InstrumentProcessor&
+        {
+            owner = micfx::inst::createInstrument ("sampler");
+            auto& p = dynamic_cast<micfx::inst::InstrumentProcessor&> (*owner);
+            p.setRateAndBufferSizeDetails (sampleRate, blockSize);
+            p.prepareToPlay (sampleRate, blockSize);
+            return p;
+        };
+        std::unique_ptr<juce::AudioProcessor> owner;
+        auto& instrument = make (owner);
+        auto* sampler = micfx::inst::asSampler (instrument.getEngine());
+        const auto setParam = [&] (const char* id, float value)
+        {
+            auto* p = instrument.getState().getParameter (id);
+            p->setValueNotifyingHost (p->convertTo0to1 (value));
+        };
+        // The dominant frequency of a stretch, by counting rising zero crossings.
+        const auto frequency = [&] (const std::vector<float>& x, double from, double to)
+        {
+            int crossings = 0;
+            for (auto i = (size_t) (from * sampleRate) + 1; i < (size_t) (to * sampleRate); ++i)
+                if (x[i - 1] <= 0.0f && x[i] > 0.0f)
+                    ++crossings;
+            return (double) crossings / (to - from);
+        };
+
+        check (sampler != nullptr && micfx::inst::findSpec ("sampler") != nullptr, "the Sampler is listed");
+        check (peakOf (playInstrument (instrument, chord ({ 60 }, 0.0, 0.3), 0.5)[0]) == 0.0f, "an empty Sampler is silent");
+
+        juce::String error;
+        check (sampler->load (tone, 0.0, 0.0, error) && sampler->getSample() != nullptr && std::abs (sampler->getSample()->seconds() - 2.0) < 0.01,
+               "a file loads (" + error + ")");
+        check (! sampler->load (folder.getChildFile ("nothing.wav"), 0.0, 0.0, error) && sampler->getSample() != nullptr,
+               "a missing file is refused and the sample stays");
+
+        // Keys: the root note plays it as it is, an octave up plays it twice as high.
+        {
+            instrument.reset();
+            const auto root = playInstrument (instrument, chord ({ 60 }, 0.0, 0.8), 1.0);
+            instrument.reset();
+            const auto up = playInstrument (instrument, chord ({ 72 }, 0.0, 0.8), 1.0);
+            const auto f1 = frequency (root[0], 0.1, 0.6), f2 = frequency (up[0], 0.1, 0.6);
+            check (peakOf (root[0]) > 0.1f && std::abs (f1 - 220.0) < 6.0 && std::abs (f2 - 440.0) < 12.0,
+                   "the root note plays the sample as it is and an octave up plays it twice as high (" + juce::String (f1, 1) + ", " + juce::String (f2, 1) + " Hz)");
+            setParam ("root", 72.0f);
+            instrument.reset();
+            const auto moved = playInstrument (instrument, chord ({ 72 }, 0.0, 0.8), 1.0);
+            check (std::abs (frequency (moved[0], 0.1, 0.6) - 220.0) < 6.0, "the root note can be moved");
+            setParam ("root", 60.0f);
+        }
+
+        // It ends with the sample unless it loops; a loop plays on for as long as the key is held.
+        {
+            instrument.reset();
+            const auto plain = playInstrument (instrument, chord ({ 60 }, 0.0, 3.0), 4.0);
+            check (lastAbove (plain[0], 1.0e-3f) > 1.8 && lastAbove (plain[0], 1.0e-3f) < 2.2, "without a loop the sample plays out (" + juce::String (lastAbove (plain[0], 1.0e-3f), 2) + " s)");
+            setParam ("loop", 1.0f);
+            setParam ("loopStart", 0.25f);
+            setParam ("loopEnd", 0.75f);
+            instrument.reset();
+            const auto looped = playInstrument (instrument, chord ({ 60 }, 0.0, 3.0), 4.0);
+            check (lastAbove (looped[0], 1.0e-3f) > 3.0 && lastAbove (looped[0], 1.0e-3f) < 3.9 && peakOf (looped[0]) > 0.1f,
+                   "with a loop it plays on while the key is held, then releases (" + juce::String (lastAbove (looped[0], 1.0e-3f), 2) + " s)");
+            setParam ("loop", 0.0f);
+        }
+
+        // Envelope: a slow attack, a short release.
+        {
+            setParam ("attack", 0.4f);
+            instrument.reset();
+            const auto slow = playInstrument (instrument, chord ({ 60 }, 0.0, 1.0), 1.5);
+            check (rms (slow[0], 0, (size_t) (0.05 * sampleRate)) < rms (slow[0], (size_t) (0.6 * sampleRate), (size_t) (0.7 * sampleRate)) * 0.4f,
+                   "a slow attack fades the sample in");
+            setParam ("attack", 0.002f);
+            setParam ("release", 0.01f);
+            instrument.reset();
+            const auto cut = playInstrument (instrument, chord ({ 60 }, 0.0, 0.5), 1.5);
+            check (lastAbove (cut[0], 1.0e-3f) < 0.7, "a short release stops it soon after the key is let go (" + juce::String (lastAbove (cut[0], 1.0e-3f), 2) + " s)");
+            setParam ("release", 0.15f);
+        }
+
+        // Slices: key 36 plays the first, 37 the second...
+        {
+            check (sampler->load (burstFile, 0.0, 0.0, error), "the bursts file loads");
+            sampler->setSlices ({ 0.0, 0.25, 0.5, 0.75 });
+            setParam ("mode", 1.0f);
+            check (instrument.getKeyName (37) == "Slice 2" && instrument.getKeyName (40).isEmpty(), "the keys are named after their slice");
+            instrument.reset();
+            const auto second = playInstrument (instrument, chord ({ 37 }, 0.0, 0.05), 0.6);
+            instrument.reset();
+            const auto fourth = playInstrument (instrument, chord ({ 39 }, 0.0, 0.05), 0.6);
+            check (std::abs (frequency (second[0], 0.02, 0.2) - 400.0) < 15.0 && std::abs (frequency (fourth[0], 0.02, 0.2) - 800.0) < 25.0,
+                   "a key plays its own slice (" + juce::String (frequency (second[0], 0.02, 0.2), 0) + ", " + juce::String (frequency (fourth[0], 0.02, 0.2), 0) + " Hz)");
+            check (lastAbove (second[0], 1.0e-3f) < 0.3, "and only that slice (" + juce::String (lastAbove (second[0], 1.0e-3f), 2) + " s)");
+            instrument.reset();
+            const auto outside = playInstrument (instrument, chord ({ 50 }, 0.0, 0.05), 0.5);
+            check (peakOf (outside[0]) == 0.0f, "a key with no slice is silent");
+
+            // Only a region of a file.
+            check (sampler->load (burstFile, 0.5, 0.75, error) && std::abs (sampler->getSample()->seconds() - 0.25) < 0.01
+                       && std::abs (sampler->getSample()->regionStart - 0.5) < 1.0e-3 && sampler->getSlices().empty(),
+                   "a region of a file loads on its own (and clears the slices)");
+        }
+
+        // The state keeps the sample, its region, the slices and the settings.
+        {
+            sampler->load (burstFile, 0.25, 1.0, error);
+            sampler->setSlices ({ 0.0, 0.25, 0.5 });
+            setParam ("mode", 1.0f);
+            setParam ("cutoff", 2000.0f);
+            juce::MemoryBlock saved;
+            instrument.getStateInformation (saved);
+            std::unique_ptr<juce::AudioProcessor> otherOwner;
+            auto& again = make (otherOwner);
+            again.setStateInformation (saved.getData(), (int) saved.getSize());
+            auto* sampler2 = micfx::inst::asSampler (again.getEngine());
+            check (sampler2->getSample() != nullptr && std::abs (sampler2->getSample()->regionStart - 0.25) < 1.0e-3
+                       && sampler2->getSlices().size() == 3,
+                   "the state brings back the sample, its region and the slices");
+            const auto a = playInstrument (instrument, chord ({ 38 }, 0.0, 0.05), 0.5);
+            const auto b = playInstrument (again, chord ({ 38 }, 0.0, 0.05), 0.5);
+            auto same = a[0].size() == b[0].size();
+            for (size_t i = 0; same && i < a[0].size(); ++i)
+                same = std::abs (a[0][i] - b[0][i]) < 1.0e-5f;
+            check (same && peakOf (a[0]) > 0.05f, "and it sounds the same");
+            setParam ("cutoff", 20000.0f);
+        }
+
+        // Swapping the sample while it plays is safe.
+        {
+            instrument.reset();
+            auto ok = true;
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            for (int start = 0; start < (int) sampleRate; start += blockSize)
+            {
+                juce::MidiBuffer midi;
+                if (start == 0)
+                    midi.addEvent (juce::MidiMessage::noteOn (1, 36, 0.8f), 0);
+                if ((start / blockSize) % 3 == 0)
+                    ok = sampler->load ((start / blockSize) % 2 == 0 ? tone : burstFile, 0.0, 0.0, error) && ok;
+                buffer.clear();
+                instrument.processBlock (buffer, midi);
+                for (int i = 0; i < blockSize; ++i)
+                    ok = ok && std::isfinite (buffer.getSample (0, i));
+            }
+            check (ok, "a sample can be replaced while it plays");
+        }
+
+        folder.deleteRecursively();
+    }
 
     void testKit()
     {
@@ -17261,6 +17434,49 @@ static void testLoops()
             check (! (bool) run ("sliceToKit", args ({ { "id", 9999 } }))["ok"], "(only an audio clip)");
             for (const auto& f : files)
                 f.deleteFile();
+        }
+
+        // Slice to MIDI: a Sampler track with the slices, and a MIDI clip with a note per slice.
+        {
+            result = run ("importFile", args ({ { "file", file.getFullPathName() }, { "track", -1 }, { "start", 2.0 } }));
+            const auto loopClip = (int) result["clip"];
+            const auto tracksBefore = edit.getTracks().size();
+            juce::var sliced;
+            bridge.handle ("sliceToSampler", args ({ { "id", loopClip } }), [&] (juce::var r) { sliced = r; });
+            for (int i = 0; i < 500 && sliced.isVoid(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            const auto trackId = (int) sliced["track"];
+            const auto midi = edit.getClip ((int) sliced["clip"]);
+            const auto count = (int) sliced["slices"];
+            check ((bool) sliced["ok"] && count >= 8 && midi.isValid() && daw::Edit::isMidiClip (midi) && midi.getNumChildren() == count
+                       && near ((double) midi[daw::ids::start], 2.0, 1e-6) && near ((double) midi[daw::ids::length], 4.0, 0.01)
+                       && edit.getTracks().size() == tracksBefore + 1 && (bool) edit.getClip (loopClip)[daw::ids::mute]
+                       && edit.getUndoManager().getUndoDescription() == "Slice to MIDI",
+                   "sliceToSampler: a Sampler track and a MIDI clip in the clip's place with a note per slice, the clip muted ("
+                       + juce::String (count) + " slices)");
+
+            auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (processor.getDawEngine().getInstrument (trackId).get());
+            auto* sampler = instrument != nullptr ? micfx::inst::asSampler (instrument->getEngine()) : nullptr;
+            const auto slices = sampler != nullptr ? sampler->getSlices() : std::vector<double>();
+            auto ok = sampler != nullptr && (int) slices.size() == count && sampler->getSample() != nullptr && near (sampler->getSample()->seconds(), 4.8, 0.01);
+            for (int i = 0; ok && i < midi.getNumChildren(); ++i)
+            {
+                const auto note = midi.getChild (i);
+                // the loop plays 1.2 x faster than its file (100 BPM in a 120 BPM project)
+                ok = (int) note[daw::ids::pitch] == 36 + i && near ((double) note[daw::ids::time] * 1.2, slices[(size_t) i], 0.03);
+            }
+            check (ok && slices.front() == 0.0, "the notes sit where the slices were cut, one key each from C2");
+
+            run ("undo", args ({}));
+            check (edit.getTracks().size() == tracksBefore && ! (bool) edit.getClip (loopClip)[daw::ids::mute], "(undo takes it all back)");
+
+            juce::var onGrid;
+            bridge.handle ("sliceToSampler", args ({ { "id", loopClip }, { "grid", 1.0 } }), [&] (juce::var r) { onGrid = r; });
+            for (int i = 0; i < 500 && onGrid.isVoid(); ++i)
+                juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+            check ((bool) onGrid["ok"] && (int) onGrid["slices"] >= 8 && (int) onGrid["slices"] <= 10, "and it can cut on a grid (" + onGrid["slices"].toString() + " beats)");
+            run ("undo", args ({}));
+            check (! (bool) run ("sliceToSampler", args ({ { "id", 9999 } }))["ok"], "(only an audio clip)");
         }
     }
     folder.deleteRecursively();
@@ -19618,6 +19834,7 @@ int main()
     {
         testInstruments();
         testKit();
+        testSampler();
         testStarterContent();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
@@ -19939,6 +20156,7 @@ int main()
     testMidiFiles();
     testInstruments();
     testKit();
+    testSampler();
     testStarterContent();
     testTemplates();
     testPluginHosting();
