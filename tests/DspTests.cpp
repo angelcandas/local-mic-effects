@@ -12414,6 +12414,37 @@ namespace
                    && juce::approximatelyEqual (at (1.6), source->getSample (0, (int) (0.6 * sampleRate))),
                "a fade-in ramps the clip up");
 
+        // A volume envelope: 0 dB, down to silence by 0.5 s, silent to 1 s, back up to 0 dB at 1.5 s (file time).
+        edit.setClipFades (clip, 0.0, 0.0);
+        edit.getUndoManager().beginNewTransaction();
+        edit.setClipEnvelope (clip, { { 0.0, 0.0f }, { 0.5, -60.0f }, { 1.0, -60.0f }, { 1.5, 0.0f } });
+        check (daw::Edit::getClipEnvelope (edit.getClip (clip)).size() == 4, "the envelope is stored on the clip");
+        engine.rebuildNow();
+        engine.loadAllNow();
+        engine.seek (0);
+        engine.play();
+        out = render (engine, 2.6);
+        engine.stop();
+        const auto envAt = [&] (double seconds) { return out[0][(size_t) (seconds * sampleRate)]; };
+        check (juce::approximatelyEqual (envAt (1.0), source->getSample (0, 0))
+                   && std::abs (envAt (1.75)) < 1.0e-3f
+                   && std::abs (envAt (1.25) - 0.0316f * source->getSample (0, (int) (0.25 * sampleRate))) < 1.0e-3f,
+               "the envelope shapes the clip's volume (a dip to silence and back)");
+
+        // It stays with the audio when the clip is split, trimmed or copied.
+        edit.getUndoManager().beginNewTransaction();
+        const auto envRight = edit.splitClip (clip, 1.5);
+        check (envRight > 0 && daw::Edit::getClipEnvelope (edit.getClip (envRight)).size() == 4
+                   && juce::approximatelyEqual (get (envRight, daw::ids::offset), 0.5),
+               "a split clip keeps the envelope in the audio's own time");
+        edit.getUndoManager().undo();
+        check (! edit.getClip (envRight).isValid() && daw::Edit::getClipEnvelope (edit.getClip (clip)).size() == 4, "(undo the split)");
+        edit.getUndoManager().undo();
+        check (daw::Edit::getClipEnvelope (edit.getClip (clip)).empty(), "one undo removes the envelope");
+        edit.getUndoManager().redo();
+        edit.setClipEnvelope (clip, {});
+        check (! edit.getClip (clip).hasProperty (daw::ids::envelope), "an empty list clears it");
+
         edit.setTempo (120.0);
         check (juce::approximatelyEqual (edit.snapToGrid (1.13, 1.0), 1.0) && juce::approximatelyEqual (edit.snapToGrid (1.3, 1.0), 1.5)
                    && juce::approximatelyEqual (edit.snapToGrid (3.9, 4.0), 4.0),
