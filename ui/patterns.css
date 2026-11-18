@@ -177,3 +177,5 @@
 .pl-ghost { position: absolute; top: 2px; pointer-events: none; opacity: 0.32; }
 .library-item.is-picked { box-shadow: inset 2px 0 0 var(--accent); }
 .library-item.is-pattern .library-item-icon::before { content: ""; display: inline-block; width: 8px; height: 8px; border-radius: 2px; background: var(--cat, var(--accent)); }
+.pat-play { min-width: 64px; font-weight: 600; }
+.pat-play.is-on { background: var(--accent, #3b82f6); border-color: var(--accent, #3b82f6); color: #fff; }

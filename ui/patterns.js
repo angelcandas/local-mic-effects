@@ -883,6 +883,12 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     snapBox.addEventListener("change", () => daw("patternRecord", { on: recording, snap: snapBox.checked }));
     snap.append(snapBox, html("span", "", "Snap"));
 
+    // Play this pattern on its own, looping its bars at the project tempo. It never needs a place on a track.
+    const playing = Boolean(screen.status?.playing) && screen.session?.patternMode === pattern.id;
+    const play = small(playing ? "■ Stop" : "▶ Play", playing ? "Stop the loop (Space)"
+      : "Play this pattern in a loop at the project tempo, without placing it on the song. You can keep editing while it plays.",
+      () => togglePatternPlay(pattern), `tool pat-play${playing ? " is-on" : ""}`);
+
     const place = small("Place at playhead", "Put this pattern on the song at the playhead (the Patterns lane under the ruler)", () => placeAtPlayhead(pattern), "tool is-accent");
 
     const prev = small("‹", "Previous pattern (-)", () => stepPattern(-1), "tool pat-arrow");
@@ -890,7 +896,7 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     prev.disabled = next.disabled = list.length < 2;
     const more = small("⋯", "Pattern options: split by track, show only the tracks in this pattern", (e) => patternMenu(e, pattern));
 
-    bar.append(dot, prev, picker, next, name,
+    bar.append(play, dot, prev, picker, next, name,
       small("+", "New pattern", () => newPattern()),
       small("Copy", "Duplicate this pattern", () => newPattern(pattern.id)),
       small("Delete", "Delete this pattern and its blocks", () => daw("removePattern", { id: pattern.id }), "tool is-danger"),
@@ -905,6 +911,14 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     const chosen = selectedRow();
     const track = chosen?.track ?? midiTracks()[0]?.id;
     await daw("patternRecord", { on: true, snap: screen.session?.patternSnap !== false, ...(track != null ? { track } : {}) });
+  };
+
+  // Loop just this pattern: Pattern mode on it, then play from its start; again to stop.
+  const togglePatternPlay = async (pattern) => {
+    const live = screen.status?.playing && screen.session?.patternMode === pattern.id;
+    if (live) return void daw("transport", { action: "pause" });
+    if (screen.session?.patternMode !== pattern.id) await daw("patternMode", { pattern: pattern.id });
+    if (!screen.status?.playing) await daw("transport", { action: "play" });
   };
 
   const placeAtPlayhead = async (pattern) => {
@@ -1056,6 +1070,12 @@ export function createPatternsPanel(screen, daw, { popMenu, toast = () => {} }) 
     // The light that runs along the steps while the pattern loops.
     setStatus(status) {
       const pattern = selected();
+      const playBtn = element.querySelector(".pat-play");
+      if (playBtn) {
+        const on = Boolean(pattern && status.playing && status.patternMode === pattern.id);
+        playBtn.classList.toggle("is-on", on);
+        playBtn.textContent = on ? "■ Stop" : "▶ Play";
+      }
       if (roll) {
         const beats = pattern ? screen.tempoMap.toBeats(status.position) : 0;
         const inside = pattern ? ((beats % pattern.length) + pattern.length) % pattern.length : 0;
