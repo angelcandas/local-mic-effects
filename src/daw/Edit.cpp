@@ -1659,6 +1659,13 @@ void Edit::keepWindow (juce::ValueTree& clip, const warp::Map& before)
     const auto start = (double) clip[ids::start], offset = (double) clip[ids::offset], length = (double) clip[ids::length];
     const auto from = before.toSource (offset), to = before.toSource (offset + length);
     const auto newOffset = after.toTarget (from);
+    // The envelope stays with the sound it was drawn on.
+    if (auto points = getClipEnvelope (clip); ! points.empty())
+    {
+        for (auto& point : points)
+            point.time = after.toTarget (before.toSource (point.time));
+        setClipEnvelope ((int) clip[ids::id], points);
+    }
     clip.setProperty (ids::offset, newOffset, undoTarget);
     clip.setProperty (ids::start, juce::jmax (0.0, start - offset + newOffset), undoTarget);
     clip.setProperty (ids::length, juce::jmax (minClipSeconds, after.toTarget (to) - newOffset), undoTarget);
@@ -2070,6 +2077,42 @@ int Edit::copyClipTo (int clipId, int trackId)
 void Edit::setClipGain (int clipId, float decibels)
 {
     getClip (clipId).setProperty (ids::gain, juce::jlimit (-60.0f, 24.0f, decibels), undoTarget);
+}
+
+void Edit::setClipEnvelope (int clipId, const std::vector<RidePoint>& points)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid() || isMidiClip (clip))
+        return;
+
+    if (points.empty())
+    {
+        clip.removeProperty (ids::envelope, undoTarget);
+        return;
+    }
+
+    auto sorted = points;
+    std::stable_sort (sorted.begin(), sorted.end(), [] (const RidePoint& a, const RidePoint& b) { return a.time < b.time; });
+
+    juce::StringArray parts;
+    for (const auto& point : sorted)
+        parts.add (juce::String (juce::jmax (0.0, point.time), 4) + ":" + juce::String (juce::jlimit (minEnvelopeDb, maxRideDb, point.db), 2));
+    clip.setProperty (ids::envelope, parts.joinIntoString (";"), undoTarget);
+}
+
+std::vector<Edit::RidePoint> Edit::getClipEnvelope (const juce::ValueTree& clip)
+{
+    std::vector<RidePoint> points;
+    for (const auto& part : juce::StringArray::fromTokens (clip[ids::envelope].toString(), ";", ""))
+    {
+        if (! part.containsChar (':'))
+            continue;
+        const auto time = part.upToFirstOccurrenceOf (":", false, false).getDoubleValue();
+        const auto db = (float) part.fromFirstOccurrenceOf (":", false, false).getDoubleValue();
+        points.push_back ({ juce::jmax (0.0, time), juce::jlimit (minEnvelopeDb, maxRideDb, db) });
+    }
+    std::stable_sort (points.begin(), points.end(), [] (const RidePoint& a, const RidePoint& b) { return a.time < b.time; });
+    return points;
 }
 
 void Edit::setClipRebalance (int clipId, const juce::File& mixed, const juce::File& original, const juce::String& settings)

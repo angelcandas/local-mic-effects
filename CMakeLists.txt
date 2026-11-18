@@ -49,6 +49,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/songmap.js
         ui/rhythm.js
         ui/clipeditor.js
+        ui/clipenvelope.js
         ui/warptool.js
         ui/hitpointtool.js
         ui/tempotool.js

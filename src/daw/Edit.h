@@ -122,7 +122,7 @@ namespace ids
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns) MICFX_DAW_ID (group) MICFX_DAW_ID (folded)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
-    MICFX_DAW_ID (pitchNotes) MICFX_DAW_ID (rebalance) MICFX_DAW_ID (rebalanceFrom)
+    MICFX_DAW_ID (envelope) MICFX_DAW_ID (pitchNotes) MICFX_DAW_ID (rebalance) MICFX_DAW_ID (rebalanceFrom)
     MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight) MICFX_DAW_ID (polarity) MICFX_DAW_ID (nudge)
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
     MICFX_DAW_ID (PATTERN) MICFX_DAW_ID (PART) MICFX_DAW_ID (PATTERNCLIP) MICFX_DAW_ID (track) MICFX_DAW_ID (drum)
@@ -406,6 +406,16 @@ public:
     void setVolumeRide (int trackId, const std::vector<RidePoint>&);
     static std::vector<RidePoint> getVolumeRide (const juce::ValueTree& track);
     static float getRideDbAt (const std::vector<RidePoint>&, double time);
+
+    // A clip's volume envelope: a gain in dB drawn over the clip's audio, on top of the clip gain
+    // and before the track's fader. Points sit in the clip's own audio time (the same time as
+    // `offset`), so the envelope moves with the clip, stays with the sound when the clip is trimmed,
+    // and split or duplicated clips keep the part that is theirs. Straight lines between the points
+    // (in dB), held before the first and after the last; minEnvelopeDb and below is silence.
+    // Stored on the CLIP as "time:dB;time:dB...". An empty list removes it. One undo step.
+    static constexpr float minEnvelopeDb = -60.0f;
+    void setClipEnvelope (int clipId, const std::vector<RidePoint>&);
+    static std::vector<RidePoint> getClipEnvelope (const juce::ValueTree& clip);
 
     // Effect automation: an insert value over time (an echo's mix rising at the end of a
     // phrase...), while playing and in exports. Straight lines between the points, held
