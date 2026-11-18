@@ -22,6 +22,7 @@ import { createPatternLane, drawGhosts } from "./patternlane.js";
 import { createDrawTool } from "./drawtool.js";
 import { drawClipEnvelope, pressClipEnvelope } from "./clipenvelope.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs, toSource } from "./rhythm.js";
+import { createKeyDialog, createKeymap } from "./keymap.js";
 import { canPasteWarpTabs, copyWarpTabs, pastedWarpTabs } from "./warptool.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, releaseFocus, svg } from "./widgets.js";
 
@@ -954,6 +955,9 @@ class DawScreen {
     window.__JUCE__.backend.addEventListener("dawStems", (event) => this.onStems(event));
     window.__JUCE__.backend.addEventListener("dawRebalance", (event) => this.onRebalance(event));
     window.__JUCE__.backend.addEventListener("dawToMidi", (event) => this.onToMidi(event));
+    this.keymap = createKeymap({ load: () => prefs.get("keymap", null), save: (changes) => prefs.set("keymap", changes) });
+    this.keyDialog = createKeyDialog({ keymap: this.keymap, h: html, keyText, toast });
+    this.root.append(this.keyDialog.element);
     document.addEventListener("keydown", (event) => this.onKey(event));
     document.addEventListener("keydown", (event) => this.onPianoKey(event, true), true); // before the shortcuts
     document.addEventListener("keyup", (event) => this.onPianoKey(event, false), true);
@@ -6323,7 +6327,8 @@ class DawScreen {
       overlay.hidden = true;
       const panel = html("div", "shortcuts-panel");
       const head = html("div", "export-head");
-      head.append(html("strong", "", "Keyboard shortcuts"), button("mini", "×", "Close", () => this.toggleShortcuts(false)));
+      head.append(html("strong", "", "Keyboard shortcuts"), button("mini", "Customise…", "Change the keys (Key commands)", () => { this.toggleShortcuts(false); this.keyDialog.show(); }),
+                  button("mini", "×", "Close", () => this.toggleShortcuts(false)));
       const grid = html("div", "shortcuts-grid");
       for (const [group, rows] of DawScreen.SHORTCUTS) {
         const section = html("section");
@@ -7117,11 +7122,46 @@ class DawScreen {
       deleteTrack: () => this.deleteTrack(),
       quantize: () => this.quantizeSelected(),
       zoomSelection: () => this.run(this.findClip(this.selectedClip) ? "zoomClip" : "zoomFit"),
+      // Reachable by key only (see ui/keymap.js), so each can be moved.
+      stepBack: () => this.seek(this.stepTarget(-1)),
+      stepForward: () => this.seek(this.stepTarget(1)),
+      previousTrack: () => this.selectTrackBy(-1),
+      nextTrack: () => this.selectTrackBy(1),
+      addMidiTrack: () => this.addMidiTrack(),
+      armTrack: () => this.toggleTrack("arm"),
+      monitorTrack: () => this.toggleTrack("monitor"),
+      togglePiano: () => this.togglePiano(),
+      punch: () => this.togglePunch(),
+      previousClip: () => this.selectClipBy(-1),
+      nextClip: () => this.selectClipBy(1),
+      nudgeBack: () => this.nudgeSelected(-this.beatsFrom(this.status.position, 1)),
+      nudgeForward: () => this.nudgeSelected(this.beatsFrom(this.status.position, 1)),
+      toolSelect: () => this.setTool("select"),
+      toolRange: () => this.setTool("range"),
+      toolCut: () => this.setTool("cut"),
+      toolGain: () => this.setTool("gain"),
+      toolEnvelope: () => this.setTool("envelope"),
+      toolDraw: () => this.setTool("draw"),
+      toolWarp: () => this.setTool("warp"),
+      gridNarrow: () => this.stepGrid("narrow"),
+      gridWiden: () => this.stepGrid("widen"),
+      gridTriplet: () => this.stepGrid("triplet"),
+      gridSnap: () => this.stepGrid("snap"),
+      nextHitpoint: () => this.seekHitpoint(1),
+      previousHitpoint: () => this.seekHitpoint(-1),
+      keyCommands: () => this.keyDialog.toggle(),
     };
   }
 
   run(command) {
     if (this.active) this.commands[command]?.();
+  }
+
+  // Where ← / → (or a custom key for the same) puts the playhead: the next beat line.
+  stepTarget(direction) {
+    const step = this.beatsFrom(this.status.position, 1);
+    return direction < 0 ? Math.ceil(this.status.position / step - 1e-6) * step - step
+                         : Math.floor(this.status.position / step + 1e-6) * step + step;
   }
 
   renameTrack() {
@@ -7168,6 +7208,11 @@ class DawScreen {
     const onSlider = event.target.closest?.("[role=slider]");
     const step = this.beatsFrom(this.status.position, event.shiftKey ? this.beatsPerBar : 1);
     const command = (name) => { handled(); this.run(name); };
+
+    // Keys the user moved (Key commands): theirs first, a default they moved away is dead.
+    const custom = this.keymap.resolve(event);
+    if (custom?.id) { command(custom.id); return; }
+    if (custom?.ignore) return;
 
     if (mod && event.altKey) { if (code === "KeyB") command("toggleLibrary"); }
     else if (mod && event.shiftKey) {
@@ -7232,6 +7277,7 @@ class DawScreen {
       this.toggleExportPanel(false);
       this.toggleAutoMix(false);
       this.toggleShortcuts(false);
+      this.keyDialog.hide();
       this.setTool("select");
       this.clipSelection.clear();
       this.trackSelection.clear();
