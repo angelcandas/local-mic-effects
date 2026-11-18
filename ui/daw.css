@@ -2856,7 +2856,9 @@ body.is-daw .library-hint { display: none; }
 
 /* Auto Mix: dialogs (who's who, losing changes) and the options fold */
 .automix-dialog { width: min(560px, 92vw); max-height: 86vh; display: flex; flex-direction: column; }
-.automix-dialog .automix-dialog-body { overflow-y: auto; margin: 0 0 16px; }
+.automix-dialog > * { flex: none; }
+.automix-dialog .automix-dialog-body { overflow-y: auto; max-height: 50vh; margin: 0 0 16px; padding: 2px; }
+.automix-dialog select.dropdown { height: 30px; min-width: 0; }
 .automix-dialog .automix-roles { margin: 0; }
 .automix-dialog .automix-role { grid-template-columns: 1fr 150px 92px; }
 .automix-dialog p { margin-bottom: 12px; }
