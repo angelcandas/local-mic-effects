@@ -22,6 +22,7 @@
 #include "analysis/Analysis.h"
 #include "dsp/Biquad.h"
 #include "analysis/Key.h"
+#include "analysis/LearnedTargets.h"
 #include "analysis/MixAssistant.h"
 #include "analysis/MixCheck.h"
 #include "analysis/MixBench.h"
@@ -1859,6 +1860,46 @@ namespace
     // Auto Mix with every track tagged: the names, a guess from the sound for drums and
     // bass, and what each role gets (background vocals under the lead, bass and drums
     // only a rumble cut).
+    void testAutoMixLearned()
+    {
+        std::cout << "\nAuto Mix learned targets\n";
+
+        const auto pop = analysis::getTargets (analysis::MixStyle::pop).voiceOverBackingLu;
+        check (std::abs (pop - (1.5f + analysis::learned::voiceOverBandShiftLu)) < 0.01f
+                   && std::abs (analysis::getTargets (analysis::MixStyle::speech).voiceOverBackingLu - 10.0f) < 0.01f
+                   && std::abs (analysis::getTargets (analysis::MixStyle::coaching).voiceOverBackingLu - 4.0f) < 0.01f,
+               "the learned shift moves the music styles' voice level (pop " + juce::String (pop, 1)
+                   + " LU), not speech or voice up front");
+
+        const auto folder = juce::File::createTempFile ("micfx-learned");
+        folder.createDirectory();
+        const auto voiceFile = folder.getChildFile ("voice.wav"), bassFile = folder.getChildFile ("bass.wav");
+        writeWav (voiceFile, makeSungLine (10.0), sampleRate);
+        writeWav (bassFile, makeBacking (10.0), sampleRate);
+
+        daw::Edit edit;
+        const auto voice = (int) edit.addTrack ("Vocal")[daw::ids::id];
+        const auto bass = (int) edit.addTrack ("Bass")[daw::ids::id];
+        edit.addClip (voice, voiceFile, 0.0, 10.0);
+        edit.addClip (bass, bassFile, 0.0, 10.0);
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { bass, analysis::Role::bass } };
+        const auto plan = analysis::planMix (source, roles, { { voice, 0.0f }, { bass, 0.0f } }, 0.0f, analysis::MixStyle::pop, {});
+
+        const analysis::MixMove* bassEq = nullptr;
+        for (const auto& move : plan.moves)
+            if (move.trackId == bass && move.insert == fx::ModuleType::paraEq)
+                bassEq = &move;
+        const auto& learned = analysis::learned::bassEq;
+        check (bassEq != nullptr && juce::approximatelyEqual (bassEq->values.at ("peqBell1Gain"), learned.bellDb)
+                   && (learned.bellDb == 0.0f || juce::approximatelyEqual (bassEq->values.at ("peqBell1Freq"), learned.bellHz))
+                   && juce::approximatelyEqual (bassEq->values.at ("peqLowGain"), learned.lowShelfDb)
+                   && juce::approximatelyEqual (bassEq->values.at ("peqHighGain"), learned.highShelfDb)
+                   && bassEq->reasons.joinIntoString (" ").contains ("finished mixes"),
+               "the bass gets the learned tone move (" + juce::String (learned.bellDb, 1) + " dB at " + juce::String (learned.bellHz, 0) + " Hz)");
+        folder.deleteRecursively();
+    }
+
     void testAutoMixRoles()
     {
         std::cout << "\nAuto Mix track roles\n";
@@ -1873,7 +1914,14 @@ namespace
             { "My song (no vocals)", Role::backing }, { "Pista sin voz", Role::backing }, { "Song - Karaoke vocals off", Role::backing },
             { "Minus one", Role::backing }, { "Acompañamiento", Role::backing }, { "Inst", Role::backing },
             { "My song - Other", Role::instrument }, { "Strings", Role::pad }, { "Synth lead", Role::synth },
-            { "Track 3", std::nullopt }, { "Audio 1", std::nullopt }
+            { "Track 3", std::nullopt }, { "Audio 1", std::nullopt },
+            // Multitrack library names (Cambridge-MT style): run-together words, amp brands, mics.
+            { "14_LeadVox1", Role::voice }, { "16_LeadVoxDT", Role::voice }, { "17_BackingVox01", Role::backingVocal },
+            { "09_BassAmpMic1", Role::bass }, { "09_BassMic", Role::bass }, { "11_ElecGtr1a_VoxM160", Role::guitar },
+            { "07_RackTom", Role::drums }, { "12_Tom1", Role::drums }, { "10_Ride1", Role::drums }, { "08_Bongos", Role::drums },
+            { "11_DjembeFX", Role::drums }, { "10_Gangs", Role::backingVocal }, { "14_ElecGtrLead", Role::guitar },
+            { "20_SynthLead1", Role::synth }, { "Vocals-Acoustic Guitar-Proto", Role::voice }, { "Room-AR70", Role::instrument },
+            { "08_DrumsRoomStereo", Role::drums }, { "13_Rhodes", Role::piano }
         };
         juce::StringArray wrong;
         for (const auto& [name, expected] : names)
@@ -20153,6 +20201,30 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=automix: just Auto Mix (planning, roles, bench).
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "automix")
+    {
+        testMixAssistant();
+        testMixCheck();
+        testAutoMixEffects();
+        testAutoMixRoles();
+        testAutoMixLearned();
+        testAutoMixBackingTrack();
+        testAutoMixAudition();
+        testAutoMixPlacement();
+        testMixBench();
+        testAutoMixSections();
+        testAutoMixPhase();
+        testAutoMixRides();
+        testAutoMixModes();
+        testAutoMixSynths();
+        testAutoMixMaster();
+        testAutoMixSends();
+        testSmoothAutoMix();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=freeze: just Freeze track and Bounce.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "freeze")
     {
@@ -20529,6 +20601,7 @@ int main()
     testDawKey();
     testAutoMixEffects();
     testAutoMixRoles();
+    testAutoMixLearned();
     testAutoMixBackingTrack();
     testAutoMixAudition();
     testAutoMixPlacement();

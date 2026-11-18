@@ -68,4 +68,14 @@ leave the computer it is on:
    octave), a compressor (gain falling by a slope per dB over the track's median loudness),
    an extra slope on 5-8 kHz for voices (de-essing), a reverb tail with a decay time, and
    left/right gains (pan); then pools the per-track numbers by role and checks them song by
-   song with that song left out of the pooling (`held_out` in the output).
+   song with that song left out of the pooling (`held_out` in the output). Tracks are grouped
+   into one stem per role (the busses an engineer would treat), roles are re-read from the
+   track names (`role_from_name`, the same rules as Auto Mix's own guess), and the mix is
+   lined up with the tracks hop by hop, so a human mix that was edited (a cut intro, a moved
+   section) still fits. `--fits fits.json` keeps every song's numbers for the next step.
+3. `python3 tools/mixlearn/export.py fits.json --header src/analysis/LearnedTargets.h` turns
+   them into what Auto Mix ships with, after checking each on songs left out of the learning:
+   a shift on every music style's voice-over-the-band target, and a gentle EQ per instrument
+   role (half of the engineers' median move, capped at 3 dB, as a low shelf, a bell and a
+   high shelf). Learned settings that didn't hold up on held-out songs (background vocals'
+   level under the lead, for one) aren't exported.

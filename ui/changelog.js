@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 215,
+ "latest": 216,
  "days": [
   {
    "date": "2026-11-18",
    "entries": [
+    {
+     "title": "Auto Mix learns from real mixes",
+     "text": "The voice sits where engineers put it over the band, instruments get a gentle tone nudge toward finished mixes, and track names like BassAmpMic or ElecGtr_Vox get the right role.",
+     "prs": [
+      216
+     ]
+    },
     {
      "title": "Lyrics in Practice",
      "text": "Paste a song's lyrics or import an .lrc file: each line is timed to the singing, lights up word by word as you sing, follows speed changes, and any line can be nudged and is saved with the song.",
