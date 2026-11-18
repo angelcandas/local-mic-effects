@@ -154,6 +154,7 @@ set(MICFX_DSP_SOURCES
     src/Recorder.cpp
     src/PitchTap.h
     src/Practice.cpp
+    src/PracticeShift.cpp
     src/Practice.h
     src/CaptureRing.cpp
     src/CaptureRing.h

@@ -18,6 +18,27 @@
 class Multitrack
 {
 public:
+    // A track whose audio is written while it already plays (Practice's key and speed
+    // change renders it piece by piece on other threads). The audio thread plays only the
+    // blocks marked ready; the rest stays silent until its piece lands.
+    struct Fill
+    {
+        static constexpr int blockSize = 1024;
+
+        explicit Fill (int numSamples);
+
+        // Track samples from..to (clamped) are all ready to play.
+        bool isReady (juce::int64 from, juce::int64 to) const noexcept;
+        void markReady (juce::int64 from, juce::int64 to) noexcept; // whole blocks inside from..to
+        void markBlock (int block) noexcept { if (juce::isPositiveAndBelow (block, numBlocks)) ready[(size_t) block].store (true, std::memory_order_release); }
+        bool isBlockReady (int block) const noexcept { return ready[(size_t) block].load (std::memory_order_acquire); }
+
+        const int numSamples, numBlocks;
+        std::unique_ptr<std::atomic<bool>[]> ready;
+        std::atomic<bool> complete { false };     // every block ready (no more checks)
+        std::vector<float*> channels;             // the track's audio, for the writers
+    };
+
     struct Track
     {
         int id = 0;
@@ -31,6 +52,8 @@ public:
 
         std::atomic<float> gain { 1.0f };
         std::atomic<bool> muted { false };
+
+        std::shared_ptr<Fill> fill;     // set when the audio is still being written
 
         juce::int64 end() const noexcept { return start + audio.getNumSamples(); }
     };
@@ -51,6 +74,13 @@ public:
     // Audio already in memory at the session rate (e.g. a rendered copy), as a backing
     // track named `name`. Returns its id.
     int addAudio (const juce::String& name, juce::AudioBuffer<float>&&, juce::int64 startSample);
+
+    // An empty track of `numSamples` (silent until written through the returned Fill),
+    // added muted or not. Returns its id. Call finishFill once every sample is written.
+    int addFilling (const juce::String& name, int numChannels, int numSamples, juce::int64 startSample, bool muted,
+                    std::shared_ptr<Fill>& fill);
+    // The track is complete: plays like any other from now on (and its waveform is drawn).
+    void finishFill (int id);
 
     // Synchronous version for tests. Returns the new track's id, or -1.
     int loadNow (const juce::File&, bool isTake, juce::int64 startSample);

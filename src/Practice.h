@@ -5,6 +5,7 @@
 
 #include "analysis/Coach.h"
 #include "analysis/Structure.h"
+#include "PracticeShift.h"
 #include "stems/StemSplitter.h"
 
 #include <functional>
@@ -44,7 +45,10 @@ public:
     //   "openCached" { id }        opens one from the library (no splitting, the original file isn't needed)
     //   "forget" { id }            deletes a song's cached stems
     //   "speed" { speed, semitones } plays the whole song at 0.5..1.5 times the speed and/or up to 12 semitones
-    //                              (fractions allowed: cents) higher or lower, each independent of the other (warp engine)
+    //                              (fractions allowed: cents) higher or lower, each independent of the other.
+    //                              Rendered with the warp engine around the playhead first (KeySpeedRender), so it's
+    //                              swapped in where the song is within a moment; "practice" { state: "shifting" }
+    //                              events give the progress of the rest. Kept in the song's folder for next time.
     //   "cancel"                   stops a preparation
     //   "view" { open }            the view opened or closed (follows the singer while open)
     //   "guide" { level }          the guide vocal's level (0..1.5 gain, 0 mutes it)
@@ -100,7 +104,6 @@ public:
     static std::vector<LibraryEntry> getLibrary (const juce::File& root = getCacheRoot());
     // A song from its cache folder, without the original file. `error` is set when it's incomplete.
     static Prepared loadFromCache (const juce::File& folder);
-    static constexpr int wholeSong = -2; // Loop::section for "the whole song at another speed"
     static constexpr const char* infoFileName = "info-v1.txt";
     static void writeInfo (const juce::File& folder, const LibraryEntry&);
     static bool readInfo (const juce::File& folder, LibraryEntry&);
@@ -144,6 +147,9 @@ public:
     // The phrases that start inside a stretch of the song: { first, last }, or { -1, -1 }.
     static std::pair<int, int> getPhrasesIn (const analysis::coach::Song&, double from, double to);
 
+    // Puts a prepared song on the tracks (as "open" does when it's ready). Public for the tests.
+    void install (const Prepared&);
+
     // The song's sections, as found (empty until "sections" has run). Tests may set them.
     const std::vector<analysis::structure::Section>& getSections() const noexcept { return sections; }
     void setSections (std::vector<analysis::structure::Section> s) { sections = std::move (s); sectionsKnown = true; }
@@ -171,6 +177,18 @@ public:
 
     bool isLooping() const noexcept { return loop.active; }
 
+    // The whole song's key and speed as heard now (1 and 0 when it plays as it is), and
+    // whether a change is still on its way (not heard yet) or still filling in.
+    double getSpeed() const noexcept { return shift.speed; }
+    double getSemitones() const noexcept { return shift.semitones; }
+    bool isShiftPending() const noexcept { return pending.render != nullptr || shiftLoad != nullptr; }
+    bool isShiftRendering() const noexcept { return shift.render != nullptr || isShiftPending(); }
+
+    // Where the copies of the song in other keys and speeds are kept, and how many.
+    static constexpr const char* shiftFolderName = "Key and speed";
+    static constexpr int maxShiftsKept = 3;
+    static juce::File getShiftFile (const juce::File& songFolder, double speed, double semitones, bool voice);
+
     //==============================================================================
     // Live scoring, exposed for the tests.
     const analysis::coach::Song& getSong() const noexcept { return song; }
@@ -190,6 +208,11 @@ private:
     struct SectionsJob;
 
     void startSpeed (double speed, double semitones);
+    void tickShift();
+    void swapShift();
+    void applyMutes();
+    double getOriginalTime() const;      // where the playhead is, in the song as it is
+    juce::var describeShift() const;
     void startLoop (int phrase, double speed, double semitones);
     void startSectionLoop (int section, double speed, double semitones);
     void startRangeLoop (int firstPhrase, int lastPhrase, int section, double from, double to, double speed, double semitones);
@@ -199,7 +222,6 @@ private:
     void endLoop (bool restoreTracks = true);
 
     void start (const juce::File&, bool split);
-    void install (const Prepared&);
     void applyGuideLevel();
     juce::var describeSong() const;
     juce::var describeScores (bool all) const;
@@ -218,6 +240,7 @@ private:
     analysis::coach::Song baseSong; // the whole song
     juce::String songName, songKey;
     juce::File source, guideFile, backingFile;
+    juce::File songFolder; // its cache folder
     float guideLevel = 0.35f;
     bool guidePending = false; // the guide track hasn't loaded yet: set its level when it does
     bool viewOpen = false;
@@ -245,6 +268,20 @@ private:
         std::vector<std::pair<int, bool>> muted; // the song's tracks muted meanwhile, and how they were
     } loop;
     std::shared_ptr<LoopJob> loopJob;
+
+    // The whole song in another key or at another speed: what's heard, and a change on its way.
+    struct Shift
+    {
+        double speed = 1.0, semitones = 0.0;
+        int backingId = -1, guideId = -1;        // its tracks (-1: none)
+        std::shared_ptr<KeySpeedRender> render;  // still filling them in (null: done, or loaded)
+        bool isActive() const noexcept { return backingId >= 0 || guideId >= 0; }
+    } shift, pending;
+    struct ShiftLoad;
+    std::shared_ptr<ShiftLoad> shiftLoad; // a copy kept from before, loading
+    juce::ThreadPool saver { juce::ThreadPoolOptions{}.withThreadName ("MicFX key and speed saver").withNumberOfThreads (1) };
+    void dropShift (Shift&);
+    void saveShift();
 
     // The song's sections.
     std::vector<analysis::structure::Section> sections;

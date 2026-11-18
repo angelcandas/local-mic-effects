@@ -183,6 +183,89 @@ int Multitrack::loadNow (const juce::File& file, bool isTake, juce::int64 startS
     return id;
 }
 
+int Multitrack::addFilling (const juce::String& name, int numChannels, int numSamples, juce::int64 startSample, bool muted,
+                            std::shared_ptr<Fill>& fill)
+{
+    numChannels = juce::jlimit (1, 2, numChannels);
+    numSamples = juce::jmax (1, numSamples);
+    const auto id = nextId++;
+
+    auto track = std::make_shared<Track>();
+    track->id = id;
+    track->name = name;
+    track->start = startSample;
+    track->audio.setSize (numChannels, numSamples);
+    track->muted = muted;
+    fill = std::make_shared<Fill> (numSamples);
+    for (int ch = 0; ch < numChannels; ++ch)
+    {
+        // getWritePointer also marks the buffer as not clear, so mixing it adds what's written.
+        auto* data = track->audio.getWritePointer (ch);
+        juce::FloatVectorOperations::clear (data, numSamples);
+        fill->channels.push_back (data);
+    }
+    track->fill = fill;
+    install (std::move (track));
+    return id;
+}
+
+void Multitrack::finishFill (int id)
+{
+    for (auto& track : tracks)
+    {
+        if (track->id != id || track->fill == nullptr)
+            continue;
+
+        track->fill->markReady (0, track->audio.getNumSamples());
+        track->fill->complete = true;
+        const auto step = juce::jmax (1, (int) (peakSeconds * sampleRate));
+        juce::Array<float> peaks;
+        for (int i = 0; i < track->audio.getNumSamples(); i += step)
+            peaks.add (track->audio.getMagnitude (i, juce::jmin (step, track->audio.getNumSamples() - i)));
+        track->peaks = std::move (peaks);
+        if (onTracksChanged)
+            onTracksChanged();
+        return;
+    }
+}
+
+Multitrack::Fill::Fill (int samples)
+    : numSamples (juce::jmax (1, samples)),
+      numBlocks ((numSamples + blockSize - 1) / blockSize),
+      ready (new std::atomic<bool>[(size_t) numBlocks])
+{
+    for (int i = 0; i < numBlocks; ++i)
+        ready[(size_t) i].store (false);
+}
+
+bool Multitrack::Fill::isReady (juce::int64 from, juce::int64 to) const noexcept
+{
+    if (complete.load (std::memory_order_acquire))
+        return true;
+    from = juce::jlimit ((juce::int64) 0, (juce::int64) numSamples, from);
+    to = juce::jlimit (from, (juce::int64) numSamples, to);
+    if (to <= from)
+        return true;
+    for (auto b = (int) (from / blockSize); b <= (int) ((to - 1) / blockSize); ++b)
+        if (! isBlockReady (b))
+            return false;
+    return true;
+}
+
+void Multitrack::Fill::markReady (juce::int64 from, juce::int64 to) noexcept
+{
+    from = juce::jmax ((juce::int64) 0, from);
+    to = juce::jmin ((juce::int64) numSamples, to);
+    // Whole blocks only, except the last block of the track, which may be short.
+    for (auto b = (int) ((from + blockSize - 1) / blockSize); b < numBlocks; ++b)
+    {
+        const auto end = juce::jmin ((juce::int64) numSamples, (juce::int64) (b + 1) * blockSize);
+        if (end > to)
+            break;
+        markBlock (b);
+    }
+}
+
 //==============================================================================
 void Multitrack::install (std::shared_ptr<Track> track)
 {
@@ -357,10 +440,29 @@ void Multitrack::mix (juce::AudioBuffer<float>& buffer, int numChannels, int off
 
         const auto gain = track->gain.load();
         const auto sourceChannels = track->audio.getNumChannels();
+        const auto add = [&] (juce::int64 a, juce::int64 b)
+        {
+            for (int ch = 0; ch < numChannels; ++ch)
+                buffer.addFrom (ch, offset + (int) (a - blockStart), track->audio,
+                                juce::jmin (ch, sourceChannels - 1), (int) (a - track->start),
+                                (int) (b - a), gain);
+        };
 
-        for (int ch = 0; ch < numChannels; ++ch)
-            buffer.addFrom (ch, offset + (int) (from - blockStart), track->audio,
-                            juce::jmin (ch, sourceChannels - 1), (int) (from - track->start),
-                            (int) (to - from), gain);
+        if (const auto* fill = track->fill.get(); fill != nullptr && ! fill->complete.load (std::memory_order_acquire))
+        {
+            // Still being written: only the blocks that are ready.
+            for (auto a = from; a < to;)
+            {
+                const auto block = (int) ((a - track->start) / Fill::blockSize);
+                const auto b = juce::jmin (to, track->start + (juce::int64) (block + 1) * Fill::blockSize);
+                if (fill->isBlockReady (block))
+                    add (a, b);
+                a = b;
+            }
+        }
+        else
+        {
+            add (from, to);
+        }
     }
 }

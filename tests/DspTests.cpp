@@ -10899,6 +10899,171 @@ namespace
     }
 
 
+    void testPracticeKeySpeed()
+    {
+        std::cout << "\nPractice (the whole song in another key and speed, swapped in where it plays)\n";
+        namespace coach = analysis::coach;
+        namespace pitch = analysis::pitch;
+
+        // Multitrack: a track being filled plays only its ready blocks.
+        {
+            Multitrack multitrack;
+            multitrack.prepare (sampleRate);
+            std::shared_ptr<Multitrack::Fill> fill;
+            const auto id = multitrack.addFilling ("Filling", 1, 4096, 0, false, fill);
+            for (int i = 0; i < 4096; ++i)
+                fill->channels[0][i] = 0.5f;
+            fill->markReady (1024, 2048);
+            multitrack.play();
+            juce::AudioBuffer<float> out (1, 3072);
+            out.clear();
+            multitrack.process (out, 1, 3072);
+            check (std::abs (out.getSample (0, 500)) < 1e-9f && std::abs (out.getSample (0, 1500) - 0.5f) < 1e-6f && std::abs (out.getSample (0, 2500)) < 1e-9f
+                       && fill->isReady (1024, 2048) && ! fill->isReady (1000, 2048),
+                   "a filling track plays the blocks that are ready and nothing else");
+            multitrack.finishFill (id);
+            multitrack.seek (0);
+            out.clear();
+            multitrack.process (out, 1, 3072);
+            check (std::abs (out.getSample (0, 500) - 0.5f) < 1e-6f && std::abs (out.getSample (0, 2500) - 0.5f) < 1e-6f && fill->complete
+                       && multitrack.getTracks()[0]->peaks.size() > 0,
+                   "and all of it once it's finished");
+        }
+
+        // A song: the coach melody as the guide, a chord as the backing.
+        const auto voice = singLine (getCoachMelody(), sampleRate);
+        juce::AudioBuffer<float> backing (2, voice.getNumSamples());
+        for (int i = 0; i < backing.getNumSamples(); ++i)
+        {
+            const auto t = i / sampleRate;
+            const auto v = 0.1f * (float) (std::sin (juce::MathConstants<double>::twoPi * 220.0 * t) + std::sin (juce::MathConstants<double>::twoPi * 277.18 * t));
+            backing.setSample (0, i, v);
+            backing.setSample (1, i, v);
+        }
+        juce::TemporaryFile folderFile;
+        const auto folder = folderFile.getFile();
+        folder.createDirectory();
+        Practice::Prepared prepared;
+        prepared.song = coach::findMelody (voice, sampleRate);
+        prepared.folder = folder;
+        prepared.guide = folder.getChildFile (Practice::guideFileName);
+        prepared.backing = folder.getChildFile (Practice::backingFileName);
+        prepared.name = "Song";
+        writeWav (prepared.guide, voice, sampleRate);
+        writeWav (prepared.backing, backing, sampleRate);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        juce::TemporaryFile settingsFile (".xml");
+        juce::PropertiesFile settings (settingsFile.getFile(), {});
+        Practice practice (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        auto& multitrack = processor.getMultitrack();
+        practice.install (prepared);
+        for (int i = 0; i < 400 && multitrack.getTracks().size() < 2; ++i)
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (10);
+        if (multitrack.getTracks().size() != 2 || prepared.song.notes.empty())
+        {
+            check (false, "the song is on the tracks");
+            return;
+        }
+        practice.tick();
+
+        // Playing from 2 s: 75% speed, two semitones up.
+        multitrack.seek ((juce::int64) (2.0 * sampleRate));
+        multitrack.play();
+        const auto speedTo = [&] (double speed, double semitones)
+        {
+            auto* options = new juce::DynamicObject();
+            options->setProperty ("speed", speed);
+            options->setProperty ("semitones", semitones);
+            practice.handle ("speed", juce::var (options));
+        };
+        const auto started = juce::Time::getMillisecondCounterHiRes();
+        speedTo (0.75, 2.0);
+        check (practice.isShiftPending() && multitrack.getTracks().size() == 4, "the change is on its way, on two new tracks");
+        auto swappedAfter = -1.0;
+        for (int i = 0; i < 4000 && practice.isShiftRendering(); ++i)
+        {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+            practice.tick();
+            if (swappedAfter < 0.0 && ! practice.isShiftPending())
+            {
+                swappedAfter = juce::Time::getMillisecondCounterHiRes() - started;
+                // Where we were (2 s, the transport doesn't move here) in the slower copy.
+                check (std::abs (multitrack.getPosition() / sampleRate - 2.0 / 0.75) < 0.01 && practice.isShiftRendering(),
+                       "it's swapped in at the same place in the song (" + juce::String (multitrack.getPosition() / sampleRate, 2) + " s), the rest still rendering");
+            }
+        }
+        std::cout << "    (heard after " << juce::String (swappedAfter, 0) << " ms, all rendered after "
+                  << juce::String (juce::Time::getMillisecondCounterHiRes() - started, 0) << " ms)\n";
+        const auto tracks = multitrack.getTracks();
+        const auto heard = [&] { juce::StringArray names; for (const auto& t : multitrack.getTracks()) if (! t->muted.load()) names.add (t->name); return names.joinIntoString (", "); };
+        check (swappedAfter >= 0.0 && std::abs (practice.getSpeed() - 0.75) < 1e-9 && std::abs (practice.getSemitones() - 2.0) < 1e-9
+                   && heard() == "Backing (new key), Guide (new key)",
+               "the new key and speed are heard instead of the song (" + heard() + ")");
+        check (std::abs (practice.getSong().notes[0].start - prepared.song.notes[0].start / 0.75) < 1e-6
+                   && std::abs (practice.getSong().notes[0].pitch - prepared.song.notes[0].pitch - 2.0f) < 1e-4f,
+               "the notes to sing move with it");
+
+        // The copy matches the warp engine's render of the whole guide.
+        std::shared_ptr<const Multitrack::Track> guideCopy;
+        for (const auto& t : tracks)
+            if (t->name == "Guide (new key)")
+                guideCopy = t;
+        const auto reference = Practice::renderLoop (nullptr, &voice, sampleRate, 0.0, voice.getNumSamples() / sampleRate, 0.75, 2.0);
+        if (guideCopy != nullptr && guideCopy->audio.getNumSamples() == reference.guide.getNumSamples())
+        {
+            auto worst = 0.0f;
+            for (int i = 0; i < reference.guide.getNumSamples(); ++i)
+                worst = juce::jmax (worst, std::abs (guideCopy->audio.getSample (0, i) - reference.guide.getSample (0, i)));
+            const auto copyTrack = pitch::analyse (guideCopy->audio, sampleRate);
+            const auto f4 = pitch::getPitch (copyTrack, 2.7 / 0.75, 3.0 / 0.75);
+            check (worst < 1e-3f && std::abs (f4 - 67.0f) < 0.2f && guideCopy->fill->complete,
+                   "the copy, rendered piece by piece out of order, is the whole render (worst " + juce::String (worst, 6) + ", F4 sung as " + juce::String (f4, 2) + ")");
+        }
+        else
+        {
+            check (false, "the guide's copy has the rendered length");
+        }
+
+        // Kept in the song's folder.
+        const auto keptGuide = Practice::getShiftFile (folder, 0.75, 2.0, true), keptBacking = Practice::getShiftFile (folder, 0.75, 2.0, false);
+        for (int i = 0; i < 400 && ! (keptGuide.existsAsFile() && keptBacking.existsAsFile()); ++i)
+            juce::Thread::sleep (10);
+        check (keptGuide.existsAsFile() && keptBacking.existsAsFile(), "and kept in the song's folder for next time");
+
+        // Back to the original, at the same place in the song.
+        multitrack.seek ((juce::int64) (3.0 * sampleRate));
+        speedTo (1.0, 0.0);
+        check (! practice.isShiftRendering() && multitrack.getTracks().size() == 2 && heard() == "Backing (no voice), Guide voice"
+                   && std::abs (multitrack.getPosition() / sampleRate - 3.0 * 0.75) < 0.01
+                   && std::abs (practice.getSong().notes[0].start - prepared.song.notes[0].start) < 1e-9,
+               "back to the original key and speed, where the song was (" + heard() + ")");
+
+        // Again: from the kept copy this time.
+        const auto again = juce::Time::getMillisecondCounterHiRes();
+        speedTo (0.75, 2.0);
+        for (int i = 0; i < 1000 && practice.isShiftRendering(); ++i)
+        {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+            practice.tick();
+        }
+        check (! practice.isShiftRendering() && std::abs (practice.getSpeed() - 0.75) < 1e-9 && heard() == "Guide (new key), Backing (new key)",
+               "the same change again loads the kept copy (" + juce::String (juce::Time::getMillisecondCounterHiRes() - again, 0) + " ms)");
+
+        // A change that replaces another one on its way.
+        speedTo (1.25, -3.0);
+        speedTo (1.0, -1.0);
+        for (int i = 0; i < 4000 && practice.isShiftRendering(); ++i)
+        {
+            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
+            practice.tick();
+        }
+        check (std::abs (practice.getSpeed() - 1.0) < 1e-9 && std::abs (practice.getSemitones() + 1.0) < 1e-9 && multitrack.getTracks().size() == 4,
+               "a newer change wins over one still on its way");
+        multitrack.pause();
+    }
+
     void testPracticeLoops()
     {
         std::cout << "\nPractice (pass report, looping a phrase slower or in another key)\n";
@@ -19915,6 +20080,7 @@ int main()
     {
         testPractice();
         testPracticeLoops();
+        testPracticeKeySpeed();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -20121,6 +20287,7 @@ int main()
         testCoach();
         testPractice();
         testPracticeLoops();
+        testPracticeKeySpeed();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -20252,6 +20419,7 @@ int main()
     testCoach();
     testPractice();
     testPracticeLoops();
+    testPracticeKeySpeed();
     testRhythm();
     testToMidi();
     testSongMap();

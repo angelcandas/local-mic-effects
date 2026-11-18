@@ -74,6 +74,15 @@ struct Practice::SectionsJob
     juce::File folder; // the song's cache folder, for the result
 };
 
+struct Practice::ShiftLoad
+{
+    std::atomic<bool> cancel { false }, finished { false };
+    double speed = 1.0, semitones = 0.0;
+    juce::File backingFile, guideFile;
+    juce::AudioBuffer<float> backing, guide;
+    bool ok = false;
+};
+
 struct Practice::LoopJob
 {
     std::atomic<bool> cancel { false }, finished { false };
@@ -103,6 +112,7 @@ Practice::Practice (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::fu
                 source = juce::File (settings.getValue ("practice.source"));
                 guideFile = guide;
                 backingFile = juce::File (settings.getValue ("practice.backing"));
+                songFolder = folder;
                 break;
             }
 }
@@ -117,6 +127,11 @@ Practice::~Practice()
         sectionsJob->cancel = true;
     if (loop.active)
         endLoop();
+    dropShift (pending);
+    dropShift (shift);
+    if (shiftLoad != nullptr)
+        shiftLoad->cancel = true;
+    saver.removeAllJobs (false, 20000); // a copy being kept finishes (a few seconds at most)
     processor.getPitchTap().setEnabled (false);
 }
 
@@ -435,6 +450,15 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
     {
         if (job != nullptr)
             job->cancel = true;
+        if (isShiftPending())
+        {
+            // A key or speed change not heard yet: stay as we are.
+            dropShift (pending);
+            if (shiftLoad != nullptr)
+                shiftLoad->cancel = true;
+            shiftLoad = nullptr;
+            emit ("practice", object ({ { "state", "shifting" }, { "shift", describeShift() } }));
+        }
     }
     else if (action == "view")
     {
@@ -476,7 +500,7 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
         loopJob = nullptr;
         if (loop.active)
         {
-            const auto from = loop.from;
+            const auto from = loop.from / shift.speed;
             endLoop();
             auto& multitrack = processor.getMultitrack();
             multitrack.seek ((juce::int64) (from * multitrack.getSampleRate()));
@@ -517,7 +541,7 @@ juce::var Practice::describeSong() const
     return object ({ { "name", songName }, { "file", source.getFullPathName() }, { "notes", notes }, { "phrases", phrases },
                      { "lowest", round2 (song.getLowest()) }, { "highest", round2 (song.getHighest()) },
                      { "hasBacking", backingFile != juce::File() }, { "key", songKey },
-                     { "speed", loop.active && loop.section == wholeSong ? loop.speed : 1.0 },
+                     { "shift", describeShift() },
                      { "sections", describeSections() },
                      { "loop", loop.active ? object ({ { "phrase", loop.phrase }, { "lastPhrase", loop.lastPhrase }, { "section", loop.section },
                                                        { "speed", loop.speed }, { "semitones", loop.semitones },
@@ -589,6 +613,16 @@ void Practice::install (const Prepared& prepared)
         loopJob->cancel = true;
     loopJob = nullptr;
     endLoop (false);
+    for (auto* s : { &pending, &shift })
+    {
+        if (s->render != nullptr)
+            s->render->cancel();
+        *s = {};
+    }
+    if (shiftLoad != nullptr)
+        shiftLoad->cancel = true;
+    shiftLoad = nullptr;
+    songFolder = prepared.folder;
 
     auto& multitrack = processor.getMultitrack();
     multitrack.pause();
@@ -648,19 +682,42 @@ void Practice::applyGuideLevel()
 {
     auto& multitrack = processor.getMultitrack();
     for (const auto& track : multitrack.getTracks())
-        if (track->file == guideFile)
+        if (track->file == guideFile || track->id == shift.guideId || track->id == pending.guideId || (loop.active && track->id == loop.guideId))
         {
             multitrack.setTrackGain (track->id, guideLevel);
-            // (the song's own guide stays muted while a rendered loop plays instead)
-            if (! (loop.active && loop.guideId >= 0))
-                multitrack.setTrackMuted (track->id, guideLevel <= 0.0f);
-            guidePending = false;
+            if (track->file == guideFile)
+                guidePending = false;
         }
-        else if (loop.active && track->id == loop.guideId)
-        {
-            multitrack.setTrackGain (track->id, guideLevel);
-            multitrack.setTrackMuted (track->id, guideLevel <= 0.0f);
-        }
+    applyMutes();
+}
+
+void Practice::applyMutes()
+{
+    // Which of the song's versions is heard: a rendered loop's, else the song in another
+    // key or speed, else the song as it is. The others rest; the guide is muted at level 0.
+    auto& multitrack = processor.getMultitrack();
+    const auto loopRendered = loop.active && (loop.backingId >= 0 || loop.guideId >= 0);
+    auto changed = false;
+    for (const auto& track : multitrack.getTracks())
+    {
+        const auto own = track->file != juce::File() && (track->file == guideFile || track->file == backingFile);
+        const auto isShift = track->id == shift.backingId || track->id == shift.guideId;
+        const auto isPending = track->id == pending.backingId || track->id == pending.guideId;
+        const auto isLoop = loop.active && (track->id == loop.backingId || track->id == loop.guideId);
+        if (! (own || isShift || isPending || isLoop))
+            continue;
+
+        const auto heard = loopRendered ? isLoop : shift.isActive() ? isShift : own;
+        const auto isGuide = track->file == guideFile || track->id == shift.guideId || track->id == pending.guideId
+                          || (loop.active && track->id == loop.guideId);
+        const auto mute = ! heard || (isGuide && guideLevel <= 0.0f);
+        changed = changed || track->muted.load() != mute;
+        multitrack.setTrackMuted (track->id, mute);
+    }
+
+    // (the Live track list shows the mute buttons)
+    if (changed && multitrack.onTracksChanged)
+        multitrack.onTracksChanged();
 }
 
 void Practice::setSong (coach::Song newSong)
@@ -785,6 +842,8 @@ void Practice::tick()
         if (! finished->result.cancelled)
             finishLoop (*finished);
     }
+
+    tickShift();
 
     if (guidePending)
         applyGuideLevel();
@@ -1086,46 +1145,285 @@ Practice::LoopAudio Practice::renderLoop (const juce::AudioBuffer<float>* backin
     return result;
 }
 
+juce::File Practice::getShiftFile (const juce::File& folder, double speed, double semitones, bool voice)
+{
+    juce::String name;
+    name << juce::String (std::round (speed * 1000.0) / 1000.0, 3) << "x " << (semitones >= 0.0 ? "+" : "")
+         << juce::String (std::round (semitones * 100.0) / 100.0, 2) << " st - " << (voice ? "guide" : "backing") << ".flac";
+    return folder.getChildFile (shiftFolderName).getChildFile (name);
+}
+
+double Practice::getOriginalTime() const
+{
+    const auto& multitrack = processor.getMultitrack();
+    const auto position = (double) multitrack.getPosition() / juce::jmax (1.0, multitrack.getSampleRate());
+    if (loop.active)
+        return loop.from + position * (loop.backingId >= 0 || loop.guideId >= 0 ? loop.speed : 1.0); // (roughly: the loop's lead-in)
+    return shift.isActive() ? position * shift.speed : position;
+}
+
+juce::var Practice::describeShift() const
+{
+    const auto* render = pending.render != nullptr ? pending.render.get() : shift.render.get();
+    const auto busy = render != nullptr || shiftLoad != nullptr;
+    return object ({ { "speed", shift.speed }, { "semitones", shift.semitones },
+                     { "pending", isShiftPending() },
+                     { "target", isShiftPending() ? object ({ { "speed", shiftLoad != nullptr ? shiftLoad->speed : pending.speed },
+                                                              { "semitones", shiftLoad != nullptr ? shiftLoad->semitones : pending.semitones } })
+                                                  : juce::var() },
+                     { "progress", busy ? (render != nullptr ? round3 (render->getProgress()) : 0.0) : 1.0 } });
+}
+
+void Practice::dropShift (Shift& s)
+{
+    if (s.render != nullptr)
+        s.render->cancel();
+    auto& multitrack = processor.getMultitrack();
+    for (auto id : { s.backingId, s.guideId })
+        if (id >= 0)
+            multitrack.removeTrack (id);
+    s = {};
+}
+
 void Practice::startSpeed (double speed, double semitones)
 {
-    if (baseSong.isEmpty())
+    if (baseSong.isEmpty() && guideFile == juce::File())
         return;
 
-    speed = juce::jlimit (0.5, 1.5, speed);
-    semitones = juce::jlimit (-12.0, 12.0, semitones);
-    if (std::abs (speed - 1.0) < 1.0e-3 && std::abs (semitones) < 5.0e-3)
+    speed = std::round (juce::jlimit (0.5, 1.5, speed) * 1000.0) / 1000.0;
+    semitones = std::round (juce::jlimit (-12.0, 12.0, semitones) * 100.0) / 100.0;
+
+    // Whatever was on its way is dropped (a newer change wins).
+    dropShift (pending);
+    if (shiftLoad != nullptr)
+        shiftLoad->cancel = true;
+    shiftLoad = nullptr;
+
+    const auto neutral = std::abs (speed - 1.0) < 1.0e-3 && std::abs (semitones) < 5.0e-3;
+    const auto same = std::abs (speed - shift.speed) < 1.0e-3 && std::abs (semitones - shift.semitones) < 5.0e-3;
+    if (same)
     {
-        // Normal speed: back to the song's own tracks, where we are.
-        if (loop.active && loop.section == wholeSong)
-        {
-            const auto position = loop.from + lastSongTime * loop.speed;
-            endLoop();
-            auto& multitrack = processor.getMultitrack();
-            multitrack.seek ((juce::int64) (position * multitrack.getSampleRate()));
-            restartFrom (position);
-            emit ("practice", object ({ { "state", "ready" }, { "song", describeSong() }, { "fromCache", true }, { "quiet", true } }));
-        }
-        else if (loopJob != nullptr && loopJob->section == wholeSong)
-        {
-            loopJob->cancel = true;
-            loopJob = nullptr;
-            emit ("practice", object ({ { "state", "ready" }, { "song", describeSong() }, { "fromCache", true }, { "quiet", true } }));
-        }
+        emit ("practice", object ({ { "state", "shifting" }, { "shift", describeShift() } }));
         return;
     }
 
-    // The song's own length (a rendered loop may be playing, with another length).
-    const auto& multitrack = processor.getMultitrack();
-    const auto rate = juce::jmax (1.0, multitrack.getSampleRate());
-    auto samples = (juce::int64) 0;
+    if (neutral)
+    {
+        // Back to the song as it is, where we are.
+        swapShift();
+        return;
+    }
+
+    pending.speed = speed;
+    pending.semitones = semitones;
+
+    // Made before: load it (a moment) instead of rendering it again.
+    const auto cachedBacking = getShiftFile (songFolder, speed, semitones, false), cachedGuide = getShiftFile (songFolder, speed, semitones, true);
+    if (songFolder != juce::File() && cachedGuide.existsAsFile() && (backingFile == juce::File() || cachedBacking.existsAsFile()))
+    {
+        auto load = std::make_shared<ShiftLoad>();
+        load->speed = speed;
+        load->semitones = semitones;
+        load->guideFile = cachedGuide;
+        load->backingFile = backingFile != juce::File() ? cachedBacking : juce::File();
+        shiftLoad = load;
+        const auto rate = processor.getMultitrack().getSampleRate();
+        juce::Thread::launch ([load, rate]
+        {
+            auto guide = Multitrack::decode (load->guideFile, rate);
+            auto backing = load->backingFile != juce::File() ? Multitrack::decode (load->backingFile, rate) : Multitrack::Decoded {};
+            load->ok = guide.error.isEmpty() && (load->backingFile == juce::File() || backing.error.isEmpty());
+            load->guide = std::move (guide.audio);
+            load->backing = std::move (backing.audio);
+            load->finished = true;
+        });
+        emit ("practice", object ({ { "state", "shifting" }, { "shift", describeShift() } }));
+        return;
+    }
+
+    // Render it: empty tracks (muted until swapped in) filled piece by piece, the playhead's first.
+    auto& multitrack = processor.getMultitrack();
+    std::vector<KeySpeedRender::Part> parts;
     for (const auto& track : multitrack.getTracks())
-        if (track->file == guideFile || (backingFile != juce::File() && track->file == backingFile))
-            samples = juce::jmax (samples, (juce::int64) track->audio.getNumSamples());
-    const auto length = (double) samples / rate;
-    // Carry on from where we are in the song.
-    const auto position = loop.active ? loop.from + lastSongTime * loop.speed : lastSongTime;
-    const auto from = juce::jlimit (0.0, juce::jmax (0.0, length - 1.0), position);
-    startRangeLoop (0, (int) baseSong.phrases.size() - 1, wholeSong, from, length, speed, semitones);
+    {
+        const auto voice = track->file == guideFile;
+        if (! voice && ! (backingFile != juce::File() && track->file == backingFile))
+            continue;
+
+        KeySpeedRender::Part part;
+        part.source = track;
+        part.voice = voice;
+        const auto length = KeySpeedRender::getLength (track->audio.getNumSamples(), speed);
+        const auto id = multitrack.addFilling (voice ? "Guide (new key)" : "Backing (new key)", track->audio.getNumChannels(), length,
+                                               0, true, part.fill);
+        (voice ? pending.guideId : pending.backingId) = id;
+        for (const auto& t : multitrack.getTracks())
+            if (t->id == id)
+                part.target = t;
+        parts.push_back (std::move (part));
+    }
+
+    if (parts.empty())
+        return;
+
+    pending.render = std::make_shared<KeySpeedRender> (multitrack.getSampleRate(), speed, semitones);
+    pending.render->start (std::move (parts), getOriginalTime() / speed);
+    applyGuideLevel();
+    emit ("practice", object ({ { "state", "shifting" }, { "shift", describeShift() } }));
+}
+
+void Practice::swapShift()
+{
+    auto& multitrack = processor.getMultitrack();
+    const auto original = getOriginalTime();
+
+    // The new version becomes the one heard (none: the song as it is); the old one goes.
+    auto old = shift;
+    shift = pending;
+    pending = {};
+    if (old.render != nullptr)
+        old.render->cancel();
+    for (auto id : { old.backingId, old.guideId })
+        if (id >= 0)
+            multitrack.removeTrack (id);
+
+    if (! shift.isActive())
+        shift = {}; // speed 1, key 0
+    applyGuideLevel();
+
+    const auto shifted = shift.isActive() && ! baseSong.isEmpty() ? baseSong.transformed (shift.semitones, shift.speed) : baseSong;
+    if (loop.active)
+    {
+        // A loop keeps playing; the whole song comes back changed after it.
+    }
+    else
+    {
+        const auto position = original / shift.speed;
+        multitrack.seek ((juce::int64) std::round (position * multitrack.getSampleRate()));
+        lastPosition = position;
+        song = shifted;
+        if (noteScores.size() != song.notes.size())
+            noteScores.assign (song.notes.size(), {});
+        if (phraseScores.size() != song.phrases.size())
+            phraseScores.assign (song.phrases.size(), {});
+        restartFrom (position);
+    }
+    emit ("practice", object ({ { "state", "ready" }, { "song", describeSong() }, { "fromCache", true }, { "quiet", true } }));
+}
+
+void Practice::tickShift()
+{
+    auto& multitrack = processor.getMultitrack();
+
+    if (shiftLoad != nullptr && shiftLoad->finished)
+    {
+        const auto load = shiftLoad;
+        shiftLoad = nullptr;
+        if (! load->ok || load->cancel)
+        {
+            // The kept copy is unreadable: forget it and render again.
+            load->guideFile.deleteFile();
+            load->backingFile.deleteFile();
+            startSpeed (load->speed, load->semitones);
+            return;
+        }
+        pending = {};
+        pending.speed = load->speed;
+        pending.semitones = load->semitones;
+        pending.guideId = multitrack.addAudio ("Guide (new key)", std::move (load->guide), 0);
+        multitrack.setTrackMuted (pending.guideId, true);
+        if (load->backing.getNumSamples() > 0)
+        {
+            pending.backingId = multitrack.addAudio ("Backing (new key)", std::move (load->backing), 0);
+            multitrack.setTrackMuted (pending.backingId, true);
+        }
+        load->guideFile.setLastModificationTime (juce::Time::getCurrentTime());
+        swapShift();
+    }
+
+    if (pending.render != nullptr)
+    {
+        // Swap it in once what's about to play is ready (or the whole of it is).
+        const auto at = getOriginalTime() / pending.speed;
+        pending.render->setFocus (at);
+        const auto ahead = multitrack.isPlaying() ? 0.35 : 0.15;
+        if (pending.render->isFinished() || pending.render->isReady (at, at + ahead))
+        {
+            if (pending.render->isCancelled())
+                dropShift (pending);
+            else
+                swapShift();
+        }
+        else
+        {
+            emit ("practice", object ({ { "state", "shifting" }, { "shift", describeShift() } }));
+        }
+    }
+
+    if (shift.render != nullptr)
+    {
+        if (! loop.active)
+            shift.render->setFocus ((double) multitrack.getPosition() / juce::jmax (1.0, multitrack.getSampleRate()));
+        if (shift.render->isFinished())
+        {
+            const auto done = shift.render;
+            shift.render = nullptr;
+            if (! done->isCancelled())
+            {
+                for (auto id : { shift.backingId, shift.guideId })
+                    if (id >= 0)
+                        multitrack.finishFill (id);
+                saveShift();
+            }
+        }
+        emit ("practice", object ({ { "state", "shifting" }, { "shift", describeShift() } }));
+    }
+}
+
+void Practice::saveShift()
+{
+    if (songFolder == juce::File() || ! shift.isActive())
+        return;
+
+    std::vector<std::pair<std::shared_ptr<const Multitrack::Track>, juce::File>> toWrite;
+    for (const auto& track : processor.getMultitrack().getTracks())
+        if (track->id == shift.backingId || track->id == shift.guideId)
+            toWrite.emplace_back (track, getShiftFile (songFolder, shift.speed, shift.semitones, track->id == shift.guideId));
+    const auto rate = processor.getMultitrack().getSampleRate();
+    const auto folder = songFolder.getChildFile (shiftFolderName);
+
+    saver.addJob ([toWrite, rate, folder]
+    {
+        folder.createDirectory();
+        for (const auto& [track, file] : toWrite)
+        {
+            const auto temp = file.getSiblingFile (file.getFileNameWithoutExtension() + ".part.flac");
+            temp.deleteFile();
+            std::unique_ptr<juce::OutputStream> stream (temp.createOutputStream());
+            if (stream == nullptr)
+                return;
+            auto writer = juce::FlacAudioFormat().createWriterFor (stream, juce::AudioFormatWriterOptions{}.withSampleRate (rate)
+                                                                                                       .withNumChannels (track->audio.getNumChannels())
+                                                                                                       .withBitsPerSample (24));
+            const auto ok = writer != nullptr && writer->writeFromAudioSampleBuffer (track->audio, 0, track->audio.getNumSamples());
+            writer.reset();
+            if (! ok || ! temp.moveFileTo (file))
+            {
+                temp.deleteFile();
+                return;
+            }
+        }
+
+        // Only the last few kept (by the guide's date: when each was last used).
+        auto guides = folder.findChildFiles (juce::File::findFiles, false, "* - guide.flac");
+        std::sort (guides.begin(), guides.end(), [] (const auto& a, const auto& b) { return a.getLastModificationTime() > b.getLastModificationTime(); });
+        for (int i = maxShiftsKept; i < guides.size(); ++i)
+        {
+            const auto stem = guides[i].getFileName().upToLastOccurrenceOf (" - guide.flac", false, false);
+            guides[i].deleteFile();
+            folder.getChildFile (stem + " - backing.flac").deleteFile();
+        }
+    });
 }
 
 void Practice::startLoop (int phrase, double speed, double semitones)
@@ -1173,8 +1471,8 @@ void Practice::startRangeLoop (int phrase, int lastPhrase, int section, double f
 
     auto& multitrack = processor.getMultitrack();
 
-    // As it is: loop the song's own tracks.
-    if (std::abs (speed - 1.0) < 1.0e-4 && std::abs (semitones) < 1.0e-4)
+    // As it is: loop the song's own tracks (the song in another key or speed is rendered).
+    if (std::abs (speed - 1.0) < 1.0e-4 && std::abs (semitones) < 1.0e-4 && ! shift.isActive())
     {
         loop = {};
         loop.active = true;
@@ -1268,8 +1566,7 @@ void Practice::finishLoop (LoopJob& done)
     phraseScores.assign (song.phrases.size(), {});
     restartFrom (0.0);
 
-    if (done.section != wholeSong) // the whole song at another speed plays through once
-        multitrack.setLoop (0, length);
+    multitrack.setLoop (0, length);
     multitrack.seek (0);
     lastPosition = 0.0;
     multitrack.play();
@@ -1293,9 +1590,12 @@ void Practice::endLoop (bool restoreTracks)
     const auto wasActive = loop.active;
     loop = {};
 
+    if (restoreTracks)
+        applyMutes();
+
     if (wasActive)
     {
-        song = baseSong;
+        song = shift.isActive() && ! baseSong.isEmpty() ? baseSong.transformed (shift.semitones, shift.speed) : baseSong;
         noteScores.assign (song.notes.size(), {});
         phraseScores.assign (song.phrases.size(), {});
         nextNote = nextPhrase = 0;
