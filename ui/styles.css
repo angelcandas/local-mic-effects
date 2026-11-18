@@ -25,6 +25,7 @@ html, body { height: 100%; margin: 0; }
 
 body {
   display: grid;
+  grid-template-columns: minmax(0, 1fr); /* wide content wraps instead of widening the page */
   grid-template-rows: auto 1fr auto;
   gap: 14px;
   padding: 14px 16px 16px;
@@ -207,7 +208,7 @@ button { font: inherit; color: inherit; }
 
 .workspace {
   display: grid;
-  grid-template-columns: 210px 1fr 118px;
+  grid-template-columns: 210px minmax(0, 1fr) 118px;
   gap: 12px;
   min-height: 0;
 }
@@ -736,10 +737,11 @@ select.dropdown {
   flex-direction: column;
   gap: 10px;
   padding: 12px 8px;
+  overflow-y: auto; /* short windows scroll the rail instead of stacking controls on each other */
 }
 
 .level {
-  flex: 1;
+  flex: 1 0 auto;
   display: flex;
   flex-direction: column;
   align-items: center;
@@ -757,7 +759,7 @@ select.dropdown {
   flex-direction: column;
   align-items: center;
   gap: 6px;
-  min-height: 60px;
+  min-height: 36px;
 }
 
 .meter .track {
