@@ -734,13 +734,17 @@ juce::String DawEngine::describeLayout (const juce::ValueTree& insert)
 std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& trackOrMaster)
 {
     const auto id = (int) trackOrMaster[ids::id];
-    const auto inserts = Edit::getInserts (trackOrMaster);
+    // A frozen track plays its render: no effects and no instrument running (that's the saving).
+    const auto frozen = trackOrMaster.hasType (ids::TRACK) && Edit::isFrozen (trackOrMaster);
+    const auto inserts = frozen ? juce::ValueTree() : Edit::getInserts (trackOrMaster);
 
     juce::String layout;
+    if (frozen)
+        layout << "frozen ";
     for (const auto& insert : inserts)
         layout << describeLayout (insert);
 
-    const auto isMidi = trackOrMaster.hasType (ids::TRACK) && Edit::isMidiTrack (trackOrMaster);
+    const auto isMidi = ! frozen && trackOrMaster.hasType (ids::TRACK) && Edit::isMidiTrack (trackOrMaster);
     const auto instrumentTree = isMidi ? trackOrMaster.getChildWithName (ids::INSTRUMENT) : juce::ValueTree();
 
     if (isMidi)
@@ -901,7 +905,10 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
     addInserts (strip->chain, inserts, nullptr);
 
 
-    strip->chain.setGains ((float) trackOrMaster.getProperty (ids::inGain, 0.0f), (float) trackOrMaster.getProperty (ids::outGain, 0.0f));
+    if (frozen) // the render has them already
+        strip->chain.setGains (0.0f, 0.0f);
+    else
+        strip->chain.setGains ((float) trackOrMaster.getProperty (ids::inGain, 0.0f), (float) trackOrMaster.getProperty (ids::outGain, 0.0f));
     strip->chain.prepare ({ sampleRate, (juce::uint32) blockSize, 2 }); // starts at those gains
     strip->buffer.setSize (2, blockSize);
     strip->isMidi = isMidi;
@@ -1089,7 +1096,27 @@ void DawEngine::rebuild()
                 if (child.hasType (ids::TAKE) && (int) child[ids::id] == listen)
                     clipSource = child;
 
-        for (const auto& clipTree : clipSource)
+        // A frozen track plays just its render, one plain clip (its own clips, takes and
+        // phase are in it already).
+        std::vector<juce::ValueTree> sourceClips;
+        const auto frozen = Edit::isFrozen (trackTree);
+        if (frozen)
+        {
+            juce::ValueTree frozenClip (ids::CLIP);
+            frozenClip.setProperty (ids::id, -1 - trackId, nullptr); // not any real clip's id
+            frozenClip.setProperty (ids::file, trackTree[ids::frozenFile], nullptr);
+            frozenClip.setProperty (ids::start, trackTree.getProperty (ids::frozenStart, 0.0), nullptr);
+            frozenClip.setProperty (ids::offset, 0.0, nullptr);
+            frozenClip.setProperty (ids::length, 1.0e6, nullptr); // cut to the file below
+            sourceClips.push_back (frozenClip);
+        }
+        else
+        {
+            for (const auto& child : clipSource)
+                sourceClips.push_back (child);
+        }
+
+        for (const auto& clipTree : sourceClips)
         {
             if (! clipTree.hasType (ids::CLIP) || Edit::isMidiClip (clipTree))
                 continue;
@@ -1149,9 +1176,9 @@ void DawEngine::rebuild()
 
             // The track's phase: upside down, and/or a little later or earlier (an earlier
             // clip at the session's start loses the bit that would play before it).
-            if (Edit::getPolarity (trackTree))
+            if (! frozen && Edit::getPolarity (trackTree))
                 clip.gain = -clip.gain;
-            if (const auto nudge = (juce::int64) std::llround (Edit::getNudge (trackTree) / 1000.0 * sampleRate); nudge != 0)
+            if (const auto nudge = (juce::int64) std::llround (Edit::getNudge (trackTree) / 1000.0 * sampleRate); nudge != 0 && ! frozen)
             {
                 clip.start += nudge;
                 if (clip.start < 0)

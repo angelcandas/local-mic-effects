@@ -33,7 +33,8 @@
 //            ride (volume automation, see RidePoint; missing when none),
 //            output (the RETURN id the track plays into instead of the master; missing = master),
 //            takesShown (its take lanes are unfolded), listenTake (a TAKE id heard instead of the comp),
-//            polarity (true: its audio clips play upside down), nudge (ms its audio clips play later; < 0 earlier)
+//            polarity (true: its audio clips play upside down), nudge (ms its audio clips play later; < 0 earlier),
+//            frozenFile (a WAV: the track frozen, its clips/instrument/effects rendered; played instead of them) and frozenStart (s)
 //       INSERTS ...
 //       SEND  id, target (a RETURN's id), level (dB), pre (true = before the fader)
 //       INSTRUMENT  id, plugin, name, format, vendor, description, state   (MIDI tracks)
@@ -124,6 +125,7 @@ namespace ids
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
     MICFX_DAW_ID (envelope) MICFX_DAW_ID (pitchNotes) MICFX_DAW_ID (rebalance) MICFX_DAW_ID (rebalanceFrom)
     MICFX_DAW_ID (inputLeft) MICFX_DAW_ID (inputRight) MICFX_DAW_ID (polarity) MICFX_DAW_ID (nudge)
+    MICFX_DAW_ID (frozenFile) MICFX_DAW_ID (frozenStart) // a frozen track plays this render instead of its clips, instrument and effects
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
     MICFX_DAW_ID (PATTERN) MICFX_DAW_ID (PART) MICFX_DAW_ID (PATTERNCLIP) MICFX_DAW_ID (track) MICFX_DAW_ID (drum)
     MICFX_DAW_ID (label) MICFX_DAW_ID (ab) MICFX_DAW_ID (abOther) // an insert's own name, A/B
@@ -204,6 +206,13 @@ public:
     void setTrackNudge (int trackId, float milliseconds);
     static bool getPolarity (const juce::ValueTree& track) { return (bool) track.getProperty (ids::polarity, false); }
     static float getNudge (const juce::ValueTree& track)   { return (float) track.getProperty (ids::nudge, 0.0f); }
+
+    // Freeze: the track's clips, instrument and effects rendered to `file` (from `startSeconds`);
+    // it plays that through its fader, pan and sends, and its own parts stay in the project
+    // untouched for unfreeze. Both can be undone.
+    static bool isFrozen (const juce::ValueTree& track) { return track.getProperty (ids::frozenFile).toString().isNotEmpty(); }
+    void freezeTrack (int trackId, const juce::File& file, double startSeconds);
+    void unfreezeTrack (int trackId);
 
     //==============================================================================
     // Return tracks. Their ids share the track id space; the mixer setters above

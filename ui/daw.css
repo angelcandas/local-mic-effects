@@ -2846,3 +2846,12 @@ body.is-daw .library-hint { display: none; }
 .ai-options summary:hover { color: var(--text); }
 .ai-options[open] > .automix-effects { margin-bottom: 8px; }
 .automix-roles-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+
+/* Freeze: the track plays its render; it can't be armed, and its header says so. */
+.track-frozen {
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.2)); border-radius: 4px; background: transparent;
+  color: #8fd3ff; font-size: 11px; line-height: 1; padding: 2px 4px; cursor: pointer;
+}
+.track-frozen:hover { background: rgba(143, 211, 255, 0.15); }
+.track-row.is-frozen .tt-arm { opacity: 0.35; pointer-events: none; }
+.track-row.is-frozen .clip { filter: saturate(0.5) brightness(0.95); }

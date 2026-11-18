@@ -2530,6 +2530,10 @@ class DawScreen {
     }
     const fx = button("fx-count", track.inserts.length ? `${track.inserts.length} fx` : "+ fx", "Effects on this track", () => this.select(track.id, null, true, !track.inserts.length));
     nameLine.append(fx);
+    if (track.frozen) {
+      const frozen = button("track-frozen", "❄", "Frozen: this track plays its render, so its effects and instrument aren't using the CPU. Click to unfreeze.", () => daw("unfreeze", { id: track.id }));
+      nameLine.append(frozen);
+    }
 
     // Mix line: M, S, arm, monitor, volume, pan.
     const toggles = html("div", "track-toggles");
@@ -2660,6 +2664,7 @@ class DawScreen {
       }
       row.classList.toggle("is-muted", Boolean(latest.mute));
       row.classList.toggle("is-armed", Boolean(latest.arm));
+      row.classList.toggle("is-frozen", Boolean(latest.frozen));
       for (const [key, b] of Object.entries(switches)) b.setAttribute("aria-pressed", String(Boolean(latest[key])));
       if (!isMidi) {
         const mode = monitorMode(latest);
@@ -4962,14 +4967,31 @@ class DawScreen {
     if (result && result.ok === false) toast(result.error || "Couldn't bounce the track.", "is-error");
   }
 
+  // Freeze: the track rendered through its effects and instrument, and played from that
+  // render instead (the effects and instrument stop using the CPU). Unfreeze brings them back.
+  async freezeTrack(id = this.selectedTrackObject()?.id) {
+    if (id == null) return toast("Select a track to freeze first.");
+    const result = await daw("freeze", { id });
+    if (result && result.ok === false) toast(result.error || "Couldn't freeze the track.", "is-error");
+  }
+
+  async unfreezeTrack(id = this.selectedTrackObject()?.id) {
+    if (id == null) return;
+    const result = await daw("unfreeze", { id });
+    if (result && result.ok === false) toast(result.error || "Couldn't unfreeze the track.", "is-error");
+    else toast("Unfrozen: the track's effects and instrument are live again.");
+  }
+
   onBounce(event) {
+    const freeze = Boolean(event.freeze);
     if (!event.done) {
-      this.setJob("bounce", { label: "Bounce", progress: event.progress ?? 0, cancel: () => daw("bounce", { cancel: true }) });
+      this.setJob("bounce", { label: freeze ? "Freeze" : "Bounce", progress: event.progress ?? 0, cancel: () => daw("bounce", { cancel: true }) });
       return;
     }
     this.endJob("bounce");
-    if (event.cancelled) toast("Bounce cancelled.");
-    else if (!event.ok) toast(event.error || "Couldn't bounce the track.", "is-error");
+    if (event.cancelled) toast(freeze ? "Freeze cancelled." : "Bounce cancelled.");
+    else if (!event.ok) toast(event.error || (freeze ? "Couldn't freeze the track." : "Couldn't bounce the track."), "is-error");
+    else if (freeze) toast("Track frozen. Right-click it to unfreeze.", "", "undo");
     else {
       this.select(event.track, null);
       toast("Bounced to a new track. The original is muted, so you can go back to it.", "", "undo");
@@ -6586,6 +6608,10 @@ class DawScreen {
       item("Clear effect automation", () => daw("setTrack", { id: track.id, clearAutomation: true }), { disabled: !track.automation?.length });
       item("Copy effects", () => this.copyEffects(track.id), { disabled: !track.inserts.length });
       item("Paste effects", () => this.pasteEffects(track.id), { disabled: !this.effectsClipboard || this.effectsClipboard.id === track.id });
+      if (track.frozen)
+        item("Unfreeze track", () => this.unfreezeTrack(track.id), { hint: "Plays the track's own clips, instrument and effects again" });
+      else
+        item("Freeze track", () => this.freezeTrack(track.id), { hint: "Renders the track through its effects and instrument and plays that instead, so they stop using the CPU. Your clips and settings stay as they are; Unfreeze brings them back." });
       item("Bounce to a new track", () => this.bounceTrack(track.id), { shortcut: "Ctrl+B",
         hint: "Renders the track through its effects to audio on a new track and mutes this one (inside the marked range, if there is one). Frees the CPU its plug-ins use." });
       if (track.kind !== "midi")
