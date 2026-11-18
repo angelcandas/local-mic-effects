@@ -6501,7 +6501,8 @@ class DawScreen {
     const from = { fromTrack: found.track.id, fromStart: clip.start };
     if (clip.midi) {
       this.clipboard = { midi: true, ...from, offset: clip.offset, length: clip.length, name: clip.name,
-                         notes: clip.notes.map(({ pitch, time, length, velocity }) => ({ pitch, time, length, velocity })) };
+                         notes: clip.notes.map(({ pitch, time, length, velocity }) => ({ pitch, time, length, velocity })),
+                         controllers: (clip.controllers ?? []).map(({ kind, number, time, value }) => ({ kind, number, time, value })) };
       if (cut) this.deleteSelected();
       return;
     }

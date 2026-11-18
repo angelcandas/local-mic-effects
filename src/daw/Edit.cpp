@@ -784,6 +784,49 @@ juce::ValueTree Edit::getNote (int noteId) const
     return findById (ids::NOTE, noteId);
 }
 
+const juce::String Edit::controllerCC { "cc" }, Edit::controllerBend { "bend" }, Edit::controllerPressure { "pressure" };
+
+int Edit::clampControllerValue (const juce::String& kind, int value)
+{
+    return kind == controllerBend ? juce::jlimit (-8192, 8191, value) : juce::jlimit (0, 127, value);
+}
+
+juce::ValueTree Edit::addController (int clipId, const juce::String& kind, int number, double time, int value)
+{
+    auto clip = getClip (clipId);
+    if (! clip.isValid() || ! isMidiClip (clip) || (kind != controllerCC && kind != controllerBend && kind != controllerPressure))
+        return {};
+
+    juce::ValueTree point (ids::CTRL);
+    point.setProperty (ids::id, takeNextId(), nullptr);
+    point.setProperty (ids::kind, kind, nullptr);
+    point.setProperty (ids::number, kind == controllerCC ? juce::jlimit (0, 127, number) : 0, nullptr);
+    point.setProperty (ids::time, juce::jmax (0.0, time), nullptr);
+    point.setProperty (ids::value, clampControllerValue (kind, value), nullptr);
+    clip.appendChild (point, undoTarget);
+    return point;
+}
+
+void Edit::setController (int id, double time, int value)
+{
+    if (auto point = getController (id); point.isValid())
+    {
+        point.setProperty (ids::time, juce::jmax (0.0, time), undoTarget);
+        point.setProperty (ids::value, clampControllerValue (point[ids::kind].toString(), value), undoTarget);
+    }
+}
+
+void Edit::removeController (int id)
+{
+    if (auto point = getController (id); point.isValid())
+        point.getParent().removeChild (point, undoTarget);
+}
+
+juce::ValueTree Edit::getController (int id) const
+{
+    return findById (ids::CTRL, id);
+}
+
 //==============================================================================
 juce::ValueTree Edit::addClip (int trackId, const juce::File& file, double startSeconds, double lengthSeconds,
                                double offsetSeconds)

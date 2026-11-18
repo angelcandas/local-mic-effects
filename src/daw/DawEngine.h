@@ -332,13 +332,17 @@ private:
         juce::MidiBuffer midi;
         juce::MidiBuffer audition;          // addLiveMidi for this track, played next block
         std::bitset<128> sounding;          // notes the timeline has started and not ended
+        std::bitset<128> ccTouched;         // controllers the timeline has sent (put back when it stops)
+        bool bendTouched = false, pressureTouched = false;
         juce::int64 nextBlock = -1;         // where playback would carry on; else it jumped
     };
 
     struct MidiEvent
     {
+        enum Kind { noteEvent, cc, bend, pressure };
         juce::int64 time = 0; // timeline samples
         int note = 0, velocity = 0; // velocity 0 = note off
+        Kind kind = noteEvent;      // for the others: note = the CC number, velocity = the value (bend: -8192..8191)
     };
 
     struct Clip

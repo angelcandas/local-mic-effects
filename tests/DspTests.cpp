@@ -7729,6 +7729,46 @@ namespace
         junk.replaceWithText ("not midi");
         check (! daw::midifile::read (junk, back, reason) && reason.isNotEmpty(), "a file that isn't MIDI is refused");
 
+                // Controllers: CC, pitch bend and pressure go out to the file and come back, into clips.
+        {
+            daw::Edit withControllers;
+            withControllers.setTempo (100.0);
+            const auto track = (int) withControllers.addMidiTrack ("Lead", *daw::instruments::findBuiltin ("builtin:keys"))[daw::ids::id];
+            const auto lead = (int) withControllers.addMidiClip (track, 0.0, withControllers.getTempoMap().toSeconds (4.0))[daw::ids::id];
+            const auto beat = [&] (double b) { return withControllers.getTempoMap().toSeconds (b); };
+            withControllers.addNote (lead, 60, 0.0, beat (1.0), 100);
+            withControllers.addController (lead, daw::Edit::controllerCC, 1, beat (1.0), 90);
+            withControllers.addController (lead, daw::Edit::controllerBend, 0, beat (2.0), -4096);
+            withControllers.addController (lead, daw::Edit::controllerPressure, 0, beat (3.0), 55);
+
+            const auto controllerSong = daw::midifile::fromClip (withControllers, lead);
+            check (controllerSong.parts.size() == 1 && controllerSong.parts[0].controllers.size() == 3, "a clip exports its controllers");
+
+            const auto controllerFile = folder.getChildFile ("controllers.mid");
+            daw::midifile::Song controllerBack;
+            check (daw::midifile::write (controllerFile, controllerSong, reason) && daw::midifile::read (controllerFile, controllerBack, reason),
+                   "controllers are written and read back");
+
+            const auto& c = controllerBack.parts[0].controllers;
+            bool wheelOk = false, bendOk = false, pressureOk = false;
+            for (const auto& point : c)
+            {
+                wheelOk = wheelOk || (point.kind == daw::Edit::controllerCC && point.number == 1 && point.value == 90 && std::abs (point.beat - 1.0) < 1.0e-6);
+                bendOk = bendOk || (point.kind == daw::Edit::controllerBend && point.value == -4096 && std::abs (point.beat - 2.0) < 1.0e-6);
+                pressureOk = pressureOk || (point.kind == daw::Edit::controllerPressure && point.value == 55 && std::abs (point.beat - 3.0) < 1.0e-6);
+            }
+            check (c.size() == 3 && wheelOk && bendOk && pressureOk, "CC, pitch bend and pressure keep their values and beats");
+
+            daw::Edit target;
+            const daw::midifile::Instruments instruments { *daw::instruments::findBuiltin ("builtin:keys"), *daw::instruments::findBuiltin ("builtin:beat") };
+            const auto placed = daw::midifile::addToEdit (target, controllerBack, 0.0, -1, instruments, "x");
+            int points = 0;
+            for (const auto& child : target.getClip (placed.clips[0]))
+                if (child.hasType (daw::ids::CTRL))
+                    ++points;
+            check (points == 3, "an imported file's controllers become points in the clip");
+        }
+
         folder.deleteRecursively();
     }
 
@@ -7882,6 +7922,98 @@ namespace
 
         check (edit.getUndoManager().getUndoDescription() == "Record", "the take is one undo step");
         edit.setTrackArm (keys, false);
+
+        // Controllers: the mod wheel, pitch bend and pressure are recorded with the notes (thinned),
+        // kept in CTRL points, and played back. The pedal isn't a point: it only lengthens notes.
+        {
+            edit.setTrackArm (keys, true);
+            engine.seek ((juce::int64) (4.0 * sampleRate));
+            check (engine.startRecording (folder).isEmpty() && engine.isRecording(), "records controllers with a MIDI track armed");
+            const auto from = (int) (4.0 * sampleRate);
+            std::vector<std::pair<int, juce::MidiMessage>> events { { from + (int) at (0.1), juce::MidiMessage::noteOn (1, 60, (juce::uint8) 90) },
+                                                                    { from + (int) at (0.9), juce::MidiMessage::noteOff (1, 60) } };
+            for (int i = 0; i < 100; ++i) // a wheel move: 100 values, 1 ms apart
+                events.push_back ({ from + (int) at (0.2) + i * 48, juce::MidiMessage::controllerEvent (1, 1, i) });
+            events.push_back ({ from + (int) at (0.5), juce::MidiMessage::controllerEvent (1, 1, 99) }); // a repeat
+            events.push_back ({ from + (int) at (0.4), juce::MidiMessage::pitchWheel (1, 8192 + 4096) });
+            events.push_back ({ from + (int) at (0.6), juce::MidiMessage::channelPressureChange (1, 70) });
+            events.push_back ({ from + (int) at (0.7), juce::MidiMessage::controllerEvent (1, 123, 0) }); // all notes off: not kept
+            std::sort (events.begin(), events.end(), [] (const auto& a, const auto& b) { return a.first < b.first; });
+            renderWithMidi (engine, 1.2, events, from);
+            engine.stopRecording();
+            edit.setTrackArm (keys, false);
+
+            juce::ValueTree recorded;
+            for (const auto& c : edit.getTrack (keys))
+                if (c.hasType (daw::ids::CLIP) && std::abs ((double) c[daw::ids::start] - 4.0) < 1.0e-6)
+                    recorded = c;
+
+            int wheel = 0, bends = 0, pressures = 0, others = 0;
+            double bendValue = 0.0;
+            for (const auto& point : recorded)
+            {
+                if (! point.hasType (daw::ids::CTRL))
+                    continue;
+                const auto kind = point[daw::ids::kind].toString();
+                if (kind == daw::Edit::controllerCC && (int) point[daw::ids::number] == 1) ++wheel;
+                else if (kind == daw::Edit::controllerBend) { ++bends; bendValue = (double) point[daw::ids::value]; }
+                else if (kind == daw::Edit::controllerPressure) ++pressures;
+                else ++others;
+            }
+            check (recorded.isValid() && recorded.getChildWithName (daw::ids::NOTE).isValid(), "the take with controllers has its note");
+            check (wheel >= 8 && wheel <= 14 && bends == 1 && pressures == 1 && others == 0 && std::abs (bendValue - 4096.0) < 1.0,
+                   "controllers are recorded and thinned (wheel " + juce::String (wheel) + " points of 100, bend " + juce::String (bends)
+                       + ", pressure " + juce::String (pressures) + ", other " + juce::String (others) + ")");
+
+            // Copying the clip copies its controllers.
+            const auto copy = edit.duplicateClip ((int) recorded[daw::ids::id]);
+            int copied = 0;
+            for (const auto& point : edit.getClip (copy))
+                if (point.hasType (daw::ids::CTRL))
+                    ++copied;
+            check (copied == wheel + bends + pressures, "a duplicated clip keeps its controllers");
+            edit.removeClip (copy);
+            edit.removeClip ((int) recorded[daw::ids::id]);
+        }
+
+        // Playback: a pitch bend lane bends the note, and stopping puts the bend back.
+        {
+            // (Nova follows the bend; the Keys don't.)
+            const auto bender = (int) edit.addMidiTrack ("Bender", *daw::instruments::findBuiltin ("builtin:lead"))[daw::ids::id];
+            edit.setTrackMute (keys, true);
+            const auto bendClip = (int) edit.addMidiClip (bender, 8.0, 2.0)[daw::ids::id];
+            edit.addNote (bendClip, 69, 0.0, 1.5, 100);
+            check (edit.addController (bendClip, daw::Edit::controllerBend, 0, 0.0, 0).isValid()
+                       && edit.addController (bendClip, daw::Edit::controllerBend, 99, 0.7, 8191).isValid()
+                       && ! edit.addController (bendClip, "nonsense", 0, 0.0, 0).isValid(),
+                   "controller points are added (a made-up kind is refused)");
+            const auto wheelPoint = edit.addController (bendClip, daw::Edit::controllerCC, 1, 0.1, 500);
+            check ((int) wheelPoint[daw::ids::value] == 127, "a CC value is held to 0..127");
+            edit.removeController ((int) wheelPoint[daw::ids::id]);
+            engine.rebuildNow();
+            engine.seek ((juce::int64) (8.0 * sampleRate));
+            engine.play();
+            out = render (engine, 1.6);
+            engine.stop();
+            const auto flat = estimateFrequency (out[0], at (0.1), at (0.5)), bent = estimateFrequency (out[0], at (0.9), at (1.4));
+            check (std::abs (flat - 440.0) < 8.0 && bent > 470.0,
+                   "a bend lane bends the note while it plays (" + juce::String (flat, 1) + " Hz, then " + juce::String (bent, 1) + " Hz)");
+
+            // The bend is reset when the timeline stops, so the next note is in tune.
+            const auto livePitch = [&]
+            {
+                engine.addLiveMidi (juce::MidiMessage::noteOn (1, 69, (juce::uint8) 100), bender);
+                const auto played = render (engine, 0.5);
+                engine.addLiveMidi (juce::MidiMessage::noteOff (1, 69), bender);
+                render (engine, 0.8);
+                return estimateFrequency (played[0], at (0.1), at (0.45));
+            };
+            render (engine, 0.1);
+            engine.rebuildNow();
+            const auto after = livePitch();
+            edit.setTrackMute (keys, false);
+            check (std::abs (after - flat) < 3.0, "stopping puts the bend back to centre (" + juce::String (after, 1) + " Hz)");
+        }
 
         // Projects: MIDI tracks, instruments and notes survive a save and open.
         {

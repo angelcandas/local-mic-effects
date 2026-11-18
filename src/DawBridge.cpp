@@ -373,7 +373,7 @@ namespace
             { "clipFades", "Fade" }, { "clipGain", "Clip gain" }, { "split", "Split clip" }, { "removeClip", "Delete clip" },
             { "duplicate", "Duplicate clip" }, { "pasteClip", "Paste clip" }, { "setClip", "Clip change" },
             { "normaliseClip", "Normalise clip" }, { "stripSilence", "Strip silence" }, { "addMidiClip", "Add MIDI clip" },
-            { "editNotes", "Edit notes" }, { "addInsert", "Add effect" }, { "addPluginInsert", "Add plug-in" }, { "removeInsert", "Remove effect" },
+            { "editNotes", "Edit notes" }, { "editControllers", "Edit controllers" }, { "addInsert", "Add effect" }, { "addPluginInsert", "Add plug-in" }, { "removeInsert", "Remove effect" },
             { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "insertFile", "Load effect file" }, { "pasteInserts", "Paste effects" },
             { "duplicateInsert", "Duplicate effect" }, { "copyInsert", "Copy effect" }, { "replaceInsert", "Replace effect" },
             { "renameInsert", "Rename effect" }, { "insertAB", "Effect A/B" }, { "loadChain", "Load chain" },
@@ -696,6 +696,18 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
     return list;
 }
 
+juce::var DawBridge::describeControllers (const juce::ValueTree& clip) const
+{
+    juce::Array<juce::var> points;
+
+    for (const auto& point : clip)
+        if (point.hasType (ids::CTRL))
+            points.add (object ({ { "id", (int) point[ids::id] }, { "kind", point[ids::kind].toString() }, { "number", (int) number (point, ids::number) },
+                                  { "time", number (point, ids::time) }, { "value", (int) number (point, ids::value) } }));
+
+    return points;
+}
+
 juce::var DawBridge::describeNotes (const juce::ValueTree& clip) const
 {
     juce::Array<juce::var> notes;
@@ -893,7 +905,7 @@ juce::var DawBridge::describeSession()
                                      { "start", number (clip, ids::start) }, { "offset", number (clip, ids::offset) },
                                      { "length", number (clip, ids::length) }, { "gain", 0.0 }, { "fadeIn", 0.0 }, { "fadeOut", 0.0 },
                                      { "mute", (bool) clip.getProperty (ids::mute, false) }, { "file", juce::String() },
-                                     { "fileLength", -1.0 }, { "missing", false }, { "notes", describeNotes (clip) } }));
+                                     { "fileLength", -1.0 }, { "missing", false }, { "notes", describeNotes (clip) }, { "controllers", describeControllers (clip) } }));
                 continue;
             }
 
@@ -5709,6 +5721,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         if (auto* notes = args["notes"].getArray())
             for (const auto& n : *notes)
                 edit.addNote (clipId, n["pitch"], n["time"], n["length"], arg (n, "velocity", 100));
+        if (auto* points = args["controllers"].getArray())
+            for (const auto& c : *points)
+                edit.addController (clipId, c["kind"].toString(), arg (c, "number", 0), arg (c, "time", 0.0), arg (c, "value", 0));
         pasteLanesWith (args, clip);
         complete (clipId);
         return;
@@ -7626,6 +7641,10 @@ void DawBridge::showInstrumentWindow (int trackId)
 //   addMidiClip {track, start, length} -> the new clip's id
 //   editNotes {clip, add: [{pitch, time, length, velocity}], change: [{id, ...}], remove: [ids]}
 //                                    one undo step -> { ok, added: [ids] }
+//   editControllers {clip, add: [{kind: "cc" | "bend" | "pressure", number, time, value}],
+//                    change: [{id, time, value}], remove: [ids]}
+//                                    CC (0..127), pitch bend (-8192..8191) and channel pressure
+//                                    points of a MIDI clip, one undo step -> { ok, added: [ids] }
 //   liveNote {note, velocity}        plays a note on the armed/monitored MIDI tracks (0 = off)
 bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, Complete& complete)
 {
@@ -7797,6 +7816,42 @@ bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, 
         if (auto* notes = args["add"].getArray())
             for (const auto& n : *notes)
                 added.add (edit.addNote (clipId, n["pitch"], n["time"], n["length"], arg (n, "velocity", 100))[ids::id]);
+
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "added", added } }));
+        return true;
+    }
+
+    if (command == "editControllers")
+    {
+        const auto clipId = arg (args, "clip", -1);
+        if (! daw::Edit::isMidiClip (edit.getClip (clipId)))
+        {
+            complete (error ("Pick a MIDI clip first."));
+            return true;
+        }
+
+        if (auto* removed = args["remove"].getArray())
+            for (const auto& id : *removed)
+                edit.removeController (id);
+
+        if (auto* changed = args["change"].getArray())
+        {
+            for (const auto& c : *changed)
+            {
+                const auto point = edit.getController (c["id"]);
+                if (point.isValid())
+                    edit.setController (c["id"], arg (c, "time", number (point, ids::time)), arg (c, "value", (int) number (point, ids::value)));
+            }
+        }
+
+        juce::Array<juce::var> added;
+        if (auto* points = args["add"].getArray())
+            for (const auto& c : *points)
+            {
+                const auto point = edit.addController (clipId, c["kind"].toString(), arg (c, "number", 0), arg (c, "time", 0.0), arg (c, "value", 0));
+                if (point.isValid())
+                    added.add (point[ids::id]);
+            }
 
         complete (object ({ { "ok", true }, { "error", juce::String() }, { "added", added } }));
         return true;

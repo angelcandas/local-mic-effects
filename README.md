@@ -307,10 +307,13 @@ tracks instead of one live chain:
   Dexed, Vital or OB-Xd work, and so do commercial ones like Kontakt, which opens in its own window
   from the ♫ button on the track. Their settings are saved in the project.
   Arm a MIDI track to play it from your MIDI keyboard (every MIDI input is opened) and record: the
-  take becomes a MIDI clip (the sustain pedal is kept). Double-click a MIDI track's lane for an
+  take becomes a MIDI clip (the sustain pedal lengthens notes; the mod wheel, other CCs, pitch bend and pressure are kept as controller points). Double-click a MIDI track's lane for an
   empty clip, and select a MIDI clip to edit its notes in the **piano roll** on the bottom panel's **Track** tab:
   click to add, drag to move, drag the end to resize, double-click to delete, box-select, ↑↓ to
-  transpose, Q to quantize to the grid. Exports play the instruments too.
+  transpose, Q to quantize to the grid. The **controller lane** under the notes (pick mod wheel, expression,
+  pitch bend, pressure or any CC) shows those points as a stepped line: drag on empty space to draw,
+  drag a point to move it, double-click or Delete to remove it. They play back on the instrument
+  (and are reset when playback stops), and they go in and out of MIDI files. Exports play the instruments too.
 - **Menus**: the standalone app has File (new, open, save, import, export, audio settings), Edit,
   View and Transport menus, in the macOS menu bar at the top of the screen or under the title bar
   on Windows and Linux. They do the same as the buttons and shortcuts.

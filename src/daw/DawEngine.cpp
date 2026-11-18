@@ -3,6 +3,7 @@
 #include "RackInsert.h"
 
 #include <functional>
+#include <map>
 
 namespace daw
 {
@@ -377,7 +378,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         return;
     }
 
-    if (tree.hasType (ids::NOTE))
+    if (tree.hasType (ids::NOTE) || tree.hasType (ids::CTRL))
     {
         requestRebuild();
         return;
@@ -1258,6 +1259,15 @@ void DawEngine::rebuild()
     rebuildPending = false; // what loaded while it built is in this graph
 }
 
+namespace
+{
+    // What a controller goes back to when the timeline stops: volume and expression up, the rest zero.
+    int restValueOfController (int number) noexcept
+    {
+        return number == 7 ? 100 : number == 11 ? 127 : 0;
+    }
+}
+
 void DawEngine::buildMidiEvents (Track& track, const juce::ValueTree& trackTree, double rate, juce::int64& end,
                                  const TempoMap& tempo, const juce::ValueTree& loopPattern)
 {
@@ -1294,6 +1304,21 @@ void DawEngine::buildMidiEvents (Track& track, const juce::ValueTree& trackTree,
 
         const auto clipEnd = toSamples (start + length);
 
+        for (const auto& point : clip)
+        {
+            if (! point.hasType (ids::CTRL))
+                continue;
+
+            const auto time = (double) point[ids::time];
+            if (time < offset || time >= offset + length)
+                continue;
+
+            const auto kind = point[ids::kind].toString();
+            const auto type = kind == Edit::controllerBend ? MidiEvent::bend : kind == Edit::controllerPressure ? MidiEvent::pressure : MidiEvent::cc;
+            track.midiEvents.push_back ({ toSamples (start + time - offset), juce::jlimit (0, 127, (int) point[ids::number]),
+                                          Edit::clampControllerValue (kind, (int) point[ids::value]), type });
+        }
+
         for (const auto& note : clip)
         {
             if (! note.hasType (ids::NOTE))
@@ -1314,10 +1339,12 @@ void DawEngine::buildMidiEvents (Track& track, const juce::ValueTree& trackTree,
         }
     }
 
-    // In time order; at the same time, note-offs first so a repeated note restarts.
-    std::sort (track.midiEvents.begin(), track.midiEvents.end(), [] (const MidiEvent& a, const MidiEvent& b)
+    // In time order; at the same time controllers first (a bend is in place for the note),
+    // then note-offs so a repeated note restarts.
+    const auto rank = [] (const MidiEvent& e) { return e.kind != MidiEvent::noteEvent ? 0 : e.velocity > 0 ? 2 : 1; };
+    std::stable_sort (track.midiEvents.begin(), track.midiEvents.end(), [&] (const MidiEvent& a, const MidiEvent& b)
     {
-        return a.time != b.time ? a.time < b.time : a.velocity < b.velocity;
+        return a.time != b.time ? a.time < b.time : rank (a) < rank (b);
     });
 }
 
@@ -1897,7 +1924,9 @@ Recorder::Take DawEngine::stopRecording()
     // moved earlier by the output latency (the keys were played to what was heard). Held
     // by the sustain pedal until it lifts; anything still held ends at the stop.
     struct Played { int pitch, velocity; double time, length; };
+    struct PlayedController { juce::String kind; int number; double time; int value; };
     std::vector<Played> notes;
+    std::vector<PlayedController> controllers;
     const auto takeStart = recordStart.load();
 
     if (wasRecordingMidi)
@@ -1936,13 +1965,42 @@ Recorder::Take DawEngine::stopRecording()
             }
             else if (type == 0xb0 && event.data1 == 64)
             {
-                pedal = event.data2 >= 64;
+                pedal = event.data2 >= 64; // held notes are longer: the pedal itself isn't kept
                 if (! pedal)
                     for (int p = 0; p < 128; ++p)
                         if (sustained[(size_t) p])
                             end (p, time);
             }
+            else if (type == 0xb0)
+                controllers.push_back ({ Edit::controllerCC, event.data1, time, event.data2 });
+            else if (type == 0xe0)
+                controllers.push_back ({ Edit::controllerBend, 0, time, ((event.data2 << 7) | event.data1) - 8192 });
+            else if (type == 0xd0)
+                controllers.push_back ({ Edit::controllerPressure, 0, time, event.data1 });
         }
+
+        // A wheel sends hundreds of values a second: per lane, drop repeats and keep one
+        // point per 10 ms (and the last value of the move).
+        std::vector<PlayedController> thinned;
+        std::map<std::pair<juce::String, int>, std::vector<PlayedController>> lanes;
+        for (const auto& c : controllers)
+            lanes[{ c.kind, c.number }].push_back (c);
+
+        for (auto& [lane, points] : lanes)
+        {
+            const PlayedController* kept = nullptr;
+            for (size_t i = 0; i < points.size(); ++i)
+            {
+                const auto& c = points[i];
+                const auto isLast = i + 1 == points.size();
+                if (kept == nullptr || (c.value != kept->value && (c.time - kept->time >= 0.01 || isLast)))
+                {
+                    thinned.push_back (c);
+                    kept = &points[i];
+                }
+            }
+        }
+        controllers = std::move (thinned);
 
         for (int p = 0; p < 128; ++p)
             end (p, seconds (stopAt));
@@ -1950,12 +2008,12 @@ Recorder::Take DawEngine::stopRecording()
         recordedMidi.clear();
     }
 
-    if (! hasAudio && notes.empty())
+    if (! hasAudio && notes.empty() && controllers.empty())
         return take;
 
     edit.getUndoManager().beginNewTransaction ("Record");
 
-    if (! notes.empty())
+    if (! notes.empty() || ! controllers.empty())
     {
         const auto start = (double) takeStart / sampleRate;
         const auto takeLength = juce::jmax (Edit::minClipSeconds, (double) (stopAt - takeStart) / sampleRate);
@@ -1968,6 +2026,8 @@ Recorder::Take DawEngine::stopRecording()
             const auto clip = edit.addMidiClip ((int) track[ids::id], start, takeLength, track[ids::name].toString());
             for (const auto& note : notes)
                 edit.addNote ((int) clip[ids::id], note.pitch, note.time, note.length, note.velocity);
+            for (const auto& c : controllers)
+                edit.addController ((int) clip[ids::id], c.kind, c.number, c.time, c.value);
         }
     }
 
@@ -2147,13 +2207,14 @@ void DawEngine::recordMidi (const juce::MidiBuffer& midi, int midiOffset, int nu
 
         // Pattern recording: from anywhere in the loop (after the count-in).
         const auto early = patternRecording.load (std::memory_order_relaxed) ? countingIn.load() : time < start;
-        if (early || ! (message.isNoteOnOrOff() || message.isSustainPedalOn() || message.isSustainPedalOff()))
+        const auto controller = message.isController() && message.getControllerNumber() < 120; // 120 up: channel mode
+        if (early || ! (message.isNoteOnOrOff() || controller || message.isPitchWheel() || message.isChannelPressure()))
             continue;
 
         const auto* data = message.getRawData();
         const auto scope = midiFifo.write (1);
         if (scope.blockSize1 == 1)
-            midiFifoData[(size_t) scope.startIndex1] = { time, data[0], data[1], data[2] };
+            midiFifoData[(size_t) scope.startIndex1] = { time, data[0], data[1], message.getRawDataSize() > 2 ? data[2] : (juce::uint8) 0 };
     }
 }
 
@@ -2183,7 +2244,8 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce
             {
                 if (e.time >= windowStart)
                     break;
-                keep.set ((size_t) e.note, e.velocity > 0);
+                if (e.kind == MidiEvent::noteEvent)
+                    keep.set ((size_t) e.note, e.velocity > 0);
             }
 
         for (int note = 0; note < 128; ++note)
@@ -2199,11 +2261,62 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce
         auto it = std::lower_bound (events.begin(), events.end(), windowStart,
                                     [] (const MidiEvent& e, juce::int64 t) { return e.time < t; });
 
+        // A new graph or a jump: the controllers take the value they have at the playhead
+        // (the latest before it), and the ones that have none yet go back to their rest value.
+        if (fresh || jumped)
+        {
+            std::array<int, 128> ccValue;
+            ccValue.fill (-1);
+            int bendValue = -100000, pressureValue = -1;
+
+            for (auto earlier = events.begin(); earlier != it; ++earlier)
+            {
+                if (earlier->kind == MidiEvent::cc) ccValue[(size_t) earlier->note] = earlier->velocity;
+                else if (earlier->kind == MidiEvent::bend) bendValue = earlier->velocity;
+                else if (earlier->kind == MidiEvent::pressure) pressureValue = earlier->velocity;
+            }
+
+            for (int n = 0; n < 128; ++n)
+            {
+                if (ccValue[(size_t) n] >= 0)
+                {
+                    midi.addEvent (juce::MidiMessage::controllerEvent (1, n, ccValue[(size_t) n]), 0);
+                    strip.ccTouched.set ((size_t) n);
+                }
+                else if (strip.ccTouched[(size_t) n])
+                {
+                    midi.addEvent (juce::MidiMessage::controllerEvent (1, n, restValueOfController (n)), 0);
+                    strip.ccTouched.reset ((size_t) n);
+                }
+            }
+
+            if (bendValue > -100000)       { midi.addEvent (juce::MidiMessage::pitchWheel (1, bendValue + 8192), 0); strip.bendTouched = true; }
+            else if (strip.bendTouched)    { midi.addEvent (juce::MidiMessage::pitchWheel (1, 8192), 0); strip.bendTouched = false; }
+
+            if (pressureValue >= 0)        { midi.addEvent (juce::MidiMessage::channelPressureChange (1, pressureValue), 0); strip.pressureTouched = true; }
+            else if (strip.pressureTouched) { midi.addEvent (juce::MidiMessage::channelPressureChange (1, 0), 0); strip.pressureTouched = false; }
+        }
+
         for (; it != events.end() && it->time < windowStart + numSamples; ++it)
         {
             const auto at = (int) (it->time - windowStart);
 
-            if (it->velocity > 0)
+            if (it->kind == MidiEvent::cc)
+            {
+                midi.addEvent (juce::MidiMessage::controllerEvent (1, it->note, it->velocity), at);
+                strip.ccTouched.set ((size_t) it->note);
+            }
+            else if (it->kind == MidiEvent::bend)
+            {
+                midi.addEvent (juce::MidiMessage::pitchWheel (1, it->velocity + 8192), at);
+                strip.bendTouched = true;
+            }
+            else if (it->kind == MidiEvent::pressure)
+            {
+                midi.addEvent (juce::MidiMessage::channelPressureChange (1, it->velocity), at);
+                strip.pressureTouched = true;
+            }
+            else if (it->velocity > 0)
             {
                 midi.addEvent (juce::MidiMessage::noteOn (1, it->note, (juce::uint8) it->velocity), at);
                 strip.sounding.set ((size_t) it->note);
@@ -2220,6 +2333,18 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce
     else
     {
         strip.nextBlock = -1;
+
+        // Stopped: what the timeline bent or moved goes back to rest.
+        if (strip.ccTouched.any() || strip.bendTouched || strip.pressureTouched)
+        {
+            for (int n = 0; n < 128; ++n)
+                if (strip.ccTouched[(size_t) n])
+                    midi.addEvent (juce::MidiMessage::controllerEvent (1, n, restValueOfController (n)), 0);
+            if (strip.bendTouched)     midi.addEvent (juce::MidiMessage::pitchWheel (1, 8192), 0);
+            if (strip.pressureTouched) midi.addEvent (juce::MidiMessage::channelPressureChange (1, 0), 0);
+            strip.ccTouched.reset();
+            strip.bendTouched = strip.pressureTouched = false;
+        }
     }
 
     if (input != nullptr && strip.monitoring.load (std::memory_order_relaxed))

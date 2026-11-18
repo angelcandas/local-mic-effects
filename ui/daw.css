@@ -1448,6 +1448,10 @@ body.library-dragging * { cursor: grabbing !important; }
 .roll-velocity { flex: 1; min-width: 0; accent-color: var(--accent); }
 .roll-velocity-value { width: 24px; text-align: right; font-variant-numeric: tabular-nums; }
 .roll-hint { margin: 0; font-size: 10.5px; }
+.roll-stage { display: flex; flex: 1 1 auto; flex-direction: column; gap: 6px; min-width: 200px; min-height: 0; }
+.roll-lane { flex: none; }
+.roll-lane-number { flex: 0 0 56px !important; }
+.roll-lane[hidden] { display: none; }
 .roll-view {
   position: relative;
   flex: 1 1 auto;
