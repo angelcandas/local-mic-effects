@@ -7,6 +7,7 @@ haven't seen yet. To add an entry for your change, see "Adding entries" in
 
 ## 2026-11-18
 
+- **Auto Mix learns from real mixes.** The voice sits where engineers put it over the band, instruments get a gentle tone nudge toward finished mixes, and track names like BassAmpMic or ElecGtr_Vox get the right role. (#216)
 - **Lyrics in Practice.** Paste a song's lyrics or import an .lrc file: each line is timed to the singing, lights up word by word as you sing, follows speed changes, and any line can be nudged and is saved with the song. (#215)
 - **Live key and speed in Practice.** Changing the song's speed or key in Practice is heard within a moment, right where the song is, while the rest of the song is prepared behind it; settings you've used before load instantly. (#211)
 - **Auto Mix starts fresh.** Closing Auto Mix forgets the last run, so it opens with the default style and options every time. Changes you tried and didn't keep yet are still shown so you can keep or discard them. (#212)
