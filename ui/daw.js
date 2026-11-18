@@ -1488,11 +1488,19 @@ class DawScreen {
   }
 
   // New, Open, the recent projects, Save as and Import (Save and Export stay as buttons).
-  openProjectMenu(anchor) {
+  async openProjectMenu(anchor) {
     const box = anchor.getBoundingClientRect();
     const s = this.session;
+    const templates = (await daw("templates")) ?? {};
+    const builtIn = templates.builtIn ?? [];
+    const mine = templates.mine ?? [];
     popMenu(box.left, box.bottom + 4, ({ item, rule, heading }) => {
       item("New project", () => daw("new"), { shortcut: "Ctrl+N" });
+      if (builtIn.length || mine.length) {
+        heading("New from template");
+        for (const t of builtIn) item(t.name, () => daw("newFromTemplate", { source: t.source }), { hint: t.description, indent: true });
+        for (const t of mine) item(t.name, () => daw("newFromTemplate", { source: t.source }), { hint: "One of your templates", indent: true });
+      }
       item("Open…", () => daw("open"), { shortcut: "Ctrl+O" });
       const recent = (s?.recent ?? []).filter((r) => r.path !== s.project.path);
       if (recent.length) {
@@ -1502,11 +1510,24 @@ class DawScreen {
       rule();
       item("Save", () => daw("save"), { shortcut: "Ctrl+S" });
       item("Save as…", () => daw("saveAs"), { shortcut: "Ctrl+Shift+S" });
+      item("Save as template…", () => this.saveTemplate(anchor), { hint: "Keeps the tracks, effects, sends, tempo and loop (not the recorded audio) as a starting point for new projects" });
+      if (mine.length) {
+        rule();
+        heading("Remove a template");
+        for (const t of mine) item(t.name, () => daw("deleteTemplate", { name: t.name }).then((r) => r?.ok !== false && toast(`Removed the template ${t.name}.`)), { indent: true });
+      }
       rule();
       item("Import audio…", () => this.importAudio(), { shortcut: "Ctrl+I" });
       item("Import MIDI file…", () => this.importMidi(), { hint: "A .mid file: each of its parts becomes a MIDI track with a clip (drag one in from the library too)" });
       item("Export…", () => this.toggleExportPanel(true), { shortcut: "Ctrl+Shift+R" });
     }, anchor);
+  }
+
+  saveTemplate(anchor) {
+    askName(anchor, { value: this.session?.project?.name ?? "", placeholder: "Template name" }, async (name) => {
+      const result = await daw("saveTemplate", { name });
+      if (result?.ok !== false) toast(`Saved the template ${name}. Find it under New from template.`);
+    });
   }
 
   // Narrow windows: fold the least used controls into the "more" menu, one level at a

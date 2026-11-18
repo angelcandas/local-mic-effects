@@ -579,6 +579,67 @@ juce::var DawBridge::describeRecentProjects() const
     return list;
 }
 
+// The templates the New menu offers: the built-in ones and your own.
+juce::var DawBridge::describeTemplates() const
+{
+    juce::Array<juce::var> builtIn, mine;
+    for (const auto& t : daw::templates::getBuiltIn())
+        builtIn.add (object ({ { "source", "builtin:" + juce::String (t.key) }, { "name", t.name }, { "description", t.description } }));
+    for (const auto& t : daw::templates::listUser())
+        mine.add (object ({ { "source", "user:" + t.name }, { "name", t.name } }));
+    return object ({ { "ok", true }, { "error", juce::String() }, { "builtIn", builtIn }, { "mine", mine } });
+}
+
+// Puts a built-in template into the (empty) session: tracks with their vocal chains and
+// instruments, sends to the reverb, tempo, loop, click.
+void DawBridge::applyBuiltInTemplate (const daw::templates::Template& t)
+{
+    auto& host = processor.getPluginHost();
+    const auto& presets = getPresets();
+    const auto returns = edit.getReturns();
+
+    edit.setTempo (t.tempo);
+    edit.setBeatsPerBar (t.beatsPerBar);
+
+    for (const auto& spec : t.tracks)
+    {
+        const juce::String instrument (spec.instrument);
+        juce::ValueTree track;
+
+        if (instrument.isNotEmpty())
+            track = edit.addMidiTrack (spec.name, host.findInstrument (instrument).value_or (daw::instruments::getDefault()));
+        else
+            track = edit.addTrack (spec.name);
+
+        const auto id = (int) track[ids::id];
+        if (juce::String (spec.colour).isNotEmpty())
+            edit.getTrack (id).setProperty (ids::colour, juce::String (spec.colour), nullptr);
+
+        for (size_t p = 0; p < presets.size(); ++p)
+            if (juce::String (spec.chain).isNotEmpty() && juce::String (presets[p].name) == spec.chain)
+            {
+                loadPresetInto (id, (int) p);
+                break;
+            }
+
+        if (spec.reverbSendDb > daw::Edit::minSendDb && ! returns.isEmpty())
+            edit.setSend (id, (int) returns.getFirst()[ids::id], spec.reverbSendDb);
+
+        if (spec.arm)
+        {
+            edit.setTrackArm (id, true);
+            edit.setTrackMonitor (id, true);
+        }
+    }
+
+    if (t.loopBars > 0)
+        edit.setLoop (true, 0.0, t.loopBars * t.beatsPerBar * 60.0 / t.tempo);
+
+    engine.setMetronome (t.metronome);
+    engine.setCountInBars (t.countInBars);
+    edit.getUndoManager().clearUndoHistory();
+}
+
 juce::File DawBridge::getRecordingFolder() const
 {
     return project.isOpen() ? project.getAudioFolder() : Recorder::getDefaultFolder();
@@ -1843,6 +1904,38 @@ juce::var DawBridge::newProject (const juce::File& folder)
     if (result.isEmpty())
     {
         setMode (true); // adds the first track
+        result = project.save();
+    }
+
+    peakCache.clear();
+    rememberProject();
+    sessionChanged = true;
+    return error (result);
+}
+
+juce::var DawBridge::newFromTemplate (const juce::File& folder, const juce::String& source)
+{
+    const auto isUser = source.startsWith ("user:");
+    const auto* builtIn = isUser ? nullptr : daw::templates::findBuiltIn (source.fromFirstOccurrenceOf ("builtin:", false, false));
+    juce::ValueTree saved;
+
+    if (isUser)
+    {
+        saved = daw::templates::readUser (source.fromFirstOccurrenceOf ("user:", false, false));
+        if (! saved.isValid())
+            return error ("Couldn't read that template.");
+    }
+    else if (builtIn == nullptr)
+        return error ("There is no such template.");
+
+    engine.stop();
+    auto result = project.createNew (folder, saved);
+
+    if (result.isEmpty())
+    {
+        if (builtIn != nullptr)
+            applyBuiltInTemplate (*builtIn);
+        setMode (true); // a template with no tracks still gets the first one
         result = project.save();
     }
 
@@ -7029,6 +7122,41 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                      Flags::saveMode | Flags::canSelectFiles,
                      [this, isNew] (const juce::File& file) { return isNew ? newProject (file) : saveProjectAs (file); },
                      complete);
+        return;
+    }
+
+    // "templates": the templates to start from { builtIn: [{ source, name, description }], mine: [{ source, name }] }.
+    if (command == "templates")
+    {
+        complete (describeTemplates());
+        return;
+    }
+
+    // "newFromTemplate" { source }: asks where to put the project, then starts it from the template.
+    if (command == "newFromTemplate")
+    {
+        const auto source = args["source"].toString();
+        const auto base = source.startsWith ("user:") ? source.fromFirstOccurrenceOf ("user:", false, false)
+                                                      : juce::String (daw::templates::findBuiltIn (source.fromFirstOccurrenceOf ("builtin:", false, false)) != nullptr
+                                                                          ? daw::templates::findBuiltIn (source.fromFirstOccurrenceOf ("builtin:", false, false))->name
+                                                                          : "New Song");
+        withChooser ("New project from template", projectsFolder.getChildFile (base), {}, Flags::saveMode | Flags::canSelectFiles,
+                     [this, source] (const juce::File& file) { return newFromTemplate (file, source); }, complete);
+        return;
+    }
+
+    // "saveTemplate" { name }: the session without its audio, kept as one of your templates.
+    if (command == "saveTemplate")
+    {
+        if (project.onBeforeWrite)
+            project.onBeforeWrite();
+        complete (error (daw::templates::saveUser (edit.getState(), args["name"].toString())));
+        return;
+    }
+
+    if (command == "deleteTemplate")
+    {
+        complete (error (daw::templates::removeUser (args["name"].toString())));
         return;
     }
 
