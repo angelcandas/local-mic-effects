@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 208,
+ "latest": 211,
  "days": [
   {
    "date": "2026-11-18",
    "entries": [
+    {
+     "title": "Live key and speed in Practice",
+     "text": "Changing the song's speed or key in Practice is heard within a moment, right where the song is, while the rest of the song is prepared behind it; settings you've used before load instantly.",
+     "prs": [
+      211
+     ]
+    },
     {
      "title": "Practice upgrades",
      "text": "Exit Practice with a button or Esc, reopen saved songs from a Library without splitting again, and change the speed (50-150%) and key (up to 12 semitones plus cents) of the whole song independently.",
