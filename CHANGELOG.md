@@ -7,6 +7,7 @@ haven't seen yet. To add an entry for your change, see "Adding entries" in
 
 ## 2026-11-18
 
+- **Practice upgrades.** Exit Practice with a button or Esc, reopen saved songs from a Library without splitting again, and change the speed (50-150%) and key (up to 12 semitones plus cents) of the whole song independently. (#208)
 - **Computer audio in Live.** Mix sound from your computer (a backing track from a browser, a video call) with your voice, hear it and record it. (#194)
 - **Pick your mic input.** In Live, choose which interface input is the microphone. (#195)
 - **MIDI instruments in Live.** Play a keyboard or a drum kit straight from your MIDI controller. (#197)

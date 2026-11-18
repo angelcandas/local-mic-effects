@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 206,
+ "latest": 208,
  "days": [
   {
    "date": "2026-11-18",
    "entries": [
+    {
+     "title": "Practice upgrades",
+     "text": "Exit Practice with a button or Esc, reopen saved songs from a Library without splitting again, and change the speed (50-150%) and key (up to 12 semitones plus cents) of the whole song independently.",
+     "prs": [
+      208
+     ]
+    },
     {
      "title": "Computer audio in Live",
      "text": "Mix sound from your computer (a backing track from a browser, a video call) with your voice, hear it and record it.",

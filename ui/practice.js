@@ -23,6 +23,10 @@ const SECONDS_SHOWN = 9;
 const PLAYHEAD = 0.28; // where "now" sits across the lane
 const TRAIL_SECONDS = 12;
 
+const SPEEDS = [0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5];
+const WHOLE_SONG = -2; // the engine's marker for "the whole song at another speed"
+const nearestSpeed = (speed) => SPEEDS.reduce((a, b) => (Math.abs(b - speed) < Math.abs(a - speed) ? b : a));
+
 const PHASES = {
   reading: "Reading the song…",
   downloading: "Downloading the separation model (once, about 84 MB)…",
@@ -54,6 +58,9 @@ export class PracticeView {
     this.build();
 
     toggle.addEventListener("click", () => this.show(!this.open));
+    document.addEventListener("keydown", (event) => {
+      if (event.key === "Escape" && this.open && !event.defaultPrevented && !/^(INPUT|SELECT|TEXTAREA)$/.test(event.target?.tagName ?? "")) this.show(false);
+    });
     const backend = window.__JUCE__.backend;
     backend.addEventListener("practice", (event) => this.onPractice(event));
     backend.addEventListener("practicePitch", (event) => this.onPitch(event));
@@ -90,6 +97,10 @@ export class PracticeView {
                                      { type: "button", title: "Choose a recording of a voice on its own (an a cappella or guide vocal): no splitting" });
     this.voiceButton.addEventListener("click", () => practice("open", { split: false }));
 
+    this.libraryButton = Object.assign(html("button", "text-button practice-library-button", "Library"),
+                                       { type: "button", title: "Songs you've prepared before: open one without splitting it again" });
+    this.libraryButton.addEventListener("click", () => this.toggleLibrary());
+
     const guide = html("label", "practice-guide");
     guide.title = "How loud the original singer plays under you (all the way down mutes it)";
     this.guideSlider = Object.assign(document.createElement("input"), { type: "range", min: 0, max: 150, step: 1, value: 35 });
@@ -100,6 +111,23 @@ export class PracticeView {
       practice("guide", { level });
     });
     guide.append(html("span", "", "Guide voice"), this.guideSlider, this.guideValue);
+
+    // The speed of the whole song (the pitch stays); phrase and section loops use it too.
+    this.loopSpeed = 1;
+    const speedLabel = html("label", "practice-speed");
+    speedLabel.title = "Play the song slower or faster without changing its pitch";
+    this.speedSelect = select(SPEEDS.map((s) => [s, `${Math.round(s * 100)}%`]), 1);
+    this.speedSelect.addEventListener("change", () => this.onSpeedChange());
+    speedLabel.append(html("span", "", "Speed"), this.speedSelect);
+
+    // The key of the whole song (and of its loops): semitones plus cents, independent of the speed.
+    const keyLabel = html("label", "practice-speed");
+    keyLabel.title = "Change the key of the song without changing its speed (the notes to sing move with it)";
+    this.keySelect = select(Array.from({ length: 25 }, (_, i) => i - 12).map((k) => [k, k === 0 ? "Original" : `${k > 0 ? "+" : "−"}${Math.abs(k)} st`]), 0);
+    this.centsSelect = select(Array.from({ length: 11 }, (_, i) => (i - 5) * 10).map((c) => [c, c === 0 ? "0 ¢" : `${c > 0 ? "+" : "−"}${Math.abs(c)} ¢`]), 0);
+    this.keySelect.addEventListener("change", () => this.onSpeedChange());
+    this.centsSelect.addEventListener("change", () => this.onSpeedChange());
+    keyLabel.append(html("span", "", "Key"), this.keySelect, this.centsSelect);
 
     const restart = Object.assign(html("button", "tool practice-restart", "From the top"), { type: "button", title: "Back to the start and play" });
     restart.addEventListener("click", async () => {
@@ -115,30 +143,28 @@ export class PracticeView {
     this.passLabel = html("div", "practice-pass");
     this.passLabel.append(html("span", "practice-pass-value", "–"), html("small", "", "this pass"));
 
-    bar.append(title, this.openButton, this.voiceButton, guide, restart, this.reportButton, this.passLabel);
+    this.exitButton = Object.assign(html("button", "tool practice-exit", "✕ Exit practice"),
+                                    { type: "button", title: "Leave Practice and go back to the Live view (Esc)" });
+    this.exitButton.addEventListener("click", () => this.show(false));
+
+    bar.append(title, this.openButton, this.voiceButton, this.libraryButton, guide, speedLabel, keyLabel, restart, this.reportButton, this.passLabel, this.exitButton);
+
+    // Songs prepared before.
+    this.library = html("div", "practice-library");
+    this.library.hidden = true;
 
     // Looping one phrase: what's looping, how slow, which key, and the way back.
-    this.loopSpeed = 1;
     this.loopKey = 0;
     this.weak = [];
     this.loopBar = html("div", "practice-loop");
     this.loopBar.hidden = true;
     this.loopLabel = html("span", "practice-loop-label");
-    const speedLabel = html("label", "", "Speed ");
-    this.speedSelect = select([[1, "100%"], [0.9, "90%"], [0.75, "75%"], [0.6, "60%"], [0.5, "50%"]], 1);
-    speedLabel.append(this.speedSelect);
-    const keyLabel = html("label", "", "Key ");
-    this.keySelect = select([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5].map((k) => [k, k === 0 ? "Original" : `${k > 0 ? "+" : "−"}${Math.abs(k)} st`]), 0);
-    keyLabel.append(this.keySelect);
     const relooped = () => {
-      this.loopSpeed = Number(this.speedSelect.value);
-      this.loopKey = Number(this.keySelect.value);
       const loop = this.song?.loop;
       if (loop?.section >= 0) this.loopSection(loop.section);
       else if (loop) this.loopPhrase(loop.phrase);
     };
-    this.speedSelect.addEventListener("change", relooped);
-    this.keySelect.addEventListener("change", relooped);
+    this.relooped = relooped;
     this.nextWeak = Object.assign(html("button", "tool", "Next weak phrase"), { type: "button" });
     this.nextWeak.addEventListener("click", () => {
       const at = this.weak.indexOf(this.song?.loop?.phrase);
@@ -146,7 +172,7 @@ export class PracticeView {
     });
     const back = Object.assign(html("button", "tool is-accent", "Back to the song"), { type: "button" });
     back.addEventListener("click", () => practice("unloop"));
-    this.loopBar.append(this.loopLabel, speedLabel, keyLabel, this.nextWeak, back);
+    this.loopBar.append(this.loopLabel, this.nextWeak, back);
 
     // Preparing a song.
     this.progress = html("div", "practice-progress");
@@ -185,7 +211,45 @@ export class PracticeView {
     this.stage.append(this.report);
     this.report.addEventListener("pointerdown", (event) => event.stopPropagation());
 
-    s.append(bar, this.loopBar, this.progress, this.stage, this.sectionStrip, this.phraseStrip, this.message);
+    s.append(bar, this.library, this.loopBar, this.progress, this.stage, this.sectionStrip, this.phraseStrip, this.message);
+  }
+
+  onSpeedChange() {
+    this.loopSpeed = Number(this.speedSelect.value);
+    this.loopKey = Number(this.keySelect.value) + Number(this.centsSelect.value) / 100;
+    const loop = this.song?.loop;
+    if (loop && loop.section !== WHOLE_SONG) this.relooped();
+    else practice("speed", { speed: this.loopSpeed, semitones: this.loopKey });
+  }
+
+  async toggleLibrary(on = this.library.hidden) {
+    this.library.hidden = !on;
+    this.libraryButton.classList.toggle("is-on", on);
+    if (!on) return;
+    let songs = [];
+    try { songs = await practice("library"); } catch { /* no backend */ }
+    this.library.replaceChildren();
+    if (!songs?.length) {
+      this.library.append(html("p", "practice-library-empty", "No songs yet. Every song you open is saved here with its voice and backing, so it never needs splitting twice."));
+      return;
+    }
+    for (const song of songs) {
+      const row = html("div", `practice-library-row${song.current ? " is-current" : ""}`);
+      const name = html("strong", "", song.name);
+      const info = html("small", "", [formatDuration(song.seconds), song.key, song.voiceOnly ? "voice only" : "", song.current ? "open now" : ""].filter(Boolean).join(" · "));
+      const text = html("div", "practice-library-text");
+      text.append(name, info);
+      const open = Object.assign(html("button", "tool is-accent", "Open"), { type: "button" });
+      open.addEventListener("click", async () => {
+        const result = await practice("openCached", { id: song.id });
+        if (result?.ok) this.toggleLibrary(false);
+        else if (result?.error) this.setMessage(result.error, true);
+      });
+      const forget = Object.assign(html("button", "text-button", "Remove"), { type: "button", title: "Delete this song's saved stems (you can open the original again later)", disabled: song.current });
+      forget.addEventListener("click", async () => { await practice("forget", { id: song.id }); this.toggleLibrary(true); });
+      row.append(text, open, forget);
+      this.library.append(row);
+    }
   }
 
   show(on, remember = true) {
@@ -231,24 +295,34 @@ export class PracticeView {
     if (!song) this.sections = null;
     this.songLabel.textContent = this.song ? this.song.name || "Song" : "No song yet";
     if (!this.song?.loop) this.songInfo.textContent = this.song
-      ? `${this.song.notes.length} notes in ${this.song.phrases.length} phrases · ${noteName(this.song.lowest)} to ${noteName(this.song.highest)}`
+      ? `${this.song.key ? `${this.song.key} · ` : ""}${this.song.notes.length} notes in ${this.song.phrases.length} phrases · ${noteName(this.song.lowest)} to ${noteName(this.song.highest)}`
         + (this.song.hasBacking ? "" : " · voice only")
       : "Open a song and sing its melody";
     this.empty.hidden = Boolean(this.song);
     const loop = this.song?.loop;
-    this.loopBar.hidden = !loop;
-    this.section.classList.toggle("is-looping", Boolean(loop));
-    if (loop) {
+    const whole = loop?.section === WHOLE_SONG;
+    this.loopBar.hidden = !loop || whole;
+    this.section.classList.toggle("is-looping", Boolean(loop) && !whole);
+    this.speedSelect.disabled = this.keySelect.disabled = this.centsSelect.disabled = !this.song;
+    this.loopSpeed = loop ? loop.speed : 1;
+    this.loopKey = loop ? loop.semitones : 0;
+    this.speedSelect.value = String(nearestSpeed(this.loopSpeed));
+    const semis = Math.round(this.loopKey);
+    this.keySelect.value = String(semis);
+    this.centsSelect.value = String(Math.max(-50, Math.min(50, Math.round((this.loopKey - semis) * 10) * 10)));
+    if (whole) {
+      const parts = [];
+      if (Math.abs(loop.speed - 1) > 0.001) parts.push(`${Math.round(loop.speed * 100)}% speed`);
+      if (Math.abs(loop.semitones) > 0.004) parts.push(`${loop.semitones > 0 ? "+" : "−"}${Math.abs(loop.semitones).toFixed(2).replace(/\.?0+$/, "")} st`);
+      this.songInfo.textContent = parts.join(" · ");
+    }
+    else if (loop) {
       const section = loop.section >= 0 && Array.isArray(this.sections) ? this.sections[loop.section] : null;
       const phrases = loop.lastPhrase > loop.phrase ? `phrases ${loop.phrase + 1}–${loop.lastPhrase + 1}` : loop.phrase >= 0 ? `phrase ${loop.phrase + 1}` : "no singing";
       const parts = [section ? `Looping ${section.name} (${phrases})` : `Looping phrase ${loop.phrase + 1}`];
       if (loop.speed < 0.999) parts.push(`${Math.round(loop.speed * 100)}% speed`);
       if (loop.semitones) parts.push(`${loop.semitones > 0 ? "+" : "−"}${Math.abs(loop.semitones)} st`);
       this.loopLabel.textContent = parts.join(" · ");
-      this.loopSpeed = loop.speed;
-      this.loopKey = loop.semitones;
-      this.speedSelect.value = String([1, 0.9, 0.75, 0.6, 0.5].reduce((a, b) => (Math.abs(b - loop.speed) < Math.abs(a - loop.speed) ? b : a)));
-      this.keySelect.value = String(loop.semitones);
       this.nextWeak.hidden = this.weak.length < 2 || loop.section >= 0;
       this.report.hidden = true;
     }
@@ -311,7 +385,7 @@ export class PracticeView {
       return;
     }
     if (event.state === "rendering") {
-      this.setMessage("Preparing the loop…");
+      this.setMessage("Changing the speed…");
       return;
     }
     this.showProgress(null);
@@ -320,6 +394,7 @@ export class PracticeView {
       this.setMessage(event.song?.loop?.section >= 0 ? "Sing the section each time it comes round. Each phrase's score is the last time round."
                                                       : "Sing the phrase each time it comes round. Its score is the last time round.");
     } else if (event.state === "ready") {
+      this.toggleLibrary(false);
       this.setSong(event.song);
       this.setMessage(event.quiet ? "" : event.fromCache ? "Ready (prepared before). Press play and sing."
                                                          : `Ready. Press play and sing.${event.note ? ` ${event.note}` : ""}`);
@@ -487,7 +562,7 @@ export class PracticeView {
       speed.append(speedCopy);
       const key = html("label", "", "in ");
       const keyCopy = select([-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5].map((k) => [k, k === 0 ? "the original key" : `${k > 0 ? "+" : "−"}${Math.abs(k)} st`]), this.loopKey);
-      keyCopy.addEventListener("change", () => { this.loopKey = Number(keyCopy.value); this.keySelect.value = keyCopy.value; });
+      keyCopy.addEventListener("change", () => { this.loopKey = Number(keyCopy.value); this.keySelect.value = keyCopy.value; this.centsSelect.value = "0"; });
       key.append(keyCopy);
       options.append(speed, key);
       r.append(options);

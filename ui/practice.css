@@ -122,3 +122,19 @@ body.is-daw .practice-toggle, body.is-daw .practice { display: none; }
 .practice-section.is-looping { border-color: var(--section); color: var(--text); background: color-mix(in srgb, var(--section) 40%, var(--panel)); }
 .practice-section-letter { flex: none; color: var(--section); font-weight: 700; }
 .practice-section-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.practice-exit { margin-left: auto; }
+.practice-speed { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
+.practice-library-button.is-on { color: var(--text); }
+.practice-library { display: flex; flex-direction: column; gap: 4px; max-height: 220px; overflow-y: auto; padding: 8px;
+                    border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.practice-library[hidden] { display: none; }
+.practice-library-empty { margin: 4px; color: var(--muted); font-size: 12px; }
+.practice-library-row { display: flex; align-items: center; gap: 8px; padding: 4px 6px; border-radius: 8px; }
+.practice-library-row.is-current { background: rgba(140, 123, 255, 0.12); }
+.practice-library-text { display: flex; flex-direction: column; flex: 1; min-width: 0; }
+.practice-library-text strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12.5px; }
+.practice-library-text small { color: var(--muted); font-size: 11px; }
+.practice-title { flex: 1 1 180px; min-width: 150px; }
+.practice-speed select { width: auto; min-width: 0; padding-right: 22px; }
+.practice-exit { white-space: nowrap; }
