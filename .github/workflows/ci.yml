@@ -24,6 +24,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 22
+      - name: Check ui/changelog.js matches CHANGELOG.md
+        run: python3 scripts/changelog.py check
       - name: Check every UI script for syntax errors
         run: for f in ui/*.js; do node --check "$f"; done
       - name: Check every UI file is embedded in the app (release builds serve only those)

@@ -7466,6 +7466,7 @@ export function initDaw() {
     if (action === "mode:live" || action === "mode:daw") requestMode(action === "mode:daw");
     else if (action === "shortcuts" && !screen.active) document.dispatchEvent(new CustomEvent("micfx:liveKeys"));
     else if (action === "settings") document.dispatchEvent(new CustomEvent("micfx:settings"));
+    else if (action === "whatsNew" || action === "changelog") document.dispatchEvent(new CustomEvent(`micfx:${action}`));
     else screen.run(action);
   });
 

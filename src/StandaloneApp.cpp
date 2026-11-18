@@ -330,7 +330,8 @@ namespace
                 { "app:manual",   "User manual",          "F1",          false },
                 { "shortcuts",    "Keyboard shortcuts",   "?",           false },
                 { "", "", "", false },
-                { "app:whatsNew", "What's new",           "",            false },
+                { "whatsNew",     "What's new",           "",            false },
+                { "changelog",    "Changelog",            "",            false },
                 { "app:updates",  "Check for updates...", "",            false },
             } },
         };
@@ -774,7 +775,6 @@ namespace
             else if (action == "app:favourites")  { if (favourites != nullptr) favourites->showDialog(); }
             else if (action == "app:updates")     showUpdateDialog (this);
             else if (action == "app:manual")      PluginEditor::openHelp ("manual");
-            else if (action == "app:whatsNew")    PluginEditor::openHelp ("whatsNew");
             else if (action == "app:fullScreen")  setFullScreen (! isFullScreen());
             else if (action == "app:quit")        juce::JUCEApplicationBase::getInstance()->systemRequestedQuit();
             else if (auto* editor = getEditor())  editor->sendMenuCommand (action);
