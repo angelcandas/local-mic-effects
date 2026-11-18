@@ -28,7 +28,7 @@ const SECTIONS = [
   { id: "presets",     name: "Presets",     icon: "★", hint: "Drag onto a track to replace its effects with the preset's" },
 ];
 
-const PLACE_ICONS = { project: "◆", recordings: "●", music: "♪", downloads: "↓", desktop: "▭", folder: "▸" };
+const PLACE_ICONS = { starter: "✦", project: "◆", recordings: "●", music: "♪", downloads: "↓", desktop: "▭", folder: "▸" };
 
 const prefs = {
   get(key, fallback) { try { const v = localStorage.getItem(`micfx.library.${key}`); return v == null ? fallback : JSON.parse(v); } catch { return fallback; } },
@@ -266,6 +266,10 @@ export class LibraryBrowser {
     const result = await this.call("instruments");
     this.instruments = result?.ok && Array.isArray(result.instruments) ? result.instruments : false;
     this.effectPlugins = result?.ok && Array.isArray(result.effects) ? result.effects : [];
+    if (!this.starter) {
+      const starter = await this.call("starterContent");
+      this.starter = starter?.ok ? starter : { patterns: [] };
+    }
     if (this.section === "instruments" || this.section === "effects") this.renderItems();
   }
 
@@ -318,6 +322,11 @@ export class LibraryBrowser {
 
     if (folder) {
       element.addEventListener("click", () => this.toggleFolder(folder));
+    } else if (payload?.kind === "starterPattern") {
+      // Not draggable: it becomes a pattern of the project when you double-click it.
+      element.payload = payload;
+      element.addEventListener("pointerdown", () => element.focus());
+      element.addEventListener("dblclick", () => this.activate(payload));
     } else if (payload) {
       element.payload = payload;
       element.addEventListener("pointerdown", (event) => this.pressItem(event, element, payload));
@@ -659,8 +668,39 @@ export class LibraryBrowser {
     }
     const list = [];
     for (const [kind, children] of byKind) list.push(...this.group(kind, null, children));
+    list.push(...this.starterPatternItems());
     list.push(this.rescanButton());
     return list;
+  }
+
+  // The starter patterns (drums, bass, chords, a hook): double-click makes one a pattern of the
+  // project, on the selected MIDI track (drums: a Kit; none there: a new track).
+  starterPatternItems() {
+    const patterns = this.starter?.patterns ?? [];
+    const byCategory = new Map();
+    for (const p of patterns) {
+      if (!this.matches(p.name) && !this.matches(p.category)) continue;
+      if (!byCategory.has(p.category)) byCategory.set(p.category, []);
+      const bars = p.beats / (this.screen.beatsPerBar || 4);
+      byCategory.get(p.category).push(this.item({
+        key: `starter:${p.name}`, name: p.name, detail: Number.isInteger(bars) ? `${bars} bar${bars === 1 ? "" : "s"}` : `${+p.beats.toFixed(1)} beats`,
+        title: `${p.name}: double-click to add it to the project as a pattern`,
+        payload: { kind: "starterPattern", name: p.name } }));
+    }
+    const list = [];
+    for (const [category, children] of byCategory) list.push(...this.group(`Starter patterns · ${category}`, null, children));
+    return list;
+  }
+
+  async addStarterPattern(payload) {
+    const selected = this.screen.selectedTrack;
+    const track = this.screen.session?.tracks.some((t) => t.id === selected) ? selected : -1;
+    const result = await this.run("addStarterPattern", { name: payload.name, track });
+    if (!result?.ok) return;
+    this.toast(`Added “${payload.name}” to the project. Place it with the Draw tool or drag it from Project.`);
+    await new Promise((resolve) => setTimeout(resolve, 80)); // the session catches up
+    this.screen.selectedPattern = result.pattern;
+    this.screen.openPatterns();
   }
 
   audioItems() {
@@ -749,6 +789,7 @@ export class LibraryBrowser {
     if (payload.kind === "audio") return this.drop(payload, { track: hasTrack ? selected : -1, start: -1 });
     if (payload.kind === "instrument") return this.drop(payload, { track: hasTrack ? selected : -1 });
     if (payload.kind === "pattern") { this.screen.selectedPattern = payload.id; return this.screen.openPatterns(); }
+    if (payload.kind === "starterPattern") return this.addStarterPattern(payload);
     return this.drop(payload, { track: hasTrack || selected === 0 ? selected : -1 });
   }
 

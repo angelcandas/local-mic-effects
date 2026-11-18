@@ -12,6 +12,7 @@
 #include "CaptureRing.h"
 #include "instruments/InstrumentProcessor.h"
 #include "instruments/Kit.h"
+#include "StarterContent.h"
 
 #include "Presets.h"
 #include "FactoryChains.h"
@@ -388,6 +389,7 @@ namespace
             { "flattenClip", "Make warp permanent" }, { "quantize", "Quantize" }, { "setHitpoints", "Hitpoints" }, { "hitpointAction", "Hitpoints" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
             { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "fitChain", "Fit to this track" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
+            { "addStarterPattern", "Add starter pattern" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
             { "setPart", "Pattern row" }, { "editPattern", "Edit pattern" }, { "setSteps", "Steps" },
             { "addPatternClip", "Place pattern" }, { "setPatternClip", "Pattern block change" },
@@ -2459,6 +2461,9 @@ juce::var DawBridge::describePlaces() const
 
     if (project.isOpen())
         add ("This project", project.getAudioFolder(), "project", false);
+
+    if (micfx::starter::ensure())
+        add ("Starter sounds", micfx::starter::getFolder(), "starter", false);
 
     add ("Recordings", Recorder::getDefaultFolder(), "recordings", false);
     add ("Music", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "music", false);
@@ -7791,6 +7796,72 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
 {
     const auto ok = [&] { complete (error ({})); };
     const auto id = arg (args, "id", -1);
+
+    // Starter patterns (StarterContent.h): the list for the library, and one made into a pattern
+    // of the project. { name, track? } -> { pattern, track }. The part goes on `track` if it's a
+    // MIDI track; else on the first MIDI track that suits it (a Kit for drums, any other
+    // instrument otherwise); else on a new MIDI track.
+    if (command == "starterContent")
+    {
+        juce::Array<juce::var> patterns, kits;
+        for (const auto& p : micfx::starter::getPatterns())
+            patterns.add (object ({ { "name", p.name }, { "category", p.category }, { "beats", p.beats }, { "drum", p.drum } }));
+        for (const auto& kit : micfx::starter::getKitNames())
+            kits.add (kit);
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "patterns", patterns }, { "kits", kits } }));
+        return true;
+    }
+
+    if (command == "addStarterPattern")
+    {
+        const micfx::starter::Pattern* found = nullptr;
+        for (const auto& p : micfx::starter::getPatterns())
+            if (p.name == args["name"].toString())
+                found = &p;
+        if (found == nullptr) { complete (error ("There's no such starter pattern.")); return true; }
+
+        const auto isKit = [&] (const juce::ValueTree& track)
+        {
+            return edit.getInstrument ((int) track[ids::id])[ids::plugin].toString() == "builtin:kit";
+        };
+
+        auto track = edit.getTrack (arg (args, "track", -1));
+        if (! track.isValid() || ! daw::Edit::isMidiTrack (track))
+        {
+            track = {};
+            for (const auto& candidate : edit.getTracks())
+                if (daw::Edit::isMidiTrack (candidate) && isKit (candidate) == found->drum)
+                {
+                    track = candidate;
+                    break;
+                }
+        }
+        if (! track.isValid())
+        {
+            auto info = processor.getPluginHost().findInstrument (found->drum ? "builtin:kit" : juce::String()).value_or (daw::instruments::getDefault());
+            track = edit.addMidiTrack (found->drum ? "Drums" : found->category, info, -1);
+        }
+
+        const auto trackId = (int) track[ids::id];
+        const auto patternId = (int) edit.addPattern (found->name, found->beats)[ids::id];
+        edit.ensurePart (patternId, trackId);
+
+        std::set<int> rows;
+        for (const auto& n : found->notes)
+        {
+            edit.addPatternNote (patternId, trackId, n.pitch, n.time, n.length, n.velocity);
+            rows.insert (n.pitch);
+        }
+        if (found->drum)
+        {
+            edit.setPartDrum (patternId, trackId, true);
+            edit.setPartRows (patternId, trackId, juce::Array<int> (std::vector<int> (rows.begin(), rows.end()).data(), (int) rows.size()));
+        }
+        edit.setPatternColour (patternId, found->category == "Drums" ? "#e8825a" : found->category == "Bass" ? "#5a9be8"
+                                        : found->category == "Chords" ? "#a97be8" : "#5ac98a");
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "pattern", patternId }, { "track", trackId } }));
+        return true;
+    }
 
     if (command == "addPattern")
     {

@@ -30,6 +30,7 @@
 #include "analysis/TakeComp.h"
 #include "Presets.h"
 #include "FactoryChains.h"
+#include "StarterContent.h"
 #include "daw/DawEngine.h"
 #include "daw/RackInsert.h"
 #include <functional>
@@ -15244,6 +15245,74 @@ namespace
         return p;
     }
 
+static void testStarterContent()
+{
+    std::cout << "\nStarter content (kits and patterns)\n";
+
+    check (micfx::starter::ensure(), "the starter sounds are written");
+    const auto kitNames = micfx::starter::getKitNames();
+    check (kitNames.size() >= 2 && kitNames.contains ("Studio Kit"), "there are at least two kits");
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    for (const auto& name : kitNames)
+    {
+        const auto files = micfx::starter::getKitFiles (name);
+        auto ok = files.size() == 16;
+        auto allDifferent = true;
+        std::vector<std::vector<float>> heads;
+        for (const auto& file : files)
+        {
+            std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+            if (reader == nullptr || reader->lengthInSamples < 2000 || reader->lengthInSamples > 5 * 44100) { ok = false; continue; }
+            juce::AudioBuffer<float> buffer (1, (int) reader->lengthInSamples);
+            reader->read (&buffer, 0, buffer.getNumSamples(), 0, true, false);
+            const auto peak = buffer.getMagnitude (0, buffer.getNumSamples());
+            if (peak < 0.3f || peak > 0.9f) ok = false;
+            std::vector<float> head (buffer.getReadPointer (0), buffer.getReadPointer (0) + 4000);
+            for (const auto& other : heads)
+                if (other == head) allDifferent = false;
+            heads.push_back (head);
+        }
+        check (ok && allDifferent, name + ": 16 readable sounds, audible but not clipping, none the same as another");
+    }
+
+    // A new Kit comes with the Studio Kit on its pads; Empty-kit behaviour is still there.
+    micfx::inst::setKitStarterEnabled (true);
+    {
+        auto owner = micfx::inst::createInstrument ("kit");
+        auto& kit = dynamic_cast<micfx::inst::InstrumentProcessor&> (*owner);
+        kit.setRateAndBufferSizeDetails (sampleRate, blockSize);
+        kit.prepareToPlay (sampleRate, blockSize);
+        auto* sampler = micfx::inst::asKit (kit.getEngine());
+        check (sampler != nullptr && kit.getKeyName (36) == "Kick" && kit.getKeyName (38) == "Snare" && kit.getKeyName (46) == "Hat Open",
+               "a new Kit has the starter sounds on its pads, named after them");
+        const auto out = playInstrument (kit, chord ({ 36, 38 }, 0.0, 0.1), 0.6);
+        check (peakOf (out[0]) > 0.1f, "and they play");
+        check (sampler->loadStarterKit ("808 Kit") && kit.getKeyName (36) == "Kick", "another starter kit loads onto the pads");
+        check (! sampler->loadStarterKit ("No such kit"), "a kit that doesn't exist is refused");
+    }
+    micfx::inst::setKitStarterEnabled (false);
+
+    const auto& patterns = micfx::starter::getPatterns();
+    juce::StringArray names;
+    auto fine = patterns.size() >= 12;
+    auto categories = juce::StringArray();
+    for (const auto& p : patterns)
+    {
+        names.add (p.name);
+        categories.addIfNotAlreadyThere (p.category);
+        fine = fine && ! p.notes.empty() && p.beats > 0.0;
+        for (const auto& n : p.notes)
+            fine = fine && n.time >= 0.0 && n.time + 1.0e-9 < p.beats && n.length > 0.0 && n.pitch >= 0 && n.pitch < 128
+                   && n.velocity >= 1 && n.velocity <= 127 && (! p.drum || (n.pitch >= 36 && n.pitch <= 51));
+    }
+    names.removeDuplicates (false);
+    check (fine && names.size() == (int) patterns.size(), "the patterns have notes inside their length, in range, with their own names");
+    check (categories.contains ("Drums") && categories.contains ("Bass") && categories.contains ("Chords") && categories.contains ("Melody"),
+           "drums, bass, chords and melody are all there");
+}
+
     void testKit()
     {
         std::cout << "\nKit (sampler drum kit)\n";
@@ -18868,12 +18937,14 @@ int main()
     std::signal (SIGBUS, printCrash);
     std::signal (SIGABRT, printCrash);
     juce::ScopedJuceInitialiser_GUI juce;
+    micfx::inst::setKitStarterEnabled (false); // the tests count on an empty Kit; testStarterContent turns it on for itself
 
     // MICFX_TEST_ONLY=instruments runs just those (quicker while working on them).
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "instruments")
     {
         testInstruments();
         testKit();
+        testStarterContent();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -19170,6 +19241,7 @@ int main()
     testMidiTracks();
     testInstruments();
     testKit();
+    testStarterContent();
     testPluginHosting();
     testEffectPlugins();
     testProjects();

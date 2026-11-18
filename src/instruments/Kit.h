@@ -35,6 +35,10 @@ public:
     // Decodes the file on this thread and swaps it into the pad. Safe while playing.
     virtual bool loadSample (int pad, const juce::File& file, juce::String& error) = 0;
     virtual void clearPad (int pad) = 0;
+
+    // Loads the 16 pads from one of the starter kits (see StarterContent.h). False if the
+    // kit's files can't be had; the pads it could load stay loaded.
+    virtual bool loadStarterKit (const juce::String& kit) = 0;
     virtual std::shared_ptr<const KitSample> getSample (int pad) const = 0;
 
     // The file a pad was loaded from, also when it can't be found any more (then no sample).
@@ -56,4 +60,8 @@ KitSampler* asKit (Engine&);
 // Where to look for a sample whose saved path is gone (the project's folder, say): a file
 // of the same name is searched in these folders (and below them). Any thread.
 void setKitSearchFolders (const juce::Array<juce::File>&);
+
+// A new Kit starts with the "Studio Kit" starter sounds on its pads (on by default). The
+// tests that count on an empty kit switch it off.
+void setKitStarterEnabled (bool);
 }
