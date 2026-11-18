@@ -5085,6 +5085,15 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
         return error ({});
     }
 
+    // Forget: the panel closed, or opened on a list that was only planned. Clears the list
+    // unless its changes are in the mix (tried, not kept), which only Keep or Discard ends.
+    if (action == "forget")
+    {
+        if (autoMixJob == nullptr && ! autoMixApplied)
+            clearAutoMix();
+        return object ({ { "ok", true }, { "cleared", autoMixPlan.moves.empty() } });
+    }
+
     // Discard: take back what was tried (when it is in the mix) and clear the list.
     if (action == "discard")
     {

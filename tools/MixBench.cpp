@@ -1,7 +1,10 @@
 // MicFXMixBench: the Auto Mix test bench (see analysis/MixBench.h and tools/README-mixbench.md).
 //
 //   MicFXMixBench <songs folder | song folder> [--style pop|rock|...|song|all] [--out folder]
-//                 [--amount 0..1] [--only name] [--no-phase]
+//                 [--amount 0..1] [--only name] [--no-phase] [--learn folder] [--no-audio]
+//
+// --learn also writes each song's measurements for learning targets (analysis/MixLearn.h)
+// to that folder; --no-audio keeps no rendered mixes or copies (only the scores).
 //
 // Writes <out>/results.csv (one row per song and style), <out>/summary.md, and each
 // rendered mix as <out>/<song>-<style>.wav next to a copy of the human mix
@@ -12,6 +15,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "analysis/MixBench.h"
+#include "analysis/MixLearn.h"
 #include "PluginProcessor.h"
 
 #include <iostream>
@@ -27,11 +31,13 @@ void printUsage()
 {
     std::cout << "Usage: MicFXMixBench <songs folder | song folder> [--style pop|rock|...|song|all]\n"
                  "                     [--out folder] [--amount 0..1] [--only name] [--no-phase]\n"
-                 "                     [--listen both|on|off]\n\n"
+                 "                     [--listen both|on|off] [--learn folder] [--no-audio]\n\n"
                  "A song folder holds tracks/*.wav, the human mix as mix.* and optionally song.txt\n"
                  "(style = rock, tempo = 96, role.<track file name> = voice).\n"
                  "--style song (default) mixes each song in its own style (pop when it has none).\n"
-                 "--listen both (default) mixes each song with and without listen-and-correct.\n";
+                 "--listen both (default) mixes each song with and without listen-and-correct.\n"
+                 "--learn writes each song's measurements for learning (no audio) to that folder.\n"
+                 "--no-audio keeps only the scores, no rendered mixes.\n";
 }
 }
 
@@ -60,6 +66,11 @@ int main (int argc, char* argv[])
     const auto out = juce::File::getCurrentWorkingDirectory().getChildFile (value ("--out", root.getChildFile ("bench-results").getFullPathName()));
     const auto styleArg = value ("--style", "song");
     const auto only = value ("--only", {});
+    const auto learnArg = value ("--learn", {});
+    const auto learnFolder = learnArg.isNotEmpty() ? juce::File::getCurrentWorkingDirectory().getChildFile (learnArg) : juce::File();
+    const auto keepAudio = ! args.contains ("--no-audio");
+    if (learnFolder != juce::File())
+        learnFolder.createDirectory();
 
     bench::Options options;
     options.amount = juce::jlimit (0.0f, 1.0f, value ("--amount", "1").getFloatValue());
@@ -98,6 +109,26 @@ int main (int argc, char* argv[])
     out.createDirectory();
     std::vector<bench::Run> runs;
 
+    // --learn-only: the measurements alone, roles from song.txt or the track names.
+    if (learnFolder != juce::File() && args.contains ("--learn-only"))
+    {
+        for (const auto& song : songs)
+        {
+            std::map<juce::String, analysis::Role> roles;
+            for (const auto& file : song.tracks)
+            {
+                const auto name = file.getFileNameWithoutExtension();
+                if (const auto it = song.roleOverrides.find (name); it != song.roleOverrides.end())
+                    roles[name] = it->second;
+                else if (const auto byName = analysis::guessRoleFromName (name))
+                    roles[name] = *byName;
+            }
+            std::cout << song.name << "\n";
+            analysis::learn::writeSong (song, roles, learnFolder.getChildFile (juce::File::createLegalFileName (song.name) + ".mlf"), options.log);
+        }
+        return 0;
+    }
+
     for (const auto& song : songs)
     {
         std::vector<analysis::MixStyle> styles;
@@ -106,7 +137,7 @@ int main (int argc, char* argv[])
         else
             styles.push_back (fixedStyle.value_or (song.style.value_or (analysis::MixStyle::pop)));
 
-        if (song.mix.existsAsFile())
+        if (keepAudio && song.mix.existsAsFile())
         {
             const auto copy = out.getChildFile (juce::File::createLegalFileName (song.name) + "-human" + song.mix.getFileExtension());
             if (! copy.existsAsFile())
@@ -137,6 +168,22 @@ int main (int argc, char* argv[])
                     if (note.startsWith ("Listened"))
                         std::cout << "  " << note << "\n";
             }
+            if (! keepAudio)
+                run.rendered.deleteFile();
+
+            // The measurements for learning, once per song (they don't depend on the style).
+            if (learnFolder != juce::File() && run.error.isEmpty())
+            {
+                const auto file = learnFolder.getChildFile (juce::File::createLegalFileName (song.name) + ".mlf");
+                if (! file.existsAsFile())
+                {
+                    std::map<juce::String, analysis::Role> roles;
+                    for (const auto& [id, role] : run.roles)
+                        roles[run.trackNames[id]] = role;
+                    analysis::learn::writeSong (song, roles, file, options.log);
+                }
+            }
+
             runs.push_back (std::move (run));
 
             // Written after every run so a long bench can be read while it goes.
