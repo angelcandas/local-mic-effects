@@ -63,7 +63,9 @@ public:
 
     // One track to one stereo WAV for "Bounce to a new track": through its inserts (and
     // instrument), at 0 dB and centred, without its sends, the returns or the master bus.
-    Result exportTrack (int trackId, const juce::File& file, Progress = {});
+    // `forFreeze`: the track's own volume ride and pan automation are left out (they keep
+    // playing live over the frozen audio).
+    Result exportTrack (int trackId, const juce::File& file, Progress = {}, bool forFreeze = false);
 
 private:
     Result render (const juce::ValueTree& session, const juce::File&, const Progress&, double progressFrom, double progressTo);

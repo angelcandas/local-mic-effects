@@ -232,7 +232,7 @@ Exporter::Result Exporter::exportStems (const juce::File& folder, Progress progr
     return combined;
 }
 
-Exporter::Result Exporter::exportTrack (int trackId, const juce::File& file, Progress progress)
+Exporter::Result Exporter::exportTrack (int trackId, const juce::File& file, Progress progress, bool forFreeze)
 {
     auto session = snapshot.createCopy();
     bool found = false;
@@ -252,6 +252,12 @@ Exporter::Result Exporter::exportTrack (int trackId, const juce::File& file, Pro
                 child.setProperty (ids::pan, 0.0f, nullptr);
                 child.setProperty (ids::output, Edit::masterId, nullptr);
                 child.removeProperty (ids::group, nullptr);
+                if (forFreeze)
+                {
+                    child.removeProperty (ids::ride, nullptr);
+                    child.removeProperty (ids::panAutomation, nullptr);
+                    child.removeProperty (ids::arm, nullptr);
+                }
                 for (int i = child.getNumChildren(); --i >= 0;)
                     if (child.getChild (i).hasType (ids::SEND))
                         child.removeChild (i, nullptr);

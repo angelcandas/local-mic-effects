@@ -17861,6 +17861,86 @@ static void testSingAlongSession()
     folder.deleteRecursively();
 }
 
+static void testFreeze()
+{
+    std::cout << "\nFreeze track\n";
+
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-freeze", {});
+    folder.createDirectory();
+    const auto makeTone = [&] (const juce::String& name, float level)
+    {
+        juce::AudioBuffer<float> tone (2, (int) (1.0 * sampleRate));
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                tone.setSample (ch, i, level * (float) std::sin (juce::MathConstants<double>::twoPi * 330.0 * i / sampleRate));
+        const auto file = folder.getChildFile (name);
+        writeWav (file, tone, sampleRate);
+        return file;
+    };
+    const auto quiet = makeTone ("quiet.wav", 0.25f);
+    const auto loud = makeTone ("loud.wav", 0.5f);
+
+    daw::Edit edit;
+    const auto vocal = (int) edit.addTrack ("Vocal")[daw::ids::id];
+    edit.addClip (vocal, quiet, 0.0, 1.0);
+
+    daw::Exporter::Settings settings;
+    settings.sampleRate = sampleRate;
+    settings.bitDepth = 32;
+    settings.tail = 0.0;
+
+    const auto peakOf = [&] (const juce::String& name)
+    {
+        daw::Exporter exporter (edit, settings);
+        const auto file = folder.getChildFile (name);
+        const auto result = exporter.exportMix (file);
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+        if (! result.error.isEmpty() || reader == nullptr)
+            return -1.0f;
+        juce::AudioBuffer<float> audio (2, (int) reader->lengthInSamples);
+        reader->read (&audio, 0, audio.getNumSamples(), 0, true, true);
+        return audio.getMagnitude (0, audio.getNumSamples());
+    };
+
+    check (std::abs (peakOf ("a.wav") - 0.25f) < 0.03f, "unfrozen, the clips play");
+
+    // The render (stands in as a louder file so the two can be told apart) plays instead.
+    edit.freezeTrack (vocal, loud, 0.0);
+    check (daw::Edit::isFrozen (edit.getTrack (vocal)), "the track is frozen");
+    check (std::abs (peakOf ("b.wav") - 0.5f) < 0.03f, "frozen, the render plays and not the clips");
+
+    edit.unfreezeTrack (vocal);
+    check (! daw::Edit::isFrozen (edit.getTrack (vocal)) && std::abs (peakOf ("c.wav") - 0.25f) < 0.03f, "unfreeze plays the clips again");
+
+    // The freeze render itself: through the track alone, without its fader.
+    edit.setTrackVolume (vocal, -12.0f);
+    daw::Exporter exporter (edit, settings);
+    const auto file = folder.getChildFile ("frozen.wav");
+    check (exporter.exportTrack (vocal, file, {}, true).error.isEmpty() && file.existsAsFile(), "renders the track for a freeze");
+
+    PluginProcessor processor;
+    processor.prepareToPlay (sampleRate, blockSize);
+    juce::PropertiesFile::Options options;
+    options.applicationName = "MicFXTests";
+    juce::PropertiesFile props (folder.getChildFile ("test.settings"), options);
+    DawBridge::availableForTesting = true;
+    {
+        DawBridge bridge (processor, props, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        auto& dawEdit = processor.getDawEdit();
+        const auto source = (int) dawEdit.addTrack ("Synth")[daw::ids::id];
+        dawEdit.setTrackArm (source, true);
+        check (! (bool) bridge.applyFreeze (source, folder.getChildFile ("nothing.wav"), 0.0)["ok"], "a missing render doesn't freeze");
+        check ((bool) bridge.applyFreeze (source, file, 0.0)["ok"] && daw::Edit::isFrozen (dawEdit.getTrack (source)), "freezing marks the track");
+        check (! (bool) dawEdit.getTrack (source)[daw::ids::arm], "a frozen track isn't armed");
+        dawEdit.getUndoManager().undo();
+        check (! daw::Edit::isFrozen (dawEdit.getTrack (source)), "one undo unfreezes");
+    }
+    DawBridge::availableForTesting = false;
+    folder.deleteRecursively();
+}
+
 static void testBounce()
 {
     std::cout << "\nBounce to a new track\n";
@@ -19409,6 +19489,15 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=freeze: just Freeze track and Bounce.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "freeze")
+    {
+        testBounce();
+        testFreeze();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=plugins: hosting instrument and effect plugins.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "plugins")
     {
@@ -19525,6 +19614,7 @@ int main()
         testSingAlongSession();
         testTimeRange();
         testBounce();
+        testFreeze();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -19693,6 +19783,7 @@ int main()
     testSingAlongSession();
     testTimeRange();
     testBounce();
+    testFreeze();
     testSetlist();
     testDawEngine();
     testDeviceEdits();

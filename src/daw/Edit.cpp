@@ -301,6 +301,25 @@ void Edit::setTrackPolarity (int trackId, bool inverted)
     }
 }
 
+void Edit::freezeTrack (int trackId, const juce::File& file, double startSeconds)
+{
+    if (auto track = getTrack (trackId); track.isValid())
+    {
+        track.setProperty (ids::frozenFile, file.getFullPathName(), undoTarget);
+        track.setProperty (ids::frozenStart, startSeconds, undoTarget);
+        track.setProperty (ids::arm, false, undoTarget);
+    }
+}
+
+void Edit::unfreezeTrack (int trackId)
+{
+    if (auto track = getTrack (trackId); track.isValid())
+    {
+        track.removeProperty (ids::frozenFile, undoTarget);
+        track.removeProperty (ids::frozenStart, undoTarget);
+    }
+}
+
 void Edit::setTrackNudge (int trackId, float milliseconds)
 {
     if (auto track = getTrack (trackId); track.isValid())
