@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 212,
+ "latest": 215,
  "days": [
   {
    "date": "2026-11-18",
    "entries": [
+    {
+     "title": "Lyrics in Practice",
+     "text": "Paste a song's lyrics or import an .lrc file: each line is timed to the singing, lights up word by word as you sing, follows speed changes, and any line can be nudged and is saved with the song.",
+     "prs": [
+      215
+     ]
+    },
     {
      "title": "Live key and speed in Practice",
      "text": "Changing the song's speed or key in Practice is heard within a moment, right where the song is, while the rest of the song is prepared behind it; settings you've used before load instantly.",

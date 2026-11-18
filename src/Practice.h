@@ -4,6 +4,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 
 #include "analysis/Coach.h"
+#include "analysis/Lyrics.h"
 #include "analysis/Structure.h"
 #include "PracticeShift.h"
 #include "stems/StemSplitter.h"
@@ -62,6 +63,15 @@ public:
     //                              background, once per song (kept in its cache folder); a
     //                              "practice" event { state: "sections", sections } follows
     //   "unloop"                   back to the whole song
+    //   "lyrics" { text }          the song's lyrics, pasted (plain lines, or .lrc text with times): plain lines
+    //                              are placed on the voice's notes (analysis::lyrics::align); kept in the song's
+    //                              folder. Empty text clears them. -> describeLyrics()
+    //   "importLyrics"             picks a .lrc or .txt file and does the same; "exportLyrics" saves a .lrc
+    //   "alignLyrics" { all }      places the lines again (all: the nudged ones too)
+    //   "nudgeLyric" { line, by }  moves a line by `by` seconds of the song as it plays now;
+    //                { line, at }  or starts it at `at` (the song's time now, e.g. the playhead)
+    // Lyrics are sent in the song's time as it plays (after a speed change or in a loop),
+    // in describeSong()'s "lyrics"; "practice" { state: "lyrics", lyrics } after a change.
     juce::var handle (const juce::String& action, const juce::var& options);
 
     // About 30 times a second (the editor's timer).
@@ -158,6 +168,13 @@ public:
     static juce::String sectionsToText (const std::vector<analysis::structure::Section>&);
     static std::vector<analysis::structure::Section> sectionsFromText (const juce::String&);
     static constexpr const char* sectionsFileName = "sections-v1.txt";
+    static constexpr const char* lyricsFileName = "lyrics-v1.txt";
+
+    const analysis::lyrics::Lyrics& getLyrics() const noexcept { return lyrics; }
+    void setLyrics (const juce::String& text); // as the "lyrics" action
+    // A time of the song as it is, in the song as it plays now (speed change, loop), and back.
+    double toPlayingTime (double originalSeconds) const;
+    double toOriginalTime (double playingSeconds) const;
 
     struct LoopAudio
     {
@@ -213,6 +230,8 @@ private:
     void applyMutes();
     double getOriginalTime() const;      // where the playhead is, in the song as it is
     juce::var describeShift() const;
+    juce::var describeLyrics() const;
+    void saveLyrics();
     void startLoop (int phrase, double speed, double semitones);
     void startSectionLoop (int section, double speed, double semitones);
     void startRangeLoop (int firstPhrase, int lastPhrase, int section, double from, double to, double speed, double semitones);
@@ -241,6 +260,7 @@ private:
     juce::String songName, songKey;
     juce::File source, guideFile, backingFile;
     juce::File songFolder; // its cache folder
+    analysis::lyrics::Lyrics lyrics; // in the song as it is
     float guideLevel = 0.35f;
     bool guidePending = false; // the guide track hasn't loaded yet: set its level when it does
     bool viewOpen = false;

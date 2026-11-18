@@ -120,6 +120,10 @@ export class PracticeView {
                                        { type: "button", title: "Songs you've prepared before: open one without splitting it again" });
     this.libraryButton.addEventListener("click", () => this.toggleLibrary());
 
+    this.lyricsButton = Object.assign(html("button", "text-button practice-library-button", "Lyrics"),
+                                      { type: "button", title: "Add the song's lyrics (paste them or import an .lrc file): they're timed to the voice and light up as you sing" });
+    this.lyricsButton.addEventListener("click", () => this.toggleLyricsEditor());
+
     const guide = html("label", "practice-guide");
     guide.title = "How loud the original singer plays under you (all the way down mutes it)";
     this.guideSlider = Object.assign(document.createElement("input"), { type: "range", min: 0, max: 150, step: 1, value: 35 });
@@ -166,7 +170,7 @@ export class PracticeView {
                                     { type: "button", title: "Leave Practice and go back to the Live view (Esc)" });
     this.exitButton.addEventListener("click", () => this.show(false));
 
-    bar.append(title, this.openButton, this.voiceButton, this.libraryButton, guide, speedLabel, keyLabel, restart, this.reportButton, this.passLabel, this.exitButton);
+    bar.append(title, this.openButton, this.voiceButton, this.libraryButton, this.lyricsButton, guide, speedLabel, keyLabel, restart, this.reportButton, this.passLabel, this.exitButton);
 
     // Songs prepared before.
     this.library = html("div", "practice-library");
@@ -230,7 +234,17 @@ export class PracticeView {
     this.stage.append(this.report);
     this.report.addEventListener("pointerdown", (event) => event.stopPropagation());
 
-    s.append(bar, this.library, this.loopBar, this.progress, this.stage, this.sectionStrip, this.phraseStrip, this.message);
+    // Lyrics: the line being sung (its words light up) and the next one; and their editor.
+    this.lyrics = [];          // [{ text, start, end, pinned, words: [{ text, start }] }] in the song's time as it plays
+    this.karaoke = html("div", "practice-karaoke");
+    this.karaoke.hidden = true;
+    this.karaokeNow = html("div", "practice-karaoke-now");
+    this.karaokeNext = html("div", "practice-karaoke-next");
+    this.karaoke.append(this.karaokeNow, this.karaokeNext);
+    this.karaokeLine = -2;
+    this.buildLyricsEditor();
+
+    s.append(bar, this.library, this.lyricsEditor, this.loopBar, this.progress, this.stage, this.karaoke, this.sectionStrip, this.phraseStrip, this.message);
   }
 
   onSpeedChange() {
@@ -246,6 +260,8 @@ export class PracticeView {
     this.library.hidden = !on;
     this.libraryButton.classList.toggle("is-on", on);
     if (!on) return;
+    this.lyricsEditor.hidden = true;
+    this.lyricsButton.classList.remove("is-on");
     let songs = [];
     try { songs = await practice("library"); } catch { /* no backend */ }
     this.library.replaceChildren();
@@ -284,6 +300,112 @@ export class PracticeView {
   }
 
   //==============================================================================
+  // Lyrics.
+  buildLyricsEditor() {
+    const editor = html("div", "practice-lyrics-editor");
+    editor.hidden = true;
+    this.lyricsEditor = editor;
+
+    const left = html("div", "practice-lyrics-paste");
+    this.lyricsText = Object.assign(document.createElement("textarea"), {
+      placeholder: "Paste the lyrics here, one sung line per line (or the text of an .lrc file with its times).",
+      spellcheck: false,
+    });
+    const place = Object.assign(html("button", "tool is-accent", "Place on the voice"), { type: "button",
+      title: "Times every line by matching its syllables to the notes found in the voice (lines you nudged stay put)" });
+    place.addEventListener("click", async () => {
+      const text = this.lyricsText.value;
+      const same = text.trim() === this.lyrics.map((l) => l.text).join("\n").trim();
+      const lines = same ? await practice("alignLyrics", { all: false }) : await practice("lyrics", { text });
+      this.setLyrics(lines);
+      this.setMessage(lines?.length ? "Lyrics placed on the voice. Nudge any line that's off; it stays put from then on." : "");
+    });
+    const importButton = Object.assign(html("button", "tool", "Import .lrc or text…"), { type: "button" });
+    importButton.addEventListener("click", () => practice("importLyrics"));
+    const exportButton = Object.assign(html("button", "text-button", "Export .lrc"), { type: "button", title: "Save the lyrics with their times as an .lrc file" });
+    exportButton.addEventListener("click", () => practice("exportLyrics"));
+    const clear = Object.assign(html("button", "text-button", "Clear"), { type: "button" });
+    clear.addEventListener("click", async () => { this.lyricsText.value = ""; this.setLyrics(await practice("lyrics", { text: "" })); });
+    const buttons = html("div", "practice-lyrics-buttons");
+    buttons.append(place, importButton, exportButton, clear);
+    left.append(this.lyricsText, buttons,
+                html("p", "practice-lyrics-note", "Plain lines are placed by matching their syllables to the notes found in the voice; .lrc times are kept as they are."));
+
+    this.lyricsList = html("div", "practice-lyrics-list");
+    editor.append(left, this.lyricsList);
+  }
+
+  toggleLyricsEditor(on = this.lyricsEditor.hidden) {
+    this.lyricsEditor.hidden = !on;
+    this.lyricsButton.classList.toggle("is-on", on);
+    if (on) {
+      this.toggleLibrary(false);
+      if (!this.lyricsText.value.trim()) this.lyricsText.value = this.lyrics.map((l) => l.text).join("\n");
+      this.buildLyricsList();
+    }
+  }
+
+  setLyrics(lines) {
+    this.lyrics = (Array.isArray(lines) ? lines : []).map((line) => {
+      const words = [];
+      for (let i = 0; i + 1 < (line.words ?? []).length; i += 2) words.push({ text: line.words[i], start: Number(line.words[i + 1]) });
+      return { ...line, start: Number(line.start), end: Number(line.end), words };
+    });
+    this.karaokeLine = -2;
+    this.lyricsButton.classList.toggle("has-lyrics", this.lyrics.length > 0);
+    if (!this.lyricsEditor.hidden) this.buildLyricsList();
+  }
+
+  buildLyricsList() {
+    const list = this.lyricsList;
+    list.replaceChildren();
+    this.karaokeLine = -2; // (marks the line sung now again)
+    if (!this.lyrics.length) {
+      list.append(html("p", "practice-lyrics-note", this.song ? "No lyrics yet." : "Open a song first."));
+      return;
+    }
+    this.lyrics.forEach((line, i) => {
+      const row = html("div", `practice-lyrics-row${line.pinned ? " is-pinned" : ""}`);
+      const time = Object.assign(html("button", "practice-lyrics-time", line.timed ? formatDuration(Math.max(0, line.start)) : "–"),
+                                 { type: "button", title: "Play from this line" });
+      time.addEventListener("click", () => this.goTo(Math.max(0, line.start - 1)));
+      const nudge = (label, by, title) => {
+        const b = Object.assign(html("button", "tool practice-lyrics-nudge", label), { type: "button", title });
+        b.addEventListener("click", async () => this.setLyrics(await practice("nudgeLyric", by === "here" ? { line: i, at: this.now() } : { line: i, by })));
+        return b;
+      };
+      row.append(time, html("span", "practice-lyrics-text", line.text),
+                 nudge("−0.1", -0.1, "A tenth of a second earlier"), nudge("+0.1", 0.1, "A tenth of a second later"),
+                 nudge("Here", "here", "Start this line at the playhead"));
+      if (line.pinned) row.title = "Set by hand (or by the .lrc file): kept when the lines are placed again";
+      list.append(row);
+    });
+  }
+
+  // The karaoke lines for `now` (called every frame: rebuilt only when the line changes).
+  drawLyrics(now) {
+    const lines = this.lyrics;
+    this.karaoke.hidden = !this.song || !lines.length;
+    if (this.karaoke.hidden) return;
+    // The line being sung, or the next one (shown a moment early).
+    let index = lines.findIndex((l) => now < l.end + 0.3);
+    if (index > 0 && now < lines[index].start - 0.6 && now < lines[index - 1].end + 1.5) index -= 1;
+    if (index !== this.karaokeLine) {
+      this.karaokeLine = index;
+      const line = lines[index];
+      this.karaokeNow.replaceChildren(...(line ? line.words.map((w) => html("span", "practice-karaoke-word", `${w.text} `)) : []));
+      this.karaokeNext.textContent = lines[index + 1]?.text ?? "";
+      this.lyricLine = this.lyrics[this.karaokeLine]?.words.length ? Array.from(this.karaokeNow.children) : [];
+      for (const row of this.lyricsList.children) row.classList?.remove("is-now");
+      this.lyricsList.children[index]?.classList?.add("is-now");
+    }
+    const line = lines[index];
+    if (!line) return;
+    this.karaokeNow.classList.toggle("is-waiting", now < line.start);
+    (this.lyricLine ?? []).forEach((span, i) => span.classList.toggle("is-sung", now >= line.words[i].start));
+  }
+
+  //==============================================================================
   applyState(state) {
     if (!state) return;
     if (typeof state.guideLevel === "number") {
@@ -306,6 +428,8 @@ export class PracticeView {
       for (let i = 0; i + 1 < song.phrases.length; i += 2) phrases.push({ start: song.phrases[i], end: song.phrases[i + 1] });
       this.song = { ...song, notes, phrases };
     }
+    if (song && "lyrics" in song) this.setLyrics(song.lyrics);
+    if (!song) this.setLyrics([]);
     this.noteScores.clear();
     this.phraseScores.clear();
     this.trail = [];
@@ -422,6 +546,12 @@ export class PracticeView {
     }
     if (event.state === "rendering") {
       this.setMessage("Preparing the loop…");
+      return;
+    }
+    if (event.state === "lyrics") {
+      this.setLyrics(event.lyrics);
+      if (!this.lyricsEditor.hidden) this.lyricsText.value = this.lyrics.map((l) => l.text).join("\n");
+      this.setMessage(this.lyrics.length ? "Lyrics placed on the voice. Nudge any line that's off; it stays put from then on." : "");
       return;
     }
     if (event.state === "shifting") {
@@ -654,6 +784,7 @@ export class PracticeView {
     if (this.canvas.height !== height) this.canvas.height = height;
     const g = this.canvas.getContext("2d");
     g.clearRect(0, 0, width, height);
+    this.drawLyrics(this.now());
     if (!this.song) { this.tuner.hidden = true; return; }
 
     const css = getComputedStyle(this.section);

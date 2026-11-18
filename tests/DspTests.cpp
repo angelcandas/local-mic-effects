@@ -10899,6 +10899,86 @@ namespace
     }
 
 
+    void testLyrics()
+    {
+        std::cout << "\nLyrics (pasted or .lrc, placed on the voice's notes, nudged)\n";
+        namespace lyr = analysis::lyrics;
+        namespace coach = analysis::coach;
+
+        check (lyr::countSyllables ("hello") == 2 && lyr::countSyllables ("strength") == 1 && lyr::countSyllables (juce::CharPointer_UTF8 ("coraz\xc3\xb3n")) == 3
+                   && lyr::countSyllables (juce::CharPointer_UTF8 ("canci\xc3\xb3n")) == 2 && lyr::countSyllables ("mmm") == 1,
+               "syllables: vowel groups, English and Spanish");
+
+        const auto lrc = lyr::parse ("[ar:Someone]\n[ti:A song]\n[00:12.50]Hello world\n[00:15.00][01:00.00]Sing it again\n\n[Chorus]\n[00:20.25]Last line\n[00:24.00]\n");
+        check (lrc.fromLrc && lrc.lines.size() == 4 && lrc.lines[0].text == "Hello world" && std::abs (lrc.lines[0].start - 12.5) < 1e-9
+                   && std::abs (lrc.lines[0].end - 15.0) < 1e-9 && std::abs (lrc.lines[2].start - 20.25) < 1e-9 && std::abs (lrc.lines[2].end - 24.0) < 1e-9
+                   && std::abs (lrc.lines[3].start - 60.0) < 1e-9 && lrc.lines[3].text == "Sing it again" && lrc.lines[0].pinned,
+               "an .lrc file: its times as they are, a line with two times sung twice, metadata and headings left out");
+
+        const auto plain = lyr::parse ("[Verse 1]\nOne two three four\n\n(Chorus)\nLa la la la la la\nGo go go\n");
+        check (! plain.fromLrc && plain.lines.size() == 3 && ! plain.lines[0].timed && plain.lines[1].words.size() == 6,
+               "pasted lines: headings and blank lines left out");
+
+        // A melody: line 1 (4 syllables) in its own phrase; lines 2 (6) and 3 (3) in one
+        // phrase with a short breath between them; an ad lib before the first line.
+        coach::Song melody;
+        const auto add = [&] (double start, int count, double step) { for (int i = 0; i < count; ++i) melody.notes.push_back ({ start + i * step, start + i * step + step * 0.8, 60.0f + (float) i, 0 }); };
+        add (0.5, 1, 0.4);    // "ooh"
+        add (2.0, 4, 0.45);   // One two three four
+        add (5.0, 6, 0.3);    // La la la la la la
+        add (7.1, 3, 0.4);    // Go go go
+        coach::findPhrases (melody);
+        auto lyrics = plain;
+        lyr::align (lyrics, melody);
+        juce::String found;
+        for (const auto& l : lyrics.lines)
+            found << juce::String (l.start, 2) << "-" << juce::String (l.end, 2) << " ";
+        check (std::abs (lyrics.lines[0].start - 2.0) < 0.01 && std::abs (lyrics.lines[1].start - 5.0) < 0.01 && std::abs (lyrics.lines[2].start - 7.1) < 0.01
+                   && lyrics.lines[2].timed,
+               "each line lands on its notes, the ad lib left out (" + found + ")");
+        check (std::abs (lyrics.lines[1].words[2].start - 5.6) < 0.01 && std::abs (lyrics.lines[0].words[3].start - 3.35) < 0.01,
+               "and each word on its syllable's note");
+
+        // Nudged lines stay when aligning again; the text goes to the cache and back.
+        lyr::nudge (lyrics, 2, 0.25, melody);
+        check (lyrics.lines[2].pinned && std::abs (lyrics.lines[2].start - 7.35) < 1e-6 && lyrics.lines[1].end <= lyrics.lines[2].start, "a nudge moves and pins a line");
+        lyrics.lines[0].start = 0.0;
+        lyr::align (lyrics, melody);
+        check (std::abs (lyrics.lines[2].start - 7.35) < 1e-6 && std::abs (lyrics.lines[0].start - 2.0) < 0.01, "aligning again keeps the nudged line");
+        auto back = lyr::Lyrics::fromString (lyrics.toString());
+        lyr::timeWords (back, melody);
+        check (back.lines.size() == 3 && back.lines[2].pinned && ! back.lines[0].pinned && back.lines[1].text == "La la la la la la"
+                   && std::abs (back.lines[1].start - lyrics.lines[1].start) < 1e-3 && std::abs (back.lines[1].words[2].start - 5.6) < 0.01,
+               "lyrics to the song's folder and back (the words timed again)");
+        check (lyr::parse (lyrics.toLrc()).lines.size() == 3 && std::abs (lyr::parse (lyrics.toLrc()).lines[2].start - 7.35) < 0.01, "and out as an .lrc file");
+
+        // Too few notes: spread over the song by syllables.
+        coach::Song sparse;
+        sparse.notes.push_back ({ 1.0, 2.0, 60.0f, 0 });
+        auto spread = plain;
+        lyr::align (spread, sparse);
+        check (spread.lines[0].timed && spread.lines[1].start > spread.lines[0].start && spread.lines[2].start > spread.lines[1].start,
+               "with too few notes the lines are spread in order");
+
+        // In Practice: pasted lyrics, kept with the song.
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        juce::TemporaryFile settingsFile (".xml");
+        juce::PropertiesFile settings (settingsFile.getFile(), {});
+        Practice practice (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+        practice.setSong (melody);
+        auto* options = new juce::DynamicObject();
+        options->setProperty ("text", "One two three four\nLa la la la la la\nGo go go");
+        const auto described = practice.handle ("lyrics", juce::var (options));
+        check (described.size() == 3 && std::abs ((double) described[1]["start"] - 5.0) < 0.01 && described[1]["words"].size() == 12,
+               "Practice places pasted lyrics on the song's melody");
+        options = new juce::DynamicObject();
+        options->setProperty ("line", 0);
+        options->setProperty ("at", 1.9);
+        const auto nudged = practice.handle ("nudgeLyric", juce::var (options));
+        check (std::abs ((double) nudged[0]["start"] - 1.9) < 1e-6 && (bool) nudged[0]["pinned"], "a line set to the playhead");
+    }
+
     void testPracticeKeySpeed()
     {
         std::cout << "\nPractice (the whole song in another key and speed, swapped in where it plays)\n";
@@ -10978,6 +11058,9 @@ namespace
             options->setProperty ("semitones", semitones);
             practice.handle ("speed", juce::var (options));
         };
+        auto* lyricOptions = new juce::DynamicObject();
+        lyricOptions->setProperty ("text", "La la la la la\nLa la la la la la");
+        const auto lyricsBefore = practice.handle ("lyrics", juce::var (lyricOptions));
         const auto started = juce::Time::getMillisecondCounterHiRes();
         speedTo (0.75, 2.0);
         check (practice.isShiftPending() && multitrack.getTracks().size() == 4, "the change is on its way, on two new tracks");
@@ -11001,6 +11084,10 @@ namespace
         check (swappedAfter >= 0.0 && std::abs (practice.getSpeed() - 0.75) < 1e-9 && std::abs (practice.getSemitones() - 2.0) < 1e-9
                    && heard() == "Backing (new key), Guide (new key)",
                "the new key and speed are heard instead of the song (" + heard() + ")");
+        const auto lyricsAfter = juce::JSON::parse (juce::JSON::toString (practice.describe()))["song"]["lyrics"];
+        check (lyricsBefore.size() == 2 && lyricsAfter.size() == 2
+                   && std::abs ((double) lyricsAfter[1]["start"] - (double) lyricsBefore[1]["start"] / 0.75) < 0.01,
+               "the lyrics follow the speed (" + lyricsAfter[1]["start"].toString() + " s for " + lyricsBefore[1]["start"].toString() + " s)");
         check (std::abs (practice.getSong().notes[0].start - prepared.song.notes[0].start / 0.75) < 1e-6
                    && std::abs (practice.getSong().notes[0].pitch - prepared.song.notes[0].pitch - 2.0f) < 1e-4f,
                "the notes to sing move with it");
@@ -20081,6 +20168,7 @@ int main()
         testPractice();
         testPracticeLoops();
         testPracticeKeySpeed();
+        testLyrics();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -20288,6 +20376,7 @@ int main()
         testPractice();
         testPracticeLoops();
         testPracticeKeySpeed();
+        testLyrics();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -20420,6 +20509,7 @@ int main()
     testPractice();
     testPracticeLoops();
     testPracticeKeySpeed();
+    testLyrics();
     testRhythm();
     testToMidi();
     testSongMap();

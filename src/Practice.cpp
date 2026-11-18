@@ -113,6 +113,8 @@ Practice::Practice (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::fu
                 guideFile = guide;
                 backingFile = juce::File (settings.getValue ("practice.backing"));
                 songFolder = folder;
+                lyrics = analysis::lyrics::Lyrics::fromString (folder.getChildFile (lyricsFileName).loadFileAsString());
+                analysis::lyrics::timeWords (lyrics, baseSong);
                 break;
             }
 }
@@ -493,6 +495,70 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
     {
         findSections();
     }
+    else if (action == "lyrics")
+    {
+        setLyrics (options["text"].toString());
+        return describeLyrics();
+    }
+    else if (action == "importLyrics")
+    {
+        chooser = std::make_unique<juce::FileChooser> ("Choose the song's lyrics (.lrc or plain text)",
+                                                       source.getParentDirectory().isDirectory() ? source.getParentDirectory()
+                                                                                                 : juce::File::getSpecialLocation (juce::File::userMusicDirectory),
+                                                       "*.lrc;*.txt");
+        chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles, [this] (const juce::FileChooser& c)
+        {
+            if (! c.getResult().existsAsFile())
+                return;
+            if (c.getResult().getSize() > 1024 * 1024)
+            {
+                emit ("practice", object ({ { "state", "error" }, { "error", c.getResult().getFileName() + " is too big for lyrics." } }));
+                return;
+            }
+            setLyrics (c.getResult().loadFileAsString());
+        });
+        return object ({ { "ok", true } });
+    }
+    else if (action == "exportLyrics")
+    {
+        if (lyrics.isEmpty())
+            return object ({ { "ok", false } });
+        chooser = std::make_unique<juce::FileChooser> ("Save the lyrics with their times",
+                                                       (source.getParentDirectory().isDirectory() ? source.getParentDirectory()
+                                                                                                  : juce::File::getSpecialLocation (juce::File::userMusicDirectory))
+                                                           .getChildFile (songName + ".lrc"),
+                                                       "*.lrc");
+        const auto text = lyrics.toLrc();
+        chooser->launchAsync (juce::FileBrowserComponent::saveMode | juce::FileBrowserComponent::warnAboutOverwriting, [text] (const juce::FileChooser& c)
+        {
+            if (c.getResult() != juce::File())
+                c.getResult().withFileExtension ("lrc").replaceWithText (text);
+        });
+        return object ({ { "ok", true } });
+    }
+    else if (action == "alignLyrics")
+    {
+        if ((bool) options.getProperty ("all", false))
+            for (auto& line : lyrics.lines)
+                line.pinned = false;
+        analysis::lyrics::align (lyrics, baseSong);
+        saveLyrics();
+        return describeLyrics();
+    }
+    else if (action == "nudgeLyric")
+    {
+        const auto index = (int) options.getProperty ("line", -1);
+        if (juce::isPositiveAndBelow (index, (int) lyrics.lines.size()))
+        {
+            const auto& line = lyrics.lines[(size_t) index];
+            // (`by` is in the song as it plays: a second at 50% speed is half a second of the song)
+            const auto by = options.hasProperty ("at") ? toOriginalTime ((double) options["at"]) - line.start
+                                                       : (double) options.getProperty ("by", 0.0) * (toOriginalTime (1.0) - toOriginalTime (0.0));
+            analysis::lyrics::nudge (lyrics, index, by, baseSong);
+            saveLyrics();
+        }
+        return describeLyrics();
+    }
     else if (action == "unloop")
     {
         if (loopJob != nullptr)
@@ -541,7 +607,7 @@ juce::var Practice::describeSong() const
     return object ({ { "name", songName }, { "file", source.getFullPathName() }, { "notes", notes }, { "phrases", phrases },
                      { "lowest", round2 (song.getLowest()) }, { "highest", round2 (song.getHighest()) },
                      { "hasBacking", backingFile != juce::File() }, { "key", songKey },
-                     { "shift", describeShift() },
+                     { "shift", describeShift() }, { "lyrics", describeLyrics() },
                      { "sections", describeSections() },
                      { "loop", loop.active ? object ({ { "phrase", loop.phrase }, { "lastPhrase", loop.lastPhrase }, { "section", loop.section },
                                                        { "speed", loop.speed }, { "semitones", loop.semitones },
@@ -623,6 +689,8 @@ void Practice::install (const Prepared& prepared)
         shiftLoad->cancel = true;
     shiftLoad = nullptr;
     songFolder = prepared.folder;
+    lyrics = prepared.folder != juce::File() ? analysis::lyrics::Lyrics::fromString (prepared.folder.getChildFile (lyricsFileName).loadFileAsString())
+                                             : analysis::lyrics::Lyrics();
 
     auto& multitrack = processor.getMultitrack();
     multitrack.pause();
@@ -670,6 +738,7 @@ void Practice::install (const Prepared& prepared)
     backingFile = prepared.backing;
     guidePending = true;
     setSong (prepared.song);
+    analysis::lyrics::timeWords (lyrics, baseSong); // (the words' times aren't kept)
 
     settings.setValue ("practice.folder", prepared.folder.getFullPathName());
     settings.setValue ("practice.guide", guideFile.getFullPathName());
@@ -1601,4 +1670,63 @@ void Practice::endLoop (bool restoreTracks)
         nextNote = nextPhrase = 0;
         scoresReset = true;
     }
+}
+
+//==============================================================================
+double Practice::toPlayingTime (double t) const
+{
+    if (loop.active && (loop.backingId >= 0 || loop.guideId >= 0))
+        return (t - loop.from) / loop.speed;
+    if (loop.active)
+        return t;
+    return t / shift.speed;
+}
+
+double Practice::toOriginalTime (double t) const
+{
+    if (loop.active && (loop.backingId >= 0 || loop.guideId >= 0))
+        return loop.from + t * loop.speed;
+    if (loop.active)
+        return t;
+    return t * shift.speed;
+}
+
+void Practice::setLyrics (const juce::String& text)
+{
+    lyrics = analysis::lyrics::parse (text);
+    if (! lyrics.fromLrc)
+        analysis::lyrics::align (lyrics, baseSong);
+    else
+        analysis::lyrics::timeWords (lyrics, baseSong);
+    saveLyrics();
+    emit ("practice", object ({ { "state", "lyrics" }, { "lyrics", describeLyrics() } }));
+}
+
+void Practice::saveLyrics()
+{
+    if (songFolder == juce::File() || ! songFolder.isDirectory())
+        return;
+    const auto file = songFolder.getChildFile (lyricsFileName);
+    if (lyrics.isEmpty())
+        file.deleteFile();
+    else
+        file.replaceWithText (lyrics.toString());
+}
+
+juce::var Practice::describeLyrics() const
+{
+    // [{ text, start, end, pinned, words: [text, start, ...] }] in the song's time as it plays.
+    juce::Array<juce::var> lines;
+    for (const auto& line : lyrics.lines)
+    {
+        juce::Array<juce::var> words;
+        for (const auto& w : line.words)
+        {
+            words.add (w.text);
+            words.add (round3 (toPlayingTime (w.start)));
+        }
+        lines.add (object ({ { "text", line.text }, { "start", round3 (toPlayingTime (line.start)) }, { "end", round3 (toPlayingTime (line.end)) },
+                             { "pinned", line.pinned }, { "timed", line.timed }, { "words", words } }));
+    }
+    return lines;
 }

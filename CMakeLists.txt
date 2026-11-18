@@ -147,6 +147,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/Structure.cpp
     src/analysis/Structure.h
     src/analysis/Harmony.cpp
+    src/analysis/Lyrics.cpp
+    src/analysis/Lyrics.h
     src/analysis/Harmony.h
     src/Parameters.cpp
     src/Presets.cpp

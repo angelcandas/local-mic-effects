@@ -138,3 +138,30 @@ body.is-daw .practice-toggle, body.is-daw .practice { display: none; }
 .practice-title { flex: 1 1 180px; min-width: 150px; }
 .practice-speed select { width: auto; min-width: 0; padding-right: 22px; }
 .practice-exit { white-space: nowrap; }
+
+/* Lyrics: the karaoke lines under the lane, and their editor. */
+.practice-karaoke { display: flex; flex-direction: column; align-items: center; gap: 2px; padding: 6px 12px 2px; text-align: center; }
+.practice-karaoke[hidden] { display: none; }
+.practice-karaoke-now { min-height: 28px; font-size: 21px; font-weight: 600; letter-spacing: 0.01em; color: rgba(255, 255, 255, 0.4); }
+.practice-karaoke-now.is-waiting { opacity: 0.75; }
+.practice-karaoke-word { transition: color 0.08s; }
+.practice-karaoke-word.is-sung { color: #fff; text-shadow: 0 0 12px rgba(140, 123, 255, 0.55); }
+.practice-karaoke-next { min-height: 16px; font-size: 13px; color: var(--faint, #566077); }
+.practice-library-button.has-lyrics::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 5px; border-radius: 50%;
+                                             background: var(--accent); vertical-align: middle; }
+.practice-lyrics-editor { display: grid; grid-template-columns: minmax(220px, 1fr) minmax(260px, 1.3fr); gap: 12px; padding: 10px;
+                          border: 1px solid var(--line); border-radius: 10px; background: var(--panel); height: 190px; flex: none; }
+.practice-lyrics-editor[hidden] { display: none; }
+.practice-lyrics-paste { display: flex; flex-direction: column; gap: 8px; min-height: 0; }
+.practice-lyrics-paste textarea { flex: 1; min-height: 60px; resize: none; padding: 8px; border: 1px solid var(--line); border-radius: 8px;
+                                  background: #0b0d12; color: var(--text); font: 12.5px/1.5 inherit; }
+.practice-lyrics-buttons { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.practice-lyrics-note { margin: 0; color: var(--muted); font-size: 11px; }
+.practice-lyrics-list { display: flex; flex-direction: column; gap: 2px; overflow-y: auto; min-height: 0; }
+.practice-lyrics-row { display: flex; align-items: center; gap: 6px; padding: 2px 6px; border-radius: 6px; font-size: 12px; }
+.practice-lyrics-row.is-now { background: rgba(140, 123, 255, 0.14); }
+.practice-lyrics-row.is-pinned .practice-lyrics-time { color: var(--accent); }
+.practice-lyrics-time { width: 44px; padding: 0; border: 0; background: none; color: var(--muted); font: 11px ui-monospace, Menlo, monospace; text-align: left; cursor: pointer; }
+.practice-lyrics-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.practice-lyrics-nudge { padding: 2px 6px; font-size: 11px; }
+@media (max-width: 760px) { .practice-lyrics-editor { grid-template-columns: 1fr; } }
