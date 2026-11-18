@@ -1170,6 +1170,9 @@ void DawEngine::rebuild()
             clip.fadeIn  = juce::jmax ((juce::int64) 0, toSamples (clipTree[ids::fadeIn]));
             clip.fadeOut = juce::jmax ((juce::int64) 0, toSamples (clipTree[ids::fadeOut]));
             clip.gain    = volumeToGain (clipTree.getProperty (ids::gain, 0.0f));
+            clip.envelope = Edit::getClipEnvelope (clipTree);
+            for (auto& point : clip.envelope)
+                point.time *= sampleRate; // seconds of the clip's audio -> file samples
 
             // The track's phase: upside down, and/or a little later or earlier (an earlier
             // clip at the session's start loses the bit that would play before it).
@@ -2177,23 +2180,45 @@ void DawEngine::renderClip (const Clip& clip, juce::AudioBuffer<float>& buffer, 
     const auto& audio = *clip.audio;
     const auto sourceChannels = audio.getNumChannels();
 
-    for (int ch = 0; ch < 2; ++ch)
+    // The envelope's gain at a position in the file (silence at its floor).
+    const auto envelopeGain = [&clip] (juce::int64 filePosition)
     {
-        const auto* source = audio.getReadPointer (juce::jmin (ch, sourceChannels - 1));
-        auto* destination = buffer.getWritePointer (ch);
+        const auto db = Edit::getRideDbAt (clip.envelope, (double) filePosition);
+        return db <= Edit::minEnvelopeDb ? 0.0f : std::pow (10.0f, db / 20.0f);
+    };
 
-        for (auto t = from; t < to; ++t)
+    // In short chunks: the envelope is read at each chunk's ends and ramps between them.
+    constexpr int chunk = 32;
+    for (auto chunkStart = from; chunkStart < to; chunkStart += chunk)
+    {
+        const auto chunkEnd = juce::jmin (to, chunkStart + chunk);
+        const auto count = (int) (chunkEnd - chunkStart);
+        auto envelopeFrom = 1.0f, envelopeStep = 0.0f;
+
+        if (! clip.envelope.empty())
         {
-            const auto intoClip = t - clip.start;
-            auto gain = clip.gain;
+            envelopeFrom = envelopeGain (clip.offset + (chunkStart - clip.start));
+            envelopeStep = (envelopeGain (clip.offset + (chunkEnd - clip.start)) - envelopeFrom) / (float) count;
+        }
 
-            if (intoClip < clip.fadeIn)
-                gain *= (float) intoClip / (float) clip.fadeIn;
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            const auto* source = audio.getReadPointer (juce::jmin (ch, sourceChannels - 1));
+            auto* destination = buffer.getWritePointer (ch);
 
-            if (const auto remaining = clip.length - intoClip; remaining < clip.fadeOut)
-                gain *= (float) remaining / (float) clip.fadeOut;
+            for (auto t = chunkStart; t < chunkEnd; ++t)
+            {
+                const auto intoClip = t - clip.start;
+                auto gain = clip.gain * (envelopeFrom + envelopeStep * (float) (t - chunkStart));
 
-            destination[t - blockStart] += gain * source[clip.offset + intoClip];
+                if (intoClip < clip.fadeIn)
+                    gain *= (float) intoClip / (float) clip.fadeIn;
+
+                if (const auto remaining = clip.length - intoClip; remaining < clip.fadeOut)
+                    gain *= (float) remaining / (float) clip.fadeOut;
+
+                destination[t - blockStart] += gain * source[clip.offset + intoClip];
+            }
         }
     }
 }

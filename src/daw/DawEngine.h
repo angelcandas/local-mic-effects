@@ -350,6 +350,7 @@ private:
         AudioPool::Audio audio;
         juce::int64 start = 0, offset = 0, length = 0, fadeIn = 0, fadeOut = 0;
         float gain = 1.0f;
+        std::vector<Edit::RidePoint> envelope; // the clip's volume envelope: time in file samples, dB (Edit::setClipEnvelope)
     };
 
     // A send's level (linear, 0 when off or the track is muted). Shared between graphs

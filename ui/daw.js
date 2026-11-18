@@ -20,6 +20,7 @@ import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { createPatternsPanel } from "./patterns.js";
 import { createPatternLane, drawGhosts } from "./patternlane.js";
 import { createDrawTool } from "./drawtool.js";
+import { drawClipEnvelope, pressClipEnvelope } from "./clipenvelope.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs, toSource } from "./rhythm.js";
 import { canPasteWarpTabs, copyWarpTabs, pastedWarpTabs } from "./warptool.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, releaseFocus, svg } from "./widgets.js";
@@ -168,6 +169,7 @@ const ICONS = {
   cut: '<circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/><path d="M8.6 7.6L20 18M8.6 16.4L20 6"/>',
   gain: '<path d="M4 9v6h4l5 4V5L8 9zM16.5 8.5a5 5 0 0 1 0 7M19 6a8.5 8.5 0 0 1 0 12"/>',
   range: '<path d="M7 4H4v16h3M17 4h3v16h-3"/><path d="M9 12h6" stroke-dasharray="2 2"/>',
+  envelope: '<path d="M3 18L9 8l5 6 7-10"/><circle cx="9" cy="8" r="1.6" fill="currentColor"/><circle cx="14" cy="14" r="1.6" fill="currentColor"/>',
   warp: '<path d="M3 12c3-8 6-8 9 0s6 8 9 0"/><path d="M3 20h18" stroke-dasharray="2 3"/>',
   fit: '<path d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>',
   undo: '<path d="M9 14L4 9l5-5"/><path d="M4 9h10a6 6 0 0 1 0 12h-3"/>',
@@ -901,7 +903,7 @@ class DawScreen {
     this.showSends = false;
     this.pinnedFolded = false; // the return and master rows folded to one line each
     this.follow = true;        // scroll the view with the playhead while playing
-    this.tool = "select";      // "select" | "cut" | "gain"
+    this.tool = "select";      // "select" | "range" | "cut" | "gain" | "envelope" | "draw" | "warp"
     this.clipboard = null;     // a copied clip
     this.recLevels = [];       // [seconds, gain] of the input while recording, for the live take
     this.snap = true;
@@ -1375,6 +1377,7 @@ class DawScreen {
                                        ["range", "Range", "Range tool: drag across tracks to mark a stretch of time, then delete, split, duplicate or loop it (2). Right-click it for more."],
                                        ["cut", "Cut", "Cut tool: click a clip to split it there (B)"],
                                        ["gain", "Gain", "Gain tool: drag a clip up or down to change its gain (G)"],
+                                       ["envelope", "Envelope", "Envelope tool: click a clip to draw its volume line, drag the points, Alt+click a point to remove it (H)"],
                                        ["draw", "Draw", "Draw tool: click to place the picked pattern or sound, drag to paint copies, right-click to erase (P)"],
                                        ["warp", "Warp", "Warp tool: on the selected clips, press to pin a warp tab and drag to move that moment of the audio (J). Click a clip first to select it"]]) {
       const b = iconButton("", tool, title, () => this.setTool(tool));
@@ -2929,7 +2932,7 @@ class DawScreen {
     element.classList.toggle("is-muted", Boolean(clip.mute));
     element.classList.toggle("is-midi", Boolean(clip.midi));
     // Double-click: the clip's editor on the Track tab (notes, or pitch and timing).
-    element.addEventListener("dblclick", () => { this.select(track.id, clip.id); this.openClipEditor(); });
+    element.addEventListener("dblclick", () => { if (this.tool === "envelope") return; this.select(track.id, clip.id); this.openClipEditor(); });
     element.title = clip.midi ? `${clip.name} (${clip.notes.length} notes)\nDouble-click to edit the notes · Drag to move (Ctrl: copy) · Edges to trim` : clip.missing ? `Missing file: ${clip.file}` : `${clip.name}\nDrag to move (Ctrl: copy) · Edges to trim · Corners to fade · S splits at the playhead`;
 
     const place = (start, length) => {
@@ -2974,6 +2977,7 @@ class DawScreen {
 
     if (!kept) this.drawWaveform(canvas);
     if (!clip.midi) drawWarpMarkers(element, clip, this.zoom);
+    drawClipEnvelope(element, clip, this.zoom, this.tool === "envelope", height - 8);
     if (!clip.midi && clip.id === this.selectedClip) this.drawClipHits(element, clip);
     element.classList.toggle("is-warped", Boolean(clip.warp?.length) || Math.abs(clip.transpose || 0) > 1e-4);
 
@@ -3015,6 +3019,15 @@ class DawScreen {
         const time = this.snapTime((event.clientX - box.left - this.headWidth) / this.zoom, event);
         if (time > clip.start + 0.01 && time < clip.start + clip.length - 0.01) daw("split", { id: clip.id, time });
         return;
+      }
+
+      if (this.tool === "envelope" && !clip.midi) {
+        return pressClipEnvelope(event, {
+          clip, element, zoom: this.zoom, label,
+          snap: (seconds, e) => this.snapTime(seconds, e),
+          redraw: () => drawClipEnvelope(element, clip, this.zoom, true, height - 8),
+          commit: (points) => { daw("clipEnvelope", { id: clip.id, points }); this.flushSession(); },
+        });
       }
 
       if (this.tool === "gain") {
@@ -6559,7 +6572,7 @@ class DawScreen {
       if (cut) this.deleteSelected();
       return;
     }
-    this.clipboard = { ...from, file: clip.file, offset: clip.offset, length: clip.length, gain: clip.gain, fadeIn: clip.fadeIn, fadeOut: clip.fadeOut, name: clip.name };
+    this.clipboard = { ...from, file: clip.file, offset: clip.offset, length: clip.length, gain: clip.gain, fadeIn: clip.fadeIn, fadeOut: clip.fadeOut, envelope: clip.envelope ?? [], name: clip.name };
     if (cut) this.deleteSelected();
   }
 
@@ -6931,6 +6944,7 @@ class DawScreen {
         const next = this.nextClipTouching(clip);
         item("Crossfade with the next clip", () => this.crossfade(clip, next, 0.05), { disabled: !next,
              hint: next ? "Both clips reach into each other by 25 ms and fade across (50 ms in all), so the join can't click" : "Only when another clip starts where this one ends" });
+        if (clip.envelope?.length) item("Clear volume envelope", () => daw("clipEnvelope", { id: clip.id, points: [] }), { hint: "Remove the volume line drawn with the Envelope tool (H)" });
         item("Split at hitpoints", () => daw("hitpointAction", { id: clip.id, action: "split" }), { hint: "Cut the clip at every note start (as the clip editor's Hitpoints tool shows them), with short fades" });
         item("Stretch to project tempo", () => daw("setClip", { id: clip.id, musical: true }), { checked: Boolean(clip.musical), hint: "Musical mode: the clip follows bars and beats (its tempo is found from its beat the first time)" });
         item("Copy warp tabs", () => { const n = copyWarpTabs(clip); toast(n ? `${n} warp tabs copied.` : "This clip has no warp tabs to copy."); }, { hint: "Its warp tabs, as places on the timeline, to paste on other clips" });
@@ -7273,6 +7287,7 @@ class DawScreen {
     else if (key === "2") { handled(); this.setTool("range"); }
     else if (key === "b") { handled(); this.setTool("cut"); }
     else if (key === "g") { handled(); this.setTool("gain"); }
+    else if (key === "h") { handled(); this.setTool("envelope"); }
     else if (key === "p") { handled(); this.setTool("draw"); }
     else if (key === "j") { handled(); this.setTool("warp"); }
     else if (key === "w") { handled(); this.openClipEditor(); }

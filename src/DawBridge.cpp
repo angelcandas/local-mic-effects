@@ -294,6 +294,15 @@ namespace
         return points;
     }
 
+    // A clip's volume envelope for the page: [[seconds into the clip's audio, dB], ...].
+    juce::var describeEnvelope (const juce::ValueTree& clip)
+    {
+        juce::Array<juce::var> points;
+        for (const auto& point : daw::Edit::getClipEnvelope (clip))
+            points.add (juce::Array<juce::var> { point.time, point.db });
+        return points;
+    }
+
     // The TRACK a clip is on (through a take lane), invalid for none.
     juce::ValueTree trackOf (const juce::ValueTree& clip)
     {
@@ -372,7 +381,7 @@ namespace
             { "addTrack", "Add track" }, { "addMidiTrack", "Add MIDI track" }, { "removeTrack", "Delete track" },
             { "duplicateTrack", "Duplicate track" }, { "moveTrack", "Move track" }, { "linkTracks", "Link tracks" }, { "alignTrack", "Align" },
             { "unlinkTrack", "Unlink track" }, { "moveClip", "Move clip" }, { "trimStart", "Trim clip" }, { "trimEnd", "Trim clip" },
-            { "clipFades", "Fade" }, { "clipGain", "Clip gain" }, { "split", "Split clip" }, { "removeClip", "Delete clip" },
+            { "clipFades", "Fade" }, { "clipGain", "Clip gain" }, { "clipEnvelope", "Clip envelope" }, { "split", "Split clip" }, { "removeClip", "Delete clip" },
             { "duplicate", "Duplicate clip" }, { "pasteClip", "Paste clip" }, { "setClip", "Clip change" },
             { "normaliseClip", "Normalise clip" }, { "stripSilence", "Strip silence" }, { "addMidiClip", "Add MIDI clip" },
             { "editNotes", "Edit notes" }, { "editControllers", "Edit controllers" }, { "addInsert", "Add effect" }, { "addPluginInsert", "Add plug-in" }, { "removeInsert", "Remove effect" },
@@ -929,6 +938,7 @@ juce::var DawBridge::describeSession()
                            { "start", number (clip, ids::start) }, { "offset", number (clip, ids::offset) },
                            { "length", number (clip, ids::length) }, { "gain", number (clip, ids::gain) },
                            { "fadeIn", number (clip, ids::fadeIn) }, { "fadeOut", number (clip, ids::fadeOut) },
+                           { "envelope", describeEnvelope (clip) },
                            { "mute", (bool) clip.getProperty (ids::mute, false) },
                            { "transpose", number (clip, ids::transpose) }, { "warp", markers }, { "warpBypass", (bool) clip.getProperty (ids::warpBypass, false) },
                            { "timeBypass", (bool) clip.getProperty (ids::timeBypass, false) },
@@ -5866,8 +5876,26 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             clip.setProperty (ids::name, args["name"], &undo);
         edit.setClipGain ((int) clip[ids::id], arg (args, "gain", 0.0f));
         edit.setClipFades ((int) clip[ids::id], arg (args, "fadeIn", 0.0), arg (args, "fadeOut", 0.0));
+        std::vector<daw::Edit::RidePoint> envelope;
+        if (const auto* list = args["envelope"].getArray())
+            for (const auto& item : *list)
+                if (const auto* pair = item.getArray(); pair != nullptr && pair->size() >= 2)
+                    envelope.push_back ({ (double) pair->getReference (0), (float) (double) pair->getReference (1) });
+        edit.setClipEnvelope ((int) clip[ids::id], envelope);
         pasteLanesWith (args, clip);
         complete (clip[ids::id]);
+        return;
+    }
+    // { id, points: [[seconds into the clip's audio, dB], ...] } (empty: removes the envelope)
+    if (command == "clipEnvelope")
+    {
+        std::vector<daw::Edit::RidePoint> points;
+        if (const auto* list = args["points"].getArray())
+            for (const auto& item : *list)
+                if (const auto* pair = item.getArray(); pair != nullptr && pair->size() >= 2)
+                    points.push_back ({ (double) pair->getReference (0), (float) (double) pair->getReference (1) });
+        edit.setClipEnvelope (id, points);
+        ok();
         return;
     }
     if (command == "clipGain")   { edit.setClipGain (id, args["gain"]); ok(); return; }

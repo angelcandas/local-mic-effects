@@ -973,6 +973,14 @@ body.is-daw .chip--live { display: none; }
 .arrange[data-tool="cut"] .clip .handle { display: none; }
 .arrange[data-tool="gain"] .clip { cursor: ns-resize; }
 .arrange[data-tool="gain"] .clip .handle { display: none; }
+.arrange[data-tool="envelope"] .clip { cursor: crosshair; }
+.arrange[data-tool="envelope"] .clip .handle { display: none; }
+
+/* A clip's volume envelope (the Envelope tool, H) */
+.clip-envelope { position: absolute; top: 0; left: 0; pointer-events: none; overflow: visible; }
+.clip-envelope .env-line { fill: none; stroke: var(--text); stroke-width: 1.6; stroke-linejoin: round; vector-effect: non-scaling-stroke; opacity: 0.9; }
+.clip-envelope .env-zero { stroke: var(--text); stroke-width: 1; stroke-dasharray: 3 4; opacity: 0.3; vector-effect: non-scaling-stroke; }
+.clip-envelope .env-point { fill: var(--bg, #0d1016); stroke: var(--text); stroke-width: 1.5; vector-effect: non-scaling-stroke; }
 
 .cut-guide {
   position: absolute;
