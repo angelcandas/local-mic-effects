@@ -13,6 +13,7 @@
 #include "CaptureRing.h"
 #include "instruments/InstrumentProcessor.h"
 #include "instruments/Kit.h"
+#include "instruments/Sampler.h"
 #include "StarterContent.h"
 
 #include "Presets.h"
@@ -6913,6 +6914,122 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                 edit.setClipMute (clipId, true);
                 sessionChanged = true;
                 complete (object ({ { "track", trackId }, { "pattern", patternId }, { "block", block[ids::id] }, { "slices", rows.size() } }));
+            });
+        });
+        return;
+    }
+
+    if (command == "sliceToSampler")
+    {
+        // Slice an audio clip to MIDI: {id (an audio clip), grid?}. The clip is cut at its hits (at
+        // most 64 slices; with `grid` in beats, at that grid instead), loaded as the slices of a
+        // new Sampler track (key 36 plays slice 1, 37 slice 2...), and a MIDI clip where the clip
+        // is plays them back where they were. The clip is muted (one undo step).
+        // -> {track, clip, slices}
+        const auto clip = edit.getClip (id);
+        if (! clip.isValid() || daw::Edit::isMidiClip (clip)) { complete (error ("Pick an audio clip to slice.")); return; }
+        auto& pool = engine.getAudioPool();
+        const auto grid = arg (args, "grid", 0.0);
+        auto find = grid > 0.0 ? std::function<std::vector<daw::hitpoints::Hit>()>() : daw::hitpoints::prepare (clip, pool);
+        if (grid <= 0.0 && ! find) { complete (error ("This clip's audio can't be read.")); return; }
+
+        const auto map = daw::Edit::getEffectiveWarp (clip);
+        const auto offset = (double) clip[ids::offset], length = (double) clip[ids::length];
+        const auto tempo = edit.getTempoMap();
+        const auto clipStart = (double) clip[ids::start];
+        const auto maxSlices = micfx::inst::SamplerInstrument::maxSlices;
+
+        juce::Thread::launch ([this, find = std::move (find), map, offset, length, tempo, clipStart, grid, maxSlices, clipId = id, complete,
+                               weak = std::weak_ptr<bool> (alive)]
+        {
+            std::vector<double> starts; // in the clip's content time
+            if (grid > 0.0)
+            {
+                const auto firstBeat = std::ceil (tempo.toBeats (clipStart) / grid - 1.0e-6) * grid;
+                starts.push_back (offset);
+                for (auto beat = firstBeat; starts.size() < (size_t) maxSlices; beat += grid)
+                {
+                    const auto t = tempo.toSeconds (beat) - clipStart + offset;
+                    if (t >= offset + length - 0.01)
+                        break;
+                    if (t > offset + 0.01)
+                        starts.push_back (t);
+                }
+            }
+            else
+            {
+                std::vector<analysis::rhythm::Onset> hits;
+                for (const auto& hit : find())
+                    if (hit.isEnabled())
+                        hits.push_back ({ map.toTarget (hit.time), hit.state == daw::hitpoints::State::automatic ? hit.strength : 2.0f });
+                starts = daw::loops::chooseSliceStarts (hits, offset, offset + length, maxSlices);
+            }
+
+            juce::MessageManager::callAsync ([this, starts, map, offset, length, clipStart, clipId, complete, weak]
+            {
+                if (auto flag = weak.lock(); flag == nullptr || ! *flag)
+                    return;
+                const auto clip = edit.getClip (clipId);
+                if (starts.empty() || ! clip.isValid())
+                {
+                    complete (error (clip.isValid() ? "There is nothing to slice in this clip." : "The clip is gone."));
+                    return;
+                }
+                const auto info = processor.getPluginHost().findInstrument ("builtin:sampler");
+                if (! info.has_value()) { complete (error ("The Sampler instrument isn't available.")); return; }
+
+                auto owner = clip.getParent();
+                while (owner.isValid() && ! owner.hasType (ids::TRACK))
+                    owner = owner.getParent();
+                auto base = clip[ids::name].toString().trim();
+                if (base.isEmpty())
+                    base = juce::File (clip[ids::file].toString()).getFileNameWithoutExtension();
+
+                edit.getUndoManager().beginNewTransaction ("Slice to MIDI");
+                const auto track = edit.addMidiTrack ((base + " slices").substring (0, 60), *info,
+                                                      owner.isValid() ? edit.getTracks().indexOf (owner) + 1 : -1);
+                const auto trackId = (int) track[ids::id];
+                engine.rebuildNow();
+                auto* instrument = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (trackId).get());
+                auto* sampler = instrument != nullptr ? micfx::inst::asSampler (instrument->getEngine()) : nullptr;
+                if (sampler == nullptr)
+                {
+                    edit.getUndoManager().undo();
+                    complete (error ("The Sampler couldn't be set up."));
+                    return;
+                }
+
+                // The part of the file the clip plays, and the cuts within it (file seconds).
+                const auto from = juce::jmax (0.0, map.toSource (offset)), to = map.toSource (offset + length);
+                juce::String problem;
+                if (! sampler->load (juce::File (clip[ids::file].toString()), from, to, problem))
+                {
+                    edit.getUndoManager().undo();
+                    complete (error (problem.isNotEmpty() ? problem : "That audio couldn't be loaded."));
+                    return;
+                }
+                std::vector<double> inFile;
+                for (const auto t : starts)
+                    inFile.push_back (juce::jmax (0.0, map.toSource (t) - from));
+                inFile.front() = 0.0;
+                sampler->setSlices (inFile);
+                for (const char* name : { "mode", "oneShot" })
+                    if (auto* parameter = instrument->getState().getParameter (name))
+                        parameter->setValueNotifyingHost (parameter->convertTo0to1 (1.0f));
+
+                // The MIDI clip: a note per slice, where the slice sits in the clip.
+                auto midiClip = edit.addMidiClip (trackId, clipStart, length, base);
+                const auto midiId = (int) midiClip[ids::id];
+                for (size_t i = 0; i < starts.size(); ++i)
+                {
+                    const auto at = starts[i] - offset;
+                    const auto next = i + 1 < starts.size() ? starts[i + 1] - offset : length;
+                    edit.addNote (midiId, micfx::inst::SamplerInstrument::firstSliceNote + (int) i, at, juce::jmax (0.02, next - at), 100);
+                }
+                edit.setClipMute (clipId, true);
+                sessionChanged = true;
+                complete (object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId }, { "clip", midiId },
+                                    { "slices", (int) starts.size() } }));
             });
         });
         return;
