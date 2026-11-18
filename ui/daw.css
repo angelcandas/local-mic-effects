@@ -109,16 +109,19 @@ body.is-daw .chip--live { display: none; }
 .tempo { display: flex; align-items: center; gap: 4px; color: var(--faint); font-size: 11px; }
 
 .tempo-input {
-  width: 56px;
+  width: 64px;
   height: 30px;
-  padding: 0 6px;
+  padding: 0 4px 0 8px;
   border: 1px solid var(--line);
   border-radius: 9px;
   background: #0d1016;
   color: var(--text);
   font: 600 13px var(--mono);
-  text-align: right;
+  text-align: center;
+  -moz-appearance: textfield;
 }
+.tempo-input::-webkit-inner-spin-button, .tempo-input::-webkit-outer-spin-button { -webkit-appearance: none; margin: 0; }
+.tempo-input:focus { outline: none; border-color: var(--accent); }
 
 .daw select.dropdown { min-width: 0; height: 30px; padding-top: 0; padding-bottom: 0; }
 .view-tabs button { padding: 5px 12px; }
@@ -1871,9 +1874,6 @@ body.is-daw .app-project { color: var(--text); font-weight: 600; }
 .app-title { white-space: nowrap; }
 .chips { min-width: 0; }
 @media (max-width: 1180px) { .chip--tip { display: none; } }
-.topbar { grid-template-columns: auto minmax(0, 1fr) auto; }
-.topbar .preset-bar { justify-self: center; }
-.topbar .chips { grid-column: 3; }
 
 .track-menu { position: fixed; z-index: 1000; min-width: 190px; padding: 5px; border: 1px solid var(--line-strong); border-radius: 8px; background: var(--panel-raised); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.55); }
 .track-menu-item { display: block; width: 100%; padding: 6px 10px; border: 0; border-radius: 5px; background: none; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
@@ -2505,7 +2505,7 @@ body:not(.is-daw) .daw-project-actions { display: none; }
 }
 .insert-add:hover, .insert-add[aria-expanded="true"] { border-color: var(--accent); color: var(--text); background: rgba(255, 255, 255, 0.02); }
 .insert-add.is-empty { width: 150px; margin-left: 0; }
-.insert-add-text { font: 500 11.5px var(--sans, inherit); }
+.insert-add-text { max-width: 110px; font: 500 12px/1.35 var(--sans); text-align: center; text-wrap: balance; }
 
 /* Trims behind a switch in the title. */
 .insert-trim-switch {
@@ -2873,3 +2873,10 @@ body.is-daw .library-hint { display: none; }
 .track-frozen:hover { background: rgba(143, 211, 255, 0.15); }
 .track-row.is-frozen .tt-arm { opacity: 0.35; pointer-events: none; }
 .track-row.is-frozen .clip { filter: saturate(0.5) brightness(0.95); }
+
+/* Short windows: the strips tighten instead of clipping the name at the bottom. */
+@media (max-height: 900px) {
+  .strip { gap: 5px; padding: 6px 6px; }
+  .strip-fader { min-height: 52px; }
+  .strip-inserts { flex-basis: 64px; min-height: 40px; }
+}
