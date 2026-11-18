@@ -20,6 +20,8 @@ fi
 
 repo="$(cd "$(dirname "$0")/.." && pwd)"
 songs="$(cd "$1" && pwd)"
+# Given the folder that holds multitracks/ (and maybe old bench results), use multitracks/.
+[[ -d "$songs/multitracks" ]] && songs="$songs/multitracks"
 out="${2:-$HOME/Desktop/learn-out}"
 mkdir -p "$out"
 out="$(cd "$out" && pwd)"
