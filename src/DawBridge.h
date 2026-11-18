@@ -173,6 +173,8 @@ public:
     // Exporter::exportTrack) on a new audio track right under it from `startSeconds`, and the
     // source muted, in one undo step. Answers { ok, error, track }.
     juce::var addBouncedTrack (int sourceTrackId, const juce::File&, double startSeconds);
+    // Freeze: the render becomes what the track plays (see Edit::freezeTrack).
+    juce::var applyFreeze (int trackId, const juce::File&, double startSeconds);
 
 private:
     juce::var handleRebalance (const juce::var& args);
@@ -290,6 +292,7 @@ private:
     std::shared_ptr<ExportJob> bounceJob;
     int bounceTrack = -1;
     double bounceStart = 0.0;
+    bool bounceIsFreeze = false; // the running render freezes the track instead of bouncing it
 
     // A running stem split (at most one).
     struct StemJob;

@@ -923,6 +923,7 @@ juce::var DawBridge::describeSession()
                               { "transpose", number (track, ids::transpose) }, { "ride", describeRide (track) }, { "automation", describeAutomation (track) },
                               { "lanes", describeLanes (track) },
                               { "link", daw::Edit::getLink (track) },
+                              { "frozen", daw::Edit::isFrozen (track) },
                               { "polarity", daw::Edit::getPolarity (track) }, { "nudge", daw::Edit::getNudge (track) },
                               { "inserts", describeInserts (track) }, { "macros", describeMacros (track) }, { "clips", clips },
                               { "output", daw::Edit::getTrackOutput (track) }, { "sends", describeSends (track) },
@@ -1711,14 +1712,16 @@ void DawBridge::tick()
             const auto job = std::move (bounceJob);
             auto answer = job->result.error.isNotEmpty() || job->result.cancelled || job->result.files.isEmpty()
                             ? object ({ { "ok", false }, { "error", job->result.cancelled ? juce::String() : job->result.error } })
-                            : addBouncedTrack (bounceTrack, job->result.files.getFirst(), bounceStart);
+                            : bounceIsFreeze ? applyFreeze (bounceTrack, job->result.files.getFirst(), bounceStart)
+                                              : addBouncedTrack (bounceTrack, job->result.files.getFirst(), bounceStart);
             answer.getDynamicObject()->setProperty ("done", true);
+            answer.getDynamicObject()->setProperty ("freeze", bounceIsFreeze);
             answer.getDynamicObject()->setProperty ("cancelled", job->result.cancelled);
             emit ("dawBounce", answer);
         }
         else
         {
-            emit ("dawBounce", object ({ { "progress", bounceJob->progress.load() } }));
+            emit ("dawBounce", object ({ { "progress", bounceJob->progress.load() }, { "freeze", bounceIsFreeze } }));
         }
     }
 
@@ -2633,6 +2636,25 @@ juce::var DawBridge::addBouncedTrack (int sourceTrackId, const juce::File& file,
     edit.getUndoManager().beginNewTransaction();
     sessionChanged = true;
     return object ({ { "ok", true }, { "error", juce::String() }, { "track", id } });
+}
+
+juce::var DawBridge::applyFreeze (int trackId, const juce::File& file, double startSeconds)
+{
+    if (! edit.getTrack (trackId).isValid())
+        return error ("The track to freeze has gone.");
+
+    juce::AudioFormatManager formats;
+    formats.registerBasicFormats();
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    if (reader == nullptr || reader->lengthInSamples <= 0)
+        return error ("The freeze didn't make any audio.");
+    reader.reset();
+
+    edit.getUndoManager().beginNewTransaction ("Freeze track");
+    edit.freezeTrack (trackId, file, startSeconds);
+    edit.getUndoManager().beginNewTransaction();
+    sessionChanged = true;
+    return object ({ { "ok", true }, { "error", juce::String() }, { "track", trackId } });
 }
 
 void DawBridge::startExport (const juce::var& args, const juce::File& destination)
@@ -5255,7 +5277,8 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
             if (args.hasProperty ("pan"))     { recordMove (id, "pan", args["pan"]); edit.setTrackPan (id, args["pan"]); }
             if (args.hasProperty ("mute"))    edit.setTrackMute (id, args["mute"]);
             if (args.hasProperty ("solo"))    edit.setTrackSolo (id, args["solo"]);
-            if (args.hasProperty ("arm"))     edit.setTrackArm (id, args["arm"]);
+            if (args.hasProperty ("arm") && ! (daw::Edit::isFrozen (track) && (bool) args["arm"])) // a frozen track can't record
+                edit.setTrackArm (id, args["arm"]);
             if (args.hasProperty ("monitor")) edit.setTrackMonitor (id, args["monitor"]);
             if (args.hasProperty ("monitorMode")) edit.setTrackMonitorMode (id, args["monitorMode"].toString());
             if (args.hasProperty ("input"))   // [left] mono, [left, right] stereo, [] none
@@ -7351,6 +7374,52 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    // "freeze" { id }: renders the whole track alone (through its effects and instrument, not
+    // its fader, pan or sends) and plays that instead of them, which saves their CPU; its
+    // own parts stay as they were. "unfreeze" { id } puts them back. Progress and the end
+    // come as "dawBounce" events with freeze: true.
+    if (command == "freeze")
+    {
+        if (bounceJob != nullptr)                 { complete (error ("A track is already rendering.")); return; }
+        const auto track = edit.getTrack (id);
+        if (! track.isValid())                    { complete (error ("Select a track to freeze.")); return; }
+        if (daw::Edit::isFrozen (track))          { complete (error ("That track is already frozen.")); return; }
+
+        engine.captureInstrumentStates();
+        daw::Exporter::Settings settings;
+        settings.sampleRate = engine.getSampleRate();
+        settings.bitDepth = 32;
+        settings.start = 0.0;
+        settings.tail = 2.0;
+
+        const auto file = getRecordingFolder().getNonexistentChildFile (juce::File::createLegalFileName (track[ids::name].toString() + " (frozen)"), ".wav", false);
+        auto exporter = std::make_shared<daw::Exporter> (edit, settings); // snapshot on this thread
+        auto job = std::make_shared<ExportJob>();
+        bounceJob = job;
+        bounceTrack = id;
+        bounceStart = 0.0;
+        bounceIsFreeze = true;
+
+        juce::Thread::launch ([exporter, job, file, trackId = id]
+        {
+            job->result = exporter->exportTrack (trackId, file, [job] (double p) { job->progress = p; return ! job->cancel.load(); }, true);
+            job->finished = true;
+        });
+        ok();
+        return;
+    }
+
+    if (command == "unfreeze")
+    {
+        if (! daw::Edit::isFrozen (edit.getTrack (id))) { complete (error ("That track isn't frozen.")); return; }
+        edit.getUndoManager().beginNewTransaction ("Unfreeze track");
+        edit.unfreezeTrack (id);
+        edit.getUndoManager().beginNewTransaction();
+        sessionChanged = true;
+        ok();
+        return;
+    }
+
     // "bounce" { track, start?, end? }: renders the track alone (through its effects) to a
     // new audio track under it and mutes it; progress and the end come as "dawBounce"
     // events. "bounce" { cancel: true } stops it.
@@ -7381,6 +7450,7 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         bounceJob = job;
         bounceTrack = id;
         bounceStart = settings.start;
+        bounceIsFreeze = false;
 
         juce::Thread::launch ([exporter, job, file, trackId = id]
         {
