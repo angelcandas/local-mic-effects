@@ -102,7 +102,9 @@ set(MICFX_INSTRUMENT_SOURCES
     src/instruments/Pluck.cpp
     src/instruments/Mallets.cpp
     src/instruments/Beat.cpp
-    src/instruments/Kit.cpp)
+    src/instruments/Kit.cpp
+    src/StarterContent.cpp
+    src/StarterContent.h)
 
 set(MICFX_DSP_SOURCES
     ${MICFX_INSTRUMENT_SOURCES}

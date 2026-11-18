@@ -5,6 +5,7 @@
 #include "Fx.h"
 #include "InstrumentEditor.h"
 #include "Registry.h"
+#include "../StarterContent.h"
 
 #include <deque>
 
@@ -16,6 +17,7 @@ namespace
     constexpr int numVoices = 32;
 
     //==========================================================================
+    std::atomic<bool> starterEnabled { true };
     juce::CriticalSection searchLock;
     juce::Array<juce::File> searchFolders;
 
@@ -24,6 +26,12 @@ namespace
         const auto name = original.getFileName();
         if (name.isEmpty())
             return {};
+
+        // A starter sound from another machine: the same kit's file in our starter folder.
+        if (starter::getKitNames().contains (original.getParentDirectory().getFileName()) && starter::ensure())
+            if (const auto starterFile = starter::getFolder().getChildFile (original.getParentDirectory().getFileName()).getChildFile (name);
+                starterFile.existsAsFile())
+                return starterFile;
 
         juce::Array<juce::File> folders;
         {
@@ -137,6 +145,9 @@ namespace
             }
             velocity = p ("velocity");
             room = p ("room");
+
+            if (starterEnabled.load())
+                loadStarterKit ("Studio Kit");
         }
 
         ~KitEngine() override = default;
@@ -198,6 +209,21 @@ namespace
                 return false;
             install (pad, std::move (sample), file);
             return true;
+        }
+
+        bool loadStarterKit (const juce::String& kit) override
+        {
+            if (! starter::ensure())
+                return false;
+            const auto files = starter::getKitFiles (kit);
+            auto all = ! files.empty();
+            for (int i = 0; i < (int) files.size() && i < numPads; ++i)
+            {
+                juce::String error;
+                if (files[(size_t) i] == juce::File() || ! loadSample (i, files[(size_t) i], error))
+                    all = false;
+            }
+            return all;
         }
 
         void clearPad (int pad) override
@@ -862,6 +888,8 @@ juce::String KitSampler::hintName (int pad)
 }
 
 KitSampler* asKit (Engine& engine) { return dynamic_cast<KitSampler*> (&engine); }
+
+void setKitStarterEnabled (bool on) { starterEnabled.store (on); }
 
 void setKitSearchFolders (const juce::Array<juce::File>& folders)
 {
