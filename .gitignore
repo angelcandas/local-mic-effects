@@ -2,3 +2,13 @@ build/
 .cache/
 .DS_Store
 *.swp
+
+# Multitracks for the Auto Mix bench and learning (free for non-commercial use only: never
+# commit them), and what tools/learn-mix.sh writes.
+ai-mixing-research/
+multitracks/
+learn-out/
+learn-out.zip
+bench-results/
+build-learn*.log
+tools/mixlearn/__pycache__/
