@@ -15744,6 +15744,69 @@ namespace
         return p;
     }
 
+static void testTemplates()
+{
+    std::cout << "\nProject templates\n";
+
+    PluginProcessor processor;
+    juce::PropertiesFile::Options options;
+    options.applicationName = "MicFXTests";
+    const auto root = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-templates", {});
+    root.createDirectory();
+    juce::PropertiesFile settings (root.getChildFile ("test.settings"), options);
+    DawBridge::availableForTesting = true;
+    DawBridge bridge (processor, settings, [] (const juce::Identifier&, const juce::var&) {}, [] { return (juce::int64) 0; });
+    auto& edit = processor.getDawEdit();
+
+    const auto vocal = bridge.newFromTemplate (root.getChildFile ("Vocal"), "builtin:vocal");
+    auto tracks = edit.getTracks();
+    check ((bool) vocal["ok"] && tracks.size() == 4 && tracks[0][daw::ids::name].toString() == "Lead Vocal", "Vocal recording: four tracks, lead first");
+    check ((bool) tracks[0][daw::ids::arm] && ! (bool) tracks[1][daw::ids::arm], "only the lead is armed");
+    check (daw::Edit::getInserts (tracks[0]).getNumChildren() > 0, "the lead has its vocal chain");
+    check (std::abs (edit.getTempo() - 100.0) < 1e-6, "with the template's tempo");
+    check (root.getChildFile ("Vocal.micfx").getChildFile ("project.xml").existsAsFile(), "the project is saved");
+
+    bridge.newFromTemplate (root.getChildFile ("Beat"), "builtin:beat");
+    tracks = edit.getTracks();
+    check (tracks.size() == 4 && daw::Edit::isMidiTrack (tracks[0]) && (bool) edit.getState()[daw::ids::loopOn],
+           "Beat making: MIDI tracks and a loop");
+
+    check (! (bool) bridge.newFromTemplate (root.getChildFile ("Nope"), "builtin:nope")["ok"], "an unknown template is an error");
+
+    // Your own: tracks, effects and settings stay, audio does not.
+    const auto audio = edit.addTrack ("Audio");
+    edit.addClip ((int) audio[daw::ids::id], root.getChildFile ("fake.wav"), 0.0, 2.0);
+    check (daw::templates::saveUser (edit.getState(), "Test Mine ZZ").isEmpty(), "saving a template works");
+    const auto saved = daw::templates::readUser ("Test Mine ZZ");
+    int clips = 0, midiTracks = 0;
+    std::function<void (juce::ValueTree)> count = [&] (juce::ValueTree t)
+    {
+        for (auto c : t)
+        {
+            if (c.hasType (daw::ids::CLIP))
+                ++clips;
+            if (c.hasType (daw::ids::TRACK) && daw::Edit::isMidiTrack (c))
+                ++midiTracks;
+            count (c);
+        }
+    };
+    count (saved);
+    check (saved.isValid() && clips == 0 && midiTracks == 4, "the saved template has no audio clips and keeps the instruments");
+
+    bridge.newFromTemplate (root.getChildFile ("From Mine"), "user:Test Mine ZZ");
+    check (edit.getTracks().size() == 5 && daw::Edit::isMidiTrack (edit.getTracks()[3]), "a project starts from it");
+
+    bool listed = false;
+    for (const auto& t : daw::templates::listUser())
+        listed = listed || t.name == "Test Mine ZZ";
+    check (listed, "it is listed");
+    check (daw::templates::removeUser ("Test Mine ZZ").isEmpty() && ! daw::templates::readUser ("Test Mine ZZ").isValid(), "and can be removed");
+    check (! daw::templates::saveUser (edit.getState(), "  ").isEmpty(), "a blank name is refused");
+
+    DawBridge::availableForTesting = false;
+    root.deleteRecursively();
+}
+
 static void testStarterContent()
 {
     std::cout << "\nStarter content (kits and patterns)\n";
@@ -19877,6 +19940,7 @@ int main()
     testInstruments();
     testKit();
     testStarterContent();
+    testTemplates();
     testPluginHosting();
     testEffectPlugins();
     testProjects();

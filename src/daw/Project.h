@@ -29,7 +29,13 @@ public:
 
     // Creates a new, empty project folder (adding ".micfx" if missing) and makes it the
     // current one. The Edit is cleared. Returns an error message, or empty.
-    juce::String createNew (const juce::File& folder);
+    // With `startFrom` (a saved session, e.g. a template's), the project starts as that
+    // instead of empty.
+    juce::String createNew (const juce::File& folder, const juce::ValueTree& startFrom = {});
+
+    // Reads a session saved as XML (a project.xml or a template), with the values' types put
+    // back. Returns an invalid tree if it can't be read or is from a newer version.
+    static juce::ValueTree readTree (const juce::File& xmlFile);
 
     // Loads a project folder into the Edit. Returns an error message, or empty.
     juce::String open (const juce::File& folder);

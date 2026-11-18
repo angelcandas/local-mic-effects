@@ -6,6 +6,7 @@
 
 #include <optional>
 #include "daw/Exporter.h"
+#include "daw/Templates.h"
 #include "daw/AutomationRecorder.h"
 #include "analysis/MixAssistant.h"
 #include "analysis/MixCorrect.h"
@@ -79,6 +80,8 @@ public:
     // click through a file chooser). Each returns { ok, error, ... } like handle().
     juce::var openProject (const juce::File& picked);       // a project folder, or any file in one
     juce::var newProject (const juce::File& folder);
+    // A new project from a template: "builtin:<key>" or "user:<name>" (see daw/Templates.h).
+    juce::var newFromTemplate (const juce::File& folder, const juce::String& source);
     juce::var saveProjectAs (const juce::File& folder);
     // start < 0: at the playhead. trackId not a track: on a new track.
     // -> { ok, error, track, clip, start, loop? { from, to, bars } }. `match`: a loop (see
@@ -154,6 +157,8 @@ private:
     void setMode (bool daw);
     void rememberProject();
     juce::var describeRecentProjects() const;
+    juce::var describeTemplates() const;
+    void applyBuiltInTemplate (const daw::templates::Template&);
     juce::File getRecordingFolder() const;
     void loadPresetInto (int trackId, int presetIndex);
     void startExport (const juce::var& args, const juce::File& destination);

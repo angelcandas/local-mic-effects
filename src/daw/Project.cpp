@@ -114,7 +114,7 @@ void Project::setFolder (const juce::File& newFolder)
 }
 
 //==============================================================================
-juce::String Project::createNew (const juce::File& requested)
+juce::String Project::createNew (const juce::File& requested, const juce::ValueTree& startFrom)
 {
     const auto target = withExtension (requested);
 
@@ -127,7 +127,7 @@ juce::String Project::createNew (const juce::File& requested)
     close();
 
     Edit fresh;
-    edit.replaceState (fresh.getState());
+    edit.replaceState (startFrom.hasType (ids::PROJECT) ? startFrom : fresh.getState());
     setFolder (target);
     recoverable = juce::File();
     return save();
@@ -175,6 +175,21 @@ juce::String Project::open (const juce::File& requested)
     }
 
     return {};
+}
+
+juce::ValueTree Project::readTree (const juce::File& xmlFile)
+{
+    const auto xml = juce::parseXML (xmlFile);
+    if (xml == nullptr)
+        return {};
+
+    auto tree = juce::ValueTree::fromXml (*xml);
+    if (! tree.hasType (ids::PROJECT) || (int) tree.getProperty (ids::version, 0) > Edit::formatVersion)
+        return {};
+
+    restoreTypes (tree);
+    tree.setProperty (ids::version, Edit::formatVersion, nullptr);
+    return tree;
 }
 
 juce::String Project::load (const juce::File& xmlFile, const juce::File& projectFolder)
