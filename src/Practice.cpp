@@ -154,6 +154,9 @@ Practice::Prepared Practice::prepare (const juce::File& source, const Options& o
     }
 
     report (0.0);
+    result.source = source;
+    result.name = source.getFileNameWithoutExtension();
+    result.voiceOnly = ! options.split;
     result.folder = getCacheFolder (source, options.split, options.cacheRoot);
     const auto melodyFile = result.folder.getChildFile (melodyFileName);
     result.guide = options.split ? result.folder.getChildFile (guideFileName) : source;
@@ -166,6 +169,8 @@ Practice::Prepared Practice::prepare (const juce::File& source, const Options& o
         if (! result.song.isEmpty())
         {
             result.fromCache = true;
+            if (LibraryEntry info; readInfo (result.folder, info))
+                result.key = info.key;
             juce::AudioFormatManager formats;
             formats.registerBasicFormats();
             if (std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (result.guide)); reader != nullptr && reader->sampleRate > 0.0)
@@ -183,7 +188,7 @@ Practice::Prepared Practice::prepare (const juce::File& source, const Options& o
         return result;
     }
 
-    juce::AudioBuffer<float> voice;
+    juce::AudioBuffer<float> voice, keyAudio; // keyAudio: the backing, when there is one
     double rate = stems::modelSampleRate;
 
     if (options.split)
@@ -233,6 +238,7 @@ Practice::Prepared Practice::prepare (const juce::File& source, const Options& o
             result.error = "Couldn't write the stems into " + result.folder.getFullPathName() + ".";
             return result;
         }
+        keyAudio = std::move (backing);
     }
     else
     {
@@ -261,6 +267,98 @@ Practice::Prepared Practice::prepare (const juce::File& source, const Options& o
     }
 
     melodyFile.replaceWithText (result.song.toString());
+
+    // The key (from the backing, or the voice when that's all there is), for the library.
+    {
+        const auto estimate = analysis::detectKey (keyAudio.getNumSamples() > 0 ? keyAudio : voice, rate,
+                                                   [&] { return report (0.5); });
+        result.key = estimate.isValid() ? estimate.getName() : juce::String();
+    }
+    LibraryEntry info;
+    info.folder = result.folder;
+    info.name = result.name;
+    info.key = result.key;
+    info.source = source;
+    info.seconds = result.seconds;
+    info.voiceOnly = result.voiceOnly;
+    info.opened = juce::Time::currentTimeMillis();
+    writeInfo (result.folder, info);
+    return result;
+}
+
+void Practice::writeInfo (const juce::File& folder, const LibraryEntry& e)
+{
+    juce::String text;
+    text << "name=" << e.name.replaceCharacters ("\r\n", "  ") << "\n"
+         << "key=" << e.key << "\n"
+         << "source=" << e.source.getFullPathName() << "\n"
+         << "seconds=" << juce::String (e.seconds, 3) << "\n"
+         << "voiceOnly=" << (e.voiceOnly ? 1 : 0) << "\n"
+         << "opened=" << e.opened << "\n";
+    folder.getChildFile (infoFileName).replaceWithText (text);
+}
+
+bool Practice::readInfo (const juce::File& folder, LibraryEntry& e)
+{
+    const auto file = folder.getChildFile (infoFileName);
+    if (! file.existsAsFile())
+        return false;
+
+    e.folder = folder;
+    for (const auto& line : juce::StringArray::fromLines (file.loadFileAsString()))
+    {
+        const auto eq = line.indexOfChar ('=');
+        if (eq < 0)
+            continue;
+        const auto key = line.substring (0, eq), value = line.substring (eq + 1);
+        if (key == "name") e.name = value;
+        else if (key == "key") e.key = value;
+        else if (key == "source") e.source = juce::File (value);
+        else if (key == "seconds") e.seconds = value.getDoubleValue();
+        else if (key == "voiceOnly") e.voiceOnly = value.getIntValue() != 0;
+        else if (key == "opened") e.opened = value.getLargeIntValue();
+    }
+    return e.name.isNotEmpty();
+}
+
+std::vector<Practice::LibraryEntry> Practice::getLibrary (const juce::File& root)
+{
+    std::vector<LibraryEntry> entries;
+    for (const auto& entry : juce::RangedDirectoryIterator (root, false, "*", juce::File::findDirectories))
+    {
+        const auto folder = entry.getFile();
+        LibraryEntry info;
+        if (folder.getChildFile (melodyFileName).existsAsFile() && readInfo (folder, info)
+            && (info.voiceOnly || (folder.getChildFile (guideFileName).existsAsFile() && folder.getChildFile (backingFileName).existsAsFile())))
+            entries.push_back (info);
+    }
+    std::sort (entries.begin(), entries.end(), [] (const auto& a, const auto& b) { return a.opened > b.opened; });
+    return entries;
+}
+
+Practice::Prepared Practice::loadFromCache (const juce::File& folder)
+{
+    Prepared result;
+    LibraryEntry info;
+    if (! readInfo (folder, info))
+    {
+        result.error = "That song isn't in the library any more.";
+        return result;
+    }
+
+    result.folder = folder;
+    result.voiceOnly = info.voiceOnly;
+    result.source = info.source;
+    result.name = info.name;
+    result.key = info.key;
+    result.seconds = info.seconds;
+    result.fromCache = true;
+    result.guide = info.voiceOnly ? info.source : folder.getChildFile (guideFileName);
+    result.backing = info.voiceOnly ? juce::File() : folder.getChildFile (backingFileName);
+    result.song = coach::Song::fromString (folder.getChildFile (melodyFileName).loadFileAsString());
+    if (result.song.isEmpty() || ! result.guide.existsAsFile() || (! info.voiceOnly && ! result.backing.existsAsFile()))
+        result.error = info.voiceOnly ? "The voice file " + info.source.getFullPathName() + " has moved. Open it again from its place."
+                                      : "This song's saved stems are incomplete. Open the song again.";
     return result;
 }
 
@@ -289,6 +387,48 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
             return object ({ { "ok", false }, { "error", "Couldn't find " + options["path"].toString() + "." } });
         start (file, (bool) options.getProperty ("split", true));
         return object ({ { "ok", true } });
+    }
+
+    if (action == "library")
+    {
+        juce::Array<juce::var> list;
+        for (const auto& e : getLibrary())
+            list.add (object ({ { "id", e.folder.getFileName() }, { "name", e.name }, { "key", e.key }, { "seconds", round3 (e.seconds) },
+                                { "voiceOnly", e.voiceOnly }, { "opened", (double) e.opened },
+                                { "current", e.folder.getFullPathName() == settings.getValue ("practice.folder") && ! song.isEmpty() } }));
+        return list;
+    }
+
+    if (action == "openCached")
+    {
+        const auto folder = getCacheRoot().getChildFile (juce::File::createLegalFileName (options["id"].toString()));
+        auto prepared = loadFromCache (folder);
+        if (prepared.error.isNotEmpty())
+        {
+            emit ("practice", object ({ { "state", "error" }, { "error", prepared.error } }));
+            return object ({ { "ok", false }, { "error", prepared.error } });
+        }
+        if (job != nullptr)
+            job->cancel = true;
+        job = nullptr;
+        install (prepared);
+        emit ("practice", object ({ { "state", "ready" }, { "song", describeSong() }, { "fromCache", true } }));
+        return object ({ { "ok", true } });
+    }
+
+    if (action == "forget")
+    {
+        const auto folder = getCacheRoot().getChildFile (juce::File::createLegalFileName (options["id"].toString()));
+        if (folder.getParentDirectory() == getCacheRoot() && folder.getChildFile (infoFileName).existsAsFile()
+            && folder.getFullPathName() != settings.getValue ("practice.folder"))
+            folder.deleteRecursively();
+        return object ({ { "ok", true } });
+    }
+
+    if (action == "speed")
+    {
+        startSpeed ((double) options.getProperty ("speed", 1.0), (double) options.getProperty ("semitones", 0.0));
+        return describe();
     }
 
     if (action == "cancel")
@@ -376,7 +516,8 @@ juce::var Practice::describeSong() const
 
     return object ({ { "name", songName }, { "file", source.getFullPathName() }, { "notes", notes }, { "phrases", phrases },
                      { "lowest", round2 (song.getLowest()) }, { "highest", round2 (song.getHighest()) },
-                     { "hasBacking", backingFile != juce::File() },
+                     { "hasBacking", backingFile != juce::File() }, { "key", songKey },
+                     { "speed", loop.active && loop.section == wholeSong ? loop.speed : 1.0 },
                      { "sections", describeSections() },
                      { "loop", loop.active ? object ({ { "phrase", loop.phrase }, { "lastPhrase", loop.lastPhrase }, { "section", loop.section },
                                                        { "speed", loop.speed }, { "semitones", loop.semitones },
@@ -472,8 +613,25 @@ void Practice::install (const Prepared& prepared)
         sectionsKnown = true;
     }
 
-    source = job != nullptr ? job->source : prepared.guide;
-    songName = source.getFileNameWithoutExtension();
+    source = prepared.source != juce::File() ? prepared.source : prepared.guide;
+    songName = prepared.name.isNotEmpty() ? prepared.name : source.getFileNameWithoutExtension();
+    songKey = prepared.key;
+    if (LibraryEntry info; readInfo (prepared.folder, info))
+    {
+        info.opened = juce::Time::currentTimeMillis();
+        writeInfo (prepared.folder, info);
+    }
+    else if (prepared.folder != juce::File())
+    {
+        info.folder = prepared.folder;
+        info.name = songName;
+        info.key = prepared.key;
+        info.source = source;
+        info.seconds = prepared.seconds;
+        info.voiceOnly = prepared.voiceOnly;
+        info.opened = juce::Time::currentTimeMillis();
+        writeInfo (prepared.folder, info);
+    }
     guideFile = prepared.guide;
     backingFile = prepared.backing;
     guidePending = true;
@@ -928,6 +1086,48 @@ Practice::LoopAudio Practice::renderLoop (const juce::AudioBuffer<float>* backin
     return result;
 }
 
+void Practice::startSpeed (double speed, double semitones)
+{
+    if (baseSong.isEmpty())
+        return;
+
+    speed = juce::jlimit (0.5, 1.5, speed);
+    semitones = juce::jlimit (-12.0, 12.0, semitones);
+    if (std::abs (speed - 1.0) < 1.0e-3 && std::abs (semitones) < 5.0e-3)
+    {
+        // Normal speed: back to the song's own tracks, where we are.
+        if (loop.active && loop.section == wholeSong)
+        {
+            const auto position = loop.from + lastSongTime * loop.speed;
+            endLoop();
+            auto& multitrack = processor.getMultitrack();
+            multitrack.seek ((juce::int64) (position * multitrack.getSampleRate()));
+            restartFrom (position);
+            emit ("practice", object ({ { "state", "ready" }, { "song", describeSong() }, { "fromCache", true }, { "quiet", true } }));
+        }
+        else if (loopJob != nullptr && loopJob->section == wholeSong)
+        {
+            loopJob->cancel = true;
+            loopJob = nullptr;
+            emit ("practice", object ({ { "state", "ready" }, { "song", describeSong() }, { "fromCache", true }, { "quiet", true } }));
+        }
+        return;
+    }
+
+    // The song's own length (a rendered loop may be playing, with another length).
+    const auto& multitrack = processor.getMultitrack();
+    const auto rate = juce::jmax (1.0, multitrack.getSampleRate());
+    auto samples = (juce::int64) 0;
+    for (const auto& track : multitrack.getTracks())
+        if (track->file == guideFile || (backingFile != juce::File() && track->file == backingFile))
+            samples = juce::jmax (samples, (juce::int64) track->audio.getNumSamples());
+    const auto length = (double) samples / rate;
+    // Carry on from where we are in the song.
+    const auto position = loop.active ? loop.from + lastSongTime * loop.speed : lastSongTime;
+    const auto from = juce::jlimit (0.0, juce::jmax (0.0, length - 1.0), position);
+    startRangeLoop (0, (int) baseSong.phrases.size() - 1, wholeSong, from, length, speed, semitones);
+}
+
 void Practice::startLoop (int phrase, double speed, double semitones)
 {
     if (! juce::isPositiveAndBelow (phrase, (int) baseSong.phrases.size()))
@@ -968,8 +1168,8 @@ void Practice::startRangeLoop (int phrase, int lastPhrase, int section, double f
     if (loop.active)
         endLoop();
 
-    speed = juce::jlimit (0.5, 1.0, speed);
-    semitones = juce::jlimit (-6.0, 6.0, std::round (semitones));
+    speed = juce::jlimit (0.5, 1.5, speed);
+    semitones = juce::jlimit (-12.0, 12.0, std::round (semitones * 100.0) / 100.0);
 
     auto& multitrack = processor.getMultitrack();
 
@@ -986,7 +1186,7 @@ void Practice::startRangeLoop (int phrase, int lastPhrase, int section, double f
         const auto rate = multitrack.getSampleRate();
         multitrack.setLoop ((juce::int64) (from * rate), (juce::int64) (to * rate));
         multitrack.seek ((juce::int64) (from * rate));
-        song = section >= 0 ? cutSong (baseSong, phrase, lastPhrase, 0.0, 1.0, 0.0) : cutSong (baseSong, phrase, 0.0, 1.0, 0.0);
+        song = section != -1 ? cutSong (baseSong, phrase, lastPhrase, 0.0, 1.0, 0.0) : cutSong (baseSong, phrase, 0.0, 1.0, 0.0);
         noteScores.assign (song.notes.size(), {});
         phraseScores.assign (song.phrases.size(), {});
         restartFrom (from);
@@ -1062,13 +1262,14 @@ void Practice::finishLoop (LoopJob& done)
     }
     applyGuideLevel();
 
-    song = done.section >= 0 ? cutSong (baseSong, done.phrase, done.lastPhrase, done.from, done.speed, done.semitones)
+    song = done.section != -1 ? cutSong (baseSong, done.phrase, done.lastPhrase, done.from, done.speed, done.semitones)
                              : cutSong (baseSong, done.phrase, done.from, done.speed, done.semitones);
     noteScores.assign (song.notes.size(), {});
     phraseScores.assign (song.phrases.size(), {});
     restartFrom (0.0);
 
-    multitrack.setLoop (0, length);
+    if (done.section != wholeSong) // the whole song at another speed plays through once
+        multitrack.setLoop (0, length);
     multitrack.seek (0);
     lastPosition = 0.0;
     multitrack.play();

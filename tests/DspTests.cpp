@@ -10789,6 +10789,24 @@ namespace
         const auto copy = Practice::prepare (root.getChildFile ("Copy.wav"), options, progress);
         check (copy.fromCache && copy.folder == first.folder && loads == 1, "the same song under another name finds its cache");
 
+        // The library lists every song prepared, and opens one without its original file.
+        const auto library = Practice::getLibrary (cacheRoot);
+        check (library.size() == 2, "the library has the split song and the voice on its own");
+        const auto entry = std::find_if (library.begin(), library.end(), [&] (const auto& e) { return e.folder == first.folder; });
+        check (entry != library.end() && entry->name == "Song" && ! entry->voiceOnly && std::abs (entry->seconds - 5.0) < 0.05 && entry->source == songFile
+                   && entry->key == first.key,
+               "a library entry keeps the name, length, key and original file");
+        const auto fromLibrary = Practice::loadFromCache (first.folder);
+        check (fromLibrary.error.isEmpty() && fromLibrary.song.notes.size() == 6 && fromLibrary.guide == first.guide && fromLibrary.backing == first.backing
+                   && fromLibrary.name == "Song" && fromLibrary.fromCache && loads == 1,
+               "a song opens from the library without splitting");
+        first.backing.deleteFile();
+        check (Practice::loadFromCache (first.folder).error.isNotEmpty() && Practice::getLibrary (cacheRoot).size() == 1,
+               "a song with missing stems is not offered and can't be opened");
+        check (Practice::loadFromCache (cacheRoot.getChildFile ("nothing")).error.isNotEmpty(), "an unknown library id is refused");
+        // Put the stems back for the rest of the test.
+        Practice::prepare (songFile, options, progress);
+
         writeSong (root.getChildFile ("Higher.wav"), 2.0);
         const auto cancelled = Practice::prepare (root.getChildFile ("Higher.wav"), options,
                                                   [] (Practice::Phase phase, double) { return phase != Practice::Phase::splitting; });
@@ -10931,6 +10949,18 @@ namespace
         check (! rendered.cancelled && rendered.backing.getNumSamples() == 0 && std::abs (rendered.guide.getNumSamples() / sampleRate - 4.0) < 0.05,
                "the guide renders slower (" + juce::String (rendered.guide.getNumSamples() / sampleRate, 2) + " s for 3 s)");
         check (std::abs (f4 - 67.0f) < 0.2f, "and in the new key (F4 sung as G4: " + juce::String (f4, 2) + ")");
+
+        // Speed and key are independent: faster keeps the pitch, a key change keeps the length.
+        const auto faster = Practice::renderLoop (nullptr, &voice, sampleRate, 2.0, 5.0, 1.5, 0.0);
+        const auto fasterTrack = pitch::analyse (faster.guide, sampleRate);
+        const auto fFast = pitch::getPitch (fasterTrack, (2.7 - 2.0) / 1.5, (3.0 - 2.0) / 1.5);
+        check (std::abs (faster.guide.getNumSamples() / sampleRate - 2.0) < 0.05 && std::abs (fFast - 65.0f) < 0.2f,
+               "150% speed is 2 s for 3 s and the pitch stays (" + juce::String (fFast, 2) + ")");
+        const auto shifted = Practice::renderLoop (nullptr, &voice, sampleRate, 2.0, 5.0, 1.0, -0.5);
+        const auto shiftedTrack = pitch::analyse (shifted.guide, sampleRate);
+        const auto fShift = pitch::getPitch (shiftedTrack, 0.7, 1.0);
+        check (std::abs (shifted.guide.getNumSamples() / sampleRate - 3.0) < 0.05 && std::abs (fShift - 64.5f) < 0.2f,
+               "50 cents down keeps the length (" + juce::String (fShift, 2) + ")");
 
         // A Practice on the song's tracks: the report, then looping a phrase as it is.
         PluginProcessor processor;
@@ -19876,6 +19906,15 @@ int main()
     {
         testBounce();
         testFreeze();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=practice: just the Practice view's engine.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "practice")
+    {
+        testPractice();
+        testPracticeLoops();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }

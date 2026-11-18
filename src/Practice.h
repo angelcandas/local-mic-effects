@@ -40,6 +40,11 @@ public:
     //   "state"                    -> describe()
     //   "open" { split }           -> { ok }: picks a file; split: false when it's a voice on its own
     //   "openFile" { path, split } -> { ok, error }
+    //   "library"                  -> [{ id, name, key, seconds, voiceOnly, opened, hasSource }]: songs prepared before
+    //   "openCached" { id }        opens one from the library (no splitting, the original file isn't needed)
+    //   "forget" { id }            deletes a song's cached stems
+    //   "speed" { speed, semitones } plays the whole song at 0.5..1.5 times the speed and/or up to 12 semitones
+    //                              (fractions allowed: cents) higher or lower, each independent of the other (warp engine)
     //   "cancel"                   stops a preparation
     //   "view" { open }            the view opened or closed (follows the singer while open)
     //   "guide" { level }          the guide vocal's level (0..1.5 gain, 0 mutes it)
@@ -76,7 +81,29 @@ public:
         bool cancelled = false;
         bool fromCache = false;
         juce::String note;   // e.g. why the GPU wasn't used
+        juce::File source;   // the file it was made from (may be gone when opened from the library)
+        juce::String name;   // the song's name
+        juce::String key;    // e.g. "A minor", or empty when no clear key
+        bool voiceOnly = false;
     };
+
+    // The library: every song prepared before, newest first, each in its own cache folder.
+    struct LibraryEntry
+    {
+        juce::File folder;
+        juce::String name, key;
+        juce::File source;
+        double seconds = 0.0;
+        bool voiceOnly = false;
+        juce::int64 opened = 0; // ms since 1970
+    };
+    static std::vector<LibraryEntry> getLibrary (const juce::File& root = getCacheRoot());
+    // A song from its cache folder, without the original file. `error` is set when it's incomplete.
+    static Prepared loadFromCache (const juce::File& folder);
+    static constexpr int wholeSong = -2; // Loop::section for "the whole song at another speed"
+    static constexpr const char* infoFileName = "info-v1.txt";
+    static void writeInfo (const juce::File& folder, const LibraryEntry&);
+    static bool readInfo (const juce::File& folder, LibraryEntry&);
 
     struct Options
     {
@@ -162,6 +189,7 @@ private:
     struct LoopJob;
     struct SectionsJob;
 
+    void startSpeed (double speed, double semitones);
     void startLoop (int phrase, double speed, double semitones);
     void startSectionLoop (int section, double speed, double semitones);
     void startRangeLoop (int firstPhrase, int lastPhrase, int section, double from, double to, double speed, double semitones);
@@ -188,7 +216,7 @@ private:
     // The song being practised.
     analysis::coach::Song song;     // the target now (a loop's own while looping)
     analysis::coach::Song baseSong; // the whole song
-    juce::String songName;
+    juce::String songName, songKey;
     juce::File source, guideFile, backingFile;
     float guideLevel = 0.35f;
     bool guidePending = false; // the guide track hasn't loaded yet: set its level when it does
