@@ -1025,6 +1025,24 @@ body.is-daw .chip--live { display: none; }
 .shortcut { display: grid; grid-template-columns: 140px 1fr; gap: 10px; padding: 3px 0; color: var(--muted); }
 .shortcut kbd { color: var(--text); font: 600 11px/1.6 var(--mono); }
 
+/* ---------- Key commands dialog ---------- */
+
+.keycmds-tools { display: flex; gap: 8px; margin: 10px 0 4px; }
+.keycmds-search { flex: 1; min-width: 0; padding: 6px 10px; border: 1px solid var(--line-strong); border-radius: 8px; background: rgba(255, 255, 255, 0.04); color: var(--text); font: inherit; }
+.keycmds-note { min-height: 18px; margin: 4px 0; color: var(--muted); font-size: 12px; }
+.keycmds-note.is-warn { color: var(--warn, #f0b35a); }
+.keycmds-note button { margin-left: 6px; }
+.keycmds-list h4 { margin: 12px 0 4px; color: var(--faint); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.8px; }
+.keycmd { display: grid; grid-template-columns: minmax(180px, 1fr) minmax(120px, auto) auto; gap: 10px; align-items: center; padding: 3px 4px; border-radius: 6px; color: var(--muted); }
+.keycmd.is-changed .keycmd-label { color: var(--text); }
+.keycmd.is-capturing { background: rgba(255, 255, 255, 0.06); }
+.keycmd-keys { display: flex; flex-wrap: wrap; gap: 4px; }
+.keycmd-keys kbd { padding: 0 6px; border: 1px solid var(--line-strong); border-radius: 5px; color: var(--text); font: 600 11px/1.7 var(--mono); }
+.keycmd-keys em { color: var(--faint); font-size: 11px; }
+.keycmd-actions { display: flex; gap: 4px; }
+.keycmd-actions button, .keycmds-tools button { white-space: nowrap; flex-shrink: 0; }
+.keycmds-empty { color: var(--faint); }
+
 /* ---------- Timeline extras: markers, go-to clock, tap tempo, click volume ---------- */
 
 .daw-clock { position: relative; cursor: text; }
