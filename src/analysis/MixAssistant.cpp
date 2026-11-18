@@ -1,4 +1,5 @@
 #include "MixAssistant.h"
+#include "LearnedTargets.h"
 #include "MixSections.h"
 
 #include "daw/Edit.h"
@@ -1023,6 +1024,18 @@ namespace
         return { 40.0, 120.0, 3.0, 8.0f, false };
     }
 
+    // The learned tone move for an instrument role (LearnedTargets.h); null when none was learned.
+    const learned::RoleEq* getLearnedEq (Role role)
+    {
+        const auto* eq = role == Role::drums  ? &learned::drumsEq
+                       : role == Role::bass   ? &learned::bassEq
+                       : role == Role::guitar ? &learned::guitarEq
+                       : role == Role::piano  ? &learned::pianoEq
+                       : role == Role::synth  ? &learned::synthEq
+                                              : nullptr;
+        return eq != nullptr && eq->songs > 0 && (eq->lowShelfDb != 0.0f || eq->bellDb != 0.0f || eq->highShelfDb != 0.0f) ? eq : nullptr;
+    }
+
     // A low cut an octave under the lowest band with much in it (within 24 dB of its
     // loudest), held to the instrument's range; 0 for none.
     double findInstrumentLowCut (const Profile& profile, Role role)
@@ -1934,6 +1947,12 @@ MixTargets getTargets (MixStyle style)
             t.spread = 0.3f;
             break;
     }
+    // Learned from engineers' mixes (LearnedTargets.h): the voice sits lower over the band
+    // than these hand-set numbers, by about the same amount in every style. Speech and voice
+    // up front are about hearing the voice, not a finished song, so they stay.
+    if (style != MixStyle::speech && style != MixStyle::coaching)
+        t.voiceOverBackingLu += learned::voiceOverBandShiftLu;
+
     t.style = style;
     return t;
 }
@@ -2023,9 +2042,25 @@ bool isInstrument (Role role) noexcept
 
 std::optional<Role> guessRoleFromName (const juce::String& trackName)
 {
-    // Whole words where a short one would match inside others ("bgv", "keys"), parts of
-    // words elsewhere. Background vocals before voice, so "Backing vocals" isn't the lead.
-    const auto name = trackName.toLowerCase().replaceCharacters ("_-.()[]", "       ");
+    // Multitrack names run words together ("LeadVox1", "BassAmpMic2", "RackTom"): camel case
+    // and numbers count as separate words. Whole words where a short one would match inside
+    // others ("bgv", "keys", "tom"), parts of words elsewhere. Background vocals before voice,
+    // so "Backing vocals" isn't the lead.
+    juce::String spaced;
+    for (int i = 0; i < trackName.length(); ++i)
+    {
+        const auto c = trackName[i];
+        if (i > 0)
+        {
+            const auto p = trackName[i - 1];
+            if ((juce::CharacterFunctions::isLowerCase (p) && juce::CharacterFunctions::isUpperCase (c))
+                || (juce::CharacterFunctions::isLetter (p) && juce::CharacterFunctions::isDigit (c))
+                || (juce::CharacterFunctions::isDigit (p) && juce::CharacterFunctions::isLetter (c)))
+                spaced << ' ';
+        }
+        spaced << c;
+    }
+    const auto name = spaced.toLowerCase().replaceCharacters ("_-.()[]", "       ");
     juce::StringArray words;
     words.addTokens (name, " ", "");
     words.removeEmptyStrings();
@@ -2050,23 +2085,35 @@ std::optional<Role> guessRoleFromName (const juce::String& trackName)
     if (hasPart ({ "karaoke", "no vocal", "novocal", "no voice", "no vox", "sin voz", "sin voces", "without vocal", "minus vocal", "vocals off" }))
         return Role::backing;
 
-    const auto vocal = hasPart ({ "vocal", "voice", "vox", "voz", "sing", "cant" }) || hasWord ({ "vo", "vx" });
+    const auto drums = hasPart ({ "drum", "bateria", "batería", "kick", "snare", "hihat", "hi hat", "perc", "overhead", "cymbal", "808",
+                                  "bombo", "caja", "tambourine", "pandereta", "shaker", "clap", "bongo", "conga", "djembe", "sidestick" })
+                       || hasWord ({ "kd", "sn", "oh", "hh", "hat", "hats", "tom", "toms", "loop", "loops", "ride", "crash", "fill" });
+    const auto bass = hasPart ({ "bass", "bajo" }) || hasWord ({ "sub" });
+    const auto guitar = hasPart ({ "guitar", "gtr", "guitarra", "acoustic", "strat", "uke", "ukulele", "banjo", "mandolin", "requinto", "dobro" })
+                        || hasWord ({ "gt" });
+    const auto keys = hasPart ({ "piano", "keys", "keyboard", "rhodes", "wurli", "organ", "organo", "órgano", "teclado", "epiano", "clav" })
+                      || hasWord ({ "ep", "key", "pno" });
+    const auto instrumentNamed = drums || bass || guitar || keys || hasPart ({ "synth", "string", "violin", "cello", "pad" });
+
+    // "Vocals - Acoustic guitar" is a vocal mic, but in "ElecGtr1a_VoxM160" (a Vox amp) or
+    // "BassAmpMic1" the instrument's name wins over "vox" and "mic".
+    const auto vocal = hasPart ({ "vocal", "voice", "voz", "sing", "cant" })
+                       || (! instrumentNamed && (hasPart ({ "vox" }) || hasWord ({ "vo", "vx" })));
     if (hasPart ({ "harmon", "choir", "background", "bgv", "bvs", "bckvoc", "segunda", "coro", "adlib", "ad lib" })
-        || hasWord ({ "bv", "bvox", "bg", "backs" })
+        || hasWord ({ "bv", "bvox", "bg", "backs", "gang", "gangs" })
         || (vocal && hasPart ({ "back", "bkg", "fondo", "dbl", "double", "chorus" })))
         return Role::backingVocal;
-    if (vocal || ((hasPart ({ "lead", "take", "mic" }) || hasWord ({ "rap", "mc" })) && ! hasPart ({ "synth", "guitar", "gtr" })))
+    if (vocal || (! instrumentNamed && (hasPart ({ "lead", "take", "mic" }) || hasWord ({ "rap", "mc" }))))
         return Role::voice;
 
     // A stem from the splitter is called "<song> - Drums", "<song> - Other"...
-    if (hasPart ({ "drum", "bateria", "batería", "kick", "snare", "hihat", "perc", "overhead", "cymbal", "808", "bombo", "caja" })
-        || hasWord ({ "kd", "sn", "oh", "hh", "hat", "hats", "tom", "toms", "loop" }))
+    if (drums)
         return Role::drums;
-    if (hasPart ({ "bass", "bajo" }) || hasWord ({ "sub" }))
+    if (bass)
         return Role::bass;
-    if (hasPart ({ "guitar", "gtr", "guitarra", "acoustic", "strat", "uke", "ukulele", "banjo", "mandolin", "requinto" }) || hasWord ({ "gt" }))
+    if (guitar)
         return Role::guitar;
-    if (hasPart ({ "piano", "keys", "keyboard", "rhodes", "wurli", "organ", "organo", "órgano", "teclado", "epiano", "clav" }) || hasWord ({ "ep", "key", "pno" }))
+    if (keys)
         return Role::piano;
     if (hasWord ({ "other", "otros", "others" }))
         return Role::instrument; // the splitter's "everything else" stem
@@ -2074,6 +2121,9 @@ std::optional<Role> guessRoleFromName (const juce::String& trackName)
         return Role::pad;
     if (hasPart ({ "synth", "arp", "pluck", "lead synth", "sintetizador" }))
         return Role::synth;
+    // A room or ambience mic of the whole band is part of the band, not a backing track.
+    if (hasWord ({ "room", "rooms", "amb", "ambience", "ambient" }))
+        return Role::instrument;
     if (hasPart ({ "backing", "music", "beat", "instrumental", "karaoke", "pista", "song", "mix", "band", "playback", "accomp", "acompa",
                    "minus one", "minusone", "backtrack", "base musical" })
         || hasWord ({ "inst", "instr", "bed", "base" }))
@@ -2436,6 +2486,27 @@ static MixPlan planMixMoves (const SessionAnalyser::Result& measured, const std:
             }
         }
 
+        // Tone toward finished mixes: the move engineers made on this role, gently (bell 1 and
+        // the shelves; bells 2 and 3 are left for the dips below).
+        if (options.eq && instrument)
+            if (const auto* tone = getLearnedEq (role))
+            {
+                eq.lowShelfHz = 120.0f;
+                eq.lowShelfDb = tone->lowShelfDb;
+                eq.bells[0] = { tone->bellHz, tone->bellDb, 1.2f };
+                eq.highShelfHz = 6000.0f;
+                eq.highShelfDb = tone->highShelfDb;
+                juce::StringArray parts;
+                if (tone->lowShelfDb != 0.0f)
+                    parts.add ("lows " + formatDb (tone->lowShelfDb));
+                if (tone->bellDb != 0.0f)
+                    parts.add (formatDb (tone->bellDb) + " at " + formatHz (tone->bellHz));
+                if (tone->highShelfDb != 0.0f)
+                    parts.add ("highs " + formatDb (tone->highShelfDb));
+                eqMove.reasons.add ("Tone " + parts.joinIntoString (", ") + ": half of what engineers did to "
+                                    + getRoleName (role).toLowerCase() + " in " + juce::String (tone->songs) + " finished mixes");
+            }
+
         if (options.eq && ! isFront)
         {
             const auto masking = measureMasking (leadProfile, profile);
@@ -2496,8 +2567,9 @@ static MixPlan planMixMoves (const SessionAnalyser::Result& measured, const std:
         double eqChange = 0.0;
         if (! eqMove.reasons.isEmpty())
         {
-            eqMove.values = { { "peqOn", 1.0f }, { "peqLowCutOn", eq.lowCutOn ? 1.0f : 0.0f }, { "peqLowGain", 0.0f }, { "peqHighGain", 0.0f },
-                              { "peqHighCutOn", 0.0f }, { "peqBell1Gain", 0.0f }, { "peqBell3Gain", eq.bells[2].db },
+            eqMove.values = { { "peqOn", 1.0f }, { "peqLowCutOn", eq.lowCutOn ? 1.0f : 0.0f }, { "peqLowGain", eq.lowShelfDb },
+                              { "peqHighGain", eq.highShelfDb }, { "peqHighCutOn", 0.0f }, { "peqBell1Gain", eq.bells[0].db },
+                              { "peqBell3Gain", eq.bells[2].db },
                               { "peqBell2Freq", eq.bells[1].hz }, { "peqBell2Gain", eq.bells[1].db }, { "peqBell2Q", eq.bells[1].q } };
             if (eq.bells[2].db < 0.0f)
             {
@@ -2506,6 +2578,15 @@ static MixPlan planMixMoves (const SessionAnalyser::Result& measured, const std:
             }
             if (eq.lowCutOn)
                 eqMove.values["peqLowCutFreq"] = eq.lowCutHz;
+            if (eq.lowShelfDb != 0.0f)
+                eqMove.values["peqLowFreq"] = eq.lowShelfHz;
+            if (eq.highShelfDb != 0.0f)
+                eqMove.values["peqHighFreq"] = eq.highShelfHz;
+            if (eq.bells[0].db != 0.0f)
+            {
+                eqMove.values["peqBell1Freq"] = eq.bells[0].hz;
+                eqMove.values["peqBell1Q"] = eq.bells[0].q;
+            }
             plan.moves.push_back (eqMove);
 
             const auto eqDb = fx::ParametricEq::getMagnitudeDb (eq, bandCentres(), analysisRate);
