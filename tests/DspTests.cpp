@@ -1860,6 +1860,50 @@ namespace
     // Auto Mix with every track tagged: the names, a guess from the sound for drums and
     // bass, and what each role gets (background vocals under the lead, bass and drums
     // only a rumble cut).
+    void testAutoMixSplitLead()
+    {
+        std::cout << "\nAuto Mix lead split over tracks\n";
+
+        // The verse on one track, the chorus on another; the band 10 dB louder in the chorus.
+        const auto seconds = 10.0;
+        const auto half = (int) (5.0 * sampleRate);
+        auto verse = makeSungLine (seconds), chorus = makeSungLine (seconds), band = makeBacking (seconds);
+        verse.clear (half, verse.getNumSamples() - half);
+        chorus.clear (0, half);
+        band.applyGain (half, band.getNumSamples() - half, juce::Decibels::decibelsToGain (10.0f));
+
+        const auto folder = juce::File::createTempFile ("micfx-splitlead");
+        folder.createDirectory();
+        writeWav (folder.getChildFile ("verse.wav"), verse, sampleRate);
+        writeWav (folder.getChildFile ("chorus.wav"), chorus, sampleRate);
+        writeWav (folder.getChildFile ("band.wav"), band, sampleRate);
+
+        daw::Edit edit;
+        const auto a = (int) edit.addTrack ("Lead verse")[daw::ids::id];
+        const auto b = (int) edit.addTrack ("Lead chorus")[daw::ids::id];
+        const auto backing = (int) edit.addTrack ("Band")[daw::ids::id];
+        edit.addClip (a, folder.getChildFile ("verse.wav"), 0.0, seconds);
+        edit.addClip (b, folder.getChildFile ("chorus.wav"), 0.0, seconds);
+        edit.addClip (backing, folder.getChildFile ("band.wav"), 0.0, seconds);
+        const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+        const std::map<int, analysis::Role> roles { { a, analysis::Role::voice }, { b, analysis::Role::voice }, { backing, analysis::Role::backing } };
+        analysis::MixOptions options;
+        options.eq = options.compressor = options.deEsser = options.reverb = options.saturation = options.echo = options.exciter = options.width = options.rides = false;
+        const auto plan = analysis::planMix (source, roles, { { a, 0.0f }, { b, 0.0f }, { backing, 0.0f } }, 0.0f, analysis::MixStyle::pop, options);
+
+        const auto volume = [&] (int id)
+        {
+            for (const auto& move : plan.moves)
+                if (move.trackId == id && ! move.insert.has_value() && move.values.count ("volume") > 0)
+                    return move.values.at ("volume");
+            return 0.0f;
+        };
+        const auto gap = volume (b) - volume (a);
+        check (std::abs (gap - 10.0f) < 2.0f, "each part sits over the band while it sings: the chorus track "
+                                                  + juce::String (gap, 1) + " dB over the verse track (band +10 dB)");
+        folder.deleteRecursively();
+    }
+
     void testAutoMixLearned()
     {
         std::cout << "\nAuto Mix learned targets\n";
@@ -20209,6 +20253,7 @@ int main()
         testAutoMixEffects();
         testAutoMixRoles();
         testAutoMixLearned();
+        testAutoMixSplitLead();
         testAutoMixBackingTrack();
         testAutoMixAudition();
         testAutoMixPlacement();
@@ -20602,6 +20647,7 @@ int main()
     testAutoMixEffects();
     testAutoMixRoles();
     testAutoMixLearned();
+    testAutoMixSplitLead();
     testAutoMixBackingTrack();
     testAutoMixAudition();
     testAutoMixPlacement();

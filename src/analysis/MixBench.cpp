@@ -719,6 +719,10 @@ juce::String getCsvHeader()
         columns.add (juce::String ("lu_") + getRoleKey (role) + "_ours");
         columns.add (juce::String ("lu_") + getRoleKey (role) + "_human");
     }
+    // Our role levels measured exactly, each track as it plays in our mix (no fit): set
+    // these against a trusted human measure (tools/mixlearn/score.py).
+    for (const auto role : allRoles)
+        columns.add (juce::String ("lu_") + getRoleKey (role) + "_ours_exact");
     return columns.joinIntoString (",");
 }
 
@@ -761,12 +765,20 @@ juce::String toCsvRow (const Run& run)
         cells.add (o != run.oursLevels.roleLu.end() ? num (o->second) : juce::String());
         cells.add (h != run.humanLevels.roleLu.end() ? num (h->second) : juce::String());
     }
+    for (const auto role : allRoles)
+    {
+        const auto e = run.oursExactLevels.roleLu.find (role);
+        cells.add (e != run.oursExactLevels.roleLu.end() ? num (e->second) : juce::String());
+    }
     return cells.joinIntoString (",");
 }
 
 juce::String summarise (const std::vector<Run>& runs)
 {
     juce::String md;
+    md << "Voice over backing and role levels here are estimated by fitting the raw tracks to each mix, which can be "
+          "off by many dB on big or edited multitracks. For levels you can trust, run tools/mixlearn/score.py "
+          "(tools/README-mixbench.md, \"Learn\").\n\n";
     md << "| Song | Style | Loudness ours / human (LUFS) | Tone distance (dB) | Tilt (dB/oct) | Voice over backing ours / human (LU) | Role error (LU) | Worst role | Width ours / human (dB) |\n"
        << "|---|---|---|---|---|---|---|---|---|\n";
 

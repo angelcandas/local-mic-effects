@@ -2896,13 +2896,16 @@ static MixPlan planMixMoves (const SessionAnalyser::Result& measured, const std:
 
     // Balance: each voice's volume so it sits the style's LU over the backing and the
     // instruments together.
-    double backingLoudness = -200.0;
+    // The backing's loudness while a voice sings, over that voice's own stretches: a lead
+    // split over tracks (verses on one, choruses on another) sits right in each part.
+    const auto backingWhile = [&] (const std::vector<bool>& active)
     {
         std::vector<double> parts;
         for (const auto& [id, change] : backingChange)
-            parts.push_back (findProfile (analysis, id)->getLoudnessOver (&leadProfile.active) + volumeOf (id) + change);
-        backingLoudness = sumLoudness (parts);
-    }
+            parts.push_back (findProfile (analysis, id)->getLoudnessOver (&active) + volumeOf (id) + change);
+        return sumLoudness (parts);
+    };
+    const double backingLoudness = backingWhile (leadProfile.active);
 
     if (backingLoudness <= -150.0)
         plan.notes.add ("No backing or instrument playing while you sing: the voice's level is left as it is.");
@@ -2935,9 +2938,10 @@ static MixPlan planMixMoves (const SessionAnalyser::Result& measured, const std:
         const auto voiceLoudness = profile.getLoudnessOver() + vp.loudnessChange; // at unity
 
         auto volume = current;
-        if (backingLoudness > -150.0)
+        const auto backingHere = id == lead ? backingLoudness : backingWhile (profile.active);
+        if (backingHere > -150.0)
         {
-            volume = (float) juce::jlimit (-30.0, 12.0, backingLoudness + targets.voiceOverBackingLu - voiceLoudness
+            volume = (float) juce::jlimit (-30.0, 12.0, backingHere + targets.voiceOverBackingLu - voiceLoudness
                                                         - (id != lead && priorityOf (id) == Priority::back ? backLu (Role::voice) : 0.0));
             volume = roundTo (volume, 0.1);
 
