@@ -1024,6 +1024,18 @@ namespace
         return { 40.0, 120.0, 3.0, 8.0f, false };
     }
 
+    // The learned band balance for an instrument role (LearnedTargets.h); null when none.
+    const learned::RoleBalance* getLearnedBalance (Role role)
+    {
+        const auto* b = role == Role::drums  ? &learned::drumsBalance
+                      : role == Role::bass   ? &learned::bassBalance
+                      : role == Role::guitar ? &learned::guitarBalance
+                      : role == Role::piano  ? &learned::pianoBalance
+                      : role == Role::synth  ? &learned::synthBalance
+                                             : nullptr;
+        return b != nullptr && b->songs > 0 ? b : nullptr;
+    }
+
     // The learned tone move for an instrument role (LearnedTargets.h); null when none was learned.
     const learned::RoleEq* getLearnedEq (Role role)
     {
@@ -2455,6 +2467,95 @@ static MixPlan planMixMoves (const SessionAnalyser::Result& measured, const std:
                 duckSource.active[i] = true;
     }
 
+    // The band's balance (learned from engineers' mixes): each instrument role at its level
+    // against all the instruments while it plays. Only tracks whose faders are untouched
+    // move, not a front or back one; the band as a whole stays as loud as it was. Not with
+    // a full backing track (it is already a mix), in fit mode or with Normalize (it sets
+    // every level itself).
+    const auto balanceChange = [&]
+    {
+        std::map<int, double> deltas;
+        if (! options.balance || options.normalize || makeRoomOnly || ! backings.empty())
+            return deltas;
+
+        struct Part { Role role; float target; std::vector<int> ids, moving; std::vector<bool> active; };
+        std::vector<Part> parts;
+        std::vector<int> band;
+        for (auto id : instruments)
+        {
+            band.push_back (id);
+            const auto role = roleOf (id);
+            const auto* balance = getLearnedBalance (role);
+            if (balance == nullptr)
+                continue;
+            auto it = std::find_if (parts.begin(), parts.end(), [&] (const Part& p) { return p.role == role; });
+            if (it == parts.end())
+                it = parts.insert (parts.end(), Part { role, balance->lu, {}, {}, {} });
+            it->ids.push_back (id);
+            if (std::abs (volumeOf (id)) < 0.05f && priorityOf (id) == Priority::normal)
+                it->moving.push_back (id);
+            const auto& active = findProfile (analysis, id)->active;
+            if (it->active.size() < active.size())
+                it->active.resize (active.size(), false);
+            for (size_t i = 0; i < active.size(); ++i)
+                if (active[i])
+                    it->active[i] = true;
+        }
+        // Two roles at least, so there is a balance to set.
+        if (parts.size() < 2)
+            return deltas;
+
+        std::vector<bool> anyActive;
+        for (const auto& part : parts)
+        {
+            if (anyActive.size() < part.active.size())
+                anyActive.resize (part.active.size(), false);
+            for (size_t i = 0; i < part.active.size(); ++i)
+                if (part.active[i])
+                    anyActive[i] = true;
+        }
+        const auto loudness = [&] (const std::vector<int>& ids, const std::vector<bool>& over)
+        {
+            std::vector<double> levels;
+            for (auto id : ids)
+                levels.push_back (findProfile (analysis, id)->getLoudnessOver (&over) + volumeOf (id) + deltas[id]);
+            return sumLoudness (levels);
+        };
+        for (auto id : band)
+            deltas[id] = 0.0;
+        const auto bandBefore = loudness (band, anyActive);
+        if (bandBefore <= -150.0)
+            return std::map<int, double> {};
+
+        for (int pass = 0; pass < 6; ++pass)
+        {
+            for (const auto& part : parts)
+            {
+                if (part.moving.empty())
+                    continue;
+                const auto level = loudness (part.ids, part.active);
+                const auto whole = loudness (band, part.active);
+                if (level <= -150.0 || whole <= -150.0)
+                    continue;
+                // Moving only some of the role's tracks moves the role by less: scale up by
+                // their share of it.
+                const auto movingLevel = loudness (part.moving, part.active);
+                const auto share = juce::jlimit (0.2, 1.0, std::pow (10.0, (movingLevel - level) / 10.0));
+                const auto step = (part.target - (level - whole)) / share;
+                for (auto id : part.moving)
+                    deltas[id] = juce::jlimit (-8.0, 8.0, deltas[id] + 0.7 * step);
+            }
+            // The band keeps its loudness: the moving tracks share the difference.
+            const auto offset = loudness (band, anyActive) - bandBefore;
+            for (const auto& part : parts)
+                for (auto id : part.moving)
+                    deltas[id] = juce::jlimit (-8.0, 8.0, deltas[id] - offset);
+        }
+        for (auto it = deltas.begin(); it != deltas.end();)
+            it = std::abs (it->second) < 1.0 ? deltas.erase (it) : std::next (it);
+        return deltas;
+    }();
+
     for (auto& [id, change] : backingChange)
     {
         const auto& profile = *findProfile (analysis, id);
@@ -2733,6 +2834,22 @@ static MixPlan planMixMoves (const SessionAnalyser::Result& measured, const std:
         }
 
         finalLoudness[id] += eqChange;
+
+        if (const auto balance = balanceChange.find (id); balance != balanceChange.end())
+        {
+            const auto delta = roundTo (balance->second, 0.5);
+            const auto target = getLearnedBalance (role)->lu;
+            MixMove move;
+            move.trackId = id;
+            move.values = { { "volume", volumeOf (id) + (float) delta } };
+            move.reasons.add ("Volume " + formatDb (delta) + ": the band's balance, " + getRoleName (role).toLowerCase() + " "
+                              + juce::String (std::abs (target), 1) + " LU under all the instruments while it plays, as engineers had it in "
+                              + juce::String (getLearnedBalance (role)->songs) + " finished mixes");
+            plan.moves.push_back (move);
+            change += delta;
+            finalLoudness[id] += delta;
+            finalPeak[id] += delta;
+        }
 
         // Back: it sits lower, from the level it has now.
         if (isBack && ! makeRoomOnly && role != Role::other)

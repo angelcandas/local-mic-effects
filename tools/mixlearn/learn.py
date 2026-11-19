@@ -356,6 +356,7 @@ def relabel(track):
 
 
 # Roles pooled into one stem each (the busses an engineer would compress, EQ and send).
+INSTRUMENT_ROLES = ["drums", "bass", "guitar", "piano", "pad", "synth", "instrument", "other", "instrumental"]
 STEM_ROLES = ["voice", "background", "drums", "bass", "guitar", "piano", "pad", "synth", "instrument", "other", "instrumental"]
 
 
@@ -536,6 +537,22 @@ def fit_song(song, subsample=3):
         return active & (lvl > np.max(lvl) - 30.0)
 
     total = sum(Seq)
+
+    # The band's balance: each instrument role against all the instruments while it plays,
+    # in the human mix and with every track at its recorded level (faders at 0 dB).
+    band_roles = [k for k, r in enumerate(stem_names) if r in INSTRUMENT_ROLES]
+    if band_roles:
+        raw_stems = {}
+        for k in band_roles:
+            raw_stems[k] = sum(X[t] for t in range(n) if roles[t] == stem_names[k] and g[t] > 0)
+        band_h = sum(S[k] for k in band_roles)
+        band_r = sum(raw_stems[k] for k in band_roles)
+        fit.mix["band_lu"], fit.mix["raw_band_lu"] = {}, {}
+        for k in band_roles:
+            when = playing(S[k])
+            fit.mix["band_lu"][stem_names[k]] = rel(S[k], band_h, when)
+            fit.mix["raw_band_lu"][stem_names[k]] = rel(raw_stems[k], band_r, when)
+
     fit.mix["role_lu"] = {}
     for k, r in enumerate(stem_names):
         fit.mix["role_lu"][r] = rel(Seq[k], mix_p, playing(Seq[k]))

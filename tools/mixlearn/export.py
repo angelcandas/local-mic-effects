@@ -85,6 +85,34 @@ def vob_shift(fits):
     return float(np.median(d)) if d else 0.0
 
 
+BALANCE_ROLES = ["drums", "bass", "guitar", "piano", "synth"]
+BALANCE_MIN_SONGS = 5
+
+
+def balance_table(fits):
+    """Each instrument role's level against all the instruments while it plays, median over the songs."""
+    out = {}
+    for role in BALANCE_ROLES:
+        vals = [f["mix"]["band_lu"][role] for f in fits if (f["mix"].get("band_lu") or {}).get(role) is not None]
+        if len(vals) >= BALANCE_MIN_SONGS:
+            out[role] = (round(float(np.median(vals)) * 2) / 2, len(vals))
+    return out
+
+
+def balance_error(fit, table):
+    """Mean |balance off| over the song's roles, as shapes (each minus its mean): the learned
+    balance, and the tracks at their recorded levels (what Auto Mix kept before)."""
+    human, raw = fit["mix"].get("band_lu") or {}, fit["mix"].get("raw_band_lu") or {}
+    ks = [k for k in table if human.get(k) is not None and raw.get(k) is not None]
+    if len(ks) < 2:
+        return None
+    h = np.array([human[k] for k in ks])
+    r = np.array([raw[k] for k in ks])
+    p = np.array([table[k][0] for k in ks])
+    c = lambda x: x - x.mean()  # noqa: E731
+    return float(np.mean(np.abs(c(p) - c(h)))), float(np.mean(np.abs(c(r) - c(h))))
+
+
 def to_moves(row):
     """Low shelf (50-200 Hz), one bell (200 Hz-5 kHz) and high shelf (5-12.6 kHz) from the group moves."""
     centres = [math.sqrt(learn.GROUP_EDGES[i] * learn.GROUP_EDGES[i + 1]) for i in range(len(learn.GROUPS))]
@@ -106,7 +134,7 @@ def main():
     fits = json.load(open(args.fits))
 
     print("Held out (each song against what the other songs teach):")
-    vob_today, vob_learned, eq_rows = [], [], []
+    vob_today, vob_learned, eq_rows, balance_rows = [], [], [], []
     for i, f in enumerate(fits):
         rest = [g for j, g in enumerate(fits) if j != i]
         actual = f["mix"].get("voice_over_band_lu")
@@ -118,11 +146,22 @@ def main():
         e = eq_error(f, eq_table(rest), shipped=True)
         if e:
             eq_rows.append(e)
+        b = balance_error(f, balance_table(rest))
+        if b:
+            balance_rows.append(b)
     print(f"  voice over the band: off by {np.median(vob_today):.1f} LU today, {np.median(vob_learned):.1f} LU learned "
           f"(median of {len(vob_today)} songs; learned closer on {sum(b < a for a, b in zip(vob_today, vob_learned))})")
     print(f"  instrument EQ, as shipped (shelves + one bell): {np.median([b for _, b in eq_rows]):.2f} dB from the engineers' moves with none, "
           f"{np.median([a for a, _ in eq_rows]):.2f} dB learned (median of {len(eq_rows)} songs; "
           f"learned closer on {sum(a < b for a, b in eq_rows)})")
+
+    if balance_rows:
+        print(f"  band balance: {np.median([b for _, b in balance_rows]):.2f} dB off with the tracks as recorded, "
+              f"{np.median([a for a, _ in balance_rows]):.2f} dB learned (median of {len(balance_rows)} songs; "
+              f"learned closer on {sum(a < b for a, b in balance_rows)})")
+    balance = balance_table(fits)
+    print("Band balance (each role against all the instruments while it plays): "
+          + ", ".join(f"{k} {v[0]:+.1f} LU ({v[1]} songs)" for k, v in balance.items()))
 
     shift = round(vob_shift(fits) * 2) / 2
     table = eq_table(fits)
@@ -161,6 +200,21 @@ def main():
                 lines.append(f"inline constexpr RoleEq {cpp}Eq {{ {m['low']:.1f}f, {m['bell_hz']:.0f}.0f, {m['bell_db']:.1f}f, {m['high']:.1f}f, {table[role][1]} }};")
             else:
                 lines.append(f"inline constexpr RoleEq {cpp}Eq {{ 0.0f, 1000.0f, 0.0f, 0.0f, 0 }};")
+        lines += [
+            "",
+            "// The band's balance: each instrument role against all the instruments together while",
+            "// it plays, in LU (the median over the songs; 0 songs: not learned). Auto Mix brings",
+            "// instrument tracks whose faders are untouched toward it.",
+            "struct RoleBalance",
+            "{",
+            "    float lu;",
+            "    int songs;",
+            "};",
+            "",
+        ]
+        for role in BALANCE_ROLES:
+            lu, n = balance.get(role, (0.0, 0))
+            lines.append(f"inline constexpr RoleBalance {role}Balance {{ {lu:.1f}f, {n} }};")
         lines += ["}", ""]
         with open(args.header, "w") as f:
             f.write("\n".join(lines))
