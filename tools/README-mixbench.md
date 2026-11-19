@@ -79,3 +79,10 @@ leave the computer it is on:
    role (half of the engineers' median move, capped at 3 dB, as a low shelf, a bell and a
    high shelf). Learned settings that didn't hold up on held-out songs (background vocals'
    level under the lead, for one) aren't exported.
+4. `python3 tools/mixlearn/score.py bench/results.csv fits.json [--before old/results.csv]`
+   scores Auto Mix's levels with measures that can be trusted: ours exactly, from each track
+   as it plays in our mix (`vob_ours_exact`, `lu_<role>_ours_exact`), the human mixes by the
+   learning fit. The bench's own voice-over-backing and role columns fit the raw tracks to
+   each mix without lining them up hop by hop, and on big or edited multitracks they can be
+   off by 10 dB or more. `tools/learn-mix.sh` runs steps 2 and 4 itself when numpy and scipy
+   are installed (`bench/score.md`).

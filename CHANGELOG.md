@@ -5,6 +5,10 @@ What changed in MicFX, newest first, in plain language. The app shows it under
 haven't seen yet. To add an entry for your change, see "Adding entries" in
 `docs/changelog.md`.
 
+## 2026-11-19
+
+- **Auto Mix: split lead vocals sit right.** When the lead is spread over several tracks (verses on one, choruses on another), each part now sits at the right level over the band while it sings. (#217)
+
 ## 2026-11-18
 
 - **Auto Mix learns from real mixes.** The voice sits where engineers put it over the band, instruments get a gentle tone nudge toward finished mixes, and track names like BassAmpMic or ElecGtr_Vox get the right role. (#216)

@@ -8,6 +8,7 @@
 # tools/fetch-multitracks.sh. The output (default ~/Desktop/learn-out) holds no audio:
 #   learn/<song>.mlf     each song's measurements (band energy per 100 ms of every track and the mix)
 #   bench/results.csv    Auto Mix's scores against the human mixes, and bench/summary.md
+#   bench/score.md       the levels compared with measures you can trust (when numpy and scipy are there)
 # and learn-out.zip next to it, the file to upload.
 #
 # Private testing only: the audio stays on this computer.
@@ -44,6 +45,15 @@ bench="build/learn/MicFXMixBench_artefacts/Release/MicFXMixBench"
 
 echo "== Listening to the songs in $songs"
 "$bench" "$songs" --listen on --no-audio --out "$out/bench" --learn "$out/learn" | tee "$out/bench-log.txt"
+
+echo "== Scoring against the human mixes (needs python3 with numpy and scipy)"
+if python3 -c "import numpy, scipy" > /dev/null 2>&1; then
+    python3 tools/mixlearn/learn.py "$out/learn" --out "$out/learned.json" --fits "$out/fits.json" > "$out/learn-log.txt" 2>&1 \
+        && python3 tools/mixlearn/score.py "$out/bench/results.csv" "$out/fits.json" --out "$out/bench/score.md" \
+        || echo "  scoring failed, see $out/learn-log.txt (the zip is scored in the project either way)"
+else
+    echo "  skipped: 'pip3 install numpy scipy' to score here (the zip is scored in the project either way)"
+fi
 
 echo "== Packing"
 rm -f "$out/../learn-out.zip"
