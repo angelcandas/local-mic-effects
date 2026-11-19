@@ -1,7 +1,19 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 216,
+ "latest": 217,
  "days": [
+  {
+   "date": "2026-11-19",
+   "entries": [
+    {
+     "title": "Auto Mix: split lead vocals sit right",
+     "text": "When the lead is spread over several tracks (verses on one, choruses on another), each part now sits at the right level over the band while it sings.",
+     "prs": [
+      217
+     ]
+    }
+   ]
+  },
   {
    "date": "2026-11-18",
    "entries": [
