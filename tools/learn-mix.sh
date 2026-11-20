@@ -28,6 +28,8 @@ mkdir -p "$out"
 out="$(cd "$out" && pwd)"
 
 cd "$repo"
+echo "== Updating the code"
+git pull --ff-only > /dev/null 2>&1 || echo "  (couldn't pull: running the code as it is here)"
 echo "== Updating libraries"
 git submodule update --init > /dev/null
 
@@ -43,8 +45,10 @@ cmake --build build/learn --target MicFXMixBench --parallel > build-learn.log 2>
 rm -f build-learn-configure.log build-learn.log
 bench="build/learn/MicFXMixBench_artefacts/Release/MicFXMixBench"
 
+code="$(git log -1 --format='%h %s (%cd)' --date=short)"
+echo "== Code: $code"
 echo "== Listening to the songs in $songs"
-"$bench" "$songs" --listen on --no-audio --out "$out/bench" --learn "$out/learn" | tee "$out/bench-log.txt"
+{ echo "Code: $code"; "$bench" "$songs" --listen on --no-audio --out "$out/bench" --learn "$out/learn"; } | tee "$out/bench-log.txt"
 
 echo "== Scoring against the human mixes (needs python3 with numpy and scipy)"
 if python3 -c "import numpy, scipy" > /dev/null 2>&1; then
