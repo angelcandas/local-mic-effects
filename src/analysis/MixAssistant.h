@@ -164,6 +164,10 @@ struct MixOptions
     // between lines.
     bool rides = true;
 
+    // Balance the band: instrument tracks whose faders are untouched are brought to the
+    // balance between roles learned from engineers' mixes (drums, bass, guitar, ...).
+    bool balance = true;
+
     // Normalize: first bring every track (voices, instruments) to a level that fits its
     // role in the style, with the chain's input gain ("inGain" moves); the rest of the
     // plan follows from those levels. Tracks left as they are keep theirs.

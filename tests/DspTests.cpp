@@ -1904,6 +1904,58 @@ namespace
         folder.deleteRecursively();
     }
 
+    void testAutoMixBalance()
+    {
+        std::cout << "\nAuto Mix band balance\n";
+
+        const auto seconds = 10.0;
+        const auto folder = juce::File::createTempFile ("micfx-balance");
+        folder.createDirectory();
+        writeWav (folder.getChildFile ("voice.wav"), makeSungLine (seconds), sampleRate);
+        writeWav (folder.getChildFile ("part.wav"), makeBacking (seconds), sampleRate);
+
+        const auto plan = [&] (float guitarFader)
+        {
+            daw::Edit edit;
+            const auto voice = (int) edit.addTrack ("Vocal")[daw::ids::id];
+            const auto drums = (int) edit.addTrack ("Drums")[daw::ids::id];
+            const auto bass = (int) edit.addTrack ("Bass")[daw::ids::id];
+            const auto guitar = (int) edit.addTrack ("Guitar")[daw::ids::id];
+            edit.addClip (voice, folder.getChildFile ("voice.wav"), 0.0, seconds);
+            for (auto id : { drums, bass, guitar })
+                edit.addClip (id, folder.getChildFile ("part.wav"), 0.0, seconds);
+            const auto source = analysis::SessionAnalyser (edit, analysis::SessionAnalyser::Point::source, false).run();
+            const std::map<int, analysis::Role> roles { { voice, analysis::Role::voice }, { drums, analysis::Role::drums },
+                                                        { bass, analysis::Role::bass }, { guitar, analysis::Role::guitar } };
+            analysis::MixOptions options;
+            options.eq = options.compressor = options.deEsser = options.reverb = options.saturation = options.echo = options.exciter
+                = options.width = options.rides = false;
+            const auto result = analysis::planMix (source, roles, { { voice, 0.0f }, { drums, 0.0f }, { bass, 0.0f }, { guitar, guitarFader } },
+                                                   0.0f, analysis::MixStyle::pop, options);
+            std::map<juce::String, float> volumes { { "drums", 0.0f }, { "bass", 0.0f }, { "guitar", guitarFader } };
+            for (const auto& move : result.moves)
+                if (! move.insert.has_value() && move.values.count ("volume") > 0)
+                    volumes[move.trackId == drums ? "drums" : move.trackId == bass ? "bass" : move.trackId == guitar ? "guitar" : "voice"]
+                        = move.values.at ("volume");
+            return volumes;
+        };
+
+        // The same part on all three: the learned balance alone sets them apart.
+        const auto v = plan (0.0f);
+        const auto expected = analysis::learned::drumsBalance.lu - analysis::learned::bassBalance.lu;
+        const auto gap = v.at ("drums") - v.at ("bass");
+        const auto power = [] (float db) { return std::pow (10.0, db / 10.0); };
+        const auto band = 10.0 * std::log10 ((power (v.at ("drums")) + power (v.at ("bass")) + power (v.at ("guitar"))) / 3.0);
+        check (std::abs (gap - expected) < 1.0f && std::abs (band) < 1.0,
+               "drums " + juce::String (gap, 1) + " dB over the bass (learned " + juce::String (expected, 1) + "), the band as loud as it was ("
+                   + juce::String (band, 1) + " dB)");
+
+        // A fader you set stays where it is.
+        const auto w = plan (-4.0f);
+        check (juce::approximatelyEqual (w.at ("guitar"), -4.0f), "a guitar fader set to -4 dB stays (" + juce::String (w.at ("guitar"), 1) + ")");
+        folder.deleteRecursively();
+    }
+
     void testAutoMixLearned()
     {
         std::cout << "\nAuto Mix learned targets\n";
@@ -20254,6 +20306,7 @@ int main()
         testAutoMixRoles();
         testAutoMixLearned();
         testAutoMixSplitLead();
+        testAutoMixBalance();
         testAutoMixBackingTrack();
         testAutoMixAudition();
         testAutoMixPlacement();
@@ -20648,6 +20701,7 @@ int main()
     testAutoMixRoles();
     testAutoMixLearned();
     testAutoMixSplitLead();
+    testAutoMixBalance();
     testAutoMixBackingTrack();
     testAutoMixAudition();
     testAutoMixPlacement();

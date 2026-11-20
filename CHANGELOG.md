@@ -7,6 +7,7 @@ haven't seen yet. To add an entry for your change, see "Adding entries" in
 
 ## 2026-11-19
 
+- **Auto Mix balances the band.** Drums, bass, guitar, piano and synth tracks you haven't set a fader on are brought to the balance engineers used in real mixes, with the band as loud as before. (#218)
 - **Auto Mix: split lead vocals sit right.** When the lead is spread over several tracks (verses on one, choruses on another), each part now sits at the right level over the band while it sings. (#217)
 
 ## 2026-11-18

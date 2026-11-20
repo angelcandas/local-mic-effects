@@ -22,4 +22,19 @@ inline constexpr RoleEq bassEq { 0.0f, 566.0f, 3.0f, 0.0f, 12 };
 inline constexpr RoleEq guitarEq { 0.5f, 2245.0f, 1.5f, 0.0f, 9 };
 inline constexpr RoleEq pianoEq { 0.0f, 1131.0f, 2.0f, 0.0f, 5 };
 inline constexpr RoleEq synthEq { 0.0f, 3969.0f, 1.5f, 1.0f, 5 };
+
+// The band's balance: each instrument role against all the instruments together while
+// it plays, in LU (the median over the songs; 0 songs: not learned). Auto Mix brings
+// instrument tracks whose faders are untouched toward it.
+struct RoleBalance
+{
+    float lu;
+    int songs;
+};
+
+inline constexpr RoleBalance drumsBalance { -3.5f, 12 };
+inline constexpr RoleBalance bassBalance { -6.5f, 12 };
+inline constexpr RoleBalance guitarBalance { -4.5f, 9 };
+inline constexpr RoleBalance pianoBalance { -9.0f, 5 };
+inline constexpr RoleBalance synthBalance { -6.0f, 5 };
 }
