@@ -1746,6 +1746,8 @@ body.library-dragging * { cursor: grabbing !important; }
 .note-editor [hidden] { display: none; }
 .rhythm-grid-row { margin-top: 0; }
 .rhythm-grid-row .dropdown { flex: 1 1 0; min-width: 0; }
+.voice-align-row { display: flex; align-items: center; gap: 8px; margin: 2px 0 6px; }
+.voice-align-row .dropdown { flex: 1 1 0; min-width: 0; }
 
 /* ---------- The clip editor in its own window (daw.js renderClipWindow) ---------- */
 

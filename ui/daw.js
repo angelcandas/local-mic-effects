@@ -24,6 +24,7 @@ import { drawClipEnvelope, pressClipEnvelope } from "./clipenvelope.js";
 import { createClipEditor, createRhythmPanel, drawWarpMarkers, savedQuantizeArgs, toSource } from "./rhythm.js";
 import { createKeyDialog, createKeymap } from "./keymap.js";
 import { canPasteWarpTabs, copyWarpTabs, pastedWarpTabs } from "./warptool.js";
+import { alignArgs, alignToLead, defaultLead, leadCandidates } from "./voicealign.js";
 import { ARC_END, ARC_START, arcPath, clamp, formatDuration, formatValue, html, IS_MAC, keyText, polar, releaseFocus, svg } from "./widgets.js";
 
 const nativeDaw = Juce.getNativeFunction("daw");
@@ -6678,7 +6679,11 @@ class DawScreen {
       if (track.kind !== "midi") {
         rule();
         const partners = tracks.filter((t) => t.id !== track.id && t.kind !== "midi" && t.clips?.length);
-        item("Align to…", () => this.openAlignMenu(track, partners, x, y), {
+        item("Align to lead…", () => this.openLeadMenu(track, x, y), {
+          disabled: !firstClip || !partners.length,
+          hint: "Line its timing up with a lead vocal, syllable by syllable: for doubles, harmonies and re-sung lines. One undo step",
+        });
+        item("Align phase to…", () => this.openAlignMenu(track, partners, x, y), {
           disabled: !firstClip || !partners.length,
           hint: "Line its phase up with a track that recorded the same sound (two mics on one drum or amp, a DI and its amp): flips the polarity and nudges it a few ms",
         });
@@ -6730,7 +6735,10 @@ class DawScreen {
       item("Pick the best takes", () => this.takes.autoComp(audioTrack.id), { indent: true, disabled: takes < 2 || Boolean(this.takes.busy),
            hint: !audioTrack ? needTrack : takes < 2 ? "Record two or more takes on this track first" : "Auto Comp: the best take in every phrase. One undo takes it back." });
       const partners = audioTrack ? tracks.filter((t) => t.id !== audioTrack.id && t.kind !== "midi" && t.clips?.length) : [];
-      item("Align to…", () => this.openAlignMenu(audioTrack, partners, box.left, box.bottom + 4), { indent: true,
+      item("Align to lead…", () => this.openLeadMenu(audioTrack, box.left, box.bottom + 4), { indent: true,
+           disabled: !audioTrack?.clips?.length || !partners.length,
+           hint: !audioTrack ? needTrack : "Line its timing up with a lead vocal, syllable by syllable (doubles, harmonies)" });
+      item("Align phase to…", () => this.openAlignMenu(audioTrack, partners, box.left, box.bottom + 4), { indent: true,
            disabled: !audioTrack?.clips?.length || !partners.length,
            hint: !audioTrack ? needTrack : "Line its phase up with a track that recorded the same sound" });
       heading(clip ? `Clip “${clip.name}”` : "The selected clip");
@@ -6755,6 +6763,21 @@ class DawScreen {
     this.renderAutoMixMode();
     if (trackId !== null) panel.querySelector("[name=focus]").value = String(trackId);
     modeSelect.dispatchEvent(new Event("change"));
+  }
+
+  // Which lead to line this track's timing up with (Align to lead, ui/voicealign.js). The
+  // likely lead comes first; the settings are the clip editor's Align section's.
+  openLeadMenu(track, x, y) {
+    const candidates = leadCandidates(this.session, track.id);
+    const first = defaultLead(this.session, track.id);
+    const ordered = first ? [first, ...candidates.filter((t) => t.id !== first.id)] : candidates;
+    const args = alignArgs();
+    popMenu(x, y, ({ item, heading }) => {
+      heading(`Line up "${track.name}" with`);
+      for (const lead of ordered)
+        item(lead.name, () => alignToLead({ daw, toast }, { track: track.id }, lead.id), { indent: true,
+             hint: `Timing${args.pitch ? " and pitch" : ""} at ${Math.round(args.strength * 100)}%, up to ${Math.round(args.maxShift * 1000)} ms (set in the clip editor's Align section)` });
+    });
   }
 
   openAlignMenu(track, partners, x, y) {

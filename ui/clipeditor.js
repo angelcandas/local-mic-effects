@@ -6,7 +6,7 @@
 //    the playhead;
 //  - the waveform, as a list of lanes: the selected clip, and every other audio clip
 //    selected with it, stacked on one timeline (Edit: Active clip | All clips);
-//  - on the left, one section per job: Pitch, Warp, Hitpoints, Tempo, Quantize. The open section
+//  - on the left, one section per job: Pitch, Warp, Hitpoints, Tempo, Quantize, Align. The open section
 //    is the active tool. With no tool open (or Pitch) the pointer only locates, scrolls and
 //    zooms, so nothing in the audio changes by accident.
 // The Notes view is ui/pitchedit.js; the tools' gestures are ui/warptool.js, ui/hitpointtool.js and ui/tempotool.js.
@@ -15,6 +15,7 @@ import { createNoteEditor } from "./pitchedit.js";
 import { createWarpTool } from "./warptool.js";
 import { createHitpointTool } from "./hitpointtool.js";
 import { createTempoTool } from "./tempotool.js";
+import { createAlignControls } from "./voicealign.js";
 import { algorithmControls, createQuantizeControls, keyCaption, pitchKnobs, prefs, semitoneText } from "./rhythm.js";
 
 export const RULER = 20; // px: the ruler lane at the top of the waveform (bars, tab handles)
@@ -26,12 +27,14 @@ const SECTIONS = [
   ["hits", "Hitpoints", "2", true],
   ["tempo", "Tempo", "3", true],
   ["quantize", "Quantize", "4", false],
+  ["align", "Align", "5", false],
 ];
 
 const HINTS = {
   none: "Click to move the playhead, drag to scroll, Ctrl/Cmd + scroll to zoom. Open Warp (1) to change the timing.",
   pitch: "Click to move the playhead, drag to scroll, Ctrl/Cmd + scroll to zoom. Open Warp (1) to change the timing.",
   quantize: "Quantize warps the clip so its note starts land on the grid.",
+  align: "Align warps the clip so it sings in time with the lead track.",
 };
 
 // The waveform's lanes: one per clip, each with its own peaks, picture remap and hitpoints.
@@ -96,6 +99,12 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
     resetText: "Reset", resetTitle: "Put the clip's timing back as recorded: every warp tab goes (its pitch stays)",
   });
 
+  // Align to lead: line the clip (or every lane's clip) up with a lead track.
+  const align = createAlignControls(screen, ui, {
+    target: () => ({ clips: editAll && lanes.length > 1 ? lanes.map((l) => l.clip.id) : [id] }),
+    trackId: () => owner.id,
+  });
+
   // The Warp tool (its own section body, gestures and drawing).
   const toolLayer = html("div", "clip-editor-tools");
   const ctx = {
@@ -116,6 +125,7 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
     hits: [tools.hits.body],
     tempo: [tools.tempo.body],
     quantize: quantize.elements,
+    align: align.elements,
   };
   let open = prefs.get("tool", "pitch");
   if (!SECTIONS.some(([key]) => key === open)) open = null;
@@ -686,6 +696,8 @@ export function createClipEditor(screen, track, clip, ui, others = []) {
     if (document.activeElement !== clipTempo) clipTempo.value = c.clipTempo ? String(Math.round(c.clipTempo * 100) / 100) : "";
     quantize.reset.disabled = !lanes.some((l) => l.clip.warp?.length);
     quantize.update();
+    align.reset.disabled = quantize.reset.disabled;
+    align.update();
 
     const changesPitch = Math.abs((c.transpose || 0) + (t.transpose || 0)) > 1e-4 || Boolean(c.pitchEdited);
     comparePitch.classList.toggle("is-selected", Boolean(c.warpBypass));

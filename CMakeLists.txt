@@ -117,6 +117,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/Analysis.h
     src/analysis/Alignment.cpp
     src/analysis/Alignment.h
+    src/analysis/VocalAlign.cpp
+    src/analysis/VocalAlign.h
     src/analysis/Key.cpp
     src/analysis/Key.h
     src/analysis/Chords.cpp
@@ -208,6 +210,8 @@ set(MICFX_DSP_SOURCES
     src/daw/MidiFileIO.h
     src/daw/Hitpoints.h
     src/daw/Quantize.cpp
+    src/daw/VoiceAlign.cpp
+    src/daw/VoiceAlign.h
     src/daw/Quantize.h
     src/daw/Warp.cpp
     src/daw/TempoMap.cpp
