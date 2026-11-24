@@ -970,8 +970,9 @@ void Practice::tick()
         scoresReset = false;
     }
 
+    // The backing's chord here (Multitrack listens to it for the harmonies), for the chord chip.
     emit ("practicePitch", object ({ { "time", round3 (songTime) }, { "playing", playing }, { "midi", round2 (lastMidi) },
-                                     { "frames", trail } }));
+                                     { "frames", trail }, { "chord", processor.getMultitrack().getBackingChord (multitrack.getPosition()).getName() } }));
 }
 
 //==============================================================================

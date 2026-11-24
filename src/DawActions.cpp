@@ -1,4 +1,5 @@
 #include "DawActions.h"
+#include "analysis/Chords.h"
 #include "DawBridge.h"
 
 namespace
@@ -574,6 +575,27 @@ juce::var DawActions::chordsFromNotes (double from, double to) const
     auto& edit = processor.getDawEdit();
     const auto tempo = edit.getTempoMap();
     const auto beatsPerBar = (double) edit.getBeatsPerBar();
+
+    // The chord track, when the song has one, says it: per bar, the chord sounding as the
+    // bar starts and any that start in it ("C G").
+    if (const auto marks = edit.getChords(); ! marks.empty())
+    {
+        juce::Array<juce::var> bars;
+        const auto firstBar = (int) std::floor (tempo.toBeats (from) / beatsPerBar + 1.0e-9);
+        for (int bar = firstBar; tempo.toSeconds (bar * beatsPerBar) < to; ++bar)
+        {
+            const auto startBeat = bar * beatsPerBar, endBeat = startBeat + beatsPerBar;
+            juce::StringArray names;
+            for (size_t i = 0; i < marks.size(); ++i)
+            {
+                const auto next = i + 1 < marks.size() ? marks[i + 1].beat : 1.0e12;
+                if (marks[i].beat < endBeat - 1.0e-6 && next > startBeat + 1.0e-6)
+                    names.add (marks[i].name);
+            }
+            bars.add (obj ({ { "bar", bar + 1 }, { "start", tempo.toSeconds (startBeat) }, { "chord", names.joinIntoString (" ") } }));
+        }
+        return bars;
+    }
     static const struct { const char* suffix; std::vector<int> tones; } shapes[] {
         { "", { 0, 4, 7 } }, { "m", { 0, 3, 7 } }, { "7", { 0, 4, 7, 10 } }, { "maj7", { 0, 4, 7, 11 } },
         { "m7", { 0, 3, 7, 10 } }, { "dim", { 0, 3, 6 } }, { "sus4", { 0, 5, 7 } }, { "5", { 0, 7 } } };
@@ -822,6 +844,30 @@ void DawActions::build()
             const auto minor = (bool) args.getProperty ("minor", false);
             edit.setKey (tonic, minor);
             complete (done ("Key is " + juce::String (noteNames[tonic]) + (minor ? " minor." : " major.")));
+        });
+
+    add ("chords.set", "Write chords on the song's chord track (the lane under the ruler). Harmonizer inserts in Chords mode follow it, and the piano roll shows its chord tones.", "Chord track",
+        { P ("chords", "array", "[{ bar: 1-based, beat: beat in the bar, 1-based (default 1), name: \"C\", \"Am\", \"G7\", \"Fmaj7\", \"D/F#\" or \"N.C.\" }]", true),
+          P ("replace", "boolean", "true (default): these become the whole chord track; false: add them, replacing chords on the same beats") },
+        [&edit] (const juce::var& args, Complete complete)
+        {
+            const auto beatsPerBar = (double) edit.getBeatsPerBar();
+            auto marks = (bool) args.getProperty ("replace", true) ? std::vector<daw::Edit::ChordMark>() : edit.getChords();
+            juce::StringArray written;
+            if (const auto* list = args["chords"].getArray())
+                for (const auto& item : *list)
+                {
+                    bool ok = false;
+                    const auto chord = analysis::Chord::fromName (item["name"].toString(), &ok);
+                    if (! ok) { complete (fail ("\"" + item["name"].toString() + "\" isn't a chord name. Use names like C, Am, G7, Fmaj7, Dm7, Bdim, Dsus4, D/F# or N.C.")); return; }
+                    const auto bar = juce::jmax (1, (int) item.getProperty ("bar", 1));
+                    const auto beat = juce::jmax (1.0, (double) item.getProperty ("beat", 1.0));
+                    const auto name = chord.isValid() ? chord.getName() : juce::String ("N.C.");
+                    marks.push_back ({ (bar - 1) * beatsPerBar + beat - 1.0, name });
+                    written.add (name);
+                }
+            edit.setChords (std::move (marks));
+            complete (done (written.isEmpty() ? juce::String ("The chord track is empty.") : "Chord track: " + written.joinIntoString (" ") + "."));
         });
 
     //============================================================================ tracks
@@ -1144,7 +1190,8 @@ void DawActions::build()
                              { "key", key }, { "tempo", edit.getTempo() }, { "beatsPerBar", edit.getBeatsPerBar() },
                              { "fromSeconds", span->first }, { "toSeconds", span->second }, { "fromBar", barOf (span->first) }, { "toBar", barOf (span->second) },
                              { "sections", sections }, { "chords", chordsFromNotes (span->first, span->second) },
-                             { "chordsNote", "Chords are read from the MIDI tracks' notes only; audio tracks aren't analysed here (see audio.toMidi)." },
+                             { "chordsNote", edit.getChords().empty() ? "No chord track: chords are read from the MIDI tracks' notes only; audio tracks aren't analysed here (see audio.toMidi, chords.set)."
+                                                                      : "From the song's chord track (see chords.set)." },
                              { "tracks", tracks }, { "songLengthSeconds", (double) engine.getLength() / engine.getSampleRate() } }));
         });
 

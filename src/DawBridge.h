@@ -39,6 +39,8 @@
 //                 or { state: "error", error }
 //   "dawKey"      { state: "analysing", progress } while the key is detected, then
 //                 { state: "ready", key... } (see describeKey), or "cancelled"
+//   "dawChords"   { state: "analysing", progress } while the chord track is detected, then
+//                 { state: "done", count, chords } (one undo step), "cancelled" or { state: "error", error }
 //   "dawSongMap"  { state: "analysing", progress } while the song map listens, then
 //                 { state: "ready", map... } (see describeSongMap), "cancelled" or
 //                 { state: "error", error }
@@ -232,6 +234,11 @@ private:
     juce::var handleFit (const juce::var& args);
     void finishFit();
     juce::var describeKey() const;
+    // The chord track (market item 9): detection from the tracks that aren't voices runs on
+    // a background thread; editing by name.
+    juce::var handleChords (const juce::var& args);
+    void finishChords();
+    juce::var describeChords() const;
     int setAutotunesToKey();
 
     // Song map (src/analysis/Structure.h): sections, bars and the performance's tempo.
@@ -364,6 +371,8 @@ private:
     // Key detection: the running analysis (at most one) and the last result.
     struct KeyJob;
     std::shared_ptr<KeyJob> keyJob;
+    struct ChordsJob;
+    std::shared_ptr<ChordsJob> chordsJob;
     struct FitJob;
     std::shared_ptr<FitJob> fitJob; // "Fit to this track" listening
     struct TakeCompJob;
