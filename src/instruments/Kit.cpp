@@ -3,7 +3,10 @@
 #include "Kit.h"
 
 #include "Fx.h"
-#include "InstrumentEditor.h"
+#include <juce_audio_formats/juce_audio_formats.h>
+#if ! MICFX_WEB
+ #include "InstrumentEditor.h"
+#endif
 #include "Registry.h"
 #include "../StarterContent.h"
 
@@ -498,6 +501,7 @@ namespace
         Room room_;
     };
 
+   #if ! MICFX_WEB // the web draws the instruments' windows itself (no juce_gui there)
     //==========================================================================
     // The window.
     class KitEditor final : public juce::AudioProcessorEditor, private juce::Timer
@@ -877,6 +881,7 @@ namespace
 
         JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (KitEditor)
     };
+   #endif
 }
 
 //==============================================================================
@@ -933,7 +938,9 @@ const Spec& getKitSpec()
         s.presets = { { "Empty Kit", {} } };
         s.keyName = [] (int note) { return KitSampler::hintName (KitSampler::padForNote (note)); };
         s.makeEngine = [] (Params p) { return std::make_unique<KitEngine> (p); };
+       #if ! MICFX_WEB
         s.makeEditor = [] (InstrumentProcessor& p) -> juce::AudioProcessorEditor* { return new KitEditor (p); };
+       #endif
         return s;
     }();
     return spec;

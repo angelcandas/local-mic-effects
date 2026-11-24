@@ -1,7 +1,10 @@
 // Sampler: one sample over the keys, or sliced onto keys (see Sampler.h).
 #include "Sampler.h"
 
-#include "InstrumentEditor.h"
+#include <juce_audio_formats/juce_audio_formats.h>
+#if ! MICFX_WEB
+ #include "InstrumentEditor.h"
+#endif
 #include "Registry.h"
 
 #include <algorithm>
@@ -424,6 +427,7 @@ namespace
         double sampleRate = 48000.0;
     };
 
+   #if ! MICFX_WEB // the web draws the instruments' windows itself (no juce_gui there)
     //==========================================================================
     class SamplerEditor final : public juce::AudioProcessorEditor, public juce::FileDragAndDropTarget, private juce::Timer
     {
@@ -669,6 +673,7 @@ namespace
         bool dragOver = false, lastHave = false;
         size_t lastSlices = 0;
     };
+   #endif
 }
 
 SamplerInstrument* asSampler (Engine& engine) { return dynamic_cast<SamplerInstrument*> (&engine); }
@@ -702,7 +707,9 @@ const Spec& getSamplerSpec()
 
         s.presets = { { "Empty Sampler", {} } };
         s.makeEngine = [] (Params p) { return std::make_unique<SamplerEngine> (p); };
+       #if ! MICFX_WEB
         s.makeEditor = [] (InstrumentProcessor& p) -> juce::AudioProcessorEditor* { return new SamplerEditor (p); };
+       #endif
         return s;
     }();
     return spec;

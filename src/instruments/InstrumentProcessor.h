@@ -44,7 +44,11 @@ public:
     bool isMidiEffect() const override { return false; }
 
     juce::AudioProcessorEditor* createEditor() override;
+   #if MICFX_WEB
+    bool hasEditor() const override { return false; } // no juce_gui on the web
+   #else
     bool hasEditor() const override { return true; }
+   #endif
 
     int getNumPrograms() override;
     int getCurrentProgram() override;
