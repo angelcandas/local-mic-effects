@@ -5,6 +5,10 @@ What changed in MicFX, newest first, in plain language. The app shows it under
 haven't seen yet. To add an entry for your change, see "Adding entries" in
 `docs/changelog.md`.
 
+## 2026-11-24
+
+- **Chord track.** A lane under the ruler with the song's chords: detect them from the music or type them. Harmonies follow it, the piano roll shows each chord's notes, and Practice shows the chord playing now. (#221)
+
 ## 2026-11-19
 
 - **Auto Mix balances the band.** Drums, bass, guitar, piano and synth tracks you haven't set a fader on are brought to the balance engineers used in real mixes, with the band as loud as before. (#218)

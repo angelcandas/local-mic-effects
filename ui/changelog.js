@@ -1,7 +1,19 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 218,
+ "latest": 221,
  "days": [
+  {
+   "date": "2026-11-24",
+   "entries": [
+    {
+     "title": "Chord track",
+     "text": "A lane under the ruler with the song's chords: detect them from the music or type them. Harmonies follow it, the piano roll shows each chord's notes, and Practice shows the chord playing now.",
+     "prs": [
+      221
+     ]
+    }
+   ]
+  },
   {
    "date": "2026-11-19",
    "entries": [
