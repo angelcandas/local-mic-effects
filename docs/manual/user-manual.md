@@ -565,6 +565,19 @@ From the clip menu choose **Vocals → Build backing vocals…** on a lead vocal
 
 The clock shows the position. Click it to type a bar or time to go to. **T** taps the tempo. The project has a tempo map you can edit in the tempo lane. **Quantize** (Q) moves clips or sung hits to the grid, using the Pitch & time settings.
 
+### Chord track
+
+**Chords** in the top bar (or the **…** menu) shows the chord track under the ruler: the song's chords, each lasting until the next.
+
+- **Detect** listens to the song without its voices and drums and writes a chord on the nearest beat wherever it changes. It replaces the chord track; Ctrl+Z brings the old one back.
+- Click an empty spot to type a chord there (C, Am, G7, Fmaj7, Dm7, Bdim, Dsus4, D/F#, or N.C. for no chord). Enter writes it, Tab writes it and moves a bar on, Esc forgets it. Double-click a chord to change it, drag it to another beat, and Delete removes the selected one. Right-click for the same, plus **Clear the chord track**.
+- The chords are kept in beats, so they stay on the music when the tempo changes, and are saved with the project.
+- A Harmonizer in **Chords** mode sings the chord track's chords instead of listening for them (notes you hold on a MIDI keyboard still win). The piano roll tints each chord's notes in gold (the root a little more) with its name on top, so a part you write fits.
+
+![The chord track under the ruler](images/chord-track.png)
+
+![The piano roll with the chord tones tinted](images/chord-track-piano-roll.png)
+
 ## 4.19 Keyboard shortcuts
 
 Space, R, Home and M mean the same in both modes. Where the big DAWs agree (Space, S, Ctrl+Z, Ctrl+D…) MicFX uses the same key. On a Mac, read Ctrl as Cmd. Press **?** for the full list. The most useful:
