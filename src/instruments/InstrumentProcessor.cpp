@@ -1,5 +1,7 @@
 #include "InstrumentProcessor.h"
-#include "InstrumentEditor.h"
+#if ! MICFX_WEB
+ #include "InstrumentEditor.h"
+#endif
 
 namespace micfx::inst
 {
@@ -154,7 +156,11 @@ juce::AudioProcessorEditor* InstrumentProcessor::createEditor()
 {
     if (spec.makeEditor)
         return spec.makeEditor (*this);
+   #if MICFX_WEB
+    return nullptr; // the web page shows the instrument's controls itself
+   #else
     return new InstrumentEditor (*this);
+   #endif
 }
 
 juce::String InstrumentProcessor::getKeyName (int note) const
