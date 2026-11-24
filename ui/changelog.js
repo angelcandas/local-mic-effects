@@ -1,7 +1,19 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 218,
+ "latest": 222,
  "days": [
+  {
+   "date": "2026-11-24",
+   "entries": [
+    {
+     "title": "Align to lead",
+     "text": "Line a double, a harmony or a re-sung line up with the lead vocal, syllable by syllable, and optionally tune its notes to the lead's: the clip editor's Align section, or Align to lead… on a track.",
+     "prs": [
+      222
+     ]
+    }
+   ]
+  },
   {
    "date": "2026-11-19",
    "entries": [

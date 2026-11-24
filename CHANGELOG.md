@@ -5,6 +5,10 @@ What changed in MicFX, newest first, in plain language. The app shows it under
 haven't seen yet. To add an entry for your change, see "Adding entries" in
 `docs/changelog.md`.
 
+## 2026-11-24
+
+- **Align to lead.** Line a double, a harmony or a re-sung line up with the lead vocal, syllable by syllable, and optionally tune its notes to the lead's: the clip editor's Align section, or Align to lead… on a track. (#222)
+
 ## 2026-11-19
 
 - **Auto Mix balances the band.** Drums, bass, guitar, piano and synth tracks you haven't set a fader on are brought to the balance engineers used in real mixes, with the band as loud as before. (#218)
