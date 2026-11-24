@@ -2573,6 +2573,78 @@ int Edit::getKey() const
 }
 
 //==============================================================================
+std::vector<Edit::ChordMark> Edit::parseChords (const juce::String& text)
+{
+    std::vector<ChordMark> marks;
+    for (const auto& item : juce::StringArray::fromTokens (text, ";", ""))
+    {
+        const auto colon = item.indexOfChar (':');
+        if (colon <= 0)
+            continue;
+        const auto beatText = item.substring (0, colon).trim();
+        const auto beat = beatText.getDoubleValue();
+        const auto name = item.substring (colon + 1).trim();
+        if (name.isNotEmpty() && beatText.containsOnly ("0123456789.") && std::isfinite (beat))
+            marks.push_back ({ beat, name });
+    }
+    std::stable_sort (marks.begin(), marks.end(), [] (const ChordMark& a, const ChordMark& b) { return a.beat < b.beat; });
+    return marks;
+}
+
+juce::String Edit::formatChords (const std::vector<ChordMark>& marks)
+{
+    juce::StringArray items;
+    for (const auto& mark : marks)
+        items.add (juce::String (std::round (mark.beat * 1000.0) / 1000.0) + ":" + mark.name.removeCharacters (";:").trim());
+    return items.joinIntoString (";");
+}
+
+std::vector<Edit::ChordMark> Edit::getChords() const
+{
+    return parseChords (state[ids::chords].toString());
+}
+
+void Edit::setChords (std::vector<ChordMark> marks)
+{
+    for (auto& mark : marks)
+        mark.beat = std::isfinite (mark.beat) ? std::round (juce::jmax (0.0, mark.beat) * 1000.0) / 1000.0 : -1.0;
+    std::stable_sort (marks.begin(), marks.end(), [] (const ChordMark& a, const ChordMark& b) { return a.beat < b.beat; });
+
+    // One per beat (the later one wins), no blanks, nothing before the start.
+    std::vector<ChordMark> kept;
+    for (auto& mark : marks)
+    {
+        mark.name = mark.name.removeCharacters (";:").trim();
+        if (mark.name.isEmpty() || mark.beat < 0.0)
+            continue;
+        if (! kept.empty() && std::abs (kept.back().beat - mark.beat) < 1.0e-6)
+            kept.back() = mark;
+        else
+            kept.push_back (mark);
+    }
+
+    if (kept.empty())
+        state.removeProperty (ids::chords, undoTarget);
+    else if (const auto text = formatChords (kept); text != state[ids::chords].toString())
+        state.setProperty (ids::chords, text, undoTarget);
+}
+
+void Edit::setChordAt (double beat, const juce::String& name)
+{
+    auto marks = getChords();
+    marks.push_back ({ beat, name }); // after any on that beat: it wins
+    setChords (std::move (marks));
+}
+
+void Edit::removeChordAt (double beat)
+{
+    auto marks = getChords();
+    marks.erase (std::remove_if (marks.begin(), marks.end(), [beat] (const ChordMark& m) { return std::abs (m.beat - beat) < 1.0e-3; }),
+                 marks.end());
+    setChords (std::move (marks));
+}
+
+//==============================================================================
 juce::ValueTree Edit::addMarker (double timeSeconds, const juce::String& name)
 {
     juce::ValueTree marker (ids::MARKER);

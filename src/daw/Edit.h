@@ -13,7 +13,9 @@
 // The DAW session as a ValueTree, so every change can be undone and the whole thing
 // saves to a file as it is:
 //
-//   PROJECT  version, tempo, tempoChanges, beatsPerBar, loopOn, loopStart, loopEnd, viewState
+//   PROJECT  version, tempo, tempoChanges, beatsPerBar, loopOn, loopStart, loopEnd, viewState,
+//            key, keyMinor, chords (the chord track: "0:C;4:Am;8:F/A", beats and chord names in
+//            beat order, see getChords; missing when there is none)
 //     MARKER  id, name, time
 //             (a song section from the song map also has length (seconds), colour, section
 //              (its kind: "intro", "verse", "chorus", "bridge", "outro", "part") and letter
@@ -119,7 +121,7 @@ namespace ids
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (CTRL) MICFX_DAW_ID (number) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
-    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (mixPriority) MICFX_DAW_ID (autoMixAudition) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
+    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (chords) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (mixPriority) MICFX_DAW_ID (autoMixAudition) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns) MICFX_DAW_ID (group) MICFX_DAW_ID (folded)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
@@ -303,6 +305,23 @@ public:
     void setKey (int tonic, bool minor);
     int getKey() const;
     bool isKeyMinor() const { return (bool) state.getProperty (ids::keyMinor, false); }
+
+    // The chord track: chord names (analysis::Chord::getName spellings; "N.C." for no
+    // chord) from a beat on (beats as the tempo map counts them, so the chords stay on the
+    // music when the tempo changes). Each lasts until the next one. In beat order, one per beat.
+    struct ChordMark
+    {
+        double beat = 0.0;
+        juce::String name;
+        bool operator== (const ChordMark& other) const { return std::abs (beat - other.beat) < 1.0e-6 && name == other.name; }
+    };
+    std::vector<ChordMark> getChords() const;
+    void setChords (std::vector<ChordMark>); // sorted, and a later mark on the same beat wins; empty removes the track
+    // One chord at a beat (replacing one there), or removes the chord at that beat.
+    void setChordAt (double beat, const juce::String& name);
+    void removeChordAt (double beat);
+    static std::vector<ChordMark> parseChords (const juce::String&);
+    static juce::String formatChords (const std::vector<ChordMark>&);
 
     //==============================================================================
     // Markers: named points on the timeline (verse, chorus...). Times in seconds.

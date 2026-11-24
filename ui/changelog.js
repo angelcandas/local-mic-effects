@@ -11,6 +11,13 @@ export const CHANGELOG = {
      "prs": [
       222
      ]
+    },
+    {
+     "title": "Chord track",
+     "text": "A lane under the ruler with the song's chords: detect them from the music or type them. Harmonies follow it, the piano roll shows each chord's notes, and Practice shows the chord playing now.",
+     "prs": [
+      221
+     ]
     }
    ]
   },

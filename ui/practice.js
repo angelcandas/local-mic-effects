@@ -4,7 +4,7 @@
 // processor's PitchTap (your pitch before the effects). The page talks to it through the
 // "practice" native function and hears back on three events:
 //   "practice"      a song is being prepared, is ready, or failed
-//   "practicePitch" { time, playing, midi, frames: [t, midi, ...] } about 30 times a second
+//   "practicePitch" { time, playing, midi, frames: [t, midi, ...], chord (the backing's, "" when none) } about 30 times a second
 //   "practiceScore" { reset, from, notes: [...], phrases: [...], pass } as notes and phrases end
 //   "practiceReport" the pass report, when the song stops after some singing
 // The song plays on the Live tracks, so the transport at the bottom drives it.
@@ -217,7 +217,11 @@ export class PracticeView {
     const emptyOpen = Object.assign(html("button", "tool is-accent", "Open song…"), { type: "button" });
     emptyOpen.addEventListener("click", () => practice("open", { split: true }));
     this.empty.append(emptyOpen);
-    this.stage.append(this.canvas, this.tuner, this.empty);
+    // The chord the backing plays now (heard from it, as the live harmonies follow it).
+    this.chordChip = html("div", "practice-chord");
+    this.chordChip.title = "The chord the song plays now";
+    this.chordChip.hidden = true;
+    this.stage.append(this.canvas, this.tuner, this.chordChip, this.empty);
     this.stage.addEventListener("pointerdown", (event) => this.onStageClick(event));
 
     // The song's sections (song map): click one to loop it.
@@ -584,6 +588,9 @@ export class PracticeView {
   onPitch(event) {
     this.clock = { time: event.time, playing: event.playing, at: performance.now() };
     this.midiNow = event.midi;
+    const chord = event.chord ?? "";
+    if (this.chordChip.textContent !== chord) this.chordChip.textContent = chord;
+    this.chordChip.hidden = !chord;
     const frames = event.frames ?? [];
     // Going back (a seek, "From the top"): what was sung after that point is forgotten.
     if (frames.length && this.trail.length && frames[0] < this.trail[this.trail.length - 1].time - 0.2)

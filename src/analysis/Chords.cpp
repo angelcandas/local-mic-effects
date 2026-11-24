@@ -88,6 +88,96 @@ juce::String Chord::getName() const
     return name;
 }
 
+Chord Chord::fromName (const juce::String& typed, bool* ok)
+{
+    const auto fail = [ok] { if (ok != nullptr) *ok = false; return Chord {}; };
+    if (ok != nullptr)
+        *ok = true;
+
+    auto text = typed.trim().removeCharacters (" ");
+    if (text.isEmpty() || text.equalsIgnoreCase ("N.C.") || text.equalsIgnoreCase ("NC") || text.equalsIgnoreCase ("N.C"))
+        return {};
+
+    // A note name at the start of `s`: its pitch class and how many characters it took.
+    const auto readNote = [] (const juce::String& s, int& used)
+    {
+        static constexpr int naturals[] = { 9, 11, 0, 2, 4, 5, 7 }; // A..G
+        used = 0;
+        if (s.isEmpty())
+            return -1;
+        const auto letter = juce::CharacterFunctions::toUpperCase (s[0]);
+        if (letter < 'A' || letter > 'G')
+            return -1;
+        auto pitch = naturals[letter - 'A'];
+        used = 1;
+        for (; used < s.length(); ++used)
+        {
+            const auto c = s[used];
+            if (c == '#' || c == (juce::juce_wchar) 0x266F)
+                ++pitch;
+            else if ((c == 'b' && used == 1) || c == (juce::juce_wchar) 0x266D)
+                --pitch;
+            else
+                break;
+        }
+        return wrap (pitch);
+    };
+
+    Chord chord;
+    int used = 0;
+    chord.root = readNote (text, used);
+    if (chord.root < 0)
+        return fail();
+
+    auto rest = text.substring (used);
+    juce::String bassText;
+    if (const auto slash = rest.indexOfChar ('/'); slash >= 0)
+    {
+        bassText = rest.substring (slash + 1);
+        rest = rest.substring (0, slash);
+    }
+
+    // Longest spellings first, so "maj7" isn't read as "maj" and "m7" isn't read as "m".
+    static const std::vector<std::pair<const char*, int>> spellings {
+        { "maj7", major7 }, { "Maj7", major7 }, { "MAJ7", major7 }, { "M7", major7 }, { "^7", major7 }, { "^", major7 },
+        { "min7", minor7 }, { "m7", minor7 }, { "-7", minor7 },
+        { "dom7", dominant7 }, { "7", dominant7 },
+        { "sus4", sus4 }, { "sus2", sus2 }, { "sus", sus4 },
+        { "dim", diminished }, { "o", diminished },
+        { "aug", augmented }, { "+", augmented },
+        { "maj", major }, { "Maj", major }, { "M", major }, { "major", major },
+        { "minor", minor }, { "min", minor }, { "m", minor }, { "-", minor },
+        { "5", power }, { "", major },
+    };
+
+    chord.quality = -1;
+    if (rest == juce::String::fromUTF8 ("\xc2\xb0") || rest == juce::String::fromUTF8 ("\xc2\xba"))
+        chord.quality = diminished; // the degree sign
+    else if (rest == juce::String::fromUTF8 ("\xce\x94") || rest == juce::String::fromUTF8 ("\xce\x94" "7"))
+        chord.quality = major7;     // the triangle
+    else
+        for (const auto& [spelling, quality] : spellings)
+            if (rest == spelling)
+            {
+                chord.quality = quality;
+                break;
+            }
+
+    if (chord.quality < 0)
+        return fail();
+
+    if (bassText.isNotEmpty())
+    {
+        int bassUsed = 0;
+        const auto bass = readNote (bassText, bassUsed);
+        if (bass < 0 || bassUsed != bassText.length())
+            return fail();
+        chord.bass = bass == chord.root ? -1 : bass;
+    }
+
+    return chord;
+}
+
 Chord Chord::unpack (int packed) noexcept
 {
     if (packed < 0)

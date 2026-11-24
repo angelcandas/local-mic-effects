@@ -431,8 +431,9 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
 
     if (tree.hasType (ids::PROJECT))
     {
-        if (property == ids::tempo || property == ids::tempoChanges)
-            requestRebuild(); // the click follows the new tempo map (and so will musical clips)
+        if (property == ids::tempo || property == ids::tempoChanges || property == ids::chords
+            || property == ids::key || property == ids::keyMinor)
+            requestRebuild(); // the click follows the new tempo map (and so will musical clips); the harmonies the chords and key
         else if (property == ids::beatsPerBar)
             updateTempo();
         else if (property == ids::loopOn || property == ids::loopStart || property == ids::loopEnd)
@@ -981,6 +982,13 @@ void DawEngine::rebuild()
     if (realtime && edit.getCue().isValid())
         graph->cue = reuse (edit.getCue());
     graph->tempo = edit.getTempoMap();
+    for (const auto& mark : edit.getChords())
+    {
+        bool ok = false;
+        const auto chord = analysis::Chord::fromName (mark.name, &ok);
+        if (ok)
+            graph->chordTrack.emplace_back ((juce::int64) std::llround (graph->tempo.toSeconds (mark.beat) * sampleRate), chord.pack());
+    }
 
     // Pattern mode: just the pattern, as a loop (a removed pattern goes back to the song).
     auto loopPattern = patternMode >= 0 ? edit.getPattern (patternMode) : juce::ValueTree();
@@ -2850,9 +2858,18 @@ void DawEngine::followChords (Graph& graph, bool isPlaying, juce::int64 blockSta
             notes |= track.strip->sounding;
     follower.setHeldNotes (notes);
 
+    // The chord track, when there is one, says the chord (the one starting a moment
+    // ahead, so a harmony lands with the chord's first beat).
+    if (! notes.any() && ! graph.chordTrack.empty())
+    {
+        const auto at = std::max ((juce::int64) 0, blockStart) + (juce::int64) (0.03 * sampleRate);
+        const auto it = std::upper_bound (graph.chordTrack.begin(), graph.chordTrack.end(), at,
+                                          [] (juce::int64 time, const std::pair<juce::int64, int>& mark) { return time < mark.first; });
+        follower.setChord (it == graph.chordTrack.begin() ? analysis::Chord() : analysis::Chord::unpack (std::prev (it)->second));
+    }
     // Audio: the clips of the tracks without pitch inserts (the vocals have them), read
     // a little ahead so the chord has been heard by the time it plays.
-    if (isPlaying && ! notes.any())
+    else if (isPlaying && ! notes.any())
     {
         const auto lookAhead = (juce::int64) (0.12 * sampleRate);
         auto& listen = graph.listen;

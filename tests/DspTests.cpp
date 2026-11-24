@@ -9633,6 +9633,182 @@ namespace
 
     // The DAW screen's key panel: detect the key from the tracks, keep it in the session,
     // and point the autotunes at it.
+    void testChordTrack()
+    {
+        std::cout << "\nChord track\n";
+        using analysis::Chord;
+
+        // Names: what getName writes reads back, and the usual spellings.
+        {
+            bool allRight = true;
+            juce::String wrong;
+            for (int root = 0; root < 12; ++root)
+                for (int quality = 0; quality < Chord::numQualities; ++quality)
+                    for (int bass : { -1, (root + 4) % 12 })
+                    {
+                        const Chord chord { root, quality, bass };
+                        bool ok = false;
+                        const auto back = Chord::fromName (chord.getName(), &ok);
+                        if (! ok || back != chord) { allRight = false; wrong << chord.getName() << " "; }
+                    }
+            check (allRight, "every chord name reads back as the same chord " + wrong);
+
+            const auto is = [] (const char* text, const char* name)
+            {
+                bool ok = false;
+                const auto chord = Chord::fromName (juce::String::fromUTF8 (text), &ok);
+                return ok && chord.getName() == name;
+            };
+            check (is ("Bb", "A#") && is ("ebm", "D#m") && is ("Cmin", "Cm") && is ("C-7", "Cm7") && is ("CM7", "Cmaj7")
+                       && is ("C^7", "Cmaj7") && is ("Csus", "Csus4") && is ("Bo", "Bdim") && is ("C+", "Caug") && is ("d/f#", "D/F#")
+                       && is ("G dom7", "G7") && is ("A\xe2\x99\xadm", "G#m") && is ("C\xc2\xb0", "Cdim") && is ("Fmaj", "F"),
+                   "the usual spellings are understood");
+            bool ok = true;
+            check (! Chord::fromName ("N.C.", &ok).isValid() && ok, "N.C. is no chord, and fine");
+            check (! Chord::fromName ("Hm", &ok).isValid() && ! ok && ! Chord::fromName ("Cxyz", &ok).isValid() && ! ok
+                       && ! Chord::fromName ("C/Q", &ok).isValid() && ! ok,
+                   "anything else is refused");
+        }
+
+        // The model: sorted, one per beat, undoable, text in the project.
+        {
+            daw::Edit edit;
+            check (edit.getChords().empty() && ! edit.getState().hasProperty (daw::ids::chords), "a new song has no chord track");
+            edit.getUndoManager().beginNewTransaction();
+            edit.setChords ({ { 8.0, "F" }, { 0.0, "C" }, { 4.0, "Am" }, { 4.0, "Am7" } });
+            check (edit.getState()[daw::ids::chords].toString() == "0:C;4:Am7;8:F", "sorted, and the later chord on a beat wins ("
+                       + edit.getState()[daw::ids::chords].toString() + ")");
+            edit.getUndoManager().beginNewTransaction();
+            edit.setChordAt (8.0, "G7");
+            edit.removeChordAt (0.0);
+            check (daw::Edit::formatChords (edit.getChords()) == "4:Am7;8:G7", "a chord replaced and one removed");
+            edit.getUndoManager().undo();
+            check (daw::Edit::formatChords (edit.getChords()) == "0:C;4:Am7;8:F", "undo brings them back");
+            check (daw::Edit::parseChords ("2.5:Dm ; x ; 1:G;bad:C") == std::vector<daw::Edit::ChordMark> ({ { 1.0, "G" }, { 2.5, "Dm" } }),
+                   "a damaged chords text keeps what reads");
+            edit.setChords ({});
+            check (! edit.getState().hasProperty (daw::ids::chords), "an empty chord track leaves nothing in the project");
+        }
+
+        // The bridge: typing, moving, removing, and detecting from the song.
+        const auto folder = juce::File::createTempFile ("micfx-chords");
+        folder.createDirectory();
+        juce::PropertiesFile::Options options;
+        options.applicationName = "MicFXTests";
+        options.filenameSuffix = ".settings";
+        juce::PropertiesFile settings (folder.getChildFile ("test.settings"), options);
+
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        auto& edit = processor.getDawEdit();
+
+        std::vector<std::pair<juce::String, juce::var>> events;
+        DawBridge::availableForTesting = true;
+        DawBridge bridge (processor, settings,
+                          [&] (const juce::Identifier& event, const juce::var& payload) { events.emplace_back (event.toString(), payload); },
+                          [] { return (juce::int64) 0; });
+
+        const auto run = [&] (const juce::String& command, std::initializer_list<std::pair<const char*, juce::var>> properties = {})
+        {
+            auto* object = new juce::DynamicObject();
+            for (const auto& [name, value] : properties)
+                object->setProperty (name, value);
+            juce::var result;
+            bridge.handle (command, juce::var (object), [&] (juce::var r) { result = r; });
+            return result;
+        };
+        const auto session = [&] { return juce::JSON::parse (juce::JSON::toString (bridge.describeSession())); };
+
+        run ("mode", { { "daw", true } });
+        run ("tempo", { { "bpm", 120.0 } });
+
+        check (! (bool) run ("chords", { { "action", "put" }, { "beat", 0.0 }, { "name", "Hello" } })["ok"]
+                   && edit.getChords().empty(), "a name that isn't a chord is refused");
+        check ((bool) run ("chords", { { "action", "put" }, { "beat", 0.0 }, { "name", "am7" } })["ok"]
+                   && (bool) run ("chords", { { "action", "put" }, { "beat", 4.0 }, { "name", "F/A" } })["ok"],
+               "chords typed at beats 0 and 4");
+        {
+            const auto list = session()["chords"];
+            check (list.size() == 2 && list[0]["name"].toString() == "Am7" && list[1]["name"].toString() == "F/A"
+                       && std::abs ((double) list[1]["time"] - 2.0) < 1.0e-9 && (bool) list[1]["chord"]
+                       && (int) list[1]["mask"] == ((1 << 5) | (1 << 9) | (1 << 0)) && (int) list[0]["root"] == 9,
+                   "the session lists them, tidied, with seconds and their notes (" + juce::JSON::toString (list, true) + ")");
+        }
+        run ("chords", { { "action", "put" }, { "beat", 6.0 }, { "name", "F/A" }, { "from", 4.0 } });
+        check (daw::Edit::formatChords (edit.getChords()) == "0:Am7;6:F/A", "a chord moved to another beat");
+        edit.getUndoManager().undo();
+        check (daw::Edit::formatChords (edit.getChords()) == "0:Am7;4:F/A", "moving is one undo step");
+        run ("chords", { { "action", "remove" }, { "beat", 0.0 } });
+        check (daw::Edit::formatChords (edit.getChords()) == "4:F/A", "a chord removed");
+
+        // The AI's view of the song reads the chord track per bar.
+        {
+            auto* object = new juce::DynamicObject();
+            object->setProperty ("name", "chords.set");
+            auto* argsObject = new juce::DynamicObject();
+            juce::Array<juce::var> list;
+            for (const auto& [bar, beat, name] : std::vector<std::tuple<int, double, const char*>> { { 1, 1.0, "C" }, { 2, 1.0, "G" }, { 2, 3.0, "Am" } })
+            {
+                auto* item = new juce::DynamicObject();
+                item->setProperty ("bar", bar);
+                item->setProperty ("beat", beat);
+                item->setProperty ("name", name);
+                list.add (juce::var (item));
+            }
+            argsObject->setProperty ("chords", list);
+            object->setProperty ("args", juce::var (argsObject));
+            juce::var result;
+            bridge.handle ("actions.run", juce::var (object), [&] (juce::var r) { result = r; });
+            check ((bool) result["ok"] && daw::Edit::formatChords (edit.getChords()) == "0:C;4:G;6:Am",
+                   "the AI writes chords by bar and beat (" + juce::JSON::toString (result, true) + ")");
+        }
+        run ("chords", { { "action", "set" }, { "chords", juce::Array<juce::var>() } });
+        check (edit.getChords().empty(), "set with nothing clears the chord track");
+
+        // Detect: a keys track playing C, Am, F, G7 (a bar each at 120 BPM) and a "Vocal" on
+        // F# all along, which is left out.
+        const auto keys = folder.getChildFile ("keys.wav"), vocal = folder.getChildFile ("vocal.wav");
+        writeWav (keys, makeChords ({ chord (60, { 0, 4, 7 }), chord (57, { 0, 3, 7 }), chord (53, { 0, 4, 7 }), chord (55, { 0, 4, 7, 10 }) },
+                                    sampleRate, 2.0), sampleRate);
+        writeWav (vocal, makeChords ({ { 78 }, { 78 }, { 78 }, { 78 } }, sampleRate, 2.0), sampleRate);
+        const auto vocalTrack = (int) edit.getTracks()[0][daw::ids::id];
+        edit.getTrack (vocalTrack).setProperty (daw::ids::name, "Vocal", nullptr);
+        bridge.importAudio (vocal, vocalTrack);
+        bridge.importAudio (keys, -1);
+
+        check ((bool) run ("chords", { { "action", "detect" } })["ok"], "detect starts");
+        juce::var done;
+        for (int i = 0; i < 2000 && ! done.isObject(); ++i)
+        {
+            events.clear();
+            bridge.tick();
+            for (const auto& [name, payload] : events)
+                if (name == "dawChords" && payload["state"].toString() != "analysing")
+                    done = payload;
+            if (! done.isObject())
+                juce::Thread::sleep (10);
+        }
+        const auto found = daw::Edit::formatChords (edit.getChords());
+        check (done["state"].toString() == "done" && found == "0:C;4:Am;8:F;12:G7",
+               "detected the four chords on their bars (" + found + ", " + done["state"].toString() + " " + done["error"].toString() + ")");
+        edit.getUndoManager().undo();
+        check (edit.getChords().empty(), "undo takes the detected chords away");
+        edit.getUndoManager().redo();
+
+        // The chord track is saved with the project.
+        {
+            check ((bool) bridge.saveProjectAs (folder.getChildFile ("Song"))["ok"], "saved");
+            const auto saved = processor.getDawProject().getFolder();
+            processor.getDawProject().close();
+            bridge.openProject (saved);
+            check (daw::Edit::formatChords (edit.getChords()) == found, "the chord track is saved in the project");
+            processor.getDawProject().close();
+        }
+
+        DawBridge::availableForTesting = false;
+        folder.deleteRecursively();
+    }
+
     void testDawKey()
     {
         std::cout << "\nSong key in DAW mode\n";
@@ -13249,6 +13425,21 @@ namespace
             const auto heard = engine.getHarmonyChord().getName();
             engine.stop();
             check (heard == "F", "DAW: the vocal's harmonizer hears the keys track's chord (" + heard + ")");
+
+            // A chord track says the chord instead of listening (seconds from its beats).
+            edit.setChords ({ { 0.0, "Dm7" }, { 8.0, "Bb/D" } });
+            engine.rebuildNow();
+            engine.seek (0);
+            engine.play();
+            render (engine, 0.2);
+            const auto first = engine.getHarmonyChord().getName();
+            engine.seek ((juce::int64) (edit.getTempoMap().toSeconds (8.0) * sampleRate));
+            render (engine, 0.2);
+            const auto second = engine.getHarmonyChord().getName();
+            engine.stop();
+            check (first == "Dm7" && second == "A#/D", "DAW: the chord track drives the harmonizer (" + first + ", " + second + ")");
+            edit.setChords ({});
+            engine.rebuildNow();
 
             // A MIDI keyboard decides while keys are held.
             engine.addLiveMidi (juce::MidiMessage::noteOn (1, 57, (juce::uint8) 100));
@@ -20497,6 +20688,15 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=chords: the chord detector, the harmonies and the chord track.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "chords")
+    {
+        testHarmonies();
+        testChordTrack();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=automix: just Auto Mix (planning, roles, bench).
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "automix")
     {
@@ -20897,6 +21097,7 @@ int main()
     testKeyDetection();
     testHarmonies();
     testDawKey();
+    testChordTrack();
     testAutoMixEffects();
     testAutoMixRoles();
     testAutoMixLearned();
