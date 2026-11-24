@@ -456,6 +456,10 @@ private:
         std::shared_ptr<analysis::ChordFollower> chords;
         juce::AudioBuffer<float> listen;
         int keyMask = 0;
+        // The chord track (Edit::getChords), when there is one: where each chord starts
+        // (samples on the timeline) and the chord (Chord::pack). It drives the harmonies
+        // instead of listening; held notes still win.
+        std::vector<std::pair<juce::int64, int>> chordTrack;
     };
 
     void followChords (Graph&, bool isPlaying, juce::int64 blockStart, int numSamples) noexcept;

@@ -17,6 +17,7 @@ import { decorateAiPanels } from "./aiviews.js";
 import { MixCheckView } from "./mixcheck.js";
 import { SongMapView } from "./songmap.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
+import { CHORD_ROW, createChordLane } from "./chordlane.js";
 import { createPatternsPanel } from "./patterns.js";
 import { createPatternLane, drawGhosts } from "./patternlane.js";
 import { createDrawTool } from "./drawtool.js";
@@ -154,6 +155,7 @@ const ICONS = {
   songmap: '<rect x="2" y="8" width="7" height="8" rx="1.5"/><rect x="10.5" y="8" width="4.5" height="8" rx="1.5"/><rect x="16.5" y="8" width="5.5" height="8" rx="1.5"/>',
   automix: '<path d="M5 4v16M12 4v16M19 4v16"/><circle cx="5" cy="14" r="2" fill="currentColor"/><circle cx="12" cy="8" r="2" fill="currentColor"/><circle cx="19" cy="15" r="2" fill="currentColor"/>',
   export: '<path d="M12 15V3M7 8l5-5 5 5M4 20h16"/>',
+  chords: '<rect x="3" y="6" width="18" height="12" rx="2"/><path d="M9 6v12M15 6v12"/><path d="M5.5 10h1.5M11.5 13h1.5M17.5 9h1.5" stroke-width="2.4"/>',
   tempo: '<path d="M3 18h5l5-10h8"/><circle cx="8" cy="18" r="1.6" fill="currentColor"/><circle cx="13" cy="8" r="1.6" fill="currentColor"/><path d="M3 21h18" stroke-dasharray="2 3"/>',
   tap: '<path d="M9 11V5a2 2 0 0 1 4 0v6M9 11l-1-1.5a1.8 1.8 0 0 0-3 2L8 18a5 5 0 0 0 4 2h2a5 5 0 0 0 5-5v-3a2 2 0 0 0-4 0M13 11a2 2 0 0 1 4 0"/>',
   key: '<circle cx="8" cy="15" r="4"/><path d="M11 12l9-9M16 7l3 3"/>',
@@ -1265,6 +1267,14 @@ class DawScreen {
       this.renderArrange(true);
     });
     this.tempoButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Tempo</span>');
+    this.showChords = prefs.get("showChords", false);
+    this.chordsButton = iconButton("toggle has-label", "chords", "Chord track: the song's chords under the ruler. Detect them or type them; harmonies and the piano roll follow", () => {
+      this.showChords = !this.showChords;
+      prefs.set("showChords", this.showChords);
+      this.renderTransport();
+      this.renderArrange(true);
+    });
+    this.chordsButton.insertAdjacentHTML("beforeend", '<span class="ib-text">Chords</span>');
     const songTempo = html("div", "tb-joined");
     songTempo.append(tempo, tap);
 
@@ -1306,7 +1316,7 @@ class DawScreen {
     const click = html("div", "tb-joined click-group");
     click.append(this.metronomeButton, this.clickMore, this.clickPopover);
 
-    const left = zone("zone-song", songTempo, this.signature, this.keyButton, this.songMapButton, this.tempoButton, click);
+    const left = zone("zone-song", songTempo, this.signature, this.keyButton, this.songMapButton, this.tempoButton, this.chordsButton, click);
 
     //---------------------------------------------------------------- centre: transport
     const start = button("transport-button", "", "Stop and back to the start (Num 0)", () => daw("transport", { action: "stop" }));
@@ -1459,6 +1469,7 @@ class DawScreen {
       { level: 2, element: help, label: "Keyboard shortcuts", run: () => this.toggleShortcuts() },
       { level: 2, element: this.pianoButton, label: "Computer keyboard piano", run: () => this.togglePiano(), checked: () => Boolean(this.piano?.on) },
       { level: 3, element: this.tempoButton, label: "Tempo track", run: () => this.tempoButton.click(), checked: () => this.showTempo },
+      { level: 3, element: this.chordsButton, label: "Chord track", run: () => this.chordsButton.click(), checked: () => this.showChords },
       { level: 3, element: tap, label: "Tap tempo", run: () => this.tapTempo() },
       { level: 3, element: this.keyButton, label: "Song key…", run: () => this.toggleKeyPanel() },
       { level: 3, element: this.songMapButton, label: "Song map…", run: () => this.songMap.toggle() },
@@ -1606,6 +1617,7 @@ class DawScreen {
     this.snapButton.setAttribute("aria-pressed", String(this.snap));
     this.followButton.setAttribute("aria-pressed", String(this.follow));
     this.tempoButton.setAttribute("aria-pressed", String(!!this.showTempo));
+    this.chordsButton.setAttribute("aria-pressed", String(!!this.showChords));
     this.libraryButton.setAttribute("aria-pressed", String(!this.library?.collapsed));
     this.dockButton.setAttribute("aria-pressed", String(!this.root.classList.contains("dock-hidden")));
     [...this.tools.children].forEach((b) => b.classList.toggle("is-selected", b.dataset.tool === this.tool));
@@ -1774,6 +1786,17 @@ class DawScreen {
     this.ruler.append(this.loopBand);
     rulerRow.append(corner, this.ruler);
 
+    // The chord track, under the ruler (shown with the Chords button; ui/chordlane.js).
+    this.chordRow = html("div", "chord-row");
+    const chordCorner = html("div", "corner chord-corner");
+    this.chordNow = html("span", "chord-now");
+    this.chordDetect = button("tool chord-detect", "Detect", "Hear the chords from the song (the tracks that aren't voices or drums). Replaces the chord track; Ctrl+Z undoes it.",
+                              () => this.detectChords());
+    chordCorner.append(html("span", "tempo-corner-name", "Chords"), this.chordNow, this.chordDetect);
+    this.chordLane = createChordLane(this, { daw, popMenu, toast: (...args) => toast(...args) });
+    this.chordRow.append(chordCorner, this.chordLane.element);
+    this.chordRow.hidden = true;
+
     // The tempo track, under the ruler (shown with the Tempo button).
     this.tempoRow = html("div", "tempo-row");
     const tempoCorner = html("div", "corner tempo-corner");
@@ -1826,7 +1849,7 @@ class DawScreen {
 
     this.cutGuide = html("div", "cut-guide");
     this.cutGuide.hidden = true;
-    this.inner.append(rulerRow, this.tempoRow, this.patternRow, this.rows, this.pinned, this.loopShade, this.playhead, this.cutGuide);
+    this.inner.append(rulerRow, this.chordRow, this.tempoRow, this.patternRow, this.rows, this.pinned, this.loopShade, this.playhead, this.cutGuide);
 
     // Scrolling by hand while playing switches Follow off, so you can look around
     // (and edit) elsewhere while the song keeps playing.
@@ -2214,7 +2237,7 @@ class DawScreen {
       (session.returns ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
       (session.groups ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
       session.patterns, session.patternClips, this.selectedPatternClip,
-      session.master.volume, session.master.inserts.length, session.tempo, session.tempoMap, this.showTempo, session.loop, session.beatsPerBar, session.markers,
+      session.master.volume, session.master.inserts.length, session.tempo, session.tempoMap, this.showTempo, session.chords, this.showChords, session.loop, session.beatsPerBar, session.markers,
       this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight, this.takes.version, this.automation.version,
       this.headWidth, [...this.trackHeights], [...this.folded],
       this.showRouting, this.showSends, this.pinnedFolded, session.master.pan,
@@ -2236,11 +2259,15 @@ class DawScreen {
       this.inner.style.setProperty("--grid-image", gridImage(this.tempoMap, this.beatsPerBar, this.zoom, width));
       this.inner.style.setProperty("--grid-width", `${Math.ceil(width)}px`);
     }
+    this.chordRow.hidden = !this.showChords;
+    if (this.showChords) this.chordLane.update(session, width);
+    const chordHeight = this.showChords ? CHORD_ROW : 0;
+    this.tempoRow.style.top = `${30 + chordHeight}px`;
     this.tempoRow.hidden = !this.showTempo;
     if (this.showTempo) this.tempoLane.update(session, width);
     const hasPatterns = (session.patterns?.length ?? 0) > 0;
     this.patternRow.hidden = !hasPatterns;
-    this.inner.style.setProperty("--pattern-top", `${30 + (this.showTempo ? 46 : 0)}px`);
+    this.inner.style.setProperty("--pattern-top", `${30 + chordHeight + (this.showTempo ? 46 : 0)}px`);
     if (hasPatterns) this.patternLane.update(session, width);
     this.renderRuler(width);
     this.showLoop(session.loop);
@@ -3312,6 +3339,10 @@ class DawScreen {
 
   movePlayhead(force = false) {
     if (!this.tempoMap.steady) this.showTempoValue();
+    if (this.showChords && this.chordNow) {
+      const name = this.chordLane.nameAt(Math.max(0, this.status.position));
+      if (this.chordNow.textContent !== name) this.chordNow.textContent = name;
+    }
     const x = this.headWidth + Math.max(0, this.status.position) * this.zoom;
     this.playhead.style.transform = `translateX(${x}px)`;
 
@@ -5805,7 +5836,31 @@ class DawScreen {
     });
 
     window.__JUCE__.backend.addEventListener("dawKey", (event) => this.onSongKey(event));
+    window.__JUCE__.backend.addEventListener("dawChords", (event) => this.onChords(event));
     window.__JUCE__.backend.addEventListener("dawFit", (event) => this.onFit(event));
+  }
+
+  // The chord track: listen to the song for its chords ("dawChords" brings them).
+  detectChords() {
+    if (this.chordsRunning) return daw("chords", { action: "cancel" });
+    if (!this.showChords) {
+      this.showChords = true;
+      prefs.set("showChords", true);
+      this.renderTransport();
+      this.renderArrange(true);
+    }
+    daw("chords", { action: "detect" });
+  }
+
+  onChords(event) {
+    this.chordsRunning = event.state === "analysing";
+    this.chordDetect.textContent = this.chordsRunning ? `Stop ${Math.round((event.progress ?? 0) * 100)}%` : "Detect";
+    this.chordDetect.classList.toggle("is-running", this.chordsRunning);
+    if (this.chordsRunning)
+      this.setJob("chords", { label: "Chord detection", progress: event.progress ?? null, cancel: () => daw("chords", { action: "cancel" }) });
+    else this.endJob("chords");
+    if (event.state === "error") toast(event.error, "is-error");
+    else if (event.state === "done") toast(`${event.count} chord${event.count === 1 ? "" : "s"} on the chord track. Ctrl+Z undoes it.`);
   }
 
   toggleKeyPanel(show = this.keyPanel.hidden) {

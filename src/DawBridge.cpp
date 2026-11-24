@@ -245,6 +245,14 @@ struct DawBridge::KeyJob
     analysis::SessionAnalyser::Result result;
 };
 
+struct DawBridge::ChordsJob
+{
+    std::atomic<double> progress { 0.0 };
+    std::atomic<bool> cancel { false }, finished { false };
+    std::vector<std::pair<double, analysis::Chord>> chords; // seconds on the timeline
+    juce::String error;
+};
+
 struct DawBridge::FitJob
 {
     std::atomic<double> progress { 0.0 };
@@ -398,7 +406,7 @@ namespace
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
             { "defineTempo", "Tempo definition" }, { "tempoFromClip", "Project tempo from clip" }, { "stretchClip", "Stretch clip" },
             { "flattenClip", "Make warp permanent" }, { "quantize", "Quantize" }, { "setHitpoints", "Hitpoints" }, { "hitpointAction", "Hitpoints" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
-            { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "fitChain", "Fit to this track" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
+            { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "chords", "Chord track" }, { "fitChain", "Fit to this track" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addStarterPattern", "Add starter pattern" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
@@ -516,6 +524,8 @@ DawBridge::~DawBridge()
         stemJob->cancel = true;
     if (keyJob != nullptr)
         keyJob->cancel = true;
+    if (chordsJob != nullptr)
+        chordsJob->cancel = true;
     if (fitJob != nullptr)
         fitJob->cancel = true;
     if (songMapJob != nullptr)
@@ -1065,6 +1075,7 @@ juce::var DawBridge::describeSession()
         { "beatsPerBar", edit.getBeatsPerBar() },
         { "key", object ({ { "key", edit.getKey() }, { "minor", edit.isKeyMinor() },
                            { "name", analysis::KeyEstimate::getName (edit.getKey(), edit.isKeyMinor()) } }) },
+        { "chords", describeChords() },
         { "markers", [this]
           {
               juce::Array<juce::var> markers;
@@ -1735,6 +1746,14 @@ void DawBridge::tick()
             finishKeyDetection();
         else
             emit ("dawKey", object ({ { "state", "analysing" }, { "progress", keyJob->progress.load() } }));
+    }
+
+    if (chordsJob != nullptr)
+    {
+        if (chordsJob->finished)
+            finishChords();
+        else
+            emit ("dawChords", object ({ { "state", "analysing" }, { "progress", chordsJob->progress.load() } }));
     }
 
     if (fitJob != nullptr)
@@ -4735,6 +4754,219 @@ void DawBridge::finishKeyDetection()
     }
 
     emit ("dawKey", describeKey());
+}
+
+//==============================================================================
+// The "chords" command (the chord track, market item 9); args.action is one of:
+//   detect   listen to the song without its voices (background); "dawChords" brings the
+//            result, which replaces the chord track (one undo step)
+//   cancel
+//   put      { beat, name, from? }   a chord at a beat (replacing one there); with `from`, the
+//            chord at that beat moves there. A name that isn't a chord is refused.
+//   remove   { beat }
+//   set      { chords: [{ beat, name }] }   the whole track (empty: no chord track)
+// Every change is one undo step. The session's "chords" lists them (see describeChords).
+juce::var DawBridge::handleChords (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+
+    const auto checkName = [] (const juce::String& name, juce::String& normal)
+    {
+        bool ok = false;
+        const auto chord = analysis::Chord::fromName (name, &ok);
+        normal = chord.isValid() ? chord.getName() : juce::String ("N.C.");
+        return ok;
+    };
+    const auto notAChord = [] (const juce::String& name)
+    {
+        return error ("\"" + name.trim() + "\" isn't a chord name. Try C, Am, G7, Fmaj7, Dm7, Bdim, Dsus4, D/F# or N.C. (no chord).");
+    };
+
+    if (action == "detect")
+    {
+        if (chordsJob != nullptr)
+            return error ("Already listening for the chords.");
+
+        // The song without its voices (tagged, or with autotune or harmonies on them) and drums.
+        daw::Edit backing;
+        backing.replaceState (edit.getState().createCopy());
+        auto playing = 0;
+        for (const auto& track : backing.getTracks())
+        {
+            const auto role = track.hasProperty (ids::mixRole) ? analysis::getRoleFromKey (track[ids::mixRole].toString())
+                                                               : analysis::guessRoleFromName (track[ids::name].toString()).value_or (analysis::Role::other);
+            auto voice = role == analysis::Role::voice || role == analysis::Role::backingVocal || role == analysis::Role::drums;
+            for (const auto& insert : daw::Edit::getInserts (track))
+                voice = voice || insert[ids::type].toString() == "pitch";
+
+            const auto id = (int) track[ids::id];
+            backing.setTrackSolo (id, false);
+            if (voice)
+                backing.setTrackMute (id, true);
+            else if (! (bool) track[ids::mute])
+                for (const auto& clip : track)
+                    playing += clip.hasType (ids::CLIP) ? 1 : 0;
+        }
+        if (playing == 0)
+            return error ("Add a track with chords on it (not only voices or drums) first.");
+
+        engine.captureInstrumentStates(); // the render loads its own instruments from these
+        const auto rate = engine.getSampleRate() > 0.0 ? engine.getSampleRate() : 48000.0;
+        daw::Exporter::Settings settings;
+        settings.sampleRate = rate;
+        settings.bitDepth = 32;
+        settings.tail = 0.0;
+        auto exporter = std::make_shared<daw::Exporter> (backing, settings); // snapshot on this thread
+        const auto key = edit.getKey();
+        const analysis::KeyEstimate songKey = [&]
+        {
+            analysis::KeyEstimate k;
+            if (key >= 0)
+            {
+                k.key = key;
+                k.minor = edit.isKeyMinor();
+            }
+            return k;
+        }();
+
+        auto job = std::make_shared<ChordsJob>();
+        chordsJob = job;
+        juce::Thread::launch ([job, exporter, rate, songKey]
+        {
+            const auto file = juce::File::createTempFile (".wav");
+            const auto result = exporter->exportMix (file, [job] (double p) { job->progress = 0.8 * p; return ! job->cancel.load(); });
+            if (result.error.isNotEmpty())
+                job->error = result.error;
+            else if (! result.cancelled && ! job->cancel)
+            {
+                juce::AudioFormatManager formats;
+                formats.registerBasicFormats();
+                if (std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file)); reader != nullptr)
+                {
+                    juce::AudioBuffer<float> audio ((int) reader->numChannels, (int) reader->lengthInSamples);
+                    reader->read (&audio, 0, audio.getNumSamples(), 0, true, true);
+                    const auto keepGoing = [job] { return ! job->cancel.load(); };
+                    for (const auto& segment : analysis::detectChords (audio, rate, songKey.isValid() ? &songKey : nullptr, keepGoing))
+                        job->chords.emplace_back ((double) segment.start / rate, segment.chord);
+                }
+                else
+                    job->error = "The song couldn't be listened to.";
+            }
+            file.deleteFile();
+            job->progress = 1.0;
+            job->finished = true;
+        });
+
+        emit ("dawChords", object ({ { "state", "analysing" }, { "progress", 0.0 } }));
+        return error ({});
+    }
+
+    if (action == "cancel")
+    {
+        if (chordsJob != nullptr)
+            chordsJob->cancel = true;
+        return error ({});
+    }
+
+    if (action == "put")
+    {
+        juce::String name;
+        if (! checkName (args["name"].toString(), name))
+            return notAChord (args["name"].toString());
+
+        const auto beat = juce::jmax (0.0, arg (args, "beat", 0.0));
+        auto marks = edit.getChords();
+        if (args.hasProperty ("from"))
+        {
+            const auto from = arg (args, "from", 0.0);
+            marks.erase (std::remove_if (marks.begin(), marks.end(), [from] (const daw::Edit::ChordMark& m) { return std::abs (m.beat - from) < 1.0e-3; }),
+                         marks.end());
+        }
+        marks.push_back ({ beat, name });
+        edit.setChords (std::move (marks));
+        return error ({});
+    }
+
+    if (action == "remove")
+    {
+        edit.removeChordAt (arg (args, "beat", 0.0));
+        return error ({});
+    }
+
+    if (action == "set")
+    {
+        std::vector<daw::Edit::ChordMark> marks;
+        if (const auto* list = args["chords"].getArray())
+            for (const auto& item : *list)
+            {
+                juce::String name;
+                if (! checkName (item["name"].toString(), name))
+                    return notAChord (item["name"].toString());
+                marks.push_back ({ juce::jmax (0.0, (double) item.getProperty ("beat", 0.0)), name });
+            }
+        edit.setChords (std::move (marks));
+        return error ({});
+    }
+
+    return error ("Unknown chords action: " + action);
+}
+
+void DawBridge::finishChords()
+{
+    auto job = std::move (chordsJob);
+    if (job->cancel)
+    {
+        emit ("dawChords", object ({ { "state", "cancelled" } }));
+        return;
+    }
+    if (job->error.isNotEmpty())
+    {
+        emit ("dawChords", object ({ { "state", "error" }, { "error", job->error } }));
+        return;
+    }
+
+    // Each chord from the beat nearest where it was heard; a beat keeps the last one, and
+    // a chord the same as the one before it adds nothing.
+    const auto tempo = edit.getTempoMap();
+    std::vector<daw::Edit::ChordMark> marks;
+    for (const auto& [seconds, chord] : job->chords)
+    {
+        const auto beat = std::max (0.0, std::round (tempo.toBeats (seconds)));
+        const auto name = chord.getName();
+        if (! marks.empty() && std::abs (marks.back().beat - beat) < 1.0e-6)
+            marks.pop_back();
+        if (marks.empty() || marks.back().name != name)
+            marks.push_back ({ beat, name });
+    }
+
+    if (marks.empty())
+    {
+        emit ("dawChords", object ({ { "state", "error" }, { "error", "No chords were heard. Chords come from the tracks that aren't voices or drums." } }));
+        return;
+    }
+
+    edit.getUndoManager().beginNewTransaction ("Detect chords");
+    edit.setChords (marks);
+    edit.getUndoManager().beginNewTransaction();
+    emit ("dawChords", object ({ { "state", "done" }, { "count", (int) marks.size() }, { "chords", describeChords() } }));
+}
+
+// The chord track for the page: [{ beat, time (seconds), name (as typed, tidied), chord
+// (true when it names one; false for N.C. or a name that no longer reads), root (0..11 or -1),
+// mask (its pitch classes as bits, bit 0 = C) }].
+juce::var DawBridge::describeChords() const
+{
+    juce::Array<juce::var> list;
+    const auto tempo = edit.getTempoMap();
+    for (const auto& mark : edit.getChords())
+    {
+        bool ok = false;
+        const auto chord = analysis::Chord::fromName (mark.name, &ok);
+        list.add (object ({ { "beat", mark.beat }, { "time", tempo.toSeconds (mark.beat) },
+                            { "name", ok ? (chord.isValid() ? chord.getName() : juce::String ("N.C.")) : mark.name },
+                            { "chord", chord.isValid() }, { "root", chord.root }, { "mask", chord.getMask() } }));
+    }
+    return list;
 }
 
 //==============================================================================
@@ -7814,6 +8046,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "key")
     {
         complete (handleKey (args));
+        return;
+    }
+
+    if (command == "chords")
+    {
+        complete (handleChords (args));
         return;
     }
 

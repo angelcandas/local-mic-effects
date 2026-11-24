@@ -44,6 +44,12 @@ struct Chord
     // "C", "Am", "G7", "Fmaj7", "Dm7", "Bdim", "Dsus4", "Asus2", "Caug", "E5", "C/E"; "" when invalid.
     juce::String getName() const;
 
+    // A chord typed by hand: what getName() writes, plus the usual spellings ("Bb", "Cmin",
+    // "C-", "CM7", "C^7", "Cmaj", "C+", "Bo", "C°", "Csus", "C#m/G#", lower-case roots).
+    // `ok` is false for anything else (the chord is then invalid); "N.C." and "" give no
+    // chord with `ok` true.
+    static Chord fromName (const juce::String& name, bool* ok = nullptr);
+
     // Semitones above the root of each quality's notes (root first).
     static const std::vector<int>& getIntervals (int quality);
 

@@ -10,6 +10,7 @@
 //   Delete, ↑↓ (Shift: octave), ←→ (one grid step), Ctrl+A, Ctrl+D, Q (quantize)
 //   Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste notes (pasted at the playhead)
 //   the song key's rows are tinted, its root a little more (Song key panel)
+//   under each chord of the chord track, its notes' rows are tinted (gold), the root more
 //
 // Under the roll, a controller lane (picked in the head: mod wheel, expression, pitch bend,
 // pressure, any CC) shows the clip's CTRL points as a stepped line. Drag on empty space to
@@ -364,6 +365,26 @@ export class PianoRoll {
       if (p % 12 === 0) { c.fillStyle = "rgba(255,255,255,0.10)"; c.fillRect(KEYS, y + ROW - 1, width - KEYS, 1); }
     }
 
+    // The chord track: under each chord, its notes' rows tinted (the root more); the
+    // names go on top once the notes are drawn.
+    const chords = this.session.chords ?? [];
+    const xAtSong = (songTime) => this.xOf(songTime - clip.start + clip.offset);
+    const chordSpans = chords.map((chord, i) => ({
+      chord,
+      x0: Math.max(KEYS, xAtSong(chord.time)),
+      x1: Math.min(width, i + 1 < chords.length ? xAtSong(chords[i + 1].time) : width),
+    })).filter(({ x0, x1 }) => x1 > x0);
+    for (const { chord, x0, x1 } of chordSpans) {
+      if (!chord.chord) continue;
+      for (let p = bottom; p <= top; ++p) {
+        if (!((chord.mask >> (p % 12)) & 1)) continue;
+        c.fillStyle = p % 12 === chord.root ? "rgba(224,180,90,0.26)" : "rgba(224,180,90,0.14)";
+        c.fillRect(x0, this.yOf(p), x1 - x0, ROW);
+      }
+      c.fillStyle = "rgba(224,180,90,0.55)";
+      c.fillRect(x0, 0, 1, height);
+    }
+
     // Outside the clip's window: shaded.
     const windowEnd = this.xOf(clip.offset + clip.length);
     if (windowEnd < width) { c.fillStyle = "rgba(0,0,0,0.35)"; c.fillRect(Math.max(KEYS, windowEnd), 0, width, height); }
@@ -402,6 +423,17 @@ export class PianoRoll {
         c.font = "9px system-ui, sans-serif";
         c.fillText(noteName(n.pitch), Math.max(KEYS, x0) + 3, y + ROW - 3);
       }
+    }
+
+    // The chord names, over the notes.
+    c.font = "700 10px ui-monospace, monospace";
+    for (const { chord, x0, x1 } of chordSpans) {
+      if (x1 - x0 < 20) continue;
+      const w = Math.min(x1 - x0 - 4, c.measureText(chord.name).width + 8);
+      c.fillStyle = "rgba(11,13,18,0.85)";
+      c.fillRect(x0 + 2, 2, w, 14);
+      c.fillStyle = chord.chord ? "#f3d79a" : "#8b90a0";
+      c.fillText(chord.name, x0 + 6, 13, w - 8);
     }
 
     // Box selection.
