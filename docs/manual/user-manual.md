@@ -455,6 +455,18 @@ In the arrangement: the **Warp tool** (**J**) works on the selected clips (click
 - **Computer keyboard piano**: press **Ctrl+K** (or the toolbar piano button) to turn the computer keyboard into a MIDI keyboard. **A S D F G H J K** are the white keys and **W E T Y U O P** the black keys. **Z / X** change octave and **C / V** change velocity. While it is on, single-letter shortcuts are off; Space, Shift+letter and Ctrl shortcuts still work. **Esc** or **Ctrl+K** closes it.
 - Double-click a MIDI track's lane for an empty clip, then edit its notes in the **piano roll** on the Clip tab: click to add, drag to move, drag the end to resize, double-click to delete, box-select, **↑ / ↓** to transpose, **Q** to quantize to the grid, **Ctrl+C / X / V** to copy, cut and paste notes at the playhead. When the song has a key (4.17), its notes' rows are tinted and the root a little more.
 
+- **Lanes under the notes**: pick one in the piano roll's head. **Velocity** shows a bar per note; drag across the bars to draw how hard each note plays, or select notes and drag one of their bars to change them all by the same amount. The controller lanes (mod wheel, expression, sustain, pitch bend, pressure, any CC) draw and edit controller points.
+
+### MIDI effects
+
+A MIDI track's **Effects** tab starts with a **MIDI FX** column: the notes go through these, left to right, before the instrument plays them. **+ Add** puts one on; its ⋯ menu moves or removes it, and the dot switches it off.
+
+- **Arpeggiator** plays the notes you hold one after another on the beat: *Rate* (1/4 to 1/32, triplets), *Order* (up, down, up and down, as played, random, all together), *Range* (1 to 4 octaves), *Gate* (how long each note lasts; 100% is legato) and *Latch* (keeps playing after you let go, until you play new notes or stop). While the song plays it locks to the beat; stopped, it starts when you press a key.
+- **Chord** turns each note into a chord: *Triad in key* or *Seventh in key* builds the song key's own chord on the note (4.17), or pick a fixed shape (major, minor, power, sus, 7ths, add 9, octaves). *Level* sets how loud the added notes are.
+- **Scale lock** keeps every note in a scale: the *Song key*, or one of its own (major, minor, harmonic minor, dorian, mixolydian, pentatonics, blues) on any root. A wrong note moves to the nearest right one, or is left out.
+
+They work on the clips, on what you play live and in exports and freezes. Order matters: a scale lock before an arpeggiator corrects the notes it arpeggiates.
+
 ### The MicFX instruments
 
 Each instrument has a window of its own (presets, knobs, a scope, and a clickable keyboard), opened from its button on the track.
