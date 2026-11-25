@@ -299,6 +299,7 @@ private:
         std::map<int, fx::Module*> modulesByInsertId;
         std::map<int, juce::ValueTree> insertTrees; // the INSERT each module was made for
         std::vector<fx::modules::Pitch*> pitches; // its autotune / harmonizer inserts
+        std::vector<fx::modules::VocoderModule*> vocoders; // its vocoder inserts
         int latencyAtBuild = 0; // the chain's delay when the current graph was built (message thread)
 
         std::atomic<float> targetLeft { 1.0f }, targetRight { 1.0f };
@@ -459,6 +460,7 @@ private:
         std::shared_ptr<analysis::ChordFollower> chords;
         juce::AudioBuffer<float> listen;
         int keyMask = 0;
+        int keyRoot = -1; // the song key's root (0 = C), -1 when it has none
         // The chord track (Edit::getChords), when there is one: where each chord starts
         // (samples on the timeline) and the chord (Chord::pack). It drives the harmonies
         // instead of listening; held notes still win.

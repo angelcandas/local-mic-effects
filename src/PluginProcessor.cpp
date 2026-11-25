@@ -28,7 +28,8 @@ PluginProcessor::PluginProcessor (juce::AudioProcessorValueTreeState::ParameterL
       params (layout),
       state (*this, nullptr, "MicFX", std::move (layout)),
       pitchModule (*chain.find<fx::modules::Pitch>()),
-      autoLevelModule (*chain.find<fx::modules::AutoLevel>())
+      autoLevelModule (*chain.find<fx::modules::AutoLevel>()),
+      vocoderModule (chain.find<fx::modules::VocoderModule>())
 {
     using Kind = Binding::Kind;
 
@@ -516,7 +517,10 @@ void PluginProcessor::followChords (const juce::AudioBuffer<float>& buffer, int 
             heldKeys.reset();
     }
 
-    if (! pitchModule.isFollowingChords())
+    // The vocoder plays the keys held, else the same chords the harmonizer would follow.
+    auto* vocoder = vocoderModule;
+    const auto vocoding = vocoder != nullptr && vocoder->isOn();
+    if (! pitchModule.isFollowingChords() && ! vocoding)
         return;
 
     using Pitch = fx::modules::Pitch;
@@ -542,7 +546,10 @@ void PluginProcessor::followChords (const juce::AudioBuffer<float>& buffer, int 
         chordFollower.setChord (chord);
     }
 
-    pitchModule.setChord (chordFollower.getChord());
+    const auto chord = chordFollower.getChord();
+    pitchModule.setChord (chord);
+    if (vocoding)
+        vocoder->setMusic (heldKeys, chord, key);
 }
 
 analysis::Chord PluginProcessor::getHarmonyChord() const noexcept

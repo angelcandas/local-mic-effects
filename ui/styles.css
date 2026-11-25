@@ -1093,6 +1093,8 @@ select.dropdown {
 .fx-graph .fx-spectrum-in { fill: none; stroke: rgba(255, 255, 255, 0.16); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .fx-graph .fx-dot { fill: none; stroke: #fff; stroke-width: 7; stroke-linecap: round; vector-effect: non-scaling-stroke; pointer-events: none; filter: drop-shadow(0 0 4px var(--cat)); }
 .fx-graph .fx-reduction { fill: var(--warn); opacity: 0.85; }
+.fx-graph.is-vocoder .fx-fill { fill: color-mix(in srgb, var(--cat) 60%, transparent); }
+.fx-graph.is-vocoder .fx-threshold { stroke-dasharray: none; opacity: 0.7; }
 .fx-graph.is-feedback .fx-reduction { opacity: 0.35; }
 .fx-graph.is-feedback .fx-curve { stroke: var(--warn); stroke-width: 1.5; }
 .fx-graph .fx-notch { stroke: var(--warn); stroke-width: 2; vector-effect: non-scaling-stroke; }
