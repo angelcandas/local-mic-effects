@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 225,
+ "latest": 228,
  "days": [
   {
    "date": "2026-11-25",
    "entries": [
+    {
+     "title": "Voice repair",
+     "text": "Three new DAW effects for recorded voices: Breath Tamer turns down the breaths between phrases, Mouth De-click rebuilds lip smacks and tongue clicks, and Room Echo Reduction takes out the ring of the room it was recorded in. The Podcast and Streamer chains now use them.",
+     "prs": [
+      228
+     ]
+    },
     {
      "title": "Vocoder",
      "text": "Your voice plays a built-in synth: hold keys on a MIDI keyboard, or it follows the song's chords (else a drone on the key). Saw, pulse or ensemble sound, 16 to 32 bands, formant and a clear-words control. In Live and as a DAW insert.",

@@ -7,6 +7,7 @@ haven't seen yet. To add an entry for your change, see "Adding entries" in
 
 ## 2026-11-25
 
+- **Voice repair.** Three new DAW effects for recorded voices: Breath Tamer turns down the breaths between phrases, Mouth De-click rebuilds lip smacks and tongue clicks, and Room Echo Reduction takes out the ring of the room it was recorded in. The Podcast and Streamer chains now use them. (#228)
 - **Vocoder.** Your voice plays a built-in synth: hold keys on a MIDI keyboard, or it follows the song's chords (else a drone on the key). Saw, pulse or ensemble sound, 16 to 32 bands, formant and a clear-words control. In Live and as a DAW insert. (#224)
 - **MIDI effects and velocity lane.** Put an arpeggiator, a chord maker or a scale lock before a MIDI track's instrument: arpeggios on the beat, the song key's chords from single notes, wrong notes kept in key. The piano roll gets a Velocity lane to draw how hard each note plays. (#225)
 - **Feedback Guard.** A Live effect that catches the mic ringing through the speakers and notches that note before it howls, while your singing goes through untouched. Ring out before the show to fix the notches for the room. (#223)
