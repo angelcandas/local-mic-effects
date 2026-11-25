@@ -5,6 +5,7 @@
 #include "daw/BackingVocals.h"
 
 #include "daw/Quantize.h"
+#include "daw/VoiceAlign.h"
 #include "daw/Hitpoints.h"
 #include "daw/ClipTools.h"
 #include "daw/Patterns.h"
@@ -405,7 +406,7 @@ namespace
             { "tempo", "Tempo" }, { "tempoMap", "Tempo change" }, { "beatsPerBar", "Time signature" }, { "loop", "Loop range" },
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
             { "defineTempo", "Tempo definition" }, { "tempoFromClip", "Project tempo from clip" }, { "stretchClip", "Stretch clip" },
-            { "flattenClip", "Make warp permanent" }, { "quantize", "Quantize" }, { "setHitpoints", "Hitpoints" }, { "hitpointAction", "Hitpoints" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
+            { "flattenClip", "Make warp permanent" }, { "quantize", "Quantize" }, { "alignVoice", "Align to lead" }, { "setHitpoints", "Hitpoints" }, { "hitpointAction", "Hitpoints" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
             { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "chords", "Chord track" }, { "fitChain", "Fit to this track" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addStarterPattern", "Add starter pattern" },
@@ -6607,6 +6608,58 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
                 edit.setClipStretch (clip, daw::warp::Algorithm::slice);
 
         complete (object ({ { "ok", true }, { "onsets", result.onsets }, { "moved", result.moved } }));
+        return;
+    }
+
+    // Align to lead: line the selected clips (args.clips, or every clip of args.track) up in
+    // time with the track args.guide, syllable by syllable, and with args.pitch tune their
+    // notes to it. args.strength 0..1, args.maxShift seconds, args.maxStretch the ratio a
+    // sung stretch may play faster or slower (see daw::voicealign). One undo step.
+    // Answers { ok, aligned, unrelated, notes, match, meanShift, largestShift, message }.
+    if (command == "alignVoice")
+    {
+        const auto clips = clipsFrom (args);
+        if (clips.isEmpty())
+        {
+            complete (error ("Select the clips to line up, or a track."));
+            return;
+        }
+
+        daw::voicealign::Options options;
+        options.timing.strength = juce::jlimit (0.0, 1.0, arg (args, "strength", 1.0));
+        options.timing.maxShift = juce::jlimit (0.02, 1.0, arg (args, "maxShift", 0.25));
+        options.timing.maxStretch = juce::jlimit (1.05, 4.0, arg (args, "maxStretch", 1.5));
+        options.timingOn = arg (args, "timing", true);
+        options.matchPitch = arg (args, "pitch", false);
+        if (! options.timingOn && ! options.matchPitch)
+        {
+            complete (error ("Choose timing, pitch or both to line up."));
+            return;
+        }
+
+        const auto guide = arg (args, "guide", -1);
+        const auto result = daw::voicealign::alignToGuide (edit, engine.getAudioPool(), clips, guide, options);
+        if (result.error.isNotEmpty())
+        {
+            complete (error (result.error));
+            return;
+        }
+
+        const auto ms = [] (double seconds) { return juce::String (juce::roundToInt (seconds * 1000.0)); };
+        const auto clipsText = [] (int n) { return juce::String (n) + (n == 1 ? " clip" : " clips"); };
+        auto message = "Lined up " + clipsText (result.aligned) + " with " + edit.getTrack (guide)[ids::name].toString();
+        if (options.timingOn)
+            message << ": moved " << ms (result.meanShift * options.timing.strength) << " ms on average, "
+                    << ms (result.largestShift * options.timing.strength) << " ms at most";
+        if (options.matchPitch)
+            message << (options.timingOn ? "; " : ": ") << juce::String (result.notes) << (result.notes == 1 ? " note" : " notes") << " tuned to the lead";
+        message << ".";
+        if (result.unrelated > 0)
+            message << " " << clipsText (result.unrelated) << (result.unrelated == 1 ? " doesn't" : " don't") << " sing the same part and stayed as they were.";
+
+        complete (object ({ { "ok", true }, { "aligned", result.aligned }, { "unrelated", result.unrelated }, { "notes", result.notes },
+                            { "match", result.match }, { "meanShift", result.meanShift }, { "largestShift", result.largestShift },
+                            { "message", message } }));
         return;
     }
 
