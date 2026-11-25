@@ -234,6 +234,16 @@ public:
     LaunchState getLaunchState (int trackId) const;
     bool isAnyOnLauncher() const;
 
+    // Recording a performance: while it's on and playing, what each track's launcher plays is
+    // noted (from the start: the slots already playing), and finishPerformance() writes it onto
+    // the tracks' timelines, a clip per loop pass (Edit::writeSlotToTimeline), replacing what was
+    // there. A jump of the playhead (the loop, a seek) ends what was noted before it there.
+    // Returns how many clips it made. Message thread.
+    void startPerformance();
+    int finishPerformance();
+    bool isRecordingPerformance() const noexcept { return performanceOn.load(); }
+    void collectPerformance(); // moves what the audio thread noted along (the timer calls it)
+
     // Pattern recording (the looper): startRecording() in pattern mode records the MIDI
     // input into the pattern's parts for the armed MIDI tracks while it loops, pass after
     // pass. Each note goes into the pattern as soon as it ends (so it plays from the next
@@ -464,6 +474,7 @@ private:
         float fadeGain = 0.0f;
         float timelineGain = 1.0f;     // the timeline's clips, fading out or back in
         bool wasPlaying = false;
+        int notedSlot = -1;            // performance recording: the slot last noted
     };
 
     // A launcher slot as it plays: its clip from 0 (audio) or its events (MIDI; times in
@@ -546,6 +557,22 @@ private:
     static void advanceLaunch (Track&, int numSamples) noexcept;
     void publishLaunch (Track&) noexcept;
 
+    // Performance recording: the audio thread notes each change of what a track's launcher
+    // plays (slot -1: nothing) at a timeline sample, with how far into the slot's content.
+    struct PerformanceEvent
+    {
+        int track = 0, slot = -1;
+        juce::int64 time = 0, phase = 0;
+    };
+    static constexpr int performanceCapacity = 2048;
+    juce::AbstractFifo performanceFifo { performanceCapacity };
+    std::array<PerformanceEvent, performanceCapacity> performanceData {};
+    std::vector<PerformanceEvent> performanceEvents; // message thread
+    std::atomic<bool> performanceOn { false }, performanceFresh { false };
+    juce::int64 performanceNext = -1; // audio thread: where playback carries on (else it jumped)
+    juce::int64 performanceStart = 0;
+    void notePerformance (Track&, juce::int64 blockStart, bool jumped, bool fresh) noexcept;
+
     void followChords (Graph&, bool isPlaying, juce::int64 blockStart, int numSamples) noexcept;
 
     // Message thread, building a graph: a channel's lanes (volume, pan, effects, macros).
@@ -575,7 +602,7 @@ private:
     void valueTreeRedirected (juce::ValueTree&) override                          { previews.clear(); requestRebuild(); }
 
     void handleAsyncUpdate() override { rebuild(); }
-    void timerCallback() override     { collectGarbage(); collectPreviews(); drainRecordedMidi(); collectPatternNotes(); syncCapture(); }
+    void timerCallback() override     { collectGarbage(); collectPreviews(); drainRecordedMidi(); collectPatternNotes(); syncCapture(); collectPerformance(); }
 
     void rebuild();
     void requestRebuild(); // realtime: on the next message loop pass; offline: before the next block

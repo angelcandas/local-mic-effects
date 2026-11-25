@@ -386,7 +386,9 @@ juce::Array<int> Edit::writeSlotToTimeline (int slotId, double startSeconds, dou
     const auto pass = juce::jmax (minClipSeconds, tempo.toSeconds (tempo.toBeats (startSeconds) + getSlotBeats (slot)) - startSeconds);
     const auto clipLength = (double) source[ids::length];
     const auto loop = getSlotLoop (slot);
-    phaseSeconds = juce::jlimit (0.0, pass, phaseSeconds);
+    phaseSeconds = loop ? std::fmod (juce::jmax (0.0, phaseSeconds), pass) : juce::jmax (0.0, phaseSeconds);
+    if (phaseSeconds >= pass - minClipSeconds)
+        return made; // a one-shot that had played
 
     // What the track had there makes way (audio crossfades with what stays; MIDI is cut).
     if (isMidiTrack (track))
