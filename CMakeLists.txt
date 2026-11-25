@@ -195,6 +195,7 @@ set(MICFX_DSP_SOURCES
     src/daw/AutomationRecorder.cpp
     src/daw/AutomationRecorder.h
     src/daw/Patterns.cpp
+    src/daw/Launcher.cpp
     src/daw/Loops.cpp
     src/daw/Loops.h
     src/daw/Patterns.h

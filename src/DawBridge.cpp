@@ -413,6 +413,10 @@ namespace
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addStarterPattern", "Add starter pattern" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
+            { "addSlotFromClip", "Clip to launcher" }, { "addMidiSlot", "New launcher clip" }, { "moveSlot", "Move launcher clip" },
+            { "removeSlot", "Delete launcher clip" }, { "setSlot", "Launcher clip change" }, { "setScenes", "Scenes" },
+            { "insertScene", "Insert scene" }, { "removeScene", "Delete scene" }, { "duplicateScene", "Duplicate scene" },
+            { "setSceneName", "Rename scene" }, { "setLaunchQuantize", "Launch quantize" },
             { "setPart", "Pattern row" }, { "editPattern", "Edit pattern" }, { "setSteps", "Steps" },
             { "addPatternClip", "Place pattern" }, { "setPatternClip", "Pattern block change" },
             { "removePatternClip", "Delete pattern block" }, { "makePatternUnique", "Make pattern unique" },
@@ -1005,6 +1009,17 @@ juce::var DawBridge::describeSession()
                            { "take", (int) clip.getProperty (ids::take, -1) } });
     };
 
+    const auto describeClip = [&] (const juce::ValueTree& clip)
+    {
+        if (daw::Edit::isMidiClip (clip))
+            return object ({ { "id", (int) clip[ids::id] }, { "name", clip[ids::name].toString() }, { "midi", true },
+                             { "start", number (clip, ids::start) }, { "offset", number (clip, ids::offset) },
+                             { "length", number (clip, ids::length) }, { "gain", 0.0 }, { "fadeIn", 0.0 }, { "fadeOut", 0.0 },
+                             { "mute", (bool) clip.getProperty (ids::mute, false) }, { "file", juce::String() },
+                             { "fileLength", -1.0 }, { "missing", false }, { "notes", describeNotes (clip) }, { "controllers", describeControllers (clip) } });
+        return describeAudioClip (clip);
+    };
+
     for (const auto& track : edit.getTracks())
     {
         juce::Array<juce::var> clips;
@@ -1014,18 +1029,16 @@ juce::var DawBridge::describeSession()
             if (! clip.hasType (ids::CLIP))
                 continue;
 
-            if (daw::Edit::isMidiClip (clip))
-            {
-                clips.add (object ({ { "id", (int) clip[ids::id] }, { "name", clip[ids::name].toString() }, { "midi", true },
-                                     { "start", number (clip, ids::start) }, { "offset", number (clip, ids::offset) },
-                                     { "length", number (clip, ids::length) }, { "gain", 0.0 }, { "fadeIn", 0.0 }, { "fadeOut", 0.0 },
-                                     { "mute", (bool) clip.getProperty (ids::mute, false) }, { "file", juce::String() },
-                                     { "fileLength", -1.0 }, { "missing", false }, { "notes", describeNotes (clip) }, { "controllers", describeControllers (clip) } }));
-                continue;
-            }
-
-            clips.add (describeAudioClip (clip));
+            clips.add (describeClip (clip));
         }
+
+        // The clip launcher's slots: { id, row, beats, loop, clip } (the clip as above).
+        juce::Array<juce::var> slots;
+        for (const auto& slot : edit.getSlots ((int) track[ids::id]))
+            if (const auto clip = daw::Edit::getSlotClip (slot); clip.isValid())
+                slots.add (object ({ { "id", (int) slot[ids::id] }, { "row", (int) number (slot, ids::row) },
+                                     { "beats", daw::Edit::getSlotBeats (slot) }, { "loop", daw::Edit::getSlotLoop (slot) },
+                                     { "clip", describeClip (clip) } }));
 
         tracks.add (object ({ { "id", (int) track[ids::id] }, { "name", track[ids::name].toString() }, { "colour", track[ids::colour].toString() },
                               { "volume", number (track, ids::volume) }, { "pan", number (track, ids::pan) },
@@ -1038,7 +1051,7 @@ juce::var DawBridge::describeSession()
                               { "link", daw::Edit::getLink (track) },
                               { "frozen", daw::Edit::isFrozen (track) },
                               { "polarity", daw::Edit::getPolarity (track) }, { "nudge", daw::Edit::getNudge (track) },
-                              { "inserts", describeInserts (track) }, { "macros", describeMacros (track) }, { "clips", clips },
+                              { "inserts", describeInserts (track) }, { "macros", describeMacros (track) }, { "clips", clips }, { "slots", slots },
                               { "output", daw::Edit::getTrackOutput (track) }, { "sends", describeSends (track) },
                               { "group", daw::Edit::getTrackGroup (track) },
                               { "input", [&track]
@@ -1174,6 +1187,15 @@ juce::var DawBridge::describeSession()
         { "patternRecording", engine.isPatternRecording() },
         { "patternRecording", engine.isPatternRecording() },
         { "patternSnap", engine.getPatternSnap() },
+        { "sceneCount", edit.getSceneCount() },
+        { "scenes", [this]
+          {
+              juce::Array<juce::var> names;
+              for (int row = 0; row < edit.getSceneCount(); ++row)
+                  names.add (edit.getSceneName (row));
+              return names;
+          }() },
+        { "launchQuantize", edit.getLaunchQuantize() },
     });
 }
 
@@ -1318,6 +1340,21 @@ juce::var DawBridge::describeStatus()
         { "inserts", juce::var (inserts) },
         { "loading", engine.getAudioPool().isLoading() },
         { "patternMode", engine.getPatternMode() },
+        // The clip launcher, per track id: { playing (slot id or -1), queued (slot id, -2 stop,
+        // -3 back to song, -1 none), on (plays the launcher, not its timeline), progress 0..1 }.
+        { "launch", [this]
+          {
+              auto* launch = new juce::DynamicObject();
+              for (const auto& track : edit.getTracks())
+              {
+                  const auto state = engine.getLaunchState ((int) track[ids::id]);
+                  launch->setProperty (juce::String ((int) track[ids::id]),
+                                       object ({ { "playing", state.playing }, { "queued", state.queued },
+                                                 { "on", state.onLauncher }, { "progress", (double) state.progress } }));
+              }
+              return juce::var (launch);
+          }() },
+        { "onLauncher", engine.isAnyOnLauncher() },
         { "midiNotes", [this]
           {
               juce::Array<juce::var> held;
@@ -1604,9 +1641,10 @@ void DawBridge::tick()
             sessionChanged = true;
         }
 
-        // Stop at the end of the song, unless recording or looping (pattern mode always loops).
+        // Stop at the end of the song, unless recording or looping (pattern mode always loops)
+        // or the clip launcher plays.
         if (engine.isPlaying() && ! engine.isRecording() && engine.getPatternMode() < 0 && engine.getLength() > 0 && engine.getPosition() >= engine.getLength()
-            && ! (bool) edit.getState().getProperty (ids::loopOn, false))
+            && ! (bool) edit.getState().getProperty (ids::loopOn, false) && ! engine.isAnyOnLauncher())
             engine.stop();
 
         emit ("dawStatus", describeStatus());
@@ -8988,6 +9026,103 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
                 edit.setPartDrum (made, (int) part[ids::track], true); // a drum kit: a row per sound
         }
         complete (made >= 0 ? juce::var (made) : error ("Pick a MIDI clip first."));
+        return true;
+    }
+
+    // The clip launcher. Playing: launchSlot { track, slot }, stopSlot { track }, launchScene
+    // { row }, stopAllSlots, backToSong (not edits). Editing: addSlotFromClip { clip, track,
+    // row } -> slot id, addMidiSlot { track, row, beats? } -> slot id, moveSlot { slot, track,
+    // row, copy? } -> slot id, removeSlot { slot }, setSlot { slot, beats?, loop?, name? },
+    // setScenes { count }, insertScene / removeScene / duplicateScene { row },
+    // setSceneName { row, name }, setLaunchQuantize { value }.
+    if (command == "launchSlot")
+    {
+        const auto trackId = arg (args, "track", -1), slotId = arg (args, "slot", -1);
+        const auto slot = edit.getSlot (slotId);
+        if (! slot.isValid() || (int) slot.getParent()[ids::id] != trackId) { complete (error ("There's no such clip in the launcher.")); return true; }
+        if (engine.isRecording()) { complete (error ("Stop recording first.")); return true; }
+        engine.launchSlot (trackId, slotId);
+        ok();
+        return true;
+    }
+
+    if (command == "stopSlot")
+    {
+        const auto trackId = arg (args, "track", -1);
+        if (! edit.getTrack (trackId).isValid()) { complete (error ("There's no such track.")); return true; }
+        engine.stopSlot (trackId);
+        ok();
+        return true;
+    }
+
+    if (command == "launchScene")
+    {
+        const auto row = arg (args, "row", -1);
+        if (row < 0 || row >= edit.getSceneCount()) { complete (error ("There's no such scene.")); return true; }
+        if (engine.isRecording()) { complete (error ("Stop recording first.")); return true; }
+        engine.launchScene (row);
+        ok();
+        return true;
+    }
+
+    if (command == "stopAllSlots") { engine.stopAllSlots(); ok(); return true; }
+    if (command == "backToSong")   { engine.backToSong(); ok(); return true; }
+
+    if (command == "addSlotFromClip")
+    {
+        const auto clip = edit.getClip (arg (args, "clip", -1));
+        const auto track = edit.getTrack (arg (args, "track", -1));
+        if (! clip.isValid() || ! track.isValid()) { complete (error ("Pick a clip and a track.")); return true; }
+        if (daw::Edit::isMidiClip (clip) != daw::Edit::isMidiTrack (track))
+        {
+            complete (error (daw::Edit::isMidiClip (clip) ? "MIDI clips go on MIDI tracks." : "Audio clips go on audio tracks."));
+            return true;
+        }
+        const auto made = edit.addSlotFromClip ((int) clip[ids::id], (int) track[ids::id], arg (args, "row", 0));
+        complete (made >= 0 ? juce::var (made) : error ("That clip can't go in the launcher."));
+        return true;
+    }
+
+    if (command == "addMidiSlot")
+    {
+        const auto track = edit.getTrack (arg (args, "track", -1));
+        if (! track.isValid() || ! daw::Edit::isMidiTrack (track)) { complete (error ("New launcher clips go on MIDI tracks.")); return true; }
+        const auto made = edit.addMidiSlot ((int) track[ids::id], arg (args, "row", 0), arg (args, "beats", 0.0));
+        complete (made >= 0 ? juce::var (made) : error ("There's no such scene."));
+        return true;
+    }
+
+    if (command == "moveSlot")
+    {
+        const auto made = edit.moveSlot (arg (args, "slot", -1), arg (args, "track", -1), arg (args, "row", 0), arg (args, "copy", false));
+        complete (made >= 0 ? juce::var (made) : error ("It can't go there (audio clips go on audio tracks, MIDI on MIDI tracks)."));
+        return true;
+    }
+
+    if (command == "removeSlot" || command == "setSlot")
+    {
+        const auto slotId = arg (args, "slot", -1);
+        if (! edit.getSlot (slotId).isValid()) { complete (error ("There's no such clip in the launcher.")); return true; }
+        if (command == "removeSlot")
+            edit.removeSlot (slotId);
+        if (args.hasProperty ("beats")) edit.setSlotBeats (slotId, arg (args, "beats", 4.0));
+        if (args.hasProperty ("loop"))  edit.setSlotLoop (slotId, arg (args, "loop", true));
+        if (args.hasProperty ("name"))  edit.setSlotName (slotId, args["name"].toString());
+        ok();
+        return true;
+    }
+
+    if (command == "setScenes")      { edit.setSceneCount (arg (args, "count", daw::Edit::defaultScenes)); ok(); return true; }
+    if (command == "insertScene")    { edit.insertScene (arg (args, "row", edit.getSceneCount())); ok(); return true; }
+    if (command == "removeScene")    { edit.removeScene (arg (args, "row", -1)); ok(); return true; }
+    if (command == "duplicateScene") { edit.duplicateScene (arg (args, "row", -1)); ok(); return true; }
+    if (command == "setSceneName")   { edit.setSceneName (arg (args, "row", -1), args["name"].toString()); ok(); return true; }
+
+    if (command == "setLaunchQuantize")
+    {
+        if (! daw::Edit::getLaunchQuantizeKeys().contains (args["value"].toString())) { complete (error ("Pick none, beat, bar, 2bars or 4bars.")); return true; }
+        edit.setLaunchQuantize (args["value"].toString());
+        ok();
         return true;
     }
 

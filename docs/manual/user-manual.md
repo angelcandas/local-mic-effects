@@ -72,7 +72,7 @@ Live mode runs the effects below in one chain. Each can be switched on or off, a
 | --- | --- |
 | Clean-up | High-pass, Denoise, Noise Gate, EQ, Parametric EQ, Smooth, Compressor, Opto Compressor, Auto Level, De-esser, Feedback Guard |
 | Pitch | Autotune, Pitch Shift (with formant), Harmonizer |
-| Character | Exciter, Saturation, Amp, Radio, Bitcrusher, Robot, Filter, Auto-wah |
+| Character | Exciter, Saturation, Amp, Radio, Bitcrusher, Robot, Vocoder, Filter, Auto-wah |
 | Modulation | Tremolo, Vibrato, Chorus, Flanger, Phaser |
 | Space | Doubler, Echo (ping-pong), Cabinet, Reverb, Plate Reverb, IR Reverb, Stereo Width |
 
@@ -166,6 +166,18 @@ Stops the howl you get when the mic hears its own speakers. It listens to what g
 **Ring out** is for the sound check, before the show: with no one singing, turn the input gain or the speakers up slowly until the room starts to ring, then back off. Each ring it catches becomes a **fixed** notch (drawn in the effect's colour; the caught ones are yellow) that stays, with the session, until you press **Clear all**. **Clear caught** lets go of the others only.
 
 Its settings belong to the room, like the input gain: presets, scenes and setlist songs leave them alone, and saved chains leave it out. It is Live only; the DAW doesn't offer it.
+
+### Vocoder
+
+![The Vocoder card](images/vocoder.png)
+
+Your voice plays a built-in synth: the synth sings your vowels and words, on the notes you choose. **Notes** says where they come from:
+
+- **Keys, then chords** (default): the keys you hold on a MIDI keyboard (up to 8). With none held, the song's chord (the backing track's in Live, the chord track or the other tracks in the DAW), else a drone on the key.
+- **Chords**: always the song's chord, voiced from C3 up (the keyboard is ignored).
+- **Drone on the key**: root, fifth and octave of the autotune key in Live, the song key in the DAW.
+
+**Synth** is a saw, a hollow pulse or an ensemble of three detuned saws; **Octave** moves the notes up or down. **Bands** (16, 24 or 32) is how finely the voice is split: more bands, clearer words. **Formant** makes the synth's "mouth" smaller (up) or bigger (down). **Release** is how quickly the bands follow when you stop. **Unvoiced** lets the voice's own s, t and sh through so words stay clear. **Mix** blends your dry voice back in. The picture shows your voice's level in each band, the ticks where the synth's bands sit after Formant, and in the corner what the synth is playing. It works in Live and as a DAW insert.
 
 ### Auto Level
 

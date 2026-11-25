@@ -19288,6 +19288,49 @@ static void testPatterns()
         check (ok (run ("removePattern", args ({ { "id", patternId } }))) && lastSession()["patternClips"].size() == 0, "removePattern removes its blocks");
         run ("undo");
         check (lastSession()["patternClips"].size() == 1, "undo brings them back");
+
+        // The clip launcher's commands (market item 14).
+        {
+            const auto slotId = run ("addMidiSlot", args ({ { "track", kit }, { "row", 2 }, { "beats", 8.0 } }));
+            check (slotId.isInt() && edit.getUndoManager().getUndoDescription() == "New launcher clip", "addMidiSlot completes with the slot's id");
+            check (! run ("addMidiSlot", args ({ { "track", 999 } })).isInt(), "and fails on a missing track");
+            check (ok (run ("setSlot", args ({ { "slot", slotId }, { "name", "Groove" }, { "loop", false } })))
+                       && ok (run ("setSceneName", args ({ { "row", 2 }, { "name", "Chorus" } })))
+                       && ok (run ("setLaunchQuantize", args ({ { "value", "beat" } })))
+                       && ! ok (run ("setLaunchQuantize", args ({ { "value", "3bars" } }))),
+                   "setSlot, setSceneName, setLaunchQuantize");
+            const auto session = lastSession();
+            juce::var kitTrack;
+            for (const auto& t : *session["tracks"].getArray())
+                if ((int) t["id"] == kit)
+                    kitTrack = t;
+            const auto slot = kitTrack["slots"][0];
+            check (kitTrack["slots"].size() == 1 && (int) slot["id"] == (int) slotId && (int) slot["row"] == 2 && near ((double) slot["beats"], 8.0)
+                       && ! (bool) slot["loop"] && slot["clip"]["name"].toString() == "Groove" && (bool) slot["clip"]["midi"]
+                       && session["scenes"][2].toString() == "Chorus" && (int) session["sceneCount"] == 8
+                       && session["launchQuantize"].toString() == "beat",
+                   "the session describes slots and scenes, typed");
+            processor.getDawEngine().rebuildNow();
+            check (! ok (run ("launchSlot", args ({ { "track", kit }, { "slot", 999 } }))), "launching a missing slot fails");
+            check (ok (run ("launchSlot", args ({ { "track", kit }, { "slot", slotId } }))) && processor.getDawEngine().isPlaying(),
+                   "launchSlot starts the transport");
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            processor.getDawEngine().process (buffer, 2, blockSize);
+            events.clear();
+            bridge.tick();
+            juce::var status;
+            for (const auto& [name, payload] : events)
+                if (name == "dawStatus")
+                    status = juce::JSON::parse (juce::JSON::toString (payload, true));
+            const auto kitLaunch = status["launch"].getProperty (juce::Identifier (juce::String (kit)), {});
+            check ((int) kitLaunch["playing"] == (int) slotId && (bool) kitLaunch["on"]
+                       && (bool) status["onLauncher"],
+                   "the status reports what each track's launcher plays");
+            check (ok (run ("backToSong")) && ok (run ("stopAllSlots")), "backToSong, stopAllSlots");
+            processor.getDawEngine().stop();
+            check (ok (run ("removeScene", args ({ { "row", 2 } }))) && ! edit.getSlot ((int) slotId).isValid(),
+                   "removeScene takes its slots");
+        }
     }
 
     folder.deleteRecursively();
@@ -19328,6 +19371,207 @@ static float soundCheckValue (const SoundCheck::Plan& plan, const juce::String& 
         if (key == id)
             return value;
     return fallback;
+}
+
+//==============================================================================
+// The clip launcher (market item 14): slots and scenes in the Edit, quantized launches in
+// the engine, and the page's commands.
+static void testLauncher()
+{
+    std::cout << "\nClip launcher\n";
+
+    const auto near = [] (double a, double b, double tolerance = 1.0e-9) { return std::abs (a - b) < tolerance; };
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-launcher", {});
+    folder.createDirectory();
+
+    const auto writeTone = [&] (const juce::String& name, double hz, double seconds)
+    {
+        juce::AudioBuffer<float> tone (2, (int) (seconds * sampleRate));
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                tone.setSample (ch, i, 0.25f * (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / sampleRate));
+        const auto file = folder.getChildFile (name);
+        writeWav (file, tone, sampleRate);
+        return file;
+    };
+
+    // How much of a frequency is in a stretch of the output (Goertzel, as a level).
+    const auto level = [] (const std::vector<float>& x, double fromSeconds, double toSeconds, double hz)
+    {
+        const auto from = (size_t) (fromSeconds * sampleRate), to = juce::jmin (x.size(), (size_t) (toSeconds * sampleRate));
+        const auto k = 2.0 * std::cos (juce::MathConstants<double>::twoPi * hz / sampleRate);
+        double s1 = 0.0, s2 = 0.0;
+        for (auto i = from; i < to; ++i)
+        {
+            const auto s0 = x[i] + k * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        const auto power = s1 * s1 + s2 * s2 - k * s1 * s2;
+        return std::sqrt (juce::jmax (0.0, power)) / juce::jmax (1.0, (double) (to - from));
+    };
+
+    const auto songFile = writeTone ("song.wav", 300.0, 12.0);
+    const auto loopFile = writeTone ("loop.wav", 1000.0, 2.0);
+
+    daw::Edit edit; // 120 BPM, 4/4: a bar is 2 s
+    const auto audio = (int) edit.addTrack ("Audio")[daw::ids::id];
+    const auto other = (int) edit.addTrack ("Other")[daw::ids::id];
+    const auto keys = (int) edit.addMidiTrack ("Keys", *daw::instruments::findBuiltin ("builtin:keys"))[daw::ids::id];
+    edit.addClip (audio, songFile, 0.0, 12.0);
+    const auto loopClip = (int) edit.addClip (audio, loopFile, 20.0, 2.0)[daw::ids::id];
+
+    // The model.
+    check (edit.getSceneCount() == daw::Edit::defaultScenes && edit.getLaunchQuantize() == "bar" && near (edit.getLaunchQuantizeBeats(), 4.0),
+           "a project starts with 8 scenes and bar quantize");
+    edit.getUndoManager().beginNewTransaction();
+    const auto slot = edit.addSlotFromClip (loopClip, audio, 0);
+    const auto slotTree = edit.getSlot (slot);
+    check (slot > 0 && near (daw::Edit::getSlotBeats (slotTree), 4.0) && daw::Edit::getSlotLoop (slotTree)
+               && near ((double) daw::Edit::getSlotClip (slotTree)[daw::ids::start], 0.0)
+               && (int) daw::Edit::getSlotClip (slotTree)[daw::ids::id] != loopClip,
+           "a clip goes into a slot as a copy from 0, its loop its length in beats");
+    check (edit.addSlotFromClip (loopClip, keys, 1) < 0, "an audio clip can't go on a MIDI track's slot");
+    check (edit.getClip ((int) daw::Edit::getSlotClip (slotTree)[daw::ids::id]).isValid()
+               && daw::Edit::getSlotOf (daw::Edit::getSlotClip (slotTree)) == slotTree,
+           "a slot's clip is found by id, and knows its slot");
+    edit.getUndoManager().undo();
+    check (! edit.getSlot (slot).isValid(), "and it undoes");
+    edit.getUndoManager().redo();
+
+    edit.getUndoManager().beginNewTransaction();
+    const auto midiSlot = edit.addMidiSlot (keys, 0);
+    const auto midiClip = (int) daw::Edit::getSlotClip (edit.getSlot (midiSlot))[daw::ids::id];
+    edit.addNote (midiClip, 60, 0.0, 0.5, 100);
+    check (midiSlot > 0 && near (daw::Edit::getSlotBeats (edit.getSlot (midiSlot)), 4.0) && edit.getClip (midiClip).getNumChildren() == 1,
+           "an empty MIDI slot is a bar long, and its notes are edited as any clip's");
+
+    // Scenes: insert, rename, duplicate, remove.
+    edit.getUndoManager().beginNewTransaction();
+    edit.setSceneName (0, "Verse");
+    edit.insertScene (0);
+    check ((int) edit.getSlot (slot)[daw::ids::row] == 1 && edit.getSceneName (1) == "Verse" && edit.getSceneName (0).isEmpty()
+               && edit.getSceneCount() == 9,
+           "inserting a scene moves the rows below down, names too");
+    edit.duplicateScene (1);
+    check (edit.getSlotAt (audio, 2).isValid() && edit.getSlotAt (keys, 2).isValid() && edit.getSceneName (2) == "Verse copy"
+               && (int) edit.getSlotAt (audio, 2)[daw::ids::id] != slot,
+           "duplicating a scene copies its slots into a new row below");
+    edit.removeScene (0);
+    edit.removeScene (1);
+    check ((int) edit.getSlot (slot)[daw::ids::row] == 0 && edit.getSceneName (0) == "Verse" && edit.getSceneCount() == 8
+               && ! edit.getSlotAt (audio, 1).isValid(),
+           "removing scenes takes their slots and moves the rest up");
+    const auto moved = edit.moveSlot (slot, other, 3, true);
+    check (moved > 0 && moved != slot && edit.getSlotAt (other, 3).isValid() && edit.getSlot (slot).isValid(), "copy a slot to another track's cell");
+    check (edit.moveSlot (slot, keys, 0) < 0, "an audio slot can't move to a MIDI track");
+    edit.removeSlot (moved);
+    edit.setLaunchQuantize ("beat");
+    check (near (edit.getLaunchQuantizeBeats(), 1.0), "launch quantize to the beat");
+    edit.setLaunchQuantize ("bar");
+
+    // Written onto the timeline: one clip per pass, the first part-way into the loop.
+    {
+        edit.getUndoManager().beginNewTransaction();
+        const auto made = edit.writeSlotToTimeline (slot, 30.0, 5.0, 0.5);
+        const auto a = edit.getClip (made[0]), b = edit.getClip (made[1]), c = edit.getClip (made[2]);
+        check (made.size() == 3 && near ((double) a[daw::ids::start], 30.0) && near ((double) a[daw::ids::offset], 0.5)
+                   && near ((double) a[daw::ids::length], 1.5) && near ((double) b[daw::ids::start], 31.5) && near ((double) b[daw::ids::length], 2.0)
+                   && near ((double) c[daw::ids::start], 33.5) && near ((double) c[daw::ids::length], 1.5)
+                   && a.getParent() == edit.getTrack (audio),
+               "a slot written to the timeline is a clip per pass");
+        edit.getUndoManager().undo();
+        check (! edit.getClip (made[0]).isValid(), "and it undoes");
+    }
+
+    // The engine.
+    daw::DawEngine engine (edit);
+    engine.prepare (sampleRate, blockSize);
+    engine.getAudioPool().loadNow (songFile);
+    engine.getAudioPool().loadNow (loopFile);
+    engine.loadAllNow();
+    engine.rebuildNow();
+
+    engine.seek ((juce::int64) (0.5 * sampleRate));
+    engine.play();
+    auto out = render (engine, 0.5); // to 1.0 s
+    check (level (out[0], 0.1, 0.5, 300.0) > 0.05 && level (out[0], 0.1, 0.5, 1000.0) < 0.01, "the song plays");
+
+    engine.launchSlot (audio, slot);
+    out = render (engine, 0.9); // to 1.9 s
+    auto state = engine.getLaunchState (audio);
+    check (state.queued == slot && state.playing == -1 && ! state.onLauncher, "a launch waits for the next bar");
+    check (level (out[0], 0.0, 0.85, 300.0) > 0.05, "the song plays on meanwhile");
+    out = render (engine, 1.6); // to 3.5 s
+    state = engine.getLaunchState (audio);
+    check (state.playing == slot && state.queued == daw::DawEngine::noLaunch && state.onLauncher, "the slot plays from the bar line");
+    check (level (out[0], 0.2, 1.5, 1000.0) > 0.05 && level (out[0], 0.2, 1.5, 300.0) < 0.01, "and the song's clip on that track stops");
+    out = render (engine, 1.0); // to 4.5 s: the loop came round at 4 s
+    check (level (out[0], 0.0, 1.0, 1000.0) > 0.05, "it loops");
+    check (std::abs (engine.getLaunchState (audio).progress - 0.25f) < 0.02f, "progress through the loop");
+
+    engine.stopSlot (audio);
+    out = render (engine, 2.0); // to 6.5 s: stops at 6 s
+    check (level (out[0], 0.0, 1.4, 1000.0) > 0.05 && rms (out[0], (size_t) (1.6 * sampleRate), (size_t) (2.0 * sampleRate)) < 1.0e-4f,
+           "a stop waits for the bar line, then the track is silent");
+    state = engine.getLaunchState (audio);
+    check (state.playing == -1 && state.onLauncher && engine.isAnyOnLauncher(), "and stays on the launcher");
+
+    engine.backToSong();
+    out = render (engine, 2.0); // to 8.5 s: back at 8 s
+    check (rms (out[0], (size_t) (0.1 * sampleRate), (size_t) (1.4 * sampleRate)) < 1.0e-4f && level (out[0], 1.6, 2.0, 300.0) > 0.05,
+           "Back to song picks up the timeline at the bar line");
+    check (! engine.getLaunchState (audio).onLauncher && ! engine.isAnyOnLauncher(), "and the track leaves the launcher");
+
+    // No quantize: at once. And a one-shot slot plays once.
+    edit.setLaunchQuantize ("none");
+    edit.setSlotLoop (slot, false);
+    engine.rebuildNow();
+    engine.launchSlot (audio, slot);
+    out = render (engine, 3.0); // 8.5 .. 11.5 s
+    check (level (out[0], 0.05, 1.9, 1000.0) > 0.05 && rms (out[0], (size_t) (2.1 * sampleRate), (size_t) (3.0 * sampleRate)) < 1.0e-4f,
+           "with no quantize a launch starts at once; a one-shot slot plays once");
+    state = engine.getLaunchState (audio);
+    check (state.playing == -1 && state.onLauncher, "then the track is silent on the launcher");
+    edit.setSlotLoop (slot, true);
+    edit.setLaunchQuantize ("bar");
+    engine.rebuildNow();
+
+    // Stopping the transport stops the slots; a launch while stopped starts it, at once.
+    engine.stop();
+    render (engine, 0.1);
+    check (engine.getLaunchState (audio).playing == -1, "the transport stopping stops the slots");
+    engine.seek ((juce::int64) (0.5 * sampleRate));
+    engine.launchSlot (audio, slot);
+    check (engine.isPlaying(), "a launch starts the transport");
+    out = render (engine, 0.5);
+    check (engine.getLaunchState (audio).playing == slot && level (out[0], 0.02, 0.5, 1000.0) > 0.05, "and plays at once");
+
+    // A scene: each track's slot in the row (MIDI notes too), together; empty cells stop.
+    edit.setTrackMute (audio, true); // to hear the MIDI slot alone
+    engine.launchScene (0);
+    out = render (engine, 2.0); // 1.0 .. 3.0 s, the line at 2 s
+    check (engine.getLaunchState (keys).playing == midiSlot && engine.getLaunchState (audio).playing == slot
+               && engine.getLaunchState (other).onLauncher && engine.getLaunchState (other).playing == -1,
+           "a scene launches the row on every track and stops the rest");
+    check (rms (out[0], (size_t) (1.0 * sampleRate), (size_t) (1.4 * sampleRate)) > rms (out[0], (size_t) (0.4 * sampleRate), (size_t) (0.9 * sampleRate)) * 1.2f,
+           "the MIDI slot's note sounds from the line");
+    out = render (engine, 2.0); // 3.0 .. 5.0 s: the MIDI loop comes round at 4 s
+    const auto keysTail = rms (out[0], (size_t) (0.8 * sampleRate), (size_t) (0.95 * sampleRate));
+    const auto keysAgain = rms (out[0], (size_t) (1.05 * sampleRate), (size_t) (1.3 * sampleRate));
+    check (keysAgain > keysTail * 1.2f, "and again each pass (" + juce::String (keysTail) + " -> " + juce::String (keysAgain) + ")");
+
+    // Removing a playing slot stops it; Back to song from everywhere.
+    edit.removeSlot (midiSlot);
+    engine.rebuildNow();
+    render (engine, 0.1);
+    check (engine.getLaunchState (keys).playing == -1, "a slot removed while it plays stops");
+    engine.backToSong();
+    render (engine, 2.0);
+    check (! engine.isAnyOnLauncher(), "Back to song takes every track off the launcher");
+    engine.stop();
+
+    folder.deleteRecursively();
 }
 
 static void testSingAlongSession()
@@ -21354,6 +21598,218 @@ static void testSidechain()
     folder.deleteRecursively();
 }
 
+//==============================================================================
+// Vocoder (market item 12): the voice's vowels on a built-in synth, played by keys held,
+// the song's chords or a drone on the key.
+namespace voctest
+{
+    using Module = fx::modules::VocoderModule;
+
+    // A sung vowel: harmonics of `hz` shaped by two formants.
+    std::vector<float> vowel (float hz, float f1, float f2, double seconds, float peak = 0.3f)
+    {
+        std::vector<float> out ((size_t) (seconds * sampleRate));
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+        for (size_t i = 0; i < out.size(); ++i)
+        {
+            const auto t = (double) i / sampleRate;
+            double s = 0.0;
+            for (int h = 1; h * hz < 9000.0f; ++h)
+            {
+                const auto f = hz * (float) h;
+                const auto w = 0.15 + std::exp (-std::pow ((f - f1) / 120.0, 2.0)) + 0.7 * std::exp (-std::pow ((f - f2) / 200.0, 2.0));
+                s += w / std::sqrt ((double) h) * std::sin (twoPi * f * t);
+            }
+            out[i] = (float) s;
+        }
+        const auto top = std::abs (*std::max_element (out.begin(), out.end(), [] (float a, float b) { return std::abs (a) < std::abs (b); }));
+        for (auto& v : out) v *= peak / juce::jmax (1.0e-6f, top);
+        return out;
+    }
+
+    std::vector<float> run (Module& vocoder, const std::vector<float>& input, const std::bitset<128>& held = {}, analysis::Chord chord = {}, int key = 0)
+    {
+        std::vector<float> out (input.size());
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        for (size_t start = 0; start < input.size(); start += blockSize)
+        {
+            const auto n = (int) juce::jmin ((size_t) blockSize, input.size() - start);
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.copyFrom (ch, 0, input.data() + start, n);
+            vocoder.setMusic (held, chord, key);
+            auto block = juce::dsp::AudioBlock<float> (buffer).getSubBlock (0, (size_t) n);
+            vocoder.process (fx::Module::Context (block));
+            std::copy_n (buffer.getReadPointer (0), n, out.begin() + (std::ptrdiff_t) start);
+        }
+        return out;
+    }
+
+    // Level at one frequency (Goertzel over the second half), dB.
+    float toneDb (const std::vector<float>& x, double hz)
+    {
+        const auto from = x.size() / 2;
+        const auto w = juce::MathConstants<double>::twoPi * hz / sampleRate;
+        double s1 = 0.0, s2 = 0.0;
+        for (auto i = from; i < x.size(); ++i)
+        {
+            const auto window = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::twoPi * (double) (i - from) / (double) (x.size() - from));
+            const auto s0 = x[i] * window + 2.0 * std::cos (w) * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        const auto power = s1 * s1 + s2 * s2 - 2.0 * std::cos (w) * s1 * s2;
+        return (float) (10.0 * std::log10 (power + 1.0e-20));
+    }
+
+    float bandDb (const std::vector<float>& x, double low, double high)
+    {
+        fx::Biquad a, b;
+        a.setup (fx::Biquad::Type::highPass, sampleRate, low, 0.707);
+        b.setup (fx::Biquad::Type::lowPass, sampleRate, high, 0.707);
+        double sum = 0.0;
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const auto y = b.process (0, a.process (0, x[i]));
+            if (i >= x.size() / 2) sum += (double) y * y;
+        }
+        return (float) (10.0 * std::log10 (sum / (double) (x.size() / 2) + 1.0e-20));
+    }
+
+    float rms (const std::vector<float>& x)
+    {
+        double sum = 0.0;
+        for (auto i = x.size() / 2; i < x.size(); ++i) sum += (double) x[i] * x[i];
+        return (float) (10.0 * std::log10 (sum / (double) (x.size() / 2) + 1.0e-20));
+    }
+
+    void prepare (Module& vocoder)
+    {
+        vocoder.on.store (1.0f);
+        vocoder.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+    }
+}
+
+static void testVocoder()
+{
+    std::cout << "\nVocoder (the voice on a built-in synth)\n";
+    using namespace voctest;
+
+    // Which notes it plays.
+    {
+        std::bitset<128> held;
+        held.set (64);
+        held.set (67);
+        const auto am = analysis::Chord::fromName ("Am");
+        const auto keys = fx::pickVocoderNotes (fx::Vocoder::keysThenChords, held, am, 2);
+        const auto chord = fx::pickVocoderNotes (fx::Vocoder::keysThenChords, {}, am, 2);
+        const auto chordOnly = fx::pickVocoderNotes (fx::Vocoder::chordsOnly, held, am, 2);
+        const auto drone = fx::pickVocoderNotes (fx::Vocoder::drone, held, am, 2);
+        const auto none = fx::pickVocoderNotes (fx::Vocoder::keysThenChords, {}, {}, 2);
+        check (keys == held, "keys held: it plays those");
+        check (chord.count() == 3 && chord[57] && chord[60] && chord[64], "none held: the chord, voiced from A3 (A C E)");
+        check (chordOnly == chord, "Chords ignores the keys");
+        check (drone.count() == 3 && drone[50] && drone[57] && drone[62], "Drone: D3 A3 D4 on the key of D");
+        check (none == drone, "no keys, no chord: the drone");
+    }
+
+    const auto ah = vowel (180.0f, 750.0f, 1200.0f, 1.0);
+    {
+        Module vocoder;
+        prepare (vocoder);
+        check (vocoder.getLatencySamples() == 0, "no delay");
+
+        std::bitset<128> a3;
+        a3.set (57); // 220 Hz
+        const auto out = run (vocoder, ah, a3);
+        const auto at220 = toneDb (out, 220.0), at440 = toneDb (out, 440.0), at180 = toneDb (out, 180.0), at360 = toneDb (out, 360.0);
+        check (at220 > at180 + 20.0f && at440 > at360 + 20.0f, "the synth's pitch, not the voice's: 220/440 Hz over 180/360 by "
+                                                                   + juce::String (juce::jmin (at220 - at180, at440 - at360), 1) + " dB");
+        const auto change = rms (out) - rms (ah);
+        check (std::abs (change) < 6.0f, "about as loud as the voice (" + juce::String (change, 1) + " dB)");
+
+        const auto silent = run (vocoder, std::vector<float> ((size_t) sampleRate, 0.0f), a3);
+        check (rms (silent) < -70.0f, "no voice, no sound (" + juce::String (rms (silent), 1) + " dB)");
+
+        // An octave up from the Octave choice.
+        vocoder.octave.store (3.0f);
+        const auto up = run (vocoder, ah, a3);
+        check (toneDb (up, 440.0) > toneDb (up, 220.0) + 20.0f, "Octave +1 plays A4");
+    }
+
+    // Vowels come through: "ee" (300 / 2300 Hz) is brighter than "ah" (750 / 1200 Hz).
+    {
+        std::bitset<128> notes;
+        notes.set (48);
+        Module a, b;
+        prepare (a);
+        prepare (b);
+        const auto ee = vowel (180.0f, 300.0f, 2300.0f, 1.0);
+        const auto outAh = run (a, ah, notes), outEe = run (b, ee, notes);
+        const auto tiltAh = bandDb (outAh, 1900.0, 2800.0) - bandDb (outAh, 600.0, 900.0);
+        const auto tiltEe = bandDb (outEe, 1900.0, 2800.0) - bandDb (outEe, 600.0, 900.0);
+        const auto sungDifference = (bandDb (ee, 1900.0, 2800.0) - bandDb (ee, 600.0, 900.0)) - (bandDb (ah, 1900.0, 2800.0) - bandDb (ah, 600.0, 900.0));
+        check (tiltEe - tiltAh > 0.5f * sungDifference, "the vowels come through: \"ee\" is " + juce::String (tiltEe - tiltAh, 1) + " dB brighter at 2-3 kHz than \"ah\" (sung: "
+                                                          + juce::String (sungDifference, 1) + " dB)");
+
+        // Formant up an octave: the vowel's shape moves up.
+        Module shifted;
+        shifted.formant.store (12.0f);
+        prepare (shifted);
+        const auto outUp = run (shifted, ah, notes);
+        const auto tiltUp = bandDb (outUp, 1900.0, 2800.0) - bandDb (outUp, 600.0, 900.0);
+        check (tiltUp > tiltAh + 6.0f, "Formant +12 moves it up (" + juce::String (tiltUp - tiltAh, 1) + " dB brighter)");
+    }
+
+    // An "s": noise with only highs. Unvoiced lets it through.
+    {
+        std::vector<float> ess ((size_t) sampleRate);
+        juce::Random random (3);
+        fx::Biquad high;
+        high.setup (fx::Biquad::Type::highPass, sampleRate, 4500.0, 0.707);
+        for (auto& s : ess)
+            s = 0.2f * high.process (0, random.nextFloat() * 2.0f - 1.0f);
+        std::bitset<128> notes;
+        notes.set (48);
+        Module with, without;
+        with.unvoiced.store (100.0f);
+        without.unvoiced.store (0.0f);
+        prepare (with);
+        prepare (without);
+        const auto a = bandDb (run (with, ess, notes), 5000.0, 12000.0), b = bandDb (run (without, ess, notes), 5000.0, 12000.0);
+        check (a > b + 10.0f, "an \"s\" stays clear with Unvoiced (" + juce::String (a - b, 1) + " dB more of it)");
+    }
+
+    // Live: keys held on a MIDI keyboard play it; the readings say what it plays.
+    {
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        processor.getState().getParameter ("vocoderOn")->setValueNotifyingHost (1.0f);
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::noteOn (1, 64, 0.8f), 0);
+        std::vector<float> out;
+        for (size_t start = 0; start + blockSize <= ah.size(); start += blockSize)
+        {
+            buffer.clear();
+            buffer.copyFrom (0, 0, ah.data() + start, blockSize);
+            processor.processBlock (buffer, midi);
+            midi.clear();
+            out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+        }
+        auto* vocoder = processor.getLiveChain().find<Module>();
+        juce::DynamicObject readings;
+        vocoder->addReadings (readings);
+        const auto* notes = readings.getProperty ("notes").getArray();
+        check (notes != nullptr && notes->size() == 1 && (int) (*notes)[0] == 64 && readings.getProperty ("playing").toString() == "keys",
+               "in Live, the key held (E4) plays it");
+        check (toneDb (out, 329.63) > toneDb (out, 180.0) + 15.0f, "and you hear E4");
+        processor.releaseResources();
+    }
+
+    check (daw::Edit::moduleTypeFromKey ("vocoder") == fx::ModuleType::vocoder, "the DAW can add it as an insert");
+}
+
+
 
 int main()
 {
@@ -21395,6 +21851,14 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "feedback")
     {
         testFeedbackGuard();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=vocoder: just the vocoder.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "vocoder")
+    {
+        testVocoder();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -21642,6 +22106,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=launcher: just the clip launcher.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "launcher")
+    {
+        testLauncher();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=patterns: just the step sequencer.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "patterns")
     {
@@ -21839,6 +22311,7 @@ int main()
     testDawFit();
     testEffectAutomation();
     testAutomationLanes();
+    testLauncher();
     testAutomationRecording();
     testAnalysisSpeed();
     testLatency();

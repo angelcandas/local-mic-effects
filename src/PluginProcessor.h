@@ -229,6 +229,7 @@ private:
     std::atomic<double> echoTapTempo { 0.0 };
     fx::modules::Pitch& pitchModule;
     fx::modules::AutoLevel& autoLevelModule;
+    fx::modules::VocoderModule* vocoderModule = nullptr;
     juce::dsp::Limiter<float> limiter;
 
     Recorder recorder;

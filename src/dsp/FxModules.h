@@ -15,6 +15,7 @@
 #include "Cabinet.h"
 #include "GuitarAmp.h"
 #include "Convolver.h"
+#include "Vocoder.h"
 
 #include <memory>
 
@@ -1526,6 +1527,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::radio:      return std::make_unique<modules::Radio>();
         case ModuleType::bitcrusher: return std::make_unique<modules::Bitcrusher>();
         case ModuleType::robot:      return std::make_unique<modules::Robot>();
+        case ModuleType::vocoder:    return std::make_unique<modules::VocoderModule>();
         case ModuleType::filter:     return std::make_unique<modules::Filter>();
         case ModuleType::autoWah:    return std::make_unique<modules::AutoWah>();
         case ModuleType::amp:        return std::make_unique<modules::Amp>();

@@ -13,6 +13,13 @@ export const CHANGELOG = {
      ]
     },
     {
+     "title": "Vocoder",
+     "text": "Your voice plays a built-in synth: hold keys on a MIDI keyboard, or it follows the song's chords (else a drone on the key). Saw, pulse or ensemble sound, 16 to 32 bands, formant and a clear-words control. In Live and as a DAW insert.",
+     "prs": [
+      224
+     ]
+    },
+    {
      "title": "MIDI effects and velocity lane",
      "text": "Put an arpeggiator, a chord maker or a scale lock before a MIDI track's instrument: arpeggios on the beat, the song key's chords from single notes, wrong notes kept in key. The piano roll gets a Velocity lane to draw how hard each note plays.",
      "prs": [
