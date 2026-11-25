@@ -777,6 +777,8 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
             members->members.push_back ({ insertId, chain.share (module), insert });
         if (auto* pitch = dynamic_cast<fx::modules::Pitch*> (&module))
             strip->pitches.push_back (pitch);
+        if (auto* vocoder = dynamic_cast<fx::modules::VocoderModule*> (&module))
+            strip->vocoders.push_back (vocoder);
     };
 
     addInserts = [&] (fx::FxChain& chain, const juce::ValueTree& list, RackInsert* members)
@@ -801,6 +803,8 @@ std::shared_ptr<DawEngine::Strip> DawEngine::getStrip (const juce::ValueTree& tr
                     strip->insertTrees[member.insertId] = member.tree;
                     if (auto* pitch = dynamic_cast<fx::modules::Pitch*> (member.module.get()))
                         strip->pitches.push_back (pitch);
+                    if (auto* vocoder = dynamic_cast<fx::modules::VocoderModule*> (member.module.get()))
+                        strip->vocoders.push_back (vocoder);
                     if (auto* plugin = dynamic_cast<PluginInsert*> (member.module.get()))
                         strip->plugins[member.insertId] = { plugin, member.tree, {} };
                     if (members != nullptr)
@@ -950,6 +954,7 @@ void DawEngine::rebuild()
     graph->chords = chordFollower;
     graph->listen.setSize (2, blockSize);
     graph->keyMask = analysis::getKeyMask (edit.getKey(), edit.isKeyMinor());
+    graph->keyRoot = edit.getKey();
     std::map<int, std::shared_ptr<Strip>> previous;
     std::swap (previous, strips);
 
@@ -2839,10 +2844,23 @@ void DawEngine::followChords (Graph& graph, bool isPlaying, juce::int64 blockSta
                 action (*pitch);
     };
 
+    // And every vocoder: it plays what's held, else the same chords.
+    const auto forEachVocoder = [&graph] (auto&& action)
+    {
+        for (auto& track : graph.tracks)
+            for (auto* vocoder : track.strip->vocoders)
+                action (*vocoder);
+        for (auto& bus : graph.returns)
+            for (auto* vocoder : bus.strip->vocoders)
+                action (*vocoder);
+    };
+
     auto following = false;
     forEachPitch ([&following] (fx::modules::Pitch& pitch) { following = following || pitch.isFollowingChords(); });
+    auto vocoding = false;
+    forEachVocoder ([&vocoding] (fx::modules::VocoderModule& vocoder) { vocoding = vocoding || vocoder.isOn(); });
 
-    if (! following || graph.chords == nullptr)
+    if ((! following && ! vocoding) || graph.chords == nullptr)
     {
         harmonyChord.store (-1, std::memory_order_relaxed);
         return;
@@ -2876,7 +2894,7 @@ void DawEngine::followChords (Graph& graph, bool isPlaying, juce::int64 blockSta
         listen.clear (0, numSamples);
 
         for (auto& track : graph.tracks)
-            if (! track.strip->isMidi && track.strip->pitches.empty())
+            if (! track.strip->isMidi && track.strip->pitches.empty() && track.strip->vocoders.empty())
                 for (const auto& clip : track.clips)
                     renderClip (clip, listen, blockStart + lookAhead, numSamples);
 
@@ -2888,6 +2906,8 @@ void DawEngine::followChords (Graph& graph, bool isPlaying, juce::int64 blockSta
     harmonyChord.store (chord.pack(), std::memory_order_relaxed);
 
     forEachPitch ([chord] (fx::modules::Pitch& pitch) { pitch.setChord (chord); });
+    if (vocoding)
+        forEachVocoder ([&] (fx::modules::VocoderModule& vocoder) { vocoder.setMusic (notes, chord, graph.keyRoot); });
 }
 
 void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int numSamples, const float* input,

@@ -214,7 +214,7 @@ Parameters::Parameters (Layout& l)
         if (const auto type = (fx::ModuleType) i;
             type != fx::ModuleType::denoise && type != fx::ModuleType::autoLevel && type != fx::ModuleType::smooth
             && type != fx::ModuleType::cab && type != fx::ModuleType::irReverb && type != fx::ModuleType::amp
-            && type != fx::ModuleType::opto && type != fx::ModuleType::plate && type != fx::ModuleType::feedbackGuard)
+            && type != fx::ModuleType::opto && type != fx::ModuleType::plate && type != fx::ModuleType::feedbackGuard && type != fx::ModuleType::vocoder)
             moduleGains (type);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
@@ -405,6 +405,20 @@ Parameters::Parameters (Layout& l)
     number (l, "fbgRelease", "Feedback Guard Release", 1.0f, 60.0f, 0.5f, 10.0f, "s", 10.0f);
     toggle (l, "fbgRingOut", "Feedback Guard Ring Out");
     moduleGains (fx::ModuleType::feedbackGuard);
+
+    // Vocoder (Vocoder.h), after those: the voice shapes a built-in synth played by the
+    // keys held, the song's chords or a drone on the key.
+    using Vocoder = fx::modules::VocoderModule;
+    toggle (l, "vocoderOn", "Vocoder On");
+    choice (l, "vocoderBands", "Vocoder Bands", Vocoder::getBandNames(), 1);
+    choice (l, "vocoderCarrier", "Vocoder Synth", Vocoder::getCarrierNames(), 0);
+    choice (l, "vocoderNotes", "Vocoder Notes", Vocoder::getSourceNames(), 0);
+    choice (l, "vocoderOctave", "Vocoder Octave", Vocoder::getOctaveNames(), 2);
+    semitones (l, "vocoderFormant", "Vocoder Formant", 12.0f, 0.1f, 0.0f);
+    number (l, "vocoderRelease", "Vocoder Release", 10.0f, 300.0f, 1.0f, 60.0f, "ms", 60.0f);
+    percent (l, "vocoderUnvoiced", "Vocoder Unvoiced", 50.0f);
+    percent (l, "vocoderMix", "Vocoder Mix", 100.0f);
+    moduleGains (fx::ModuleType::vocoder);
 }
 
 bool Parameters::belongsToRoom (const juce::String& id)

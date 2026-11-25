@@ -402,6 +402,69 @@ const views = {
     };
   },
 
+  // Vocoder: the voice's level in each band (the bars, low to high), the synth's band
+  // positions after Formant (the ticks), and, in the corner, what the synth plays.
+  vocoder({ get }) {
+    const LOW = 100, HIGH = 8000, FLOOR = -70, CEILING = -10; // Vocoder::lowHz, highHz
+    const NAMES = ["C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B"];
+    const element = frame("is-vocoder");
+    frequencyGrid(element);
+    const bars = Array.from({ length: 32 }, () => {
+      const bar = svg("rect", { class: "fx-fill", y: H, height: 0 });
+      element.append(bar);
+      return bar;
+    });
+    const ticks = Array.from({ length: 32 }, () => {
+      const tick = svg("line", { class: "fx-threshold", y1: H - 4, y2: H });
+      element.append(tick);
+      return tick;
+    });
+    label(element, 3, 11, "Voice");
+    let count = 0, shown = [];
+
+    const layout = (n) => {
+      count = n;
+      shown = new Array(n).fill(FLOOR);
+      const shift = Math.pow(2, (get("vocoderFormant") ?? 0) / 12);
+      const span = Math.log2(HIGH / LOW) / n;
+      bars.forEach((bar, b) => {
+        bar.style.display = b < n ? "" : "none";
+        if (b >= n) return;
+        const x0 = xOfF(LOW * Math.pow(2, b * span)), x1 = xOfF(LOW * Math.pow(2, (b + 1) * span));
+        bar.setAttribute("x", x0 + 0.5);
+        bar.setAttribute("width", Math.max(0.5, x1 - x0 - 1));
+      });
+      ticks.forEach((tick, b) => {
+        tick.style.display = b < n ? "" : "none";
+        if (b >= n) return;
+        const x = xOfF(LOW * Math.pow(2, (b + 0.5) * span) * shift);
+        tick.setAttribute("x1", x);
+        tick.setAttribute("x2", x);
+      });
+    };
+
+    return {
+      element,
+      update() { layout([16, 24, 32][Math.round(get("vocoderBands") ?? 1)] ?? 24); },
+      live(reading) {
+        const levels = reading?.bands ?? [];
+        if (levels.length && levels.length !== count) layout(levels.length);
+        shown = shown.map((v, b) => Math.max(levels[b] ?? FLOOR, v - 1.5));
+        bars.forEach((bar, b) => {
+          if (b >= count) return;
+          const height = clamp((shown[b] - FLOOR) / (CEILING - FLOOR)) * (H - 8);
+          bar.setAttribute("y", H - height);
+          bar.setAttribute("height", height);
+        });
+        if (!reading) return "";
+        const notes = (reading.notes ?? []).map((n) => `${NAMES[n % 12]}${Math.floor(n / 12) - 1}`).join(" ");
+        if (reading.playing === "keys") return `Keys ${notes}`;
+        if (reading.playing === "chord") return `${reading.chord} · ${notes}`;
+        return `Drone ${notes}`;
+      },
+    };
+  },
+
   // Speaker cabinet: its frequency response (from C++: the built-in model with the mic and
   // cuts, or the loaded impulse response) over the live spectrum.
   cab() {

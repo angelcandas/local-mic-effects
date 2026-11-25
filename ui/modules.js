@@ -117,6 +117,14 @@ export const MODULES = [
     description: "Ring-modulated metallic voice",
     controls: [knob("robotFreq", "Freq"), knob("robotMix", "Mix")] },
 
+  // The voice shapes a built-in synth (src/dsp/Vocoder.h). Its picture shows the voice's
+  // bands and what the synth is playing.
+  { id: "vocoder", name: "Vocoder", category: "character", power: "vocoderOn", wide: true,
+    description: "Your voice plays a synth: hold keys on a MIDI keyboard, or it follows the song's chords (else a drone on the key)",
+    controls: [choice("vocoderNotes", "Notes"), choice("vocoderCarrier", "Synth"), choice("vocoderOctave", "Octave"),
+               choice("vocoderBands", "Bands"), bipolar("vocoderFormant", "Formant"), knob("vocoderRelease", "Release"),
+               knob("vocoderUnvoiced", "Unvoiced"), knob("vocoderMix", "Mix")] },
+
   { id: "filter", name: "Filter", category: "character", power: "filterOn",
     description: "Resonant ladder filter",
     controls: [choice("filterType", "Type"), knob("filterCutoff", "Cutoff"), knob("filterResonance", "Resonance")] },
@@ -236,7 +244,7 @@ export const MODULES = [
 export const MODULE_KEYS = {
   hpf: "highPass", denoise: "denoise", gate: "gate", tune: "pitch", pitch: "pitch", harmony: "pitch", eq: "eq", peq: "paraEq", smooth: "smooth",
   comp: "compressor", opto: "opto", autolevel: "autoLevel", deess: "deEsser", exciter: "exciter", sat: "saturation", radio: "radio",
-  crush: "bitcrusher", robot: "robot", filter: "filter", wah: "autoWah", amp: "amp", cab: "cab", tremolo: "tremolo",
+  crush: "bitcrusher", robot: "robot", vocoder: "vocoder", filter: "filter", wah: "autoWah", amp: "amp", cab: "cab", tremolo: "tremolo",
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
   echo: "echo", reverb: "reverb", plate: "plate", irverb: "irReverb", width: "width",
   meq: "masterEq", mb: "multiband", imager: "imager", limiter: "limiter", loudness: "loudness",

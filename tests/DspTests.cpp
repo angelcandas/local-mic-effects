@@ -20959,6 +20959,218 @@ static void testVocalAlign()
     folder.deleteRecursively();
 }
 
+//==============================================================================
+// Vocoder (market item 12): the voice's vowels on a built-in synth, played by keys held,
+// the song's chords or a drone on the key.
+namespace voctest
+{
+    using Module = fx::modules::VocoderModule;
+
+    // A sung vowel: harmonics of `hz` shaped by two formants.
+    std::vector<float> vowel (float hz, float f1, float f2, double seconds, float peak = 0.3f)
+    {
+        std::vector<float> out ((size_t) (seconds * sampleRate));
+        const auto twoPi = juce::MathConstants<double>::twoPi;
+        for (size_t i = 0; i < out.size(); ++i)
+        {
+            const auto t = (double) i / sampleRate;
+            double s = 0.0;
+            for (int h = 1; h * hz < 9000.0f; ++h)
+            {
+                const auto f = hz * (float) h;
+                const auto w = 0.15 + std::exp (-std::pow ((f - f1) / 120.0, 2.0)) + 0.7 * std::exp (-std::pow ((f - f2) / 200.0, 2.0));
+                s += w / std::sqrt ((double) h) * std::sin (twoPi * f * t);
+            }
+            out[i] = (float) s;
+        }
+        const auto top = std::abs (*std::max_element (out.begin(), out.end(), [] (float a, float b) { return std::abs (a) < std::abs (b); }));
+        for (auto& v : out) v *= peak / juce::jmax (1.0e-6f, top);
+        return out;
+    }
+
+    std::vector<float> run (Module& vocoder, const std::vector<float>& input, const std::bitset<128>& held = {}, analysis::Chord chord = {}, int key = 0)
+    {
+        std::vector<float> out (input.size());
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        for (size_t start = 0; start < input.size(); start += blockSize)
+        {
+            const auto n = (int) juce::jmin ((size_t) blockSize, input.size() - start);
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.copyFrom (ch, 0, input.data() + start, n);
+            vocoder.setMusic (held, chord, key);
+            auto block = juce::dsp::AudioBlock<float> (buffer).getSubBlock (0, (size_t) n);
+            vocoder.process (fx::Module::Context (block));
+            std::copy_n (buffer.getReadPointer (0), n, out.begin() + (std::ptrdiff_t) start);
+        }
+        return out;
+    }
+
+    // Level at one frequency (Goertzel over the second half), dB.
+    float toneDb (const std::vector<float>& x, double hz)
+    {
+        const auto from = x.size() / 2;
+        const auto w = juce::MathConstants<double>::twoPi * hz / sampleRate;
+        double s1 = 0.0, s2 = 0.0;
+        for (auto i = from; i < x.size(); ++i)
+        {
+            const auto window = 0.5 - 0.5 * std::cos (juce::MathConstants<double>::twoPi * (double) (i - from) / (double) (x.size() - from));
+            const auto s0 = x[i] * window + 2.0 * std::cos (w) * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        const auto power = s1 * s1 + s2 * s2 - 2.0 * std::cos (w) * s1 * s2;
+        return (float) (10.0 * std::log10 (power + 1.0e-20));
+    }
+
+    float bandDb (const std::vector<float>& x, double low, double high)
+    {
+        fx::Biquad a, b;
+        a.setup (fx::Biquad::Type::highPass, sampleRate, low, 0.707);
+        b.setup (fx::Biquad::Type::lowPass, sampleRate, high, 0.707);
+        double sum = 0.0;
+        for (size_t i = 0; i < x.size(); ++i)
+        {
+            const auto y = b.process (0, a.process (0, x[i]));
+            if (i >= x.size() / 2) sum += (double) y * y;
+        }
+        return (float) (10.0 * std::log10 (sum / (double) (x.size() / 2) + 1.0e-20));
+    }
+
+    float rms (const std::vector<float>& x)
+    {
+        double sum = 0.0;
+        for (auto i = x.size() / 2; i < x.size(); ++i) sum += (double) x[i] * x[i];
+        return (float) (10.0 * std::log10 (sum / (double) (x.size() / 2) + 1.0e-20));
+    }
+
+    void prepare (Module& vocoder)
+    {
+        vocoder.on.store (1.0f);
+        vocoder.prepare ({ sampleRate, (juce::uint32) blockSize, 2 });
+    }
+}
+
+static void testVocoder()
+{
+    std::cout << "\nVocoder (the voice on a built-in synth)\n";
+    using namespace voctest;
+
+    // Which notes it plays.
+    {
+        std::bitset<128> held;
+        held.set (64);
+        held.set (67);
+        const auto am = analysis::Chord::fromName ("Am");
+        const auto keys = fx::pickVocoderNotes (fx::Vocoder::keysThenChords, held, am, 2);
+        const auto chord = fx::pickVocoderNotes (fx::Vocoder::keysThenChords, {}, am, 2);
+        const auto chordOnly = fx::pickVocoderNotes (fx::Vocoder::chordsOnly, held, am, 2);
+        const auto drone = fx::pickVocoderNotes (fx::Vocoder::drone, held, am, 2);
+        const auto none = fx::pickVocoderNotes (fx::Vocoder::keysThenChords, {}, {}, 2);
+        check (keys == held, "keys held: it plays those");
+        check (chord.count() == 3 && chord[57] && chord[60] && chord[64], "none held: the chord, voiced from A3 (A C E)");
+        check (chordOnly == chord, "Chords ignores the keys");
+        check (drone.count() == 3 && drone[50] && drone[57] && drone[62], "Drone: D3 A3 D4 on the key of D");
+        check (none == drone, "no keys, no chord: the drone");
+    }
+
+    const auto ah = vowel (180.0f, 750.0f, 1200.0f, 1.0);
+    {
+        Module vocoder;
+        prepare (vocoder);
+        check (vocoder.getLatencySamples() == 0, "no delay");
+
+        std::bitset<128> a3;
+        a3.set (57); // 220 Hz
+        const auto out = run (vocoder, ah, a3);
+        const auto at220 = toneDb (out, 220.0), at440 = toneDb (out, 440.0), at180 = toneDb (out, 180.0), at360 = toneDb (out, 360.0);
+        check (at220 > at180 + 20.0f && at440 > at360 + 20.0f, "the synth's pitch, not the voice's: 220/440 Hz over 180/360 by "
+                                                                   + juce::String (juce::jmin (at220 - at180, at440 - at360), 1) + " dB");
+        const auto change = rms (out) - rms (ah);
+        check (std::abs (change) < 6.0f, "about as loud as the voice (" + juce::String (change, 1) + " dB)");
+
+        const auto silent = run (vocoder, std::vector<float> ((size_t) sampleRate, 0.0f), a3);
+        check (rms (silent) < -70.0f, "no voice, no sound (" + juce::String (rms (silent), 1) + " dB)");
+
+        // An octave up from the Octave choice.
+        vocoder.octave.store (3.0f);
+        const auto up = run (vocoder, ah, a3);
+        check (toneDb (up, 440.0) > toneDb (up, 220.0) + 20.0f, "Octave +1 plays A4");
+    }
+
+    // Vowels come through: "ee" (300 / 2300 Hz) is brighter than "ah" (750 / 1200 Hz).
+    {
+        std::bitset<128> notes;
+        notes.set (48);
+        Module a, b;
+        prepare (a);
+        prepare (b);
+        const auto ee = vowel (180.0f, 300.0f, 2300.0f, 1.0);
+        const auto outAh = run (a, ah, notes), outEe = run (b, ee, notes);
+        const auto tiltAh = bandDb (outAh, 1900.0, 2800.0) - bandDb (outAh, 600.0, 900.0);
+        const auto tiltEe = bandDb (outEe, 1900.0, 2800.0) - bandDb (outEe, 600.0, 900.0);
+        const auto sungDifference = (bandDb (ee, 1900.0, 2800.0) - bandDb (ee, 600.0, 900.0)) - (bandDb (ah, 1900.0, 2800.0) - bandDb (ah, 600.0, 900.0));
+        check (tiltEe - tiltAh > 0.5f * sungDifference, "the vowels come through: \"ee\" is " + juce::String (tiltEe - tiltAh, 1) + " dB brighter at 2-3 kHz than \"ah\" (sung: "
+                                                          + juce::String (sungDifference, 1) + " dB)");
+
+        // Formant up an octave: the vowel's shape moves up.
+        Module shifted;
+        shifted.formant.store (12.0f);
+        prepare (shifted);
+        const auto outUp = run (shifted, ah, notes);
+        const auto tiltUp = bandDb (outUp, 1900.0, 2800.0) - bandDb (outUp, 600.0, 900.0);
+        check (tiltUp > tiltAh + 6.0f, "Formant +12 moves it up (" + juce::String (tiltUp - tiltAh, 1) + " dB brighter)");
+    }
+
+    // An "s": noise with only highs. Unvoiced lets it through.
+    {
+        std::vector<float> ess ((size_t) sampleRate);
+        juce::Random random (3);
+        fx::Biquad high;
+        high.setup (fx::Biquad::Type::highPass, sampleRate, 4500.0, 0.707);
+        for (auto& s : ess)
+            s = 0.2f * high.process (0, random.nextFloat() * 2.0f - 1.0f);
+        std::bitset<128> notes;
+        notes.set (48);
+        Module with, without;
+        with.unvoiced.store (100.0f);
+        without.unvoiced.store (0.0f);
+        prepare (with);
+        prepare (without);
+        const auto a = bandDb (run (with, ess, notes), 5000.0, 12000.0), b = bandDb (run (without, ess, notes), 5000.0, 12000.0);
+        check (a > b + 10.0f, "an \"s\" stays clear with Unvoiced (" + juce::String (a - b, 1) + " dB more of it)");
+    }
+
+    // Live: keys held on a MIDI keyboard play it; the readings say what it plays.
+    {
+        PluginProcessor processor;
+        processor.prepareToPlay (sampleRate, blockSize);
+        processor.getState().getParameter ("vocoderOn")->setValueNotifyingHost (1.0f);
+        juce::AudioBuffer<float> buffer (2, blockSize);
+        juce::MidiBuffer midi;
+        midi.addEvent (juce::MidiMessage::noteOn (1, 64, 0.8f), 0);
+        std::vector<float> out;
+        for (size_t start = 0; start + blockSize <= ah.size(); start += blockSize)
+        {
+            buffer.clear();
+            buffer.copyFrom (0, 0, ah.data() + start, blockSize);
+            processor.processBlock (buffer, midi);
+            midi.clear();
+            out.insert (out.end(), buffer.getReadPointer (0), buffer.getReadPointer (0) + blockSize);
+        }
+        auto* vocoder = processor.getLiveChain().find<Module>();
+        juce::DynamicObject readings;
+        vocoder->addReadings (readings);
+        const auto* notes = readings.getProperty ("notes").getArray();
+        check (notes != nullptr && notes->size() == 1 && (int) (*notes)[0] == 64 && readings.getProperty ("playing").toString() == "keys",
+               "in Live, the key held (E4) plays it");
+        check (toneDb (out, 329.63) > toneDb (out, 180.0) + 15.0f, "and you hear E4");
+        processor.releaseResources();
+    }
+
+    check (daw::Edit::moduleTypeFromKey ("vocoder") == fx::ModuleType::vocoder, "the DAW can add it as an insert");
+}
+
+
 
 int main()
 {
@@ -20984,6 +21196,14 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "feedback")
     {
         testFeedbackGuard();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=vocoder: just the vocoder.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "vocoder")
+    {
+        testVocoder();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
