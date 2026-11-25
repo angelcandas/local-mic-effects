@@ -994,7 +994,7 @@ void DawActions::build()
             if (! daw::Edit::moduleTypeFromKey (type).has_value())
             {
                 juce::StringArray keys;
-                for (int i = 0; i < fx::numModuleTypes; ++i) keys.add (fx::getModuleKey ((fx::ModuleType) i));
+                for (int i = 0; i < fx::numModuleTypes; ++i) if (! fx::isLiveOnly ((fx::ModuleType) i)) keys.add (fx::getModuleKey ((fx::ModuleType) i));
                 complete (fail ("There is no effect \"" + type + "\". Effects: " + keys.joinIntoString (", ") + "."));
                 return;
             }

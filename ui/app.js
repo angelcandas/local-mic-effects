@@ -731,6 +731,46 @@ class PresetBar {
 }
 
 //==============================================================================
+// Feedback Guard's notches: how many it holds (fixed ones from Ring out, and the ones it
+// caught while singing) and buttons to clear them.
+class FeedbackNotches {
+  constructor() {
+    this.call = Juce.getNativeFunction("feedbackGuard");
+    this.element = html("div", "feedback-notches");
+    this.summary = html("span", "feedback-summary", "No notches yet");
+    this.clear = html("button", "mini", "Clear caught");
+    this.clear.title = "Let go of the notches caught while singing (the fixed Ring out ones stay)";
+    this.clear.addEventListener("click", () => this.run("clear"));
+    this.clearAll = html("button", "mini", "Clear all");
+    this.clearAll.title = "Let go of every notch, the fixed Ring out ones too (for a new room)";
+    this.clearAll.addEventListener("click", () => this.run("clearAll"));
+    this.element.append(this.summary, this.clear, this.clearAll);
+    this.show([]);
+  }
+
+  run(action) {
+    this.call(action).then(() => this.show([])).catch(() => {});
+  }
+
+  show(notches) {
+    const fixed = notches.filter((n) => n.fixed).length, caught = notches.length - fixed;
+    const parts = [];
+    if (fixed) parts.push(`${fixed} fixed`);
+    if (caught) parts.push(`${caught} caught`);
+    const text = parts.length ? `Notches: ${parts.join(", ")}` : "No notches yet";
+    if (this.summary.textContent !== text) this.summary.textContent = text;
+    this.summary.title = notches.map((n) => `${n.hz < 1000 ? Math.round(n.hz) + " Hz" : (n.hz / 1000).toFixed(2) + " kHz"} −${n.cut.toFixed(1)} dB${n.fixed ? " (fixed)" : ""}`).join("\n");
+    this.clear.disabled = caught === 0;
+    this.clearAll.disabled = notches.length === 0;
+  }
+
+  // From the meters, while the card shows (null while it's off).
+  live(reading) {
+    if (reading) this.show(reading.notches ?? []);
+  }
+}
+
+//==============================================================================
 // Builds the sidebar (every effect, grouped) and the chain (cards for effects that
 // are switched on, in processing order). The order is the singer's: drag a card by its
 // number (or focus the number and press ←/→) to move it; an effect switched on from
@@ -972,6 +1012,7 @@ class Rack {
         moduleFile(control.module, "get").then((result) => picker.update(result?.file)).catch(() => {});
         return picker.element;
       }
+      case "feedback-notches": return (this.feedbackNotches = new FeedbackNotches()).element;
       case "tuner": return (this.tuner = new Tuner()).element;
       case "chord": return (this.chordReadout = new ChordReadout()).element;
       case "keys": return (this.keyPicker = new KeyPicker(control.param, control.scaleParam, this.onUserChange)).element;
@@ -1028,6 +1069,7 @@ class Rack {
       if (card.hidden) continue;
       card.device.live(readings?.[MODULE_KEYS[module.id]] ?? null);
     }
+    this.feedbackNotches?.live(readings?.feedbackGuard ?? null);
   }
 
   // Every control of the module, and its in/out gain, back to its default (the power stays on).

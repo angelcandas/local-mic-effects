@@ -2705,7 +2705,7 @@ void DawBridge::loadPresetInto (int trackId, int presetIndex)
         if (const auto type = daw::Edit::moduleTypeFromKey (key); type.has_value() && std::find (types.begin(), types.end(), *type) == types.end())
             types.push_back (*type);
     for (int t = 0; t < fx::numModuleTypes; ++t)
-        if (std::find (types.begin(), types.end(), (fx::ModuleType) t) == types.end())
+        if (! fx::isLiveOnly ((fx::ModuleType) t) && std::find (types.begin(), types.end(), (fx::ModuleType) t) == types.end())
             types.push_back ((fx::ModuleType) t);
 
     for (const auto type : types)

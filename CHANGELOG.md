@@ -5,6 +5,10 @@ What changed in MicFX, newest first, in plain language. The app shows it under
 haven't seen yet. To add an entry for your change, see "Adding entries" in
 `docs/changelog.md`.
 
+## 2026-11-25
+
+- **Feedback Guard.** A Live effect that catches the mic ringing through the speakers and notches that note before it howls, while your singing goes through untouched. Ring out before the show to fix the notches for the room. (#223)
+
 ## 2026-11-24
 
 - **Align to lead.** Line a double, a harmony or a re-sung line up with the lead vocal, syllable by syllable, and optionally tune its notes to the lead's: the clip editor's Align section, or Align to lead… on a track. (#222)

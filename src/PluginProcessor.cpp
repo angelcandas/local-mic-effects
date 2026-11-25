@@ -669,6 +669,16 @@ void PluginProcessor::setChainOrder (const juce::StringArray& keys)
         placed[(size_t) i] = true;
     }
 
+    // Feedback protection always listens last, to what goes out to the speakers (a ring
+    // notched before the echo or reverb would still ring in their tails).
+    for (int i = 0; i < chain.size(); ++i)
+        if (fx::isLiveOnly (chain[i].getType()))
+            if (const auto found = std::find (order.begin(), order.end(), i); found != order.end())
+            {
+                order.erase (found);
+                order.push_back (i);
+            }
+
     chain.setOrder (order);
 }
 
@@ -680,6 +690,8 @@ juce::ValueTree PluginProcessor::captureLiveChain() const
     for (const auto index : live.getOrder())
     {
         auto& module = live[index];
+        if (fx::isLiveOnly (module.getType()))
+            continue; // feedback protection belongs to the room, not to the sound (and the DAW has none)
         // On: any of its switches, read from the parameters (the module's own values
         // only catch up in the next block).
         bool on = false;
@@ -713,7 +725,7 @@ void PluginProcessor::applyLiveChain (const juce::ValueTree& inserts)
 
     for (int m = 0; m < chain.size(); ++m)
         for (int v = 0; v < chain[m].getNumValues(); ++v)
-            if (chain[m].isSwitch (v))
+            if (chain[m].isSwitch (v) && ! Parameters::belongsToRoom (chain[m].getValueId (v)))
                 set (chain[m].getValueId (v), 0.0f);
 
     juce::StringArray order;
@@ -727,7 +739,7 @@ void PluginProcessor::applyLiveChain (const juce::ValueTree& inserts)
                     return &chain[m];
             return nullptr;
         }();
-        if (module == nullptr || order.contains (key))
+        if (module == nullptr || order.contains (key) || fx::isLiveOnly (module->getType()))
             continue; // a plug-in, or a second one of an effect: Live has one of each
 
         for (int v = 0; v < module->getNumValues(); ++v)
@@ -840,6 +852,21 @@ void PluginProcessor::getStateInformation (juce::MemoryBlock& destData)
             files.setProperty (fx::getModuleKey (module.getType()), module.getFile().getFullPathName(), nullptr);
     if (files.getNumProperties() > 0)
         tree.appendChild (files, nullptr);
+
+    // Feedback protection's fixed notches (from Ring out): the room's, kept with the session.
+    if (auto* guard = chain.find<fx::modules::FeedbackGuardModule>())
+        if (const auto fixed = guard->getGuard().getFixedNotches(); ! fixed.empty())
+        {
+            juce::ValueTree notches ("FEEDBACK_NOTCHES");
+            for (const auto& notch : fixed)
+            {
+                juce::ValueTree n ("NOTCH");
+                n.setProperty ("hz", notch.hz, nullptr);
+                n.setProperty ("cut", notch.cutDb, nullptr);
+                notches.appendChild (n, nullptr);
+            }
+            tree.appendChild (notches, nullptr);
+        }
     if (juce::JUCEApplicationBase::isStandaloneApp() && (setlist.size() > 0 || setlist.getFile() != juce::File()))
         tree.appendChild (setlist.getSnapshot(), nullptr); // the app's setlist survives a restart
     if (juce::JUCEApplicationBase::isStandaloneApp() && juce::MessageManager::existsAndIsCurrentThread())
@@ -890,6 +917,16 @@ void PluginProcessor::setStateInformation (const void* data, int sizeInBytes)
                 if (juce::JUCEApplicationBase::isStandaloneApp() && juce::MessageManager::existsAndIsCurrentThread())
                     multitrack.restoreSession (singAlong);
                 tree.removeChild (singAlong, nullptr);
+            }
+
+            if (auto* guard = chain.find<fx::modules::FeedbackGuardModule>())
+            {
+                std::vector<fx::FeedbackGuard::Notch> fixed;
+                const auto notches = tree.getChildWithName ("FEEDBACK_NOTCHES");
+                for (const auto& n : notches)
+                    fixed.push_back ({ (float) n.getProperty ("hz", 0.0f), (float) n.getProperty ("cut", 0.0f), true });
+                guard->getGuard().setFixedNotches (fixed);
+                tree.removeChild (notches, nullptr);
             }
 
             const auto files = tree.getChildWithName ("MODULE_FILES");

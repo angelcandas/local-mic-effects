@@ -51,4 +51,8 @@ struct Parameters
     struct Width      { BoolParam& on; FloatParam& amount; } width;
 
     FloatParam& outputGain;
+
+    // Values that belong to the room rather than to the sound (the mic's level, feedback
+    // protection): presets, scenes, setlist songs and saved Live chains leave them alone.
+    static bool belongsToRoom (const juce::String& parameterId);
 };
