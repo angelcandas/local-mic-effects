@@ -20873,7 +20873,10 @@ static void testFactoryChains()
             processor.applyLiveChain (inserts);
             const auto captured = processor.captureLiveChain();
             juce::StringArray want, got;
-            for (const auto& insert : inserts) if (insert.hasType ("INSERT")) want.add (insert["type"].toString());
+            for (const auto& insert : inserts)
+                if (const auto type = daw::Edit::moduleTypeFromKey (insert["type"].toString());
+                    insert.hasType ("INSERT") && ! (type && fx::isDawOnly (*type)))
+                    want.add (insert["type"].toString()); // voice repair stays in the DAW
             for (const auto& insert : captured) if (insert.hasType ("INSERT")) got.add (insert["type"].toString());
             check (want == got, name + ": loads in Live as written (" + got.joinIntoString (", ") + ")");
 

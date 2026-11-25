@@ -408,9 +408,9 @@ Under *Clean-up* in Add effect and the library (DAW only), for recorded vocals, 
 
 - **Room Echo Reduction** turns down the echo of the room the voice was recorded in (the boxy "bathroom" ring between and under the words) while the voice and its first reflections stay. With **Auto decay** on it works out how long the room rings from the moments the voice stops (the card shows it, e.g. "room 0.6 s"); switch it off to set **Decay** yourself. **Amount** sets how hard it works: 30 to 50 % sounds natural, more starts to thin the voice. Adds 21 ms.
 
-The cards show what they found while the song plays. The *Podcast and spoken word* chain now starts with Mouth De-click, Room Echo Reduction and a gentle Breath Tamer, and *Streamer and broadcast* with Mouth De-click and Breath Tamer. Loaded in Live mode, those chains leave the repair effects out (they look too far ahead for a live mic).
+The cards show what they found while the song plays. The *Podcast and spoken word* and *Streamer and broadcast* chains now start with Mouth De-click and a gentle Breath Tamer; add Room Echo Reduction yourself when the room rings. Loaded in Live mode, those chains leave the repair effects out (they look too far ahead for a live mic).
 
-![Room Echo Reduction and Breath Tamer in the Podcast chain](images/voice-repair.png)
+![Room Echo Reduction and Breath Tamer cards](images/voice-repair.png)
 
 ### Automation lanes
 

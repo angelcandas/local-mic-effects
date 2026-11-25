@@ -184,8 +184,8 @@ const std::vector<Chain>& getChains()
                 saturation (3.0f, 4.0f, 50.0f), echo (7.0f, 500.0f, 50.0f, 30.0f, 40.0f, 400.0f, 3500.0f), plate (2.5f, 30.0f, 22.0f, 0.0f),
                 trimmed (width (140.0f), 4.3f) } },
 
-            { "Podcast and spoken word", "Vocals", "Clear, even speech: clicks, noise and room echo taken out, breaths eased, a soft expander, warmth and steady level. No space",
-              { highPass (80.0f), declick (50.0f), denoise (12.0f), dereverb (35.0f), gate (-50.0f, 10.0f, 150.0f, 250.0f, false),
+            { "Podcast and spoken word", "Vocals", "Clear, even speech: clicks and noise taken out, breaths eased, a soft expander, warmth and steady level. No space",
+              { highPass (80.0f), declick (50.0f), denoise (12.0f), gate (-50.0f, 10.0f, 150.0f, 250.0f, false),
                 breath (8.0f), eq ({ .lowShelfHz = 150.0f, .lowShelfDb = 1.5f, .b1Hz = 350.0f, .b1Db = -2.0f, .b3Db = 1.5f }),
                 comp (glue, -24.0f, 3.0f, 10.0f, 150.0f, 2.0f), opto (40.0f, 2.0f), trimmed (deEss (50.0f, true), 5.6f) } },
 
