@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 230,
+ "latest": 231,
  "days": [
   {
    "date": "2026-11-25",
    "entries": [
+    {
+     "title": "Arrange with sections, and mix versions",
+     "text": "Drag a song section on the ruler to move it and its music on every track, or right-click it to duplicate or delete it: automation, tempo changes and chords go along. The new Versions button keeps your mix as a version so you can try another and switch between them to compare.",
+     "prs": [
+      231
+     ]
+    },
     {
      "title": "MIDI clock sync",
      "text": "Keep drum machines, synths and other apps in time with MicFX, or MicFX in time with them. Settings → MIDI clock: send clock from the DAW song or Live mode's tempo and looper, or follow a clock coming in (it sets Live mode's echo and looper tempo, and plays and stops the DAW song).",

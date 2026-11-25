@@ -20030,6 +20030,243 @@ static void testBounce()
     folder.deleteRecursively();
 }
 
+// Market item 18: arranger sections. Moving, duplicating and deleting a section moves its
+// music on every track, with automation, chords, pattern blocks and tempo points.
+static void testArrangement()
+{
+    std::cout << "\nArrangement sections\n";
+    using namespace daw;
+
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-arrange", {});
+    folder.createDirectory();
+    juce::AudioBuffer<float> audio (1, (int) (24.0 * sampleRate));
+    audio.clear();
+    const auto file = folder.getChildFile ("song.wav");
+    writeWav (file, audio, sampleRate);
+    const auto near = [] (double x, double y, double tolerance = 1.0e-4) { return std::abs (x - y) < tolerance; };
+
+    Edit edit;
+    auto& undo = edit.getUndoManager();
+    const auto a = (int) edit.addTrack ("Song")[ids::id];
+    const auto b = (int) edit.addTrack ("Shaker")[ids::id];
+    edit.addClip (a, file, 0.0, 20.0);
+    edit.addClip (b, file, 9.0, 2.0); // in the chorus
+    // 120 BPM: a bar is 2 s. Verse 0-8 s, chorus 8-16 s, outro 16-20 s.
+    edit.setSongSections ({ { "Verse", "verse", "#4f8cff", 0, 0.0, 8.0 }, { "Chorus", "chorus", "#ff7a45", 1, 8.0, 8.0 },
+                            { "Outro", "outro", "#7d8799", 2, 16.0, 4.0 } });
+    edit.setVolumeRide (a, { { 8.0, 0.0f }, { 12.0, -12.0f }, { 16.0, 0.0f } });
+    edit.setChords ({ { 0.0, "C" }, { 16.0, "F" }, { 24.0, "G" } });
+    const auto pattern = (int) edit.addPattern ("Beat", 4.0)[ids::id];
+    edit.addPatternClip (pattern, 16.0, 4.0); // the chorus's first two bars
+    edit.setLane (Edit::masterId, "volume", { { 8.0, 0.0f }, { 16.0, -6.0f } }); // the master dips through the chorus
+    undo.clearUndoHistory();
+
+    const auto sections = [&]
+    {
+        std::vector<std::tuple<juce::String, double, double>> out;
+        for (const auto& m : edit.getSongSections())
+            out.push_back ({ m[ids::name].toString(), (double) m[ids::time], (double) m[ids::length] });
+        return out;
+    };
+    const auto sectionId = [&] (const juce::String& name)
+    {
+        for (const auto& m : edit.getSongSections())
+            if (m[ids::name].toString() == name) return (int) m[ids::id];
+        return -1;
+    };
+    const auto clipStarts = [&] (int track)
+    {
+        std::vector<double> out;
+        double total = 0.0;
+        for (const auto& c : edit.getTrack (track))
+            if (c.hasType (ids::CLIP)) { out.push_back ((double) c[ids::start]); total += (double) c[ids::length]; }
+        std::sort (out.begin(), out.end());
+        out.push_back (total); // last: the length they cover
+        return out;
+    };
+    const auto chordAt = [&] (double beat)
+    {
+        juce::String name;
+        for (const auto& mark : edit.getChords())
+            if (mark.beat <= beat + 1.0e-6) name = mark.name;
+        return name;
+    };
+    const auto rideAt = [&] (double time) { return Edit::getRideDbAt (Edit::getVolumeRide (edit.getTrack (a)), time); };
+    const auto blockStarts = [&]
+    {
+        std::vector<double> out;
+        for (const auto& block : edit.getPatternClips())
+            out.push_back ((double) block[ids::start]);
+        std::sort (out.begin(), out.end());
+        return out;
+    };
+
+    //---------------------------------------------------------------- duplicate
+    undo.beginNewTransaction();
+    const auto copy = edit.duplicateSection (sectionId ("Chorus"));
+    auto now = sections();
+    check (copy >= 0 && now.size() == 4 && near (std::get<1> (now[2]), 16.0) && near (std::get<2> (now[2]), 8.0)
+               && std::get<0> (now[2]) == "Chorus" && near (std::get<1> (now[3]), 24.0),
+           "duplicating the chorus puts a copy right after it and pushes the outro right");
+    auto song = clipStarts (a), shaker = clipStarts (b);
+    check (near (song.back(), 28.0) && shaker.size() == 3 && near (shaker[0], 9.0) && near (shaker[1], 17.0),
+           "every track's clips are copied with it");
+    check (near (rideAt (12.0), -12.0) && near (rideAt (20.0), -12.0) && near (rideAt (16.0), 0.0, 0.05),
+           "the volume automation is copied with the section");
+    const auto master = Edit::getLane (edit.getMaster(), "volume");
+    check (near (Edit::getAutomationValueAt (master, 16.0), 0.0, 0.05) && near (Edit::getAutomationValueAt (master, 23.99), -6.0, 0.05)
+               && near (Edit::getAutomationValueAt (master, 26.0), -6.0, 0.05),
+           "so are the master's lanes");
+    check (chordAt (32.0) == "F" && chordAt (40.0) == "G" && chordAt (48.0) == "G" && chordAt (16.0) == "F",
+           "the chords are copied, and the outro keeps its chord");
+    auto blocks = blockStarts();
+    check (blocks.size() == 2 && near (blocks[0], 16.0) && near (blocks[1], 32.0), "pattern blocks are copied too");
+    undo.undo();
+    check (sections().size() == 3 && clipStarts (b).size() == 2 && blockStarts().size() == 1 && chordAt (32.0) == "G",
+           "one undo puts it all back");
+
+    //---------------------------------------------------------------- delete
+    undo.beginNewTransaction();
+    check (edit.deleteSection (sectionId ("Verse")), "delete a section");
+    now = sections();
+    shaker = clipStarts (b);
+    check (now.size() == 2 && std::get<0> (now[0]) == "Chorus" && near (std::get<1> (now[0]), 0.0) && near (shaker[0], 1.0)
+               && near (clipStarts (a).back(), 12.0) && near (rideAt (4.0), -12.0) && chordAt (0.0) == "F",
+           "deleting the verse pulls the rest of the song (clips, automation, chords) left");
+    undo.undo();
+
+    //---------------------------------------------------------------- move
+    undo.beginNewTransaction();
+    check (edit.moveSection (sectionId ("Outro"), 0.0), "move the outro to the start");
+    now = sections();
+    check (now.size() == 3 && std::get<0> (now[0]) == "Outro" && near (std::get<1> (now[1]), 4.0) && near (std::get<1> (now[2]), 12.0)
+               && near (clipStarts (b)[0], 13.0) && near (rideAt (16.0), -12.0) && chordAt (0.0) == "G" && chordAt (8.0) == "C",
+           "moving a section earlier takes its music there and the rest closes up behind it");
+    undo.undo();
+    undo.beginNewTransaction();
+    check (edit.moveSection (sectionId ("Verse"), 20.0), "move the verse to the end");
+    now = sections();
+    check (std::get<0> (now[0]) == "Chorus" && std::get<0> (now[2]) == "Verse" && near (std::get<1> (now[2]), 12.0)
+               && near (clipStarts (b)[0], 1.0) && near (blockStarts()[0], 0.0) && near (clipStarts (a).back(), 20.0),
+           "moving a section later works the same way, and nothing is lost");
+    check (! edit.moveSection (sectionId ("Verse"), 14.0), "a move onto itself does nothing");
+    undo.undo();
+
+    //---------------------------------------------------------------- tempo goes along
+    {
+        undo.beginNewTransaction();
+        edit.setTempoMap (TempoMap ({ { 0.0, 120.0, false }, { 16.0, 90.0, false } })); // the chorus at 90 BPM
+        const auto tempo = edit.getTempoMap();
+        const auto chorusStart = tempo.toSeconds (16.0), chorusLength = tempo.toSeconds (32.0) - chorusStart;
+        edit.setSongSections ({ { "Verse", "verse", {}, 0, 0.0, chorusStart }, { "Chorus", "chorus", {}, 1, chorusStart, chorusLength } });
+        undo.beginNewTransaction();
+        edit.moveSection (sectionId ("Chorus"), 0.0);
+        const auto after = edit.getTempoMap();
+        now = sections();
+        check (near (after.getBpmAtBeat (0.0), 90.0) && near (after.getBpmAtBeat (20.0), 120.0)
+                   && near (std::get<2> (now[0]), chorusLength, 1.0e-3) && near (std::get<1> (now[1]), chorusLength, 1.0e-3),
+               "a section takes its tempo along and keeps its length");
+        undo.undo();
+        undo.undo();
+    }
+
+    //---------------------------------------------------------------- by hand
+    undo.beginNewTransaction();
+    const auto bridge = edit.addSection (4.0, 8.0, "bridge");
+    now = sections();
+    check (bridge.isValid() && bridge[ids::name].toString() == "Bridge" && now.size() == 4 && near (std::get<2> (now[0]), 4.0)
+               && near (std::get<1> (now[2]), 12.0) && near (std::get<2> (now[2]), 4.0),
+           "a section made by hand cuts back the sections it overlaps");
+    edit.setSectionKind ((int) bridge[ids::id], "chorus");
+    check (bridge[ids::colour].toString() == Edit::getSectionColour ("chorus", 0), "its colour follows its kind");
+    undo.undo();
+
+    //---------------------------------------------------------------- the Range tool's time edits
+    undo.beginNewTransaction();
+    edit.insertTime (8.0, 2.0);
+    check (near (std::get<1> (sections()[1]), 10.0) && near (rideAt (14.0), -12.0) && chordAt (20.0) == "F",
+           "insert time pushes the sections, automation and chords right");
+    undo.undo();
+
+    folder.deleteRecursively();
+}
+
+// Market item 18, part 2: mix versions, snapshots of the mix to switch between and compare.
+static void testMixVersions()
+{
+    std::cout << "\nMix versions\n";
+    using namespace daw;
+
+    Edit edit;
+    auto& undo = edit.getUndoManager();
+    const auto a = (int) edit.addTrack ("Voice")[ids::id];
+    const auto b = (int) edit.addTrack ("Guitar")[ids::id];
+    const auto verb = (int) edit.addReturn ("Verb", fx::ModuleType::reverb)[ids::id];
+    edit.setTrackVolume (a, -3.0f);
+    edit.setSend (a, verb, -12.0f);
+    edit.addInsert (a, fx::ModuleType::eq);
+    edit.setVolumeRide (b, { { 0.0, 0.0f }, { 4.0, -6.0f } });
+    undo.clearUndoHistory();
+
+    const auto inserts = [&] (int track) { return Edit::getInserts (edit.getTrack (track)).getNumChildren(); };
+    const auto volume = [&] (int track) { return (float) edit.getTrack (track)[ids::volume]; };
+
+    undo.beginNewTransaction();
+    const auto second = edit.addMixVersion();
+    const auto versions = edit.getMixVersions();
+    check (versions.size() == 2 && versions[0][ids::name].toString() == "Mix 1" && edit.getCurrentMixVersion() == (int) second[ids::id]
+               && edit.getPreviousMixVersion() == (int) versions[0][ids::id],
+           "the first new version keeps the mix so far as Mix 1 and carries on in Mix 2");
+
+    // Mix 2: louder voice, no EQ, no reverb send, a compressor on the guitar, no reverb return at all.
+    undo.beginNewTransaction();
+    edit.setTrackVolume (a, 2.0f);
+    edit.removeInsert ((int) Edit::getInserts (edit.getTrack (a)).getChild (0)[ids::id]);
+    edit.addInsert (b, fx::ModuleType::compressor);
+    edit.setVolumeRide (b, {});
+    edit.removeReturn (verb);
+    check (! Edit::getSend (edit.getTrack (a), verb).isValid(), "(the send went with the return)");
+
+    undo.beginNewTransaction();
+    check (edit.recallMixVersion ((int) versions[0][ids::id]), "switch back to Mix 1");
+    check (std::abs (volume (a) + 3.0f) < 1.0e-4f && inserts (a) == 1 && inserts (b) == 0 && edit.getReturn (verb).isValid()
+               && Edit::getSend (edit.getTrack (a), verb).isValid() && Edit::getVolumeRide (edit.getTrack (b)).size() == 2,
+           "Mix 1 brings back its faders, effects, sends, returns and lanes");
+
+    undo.beginNewTransaction();
+    check (edit.recallMixVersion (edit.getPreviousMixVersion()), "compare: back to Mix 2");
+    check (std::abs (volume (a) - 2.0f) < 1.0e-4f && inserts (a) == 0 && inserts (b) == 1 && ! edit.getReturn (verb).isValid()
+               && Edit::getVolumeRide (edit.getTrack (b)).empty(),
+           "switching away kept Mix 2's changes in it");
+
+    undo.undo();
+    check (std::abs (volume (a) + 3.0f) < 1.0e-4f && edit.getReturn (verb).isValid(), "a switch is one undo step");
+    undo.redo();
+
+    // A track a version doesn't know keeps its own mix; it can't keep a send to a return that's gone.
+    const auto noReverb = edit.captureMix(); // Mix 2 as it is: no reverb return
+    undo.beginNewTransaction();
+    const auto c = (int) edit.addTrack ("Keys")[ids::id];
+    edit.setTrackVolume (c, -9.0f);
+    edit.recallMixVersion (edit.getPreviousMixVersion()); // Mix 1, which was made before Keys
+    check (std::abs (volume (c) + 9.0f) < 1.0e-4f, "a track the version doesn't know keeps its own fader");
+    edit.setSend (c, verb, -6.0f);
+    edit.applyMix (noReverb);
+    check (std::abs (volume (c) + 9.0f) < 1.0e-4f && ! Edit::getSend (edit.getTrack (c), verb).isValid(),
+           "and loses its send to a return the version doesn't have");
+
+    // Saved and opened again (as text, like project.xml): the versions survive.
+    const auto copy = juce::ValueTree::fromXml (*edit.getState().createXml());
+    check (copy.getChildWithName (ids::MIXES).getNumChildren() == 2, "the versions are saved with the project");
+
+    undo.beginNewTransaction();
+    edit.renameMixVersion ((int) second[ids::id], "Loud vocal");
+    check (edit.getMixVersions()[1][ids::name].toString() == "Loud vocal", "rename a version");
+    edit.removeMixVersion ((int) versions[0][ids::id]);
+    check (edit.getMixVersions().size() == 1 && edit.getCurrentMixVersion() < 0 && edit.getPreviousMixVersion() == (int) second[ids::id],
+           "delete the current version: the mix stays as it is, and the other one is still there to compare with");
+}
+
 static void testTimeRange()
 {
     std::cout << "\nArrangement time range commands\n";
@@ -22372,6 +22609,16 @@ int main()
     juce::ScopedJuceInitialiser_GUI juce;
     micfx::inst::setKitStarterEnabled (false); // the tests count on an empty Kit; testStarterContent turns it on for itself
 
+    // MICFX_TEST_ONLY=arrange: just the arranger sections and mix versions.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "arrange")
+    {
+        testTimeRange();
+        testArrangement();
+        testMixVersions();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=clock: just MIDI clock sync.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "clock")
     {
@@ -22601,6 +22848,7 @@ int main()
         testLiveHistory();
         testSingAlongSession();
         testTimeRange();
+        testArrangement();
         testBounce();
         testFreeze();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
@@ -22780,6 +23028,8 @@ int main()
     testLiveHistory();
     testSingAlongSession();
     testTimeRange();
+    testArrangement();
+    testMixVersions();
     testBounce();
     testFreeze();
     testSetlist();

@@ -448,6 +448,15 @@ Automation makes a setting move over time: the voice comes up in the chorus, the
 - **Thin points** (right-click a lane) keeps the same curve with fewer points.
 - **Automation follows clips** (right-click a lane; on by default): moving a clip takes the automation under it along, and duplicating, Ctrl+dragging, copying and pasting a clip brings a copy. Effect lanes stay on their own track.
 
+### Mix versions
+
+Keep a mix and try another without losing it: the **Versions** button in the toolbar.
+
+- **New version from this mix**: the first time, the mix so far is kept as **Mix 1** and you carry on in **Mix 2**. Change anything: faders, pan, mute and solo, sends, effects, macros, returns and groups, the master, automation lanes.
+- Pick a version in the menu to hear it. The version you leave keeps what you changed in it, so switching never loses work. **Compare with…** switches back to the version before, again and again, to hear the two against each other (it works while the song plays).
+- **Rename** or **Delete** the current version from the same menu. Versions are saved with the project; each switch is one undo step.
+- A version holds the mix, not the song: clips, takes, instruments and the arrangement are the same in every version. A track added later keeps its own settings in older versions (minus sends to returns they don't have).
+
 ## 4.6 Projects and export
 
 - A **project** is a folder (`My Song.micfx/`) with `project.xml`, the audio, autosave backups and exports. It moves and backs up as one thing. After a crash you are offered the newest autosave.
@@ -587,6 +596,15 @@ The thresholds are a first guess for each style. Treat a finding as a second opi
 ## 4.13 Song map
 
 **Song map** (toolbar button, or the clip menu's **Find song sections…**) finds the beats, bars, tempo and sections (intro, verse, chorus…) of a song and marks the sections on the ruler as coloured ranges. Right-click a section to **Loop this section**. **Follow the performance** can make the project's tempo map follow a recording played without a click.
+
+### Arranging with sections
+
+Sections are the coloured ranges on the ruler: from the song map, or made by hand. Right-click the ruler for **Add a section here** (up to 8 bars, to the next section), or mark a stretch with the Range tool and pick **Make it a song section**.
+
+- **Drag a section's label** to move the section and its music on every track to another section's edge; a line shows where it lands, and the rest of the song closes up behind it. **Alt+drag** moves only the label.
+- **Right-click a section**: **Duplicate section** (a copy right after it, the rest of the song moves right), **Move before / after** its neighbour, **Delete section and its music** (the song closes the gap), its **kind** (intro, verse, chorus, bridge, outro, part; it sets the colour), **Loop this section**, and **Remove the section label** (the music stays).
+- **Drag the end** of a section's range to make it longer or shorter (the label only).
+- Everything goes along: clips (cut at the section's edges, MIDI and take lanes too), automation lanes of the tracks, returns and master, tempo changes, the chord track, markers and pattern blocks. Each is one undo step. **Delete time** and **Insert silence** on a range now move automation, tempo and chords the same way.
 
 
 

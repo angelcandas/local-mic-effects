@@ -425,6 +425,22 @@ namespace
             { "addPatternClips", "Draw patterns" }, { "removePatternClips", "Erase pattern blocks" },
             { "splitPatternClip", "Cut pattern block" },
         };
+        if (command == "mixVersion")
+        {
+            static const std::map<juce::String, const char*> actions {
+                { "add", "New mix version" }, { "recall", "Switch mix version" }, { "compare", "Compare mix versions" },
+                { "update", "Update mix version" }, { "rename", "Rename mix version" }, { "remove", "Delete mix version" } };
+            const auto it = actions.find (args["action"].toString());
+            return it != actions.end() ? it->second : "Mix version";
+        }
+        if (command == "section")
+        {
+            static const std::map<juce::String, const char*> actions {
+                { "add", "Add section" }, { "range", "Resize section" }, { "kind", "Section kind" }, { "move", "Move section" },
+                { "duplicate", "Duplicate section" }, { "delete", "Delete section" } };
+            const auto it = actions.find (args["action"].toString());
+            return it != actions.end() ? it->second : "Section";
+        }
         if (command == "timeRange")
         {
             static const std::map<juce::String, const char*> actions {
@@ -1121,6 +1137,14 @@ juce::var DawBridge::describeSession()
         { "key", object ({ { "key", edit.getKey() }, { "minor", edit.isKeyMinor() },
                            { "name", analysis::KeyEstimate::getName (edit.getKey(), edit.isKeyMinor()) } }) },
         { "chords", describeChords() },
+        // Mix versions (Edit::addMixVersion): { current, previous (ids, -1: none), versions: [{ id, name }] }.
+        { "mixes", [this]
+          {
+              juce::Array<juce::var> versions;
+              for (const auto& mix : edit.getMixVersions())
+                  versions.add (object ({ { "id", (int) mix[ids::id] }, { "name", mix[ids::name].toString() } }));
+              return object ({ { "current", edit.getCurrentMixVersion() }, { "previous", edit.getPreviousMixVersion() }, { "versions", versions } });
+          }() },
         { "markers", [this]
           {
               juce::Array<juce::var> markers;
@@ -2350,32 +2374,6 @@ juce::var DawBridge::editTimeRange (const juce::var& args)
                 if (clipStart (id) >= from - eps && clipEnd (id) <= to + eps)
                     edit.removeClip (id);
     };
-    // Moves everything that starts at or after `from` by `delta` seconds: clips, markers, pattern blocks.
-    const auto shiftFrom = [&] (double from, double delta)
-    {
-        for (const auto& track : tracks)
-        {
-            auto ids = clipsOf (track);
-            if (delta > 0.0) std::reverse (ids.begin(), ids.end()); // move the last first so nothing collides
-            for (const auto id : ids)
-                if (clipStart (id) >= from - eps)
-                    edit.moveClip (id, juce::jmax (0.0, clipStart (id) + delta));
-        }
-        for (const auto& marker : edit.getMarkers())
-            if ((double) marker[ids::time] >= from - eps)
-                edit.setMarkerTime ((int) marker[ids::id], juce::jmax (0.0, (double) marker[ids::time] + delta));
-        const auto map = edit.getTempoMap();
-        const auto fromBeats = map.toBeats (from);
-        for (const auto& block : edit.getPatternClips())
-        {
-            const auto startBeats = (double) block[ids::start];
-            if (startBeats < fromBeats - eps)
-                continue;
-            const auto newStart = map.toBeats (juce::jmax (0.0, map.toSeconds (startBeats) + delta));
-            edit.setPatternClip ((int) block[ids::id], newStart, (double) block[ids::length], (int) block[ids::row]);
-        }
-    };
-
     juce::Array<juce::var> made;
     if (action == "split")
     {
@@ -2408,23 +2406,11 @@ juce::var DawBridge::editTimeRange (const juce::var& args)
     }
     else if (action == "deleteTime")
     {
-        clear (start, end);
-        for (const auto& marker : edit.getMarkers())
-            if ((double) marker[ids::time] >= start - eps && (double) marker[ids::time] < end - eps)
-                edit.removeMarker ((int) marker[ids::id]);
-        const auto map = edit.getTempoMap();
-        for (const auto& block : edit.getPatternClips())
-        {
-            const auto at = map.toSeconds ((double) block[ids::start]);
-            if (at >= start - eps && at < end - eps)
-                edit.removePatternClip ((int) block[ids::id]);
-        }
-        shiftFrom (end, -length);
+        edit.deleteTime (start, end); // automation, tempo points and chords go along (see Edit::rearrange)
     }
     else if (action == "insertSilence")
     {
-        splitAt (start);
-        shiftFrom (start, length);
+        edit.insertTime (start, length);
     }
     else
     {
@@ -7573,6 +7559,62 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
         return;
     }
 
+    // Mix versions (Edit::addMixVersion). { action, id?, name? }: add -> { ok, id }, recall,
+    // compare (recall the one before), update (store the live mix into it), rename, remove.
+    if (command == "mixVersion")
+    {
+        const auto action = args["action"].toString();
+        auto result = object ({ { "ok", true }, { "error", juce::String() } });
+        if (action == "add")
+            result.getDynamicObject()->setProperty ("id", edit.addMixVersion (args["name"].toString())[ids::id]);
+        else if (action == "recall" || action == "compare")
+        {
+            const auto target = action == "compare" ? edit.getPreviousMixVersion() : id;
+            if (! edit.recallMixVersion (target))
+                result = error (action == "compare" ? "Make a second mix version to compare with." : "That mix version isn't there any more.");
+        }
+        else if (action == "update")  edit.updateMixVersion (id);
+        else if (action == "rename")  edit.renameMixVersion (id, args["name"].toString());
+        else if (action == "remove")  edit.removeMixVersion (id);
+        else result = error ("Unknown mix version command: " + action);
+        sessionChanged = true;
+        complete (result);
+        return;
+    }
+
+    // Arranger sections (MARKERs with a length, see Edit::rearrange). { action, id, ... }:
+    //   add {start, length, kind?, name?} -> { ok, id }   range {start, length}   kind {kind}
+    //   move {to: seconds}   duplicate -> { ok, id }   delete (the section's music goes too)
+    if (command == "section")
+    {
+        const auto action = args["action"].toString();
+        const auto done = [this] (bool ok, int newId, const juce::String& message)
+        {
+            if (ok) sessionChanged = true;
+            return object ({ { "ok", ok }, { "error", ok ? juce::String() : message }, { "id", newId } });
+        };
+        if (action == "add")
+        {
+            const auto made = edit.addSection (args["start"], args["length"], args["kind"].toString(), args["name"].toString());
+            complete (done (made.isValid(), made.isValid() ? (int) made[ids::id] : -1, "Mark a stretch of the song first."));
+            return;
+        }
+        auto isSection = false;
+        for (const auto& marker : edit.getSongSections())
+            isSection = isSection || (int) marker[ids::id] == id;
+        if (! isSection)
+        {
+            complete (done (false, -1, "That isn't a song section."));
+            return;
+        }
+        if (action == "range")     { edit.setSectionRange (id, args["start"], args["length"]); complete (done (true, id, {})); return; }
+        if (action == "kind")      { edit.setSectionKind (id, args["kind"].toString()); complete (done (true, id, {})); return; }
+        if (action == "move")      { complete (done (edit.moveSection (id, args["to"]), id, "Drop it outside the section itself.")); return; }
+        if (action == "duplicate") { const auto copy = edit.duplicateSection (id); complete (done (copy >= 0, copy, "Couldn't copy the section.")); return; }
+        if (action == "delete")    { complete (done (edit.deleteSection (id), -1, "Couldn't delete the section.")); return; }
+        complete (done (false, -1, "Unknown section command: " + action));
+        return;
+    }
     if (command == "addMarker")    { complete (edit.addMarker (args["time"], args["name"].toString())[ids::id]); return; }
     if (command == "removeMarker") { edit.removeMarker (id); ok(); return; }
     if (command == "setMarker")
