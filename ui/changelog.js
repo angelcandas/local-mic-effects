@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 225,
+ "latest": 227,
  "days": [
   {
    "date": "2026-11-25",
    "entries": [
+    {
+     "title": "Sidechain",
+     "text": "A compressor, noise gate or dynamic EQ can listen to another track: music that ducks under your voice, a bass that makes room for the kick, guitars that dip only where the voice sits. Pick the track under Listens to on the effect.",
+     "prs": [
+      227
+     ]
+    },
     {
      "title": "MIDI effects and velocity lane",
      "text": "Put an arpeggiator, a chord maker or a scale lock before a MIDI track's instrument: arpeggios on the beat, the song key's chords from single notes, wrong notes kept in key. The piano roll gets a Velocity lane to draw how hard each note plays.",
