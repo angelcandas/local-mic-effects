@@ -21665,10 +21665,10 @@ static void testVocoder()
 // Voice repair (VoiceRepair.h): breaths turned down, mouth clicks rebuilt.
 namespace repairtest
 {
-    constexpr double rate = 48000.0;
+    static constexpr double rate = 48000.0;
 
     // A sung vowel-ish tone: 200 Hz with 20 falling harmonics and a little vibrato.
-    std::vector<float> voice (double seconds, float rmsDb, double f0 = 200.0)
+    static std::vector<float> voice (double seconds, float rmsDb, double f0 = 200.0)
     {
         std::vector<float> out ((size_t) (seconds * rate));
         auto phase = 0.0;
@@ -21689,7 +21689,7 @@ namespace repairtest
     }
 
     // Noise through a band (Hz), at an RMS level.
-    std::vector<float> noise (double seconds, float rmsDb, double lowHz, double highHz, int seed)
+    static std::vector<float> noise (double seconds, float rmsDb, double lowHz, double highHz, int seed)
     {
         juce::Random random (seed);
         fx::Biquad hp, lp;
@@ -21705,10 +21705,10 @@ namespace repairtest
         return out;
     }
 
-    void append (std::vector<float>& to, const std::vector<float>& part) { to.insert (to.end(), part.begin(), part.end()); }
+    static void append (std::vector<float>& to, const std::vector<float>& part) { to.insert (to.end(), part.begin(), part.end()); }
 
     // Runs a module over a mono signal in 512-sample blocks and takes its delay back out.
-    std::vector<float> run (fx::Module& module, const std::vector<float>& input)
+    static std::vector<float> run (fx::Module& module, const std::vector<float>& input)
     {
         module.prepare ({ rate, 512, 1 });
         const auto latency = module.getLatencySamples();
@@ -21724,15 +21724,15 @@ namespace repairtest
         return { padded.begin() + latency, padded.begin() + latency + (std::ptrdiff_t) input.size() };
     }
 
-    float levelDb (const std::vector<float>& x, double from, double to)
+    static float levelDb (const std::vector<float>& x, double from, double to)
     {
         const auto a = (size_t) (from * rate), b = std::min (x.size(), (size_t) (to * rate));
         auto sum = 0.0;
         for (auto n = a; n < b; ++n) sum += (double) x[n] * x[n];
-        return (float) (10.0 * std::log10 (sum / (double) juce::jmax<size_t> (1, b - a) + 1.0e-20));
+        return (float) (10.0 * std::log10 (sum / (double) std::max<size_t> (1, b - a) + 1.0e-20));
     }
 
-    std::unique_ptr<fx::Module> make (fx::ModuleType type, std::initializer_list<std::pair<const char*, float>> values)
+    static std::unique_ptr<fx::Module> make (fx::ModuleType type, std::initializer_list<std::pair<const char*, float>> values)
     {
         auto module = fx::createModule (type);
         for (const auto& [id, value] : values)
