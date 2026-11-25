@@ -207,6 +207,33 @@ public:
     void setPatternMode (int patternIdOrNone);
     int getPatternMode() const noexcept { return patternMode; }
 
+    //==============================================================================
+    // Clip launcher (Edit's SLOTs). A track that launches a slot leaves its timeline: it plays
+    // the slot's clip as a loop (or once) from the launch on, until another slot, a stop
+    // (silence: the track stays on the launcher) or "Back to song". Launches, stops and
+    // Back to song wait for the next launch quantize line (Edit::getLaunchQuantize) on the
+    // timeline's beats, so slots launched together start together and in time with the song;
+    // with the transport stopped they start it and play at once. Stopping the transport
+    // stops the slots (their tracks stay on the launcher). Changes fade over a few ms.
+    // A slot's loop is its beats at the tempo where the song starts. Realtime engines only
+    // (exports play the song). Message thread unless noted.
+    static constexpr int noLaunch = -1, launchStop = -2, launchSong = -3;
+    void launchSlot (int trackId, int slotId);
+    void stopSlot (int trackId);
+    void launchScene (int row);  // every track: its slot in the row, or a stop where there's none
+    void stopAllSlots();
+    void backToSong();           // every track on the launcher goes back to its timeline
+
+    struct LaunchState
+    {
+        int playing = -1;        // the slot playing, or -1
+        int queued = noLaunch;   // waiting for the quantize line: a slot id, launchStop or launchSong
+        bool onLauncher = false; // the track plays the launcher, not its timeline
+        float progress = 0.0f;   // through the playing slot's loop, 0..1
+    };
+    LaunchState getLaunchState (int trackId) const;
+    bool isAnyOnLauncher() const;
+
     // Pattern recording (the looper): startRecording() in pattern mode records the MIDI
     // input into the pattern's parts for the armed MIDI tracks while it loops, pass after
     // pass. Each note goes into the pattern as soon as it ends (so it plays from the next
@@ -338,6 +365,7 @@ private:
         std::bitset<128> ccTouched;         // controllers the timeline has sent (put back when it stops)
         bool bendTouched = false, pressureTouched = false;
         juce::int64 nextBlock = -1;         // where playback would carry on; else it jumped
+
     };
 
     struct MidiEvent
@@ -414,9 +442,46 @@ private:
         bool automating = false;
     };
 
+    // A track's clip launcher, kept across graphs and strips (by track id). The message
+    // thread asks with `request` (a slot id, launchStop or launchSong; `requestNow` first for
+    // no wait); the audio thread runs the rest and reports in the atomics below it.
+    struct Launch
+    {
+        std::atomic<int> request { noLaunch };
+        std::atomic<bool> requestNow { false };
+        std::atomic<int> playingSlot { -1 }, queuedSlot { noLaunch };
+        std::atomic<bool> onLauncherNow { false };
+        std::atomic<float> progress { 0.0f };
+
+        // Audio thread.
+        bool onLauncher = false;
+        int slot = -1;                 // playing
+        juce::int64 phase = 0;         // samples into it (< 0: not started yet, MIDI latency)
+        int pending = noLaunch;        // waiting for `fireAt` (timeline samples)
+        juce::int64 fireAt = 0, requestedAt = 0;
+        int fadeSlot = -1;             // the slot before, fading out
+        juce::int64 fadePhase = 0;
+        float fadeGain = 0.0f;
+        float timelineGain = 1.0f;     // the timeline's clips, fading out or back in
+        bool wasPlaying = false;
+    };
+
+    // A launcher slot as it plays: its clip from 0 (audio) or its events (MIDI; times in
+    // samples from the loop's start, in order), and its loop length in samples.
+    struct SlotPlay
+    {
+        int id = -1;
+        juce::int64 loopLength = 1;
+        bool loop = true;
+        Clip clip;                       // audio tracks (no audio: silent)
+        std::vector<MidiEvent> events;   // MIDI tracks
+    };
+
     struct Track : Automation
     {
         std::shared_ptr<Strip> strip;
+        std::shared_ptr<Launch> launch;
+        std::vector<SlotPlay> slots;     // the clip launcher's
         std::vector<Send> sends;
         int output = -1; // index into Graph::returns, or -1 for the master
         std::vector<Clip> clips;
@@ -465,7 +530,21 @@ private:
         // (samples on the timeline) and the chord (Chord::pack). It drives the harmonies
         // instead of listening; held notes still win.
         std::vector<std::pair<juce::int64, int>> chordTrack;
+
+        juce::AudioBuffer<float> launchScratch; // fades between the timeline and the launcher (blockSize long)
+        double launchQuantize = 4.0;            // beats between launch lines (0: none)
     };
+
+    // Audio thread: a track's launcher requests picked up (and when they fire), the launcher
+    // running at a block's start, and its audio and MIDI.
+    void pickUpLaunch (Graph&, Track&, juce::int64 blockStart) noexcept;
+    bool runLaunch (Track&, bool isPlaying, juce::int64 blockStart) noexcept; // true: what it plays changed
+    static const SlotPlay* findSlot (const Track&, int slotId) noexcept;
+    static void renderSlotAudio (const SlotPlay&, juce::int64 phase, juce::AudioBuffer<float>&, int numSamples) noexcept;
+    void renderLaunchAudio (Graph&, Track&, bool isPlaying, juce::int64 blockStart, int numSamples) noexcept;
+    static void addSlotMidi (Track&, juce::MidiBuffer&, bool fresh, int numSamples) noexcept;
+    static void advanceLaunch (Track&, int numSamples) noexcept;
+    void publishLaunch (Track&) noexcept;
 
     void followChords (Graph&, bool isPlaying, juce::int64 blockStart, int numSamples) noexcept;
 
@@ -488,7 +567,7 @@ private:
             for (const auto& macro : child)
                 if (macro.hasProperty (ids::automation))
                     return true;
-        return ! (child.hasType (ids::MARKER) || child.hasType (ids::MACROS));
+        return ! (child.hasType (ids::MARKER) || child.hasType (ids::MACROS) || child.hasType (ids::SCENE));
     }
     void valueTreeChildAdded (juce::ValueTree& parent, juce::ValueTree& child) override        { if (isPlayed (parent, child)) requestRebuild(); }
     void valueTreeChildRemoved (juce::ValueTree& parent, juce::ValueTree& child, int) override { if (child.hasType (ids::CLIP)) previews.erase ((int) child[ids::id]); if (isPlayed (parent, child)) requestRebuild(); }
@@ -514,7 +593,7 @@ private:
     static void renderClip (const Clip&, juce::AudioBuffer<float>&, juce::int64 blockStart, int numSamples) noexcept;
     void renderBlock (Graph&, juce::AudioBuffer<float>& output, int outputOffset, int numChannels, int numSamples,
                       const float* const* inputs, int numInputs, const juce::MidiBuffer* midi, int midiOffset) noexcept;
-    void renderInstrument (Track&, const TempoMap&, bool isPlaying, bool fresh, juce::int64 blockStart, int numSamples,
+    void renderInstrument (Track&, const TempoMap&, bool isPlaying, bool fresh, bool launchChanged, juce::int64 blockStart, int numSamples,
                            const juce::MidiBuffer* midi, int midiOffset) noexcept;
     void recordMidi (const juce::MidiBuffer&, int midiOffset, int numSamples, juce::int64 blockStart) noexcept;
     void drainRecordedMidi();
@@ -536,6 +615,8 @@ private:
     int blockSize = 512;
 
     std::map<int, std::shared_ptr<Strip>> strips; // message thread: the current strip per id
+    std::map<int, std::shared_ptr<Launch>> launches; // message thread: each track's launcher
+    void requestLaunch (int trackId, int code, bool now);
 
     // While rebuild() runs: every insert module of the graph being replaced, by insert id,
     // with the INSERT it belongs to. A new chain takes over the module of an INSERT that
