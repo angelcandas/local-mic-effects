@@ -12,7 +12,10 @@
 //   the song key's rows are tinted, its root a little more (Song key panel)
 //   under each chord of the chord track, its notes' rows are tinted (gold), the root more
 //
-// Under the roll, a controller lane (picked in the head: mod wheel, expression, pitch bend,
+// Under the roll, a lane (picked in the head). Velocity: a bar per note; drag across the bars
+// to draw velocities (the notes under the stroke take the height you draw), or drag a selected
+// note's bar up or down to change every selected note by the same amount; one "editNotes" per
+// gesture. A controller lane (mod wheel, expression, pitch bend,
 // pressure, any CC) shows the clip's CTRL points as a stepped line. Drag on empty space to
 // draw (it replaces the points under the stroke), drag a point to move it, double-click or
 // Delete to remove it. One "editControllers" command (one undo step) per gesture.
@@ -33,7 +36,8 @@ export const noteName = (pitch) => `${NAMES[pitch % 12]}${Math.floor(pitch / 12)
 
 const LANE_HEIGHT = 110;   // px
 const LANES = [
-  { id: "off", name: "Controller lane: off" },
+  { id: "off", name: "Lane: off" },
+  { id: "velocity", name: "Velocity", kind: "velocity", number: 0 },
   { id: "cc:1", name: "Mod wheel (CC 1)", kind: "cc", number: 1 },
   { id: "cc:11", name: "Expression (CC 11)", kind: "cc", number: 11 },
   { id: "cc:7", name: "Volume (CC 7)", kind: "cc", number: 7 },
@@ -63,7 +67,7 @@ export class PianoRoll {
     this.notes = clip.notes.map((n) => ({ ...n }));
     this.hasLanes = Array.isArray(clip.controllers); // not for a pattern's part
     this.controllers = (clip.controllers ?? []).map((p) => ({ ...p }));
-    this.lane = this.hasLanes ? savedLane : "off";
+    this.lane = this.hasLanes || savedLane === "velocity" ? savedLane : "off";
     this.laneSelected = new Set();
     this.selected = new Set();
     this.grid = savedGrid;
@@ -162,9 +166,9 @@ export class PianoRoll {
                 tool("▼", "Down a semitone (↓; Shift+↓ an octave)", () => this.transpose(-1)),
                 tool("Delete", "Delete the selected notes (Delete)", () => this.removeSelected()));
 
-    if (this.hasLanes) {
+    {
       this.laneSelect = html("select", "dropdown roll-lane-select");
-      this.laneSelect.title = "A controller lane under the notes: draw mod wheel, expression, pitch bend...";
+      this.laneSelect.title = this.hasLanes ? "A lane under the notes: draw velocities, mod wheel, expression, pitch bend..." : "A lane under the notes: draw their velocities";
       this.laneSelect.addEventListener("change", () => {
         this.laneSelected.clear();
         if (this.laneSelect.value === "other") { this.laneNumber.hidden = false; this.laneNumber.focus(); return; }
@@ -185,7 +189,7 @@ export class PianoRoll {
       this.laneRow.append(this.laneSelect, this.laneNumber);
       this.fillLaneSelect();
       head.append(title, this.instrumentRow, row1, row2, velocity, this.laneRow);
-    } else head.append(title, this.instrumentRow, row1, row2, velocity);
+    }
 
     this.hint = html("p", "panel-caption roll-hint", "Click to add notes · drag to move · drag the end to resize · double-click deletes");
     head.append(this.hint);
@@ -199,9 +203,11 @@ export class PianoRoll {
     const extra = [...new Set(this.controllers.map(laneId))].filter((id) => !known.has(id)).sort();
     if (!known.has(this.lane) && !extra.includes(this.lane) && this.lane.startsWith("cc:")) extra.push(this.lane);
     this.laneSelect.replaceChildren();
-    for (const lane of LANES) this.laneSelect.append(new Option(lane.name, lane.id));
-    for (const id of extra) this.laneSelect.append(new Option(`CC ${id.slice(3)}`, id));
-    this.laneSelect.append(new Option("Other CC…", "other"));
+    for (const lane of LANES) if (this.hasLanes || lane.id === "off" || lane.id === "velocity") this.laneSelect.append(new Option(lane.name, lane.id));
+    if (this.hasLanes) {
+      for (const id of extra) this.laneSelect.append(new Option(`CC ${id.slice(3)}`, id));
+      this.laneSelect.append(new Option("Other CC…", "other"));
+    }
     this.laneSelect.value = this.lane;
   }
 
@@ -534,8 +540,10 @@ export class PianoRoll {
     c.fillStyle = "rgba(255,255,255,0.16)";
     c.fillRect(KEYS, Math.round(yRest), width - KEYS, 1);
 
+    if (spec.kind === "velocity") this.drawVelocities(c, width, height);
+
     // The points as a stepped line with a faint fill; what a stroke is drawing replaces its range.
-    let points = this.lanePoints();
+    let points = spec.kind === "velocity" ? [] : this.lanePoints();
     const stroke = this.gesture?.type === "lane-draw" ? this.gesture : null;
     if (stroke?.points.length) {
       const t0 = stroke.points[0].time, t1 = stroke.points[stroke.points.length - 1].time;
@@ -589,7 +597,7 @@ export class PianoRoll {
     c.fillRect(0, 0, KEYS, height);
     c.fillStyle = "#9aa0b4";
     c.font = "9px system-ui, sans-serif";
-    c.fillText(spec.kind === "cc" ? `CC ${spec.number}` : spec.kind === "bend" ? "Bend" : "Press.", 4, 12);
+    c.fillText(spec.kind === "cc" ? `CC ${spec.number}` : spec.kind === "bend" ? "Bend" : spec.kind === "velocity" ? "Vel" : "Press.", 4, 12);
     c.fillText(String(hi), 4, 6 + 18);
     c.fillText(String(rest), 4, Math.min(height - 4, Math.round(yRest) + 3));
     if (spec.kind === "bend") c.fillText(String(lo), 4, height - 4);
@@ -597,9 +605,99 @@ export class PianoRoll {
     c.fillRect(KEYS - 1, 0, 1, height);
   }
 
+  //============================================================================ velocity lane
+  // The notes' bars: one per note at its start, as tall as its velocity (selected: white).
+  drawVelocities(c, width, height) {
+    const clip = this.clip;
+    const stroke = this.gesture?.type === "velocity" ? this.gesture : null;
+    c.save();
+    c.beginPath();
+    c.rect(KEYS, 0, width - KEYS, height);
+    c.clip();
+    const notes = [...this.notes].sort((a, b) => a.time - b.time || a.pitch - b.pitch);
+    for (const n of notes) {
+      const x = Math.round(this.xOf(n.time)) + 0.5;
+      if (x < KEYS - 4 || x > width + 4) continue;
+      const velocity = stroke?.values.get(n.id) ?? n.velocity;
+      const y = this.laneY(velocity, "velocity", height);
+      const inside = n.time >= clip.offset && n.time < clip.offset + clip.length;
+      const chosen = this.selected.has(n.id);
+      c.globalAlpha = inside ? 1 : 0.4;
+      c.fillStyle = chosen ? "#ffffff" : this.colour;
+      c.fillRect(x - 1, y, 2, Math.max(1, this.laneY(0, "velocity", height) - y));
+      c.globalAlpha = inside ? 0.25 : 0.1;
+      const end = this.xOf(n.time + n.length);
+      c.fillRect(x, y, Math.max(0, Math.min(end, width) - x), 2);
+      c.globalAlpha = inside ? 1 : 0.4;
+      c.beginPath();
+      c.arc(x, y, 3, 0, Math.PI * 2);
+      c.fill();
+    }
+    c.globalAlpha = 1;
+    c.restore();
+  }
+
+  // The note whose bar is under the pointer (its top, or its stem), or null.
+  velocityNoteAt({ x, y }) {
+    const height = this.laneView.clientHeight;
+    let best = null, bestDistance = 6;
+    for (const n of this.notes) {
+      const nx = this.xOf(n.time), top = this.laneY(n.velocity, "velocity", height);
+      const d = y >= top - 4 ? Math.abs(nx - x) : Math.hypot(nx - x, top - y);
+      if (d <= bestDistance) { best = n; bestDistance = d; }
+    }
+    return best;
+  }
+
+  onVelocityDown(event, where) {
+    const height = this.laneView.clientHeight;
+    const hit = this.velocityNoteAt(where);
+    const g = { type: "velocity", values: new Map() };
+    this.gesture = g;
+
+    if (hit && this.selected.has(hit.id) && this.selected.size > 1) {
+      // A selected note's bar: every selected note up or down by the same amount.
+      const chosen = this.notes.filter((n) => this.selected.has(n.id));
+      const top = this.laneY(hit.velocity, "velocity", height);
+      this.trackLane(event, (dx, dy) => {
+        const delta = this.laneValue(top + dy, "velocity", height) - hit.velocity;
+        for (const n of chosen) g.values.set(n.id, clamp(n.velocity + delta, 1, 127));
+        this.draw();
+      }, () => this.endVelocity(g));
+      return;
+    }
+
+    // Draw: each note the stroke passes over takes the stroke's height there.
+    let lastX = where.x;
+    const paint = (at) => {
+      const value = clamp(this.laneValue(at.y, "velocity", height), 1, 127);
+      const from = Math.min(lastX, at.x) - 4, to = Math.max(lastX, at.x) + 4;
+      for (const n of this.notes) {
+        const x = this.xOf(n.time);
+        if (x >= from && x <= to) g.values.set(n.id, value);
+      }
+      if (hit && !g.values.has(hit.id)) g.values.set(hit.id, value);
+      lastX = at.x;
+      this.draw();
+    };
+    paint(where);
+    this.trackLane(event, (dx, dy, e) => paint(this.local(e, true)), () => this.endVelocity(g));
+  }
+
+  endVelocity(g) {
+    const change = [];
+    for (const n of this.notes) {
+      const v = g.values.get(n.id);
+      if (v !== undefined && v !== n.velocity) { change.push({ id: n.id, velocity: v }); n.velocity = v; }
+    }
+    this.gesture = null;
+    if (change.length) this.send({ change });
+  }
+
   lanePointAt({ x, y }) {
     const spec = this.laneSpec;
     if (!spec || x <= KEYS) return null;
+    if (spec.kind === "velocity") return this.velocityNoteAt({ x, y });
     const height = this.laneView.clientHeight;
     let best = null, bestDistance = 8;
     for (const p of this.lanePoints()) {
@@ -629,6 +727,7 @@ export class PianoRoll {
     this.laneCanvas.setPointerCapture(event.pointerId);
     const clip = this.clip;
     const clampTime = (t) => clamp(t, clip.offset, clip.offset + clip.length - 0.001);
+    if (spec.kind === "velocity") { this.onVelocityDown(event, where); return; }
     const point = this.lanePointAt(where);
 
     if (point) {
@@ -696,6 +795,7 @@ export class PianoRoll {
   }
 
   onLaneDouble(event) {
+    if (this.laneSpec?.kind === "velocity") return;
     const point = this.lanePointAt(this.local(event, true));
     if (!point) return;
     this.controllers = this.controllers.filter((p) => p.id !== point.id);

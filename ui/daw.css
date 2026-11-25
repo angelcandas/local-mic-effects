@@ -2007,6 +2007,34 @@ body.is-daw .app-project { color: var(--text); font-weight: 600; }
   border-radius: 12px;
   background: var(--panel);
 }
+.midifx-panel {
+  display: flex;
+  flex: none;
+  flex-direction: column;
+  gap: 6px;
+  min-height: 0;
+  padding: 8px 6px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--panel);
+}
+.midifx-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; padding: 0 2px; }
+.midifx-add { padding: 2px 8px; font-size: 10.5px; }
+.midifx-list { display: flex; gap: 6px; min-height: 0; }
+.midifx-empty { width: 128px; margin: 0; padding: 10px 6px; border: 1px dashed var(--line); border-radius: 8px; color: var(--faint); font-size: 11px; text-align: center; }
+.midifx-card { display: flex; flex: none; flex-direction: column; gap: 5px; width: 172px; padding: 6px 7px 8px; border: 1px solid var(--line); border-radius: 9px; background: var(--panel-2, rgba(255, 255, 255, 0.03)); }
+.midifx-card.is-off { opacity: 0.55; }
+.midifx-card-head { display: flex; align-items: center; gap: 6px; }
+.midifx-title { flex: 1; overflow: hidden; font-size: 11.5px; text-overflow: ellipsis; white-space: nowrap; }
+.midifx-power { width: 12px; height: 12px; padding: 0; border: 1px solid var(--line); border-radius: 50%; background: transparent; cursor: pointer; }
+.midifx-power[aria-pressed="true"] { border-color: var(--accent); background: var(--accent); box-shadow: 0 0 6px var(--accent); }
+.midifx-more { padding: 0 5px; border: 0; background: transparent; color: var(--muted); font-size: 14px; line-height: 1; cursor: pointer; }
+.midifx-row { display: grid; grid-template-columns: 38px 1fr; align-items: center; gap: 4px; color: var(--muted); font-size: 10px; }
+.daw select.dropdown.midifx-select { width: 100%; min-width: 0; height: 24px; padding: 0 4px; font-size: 10.5px; }
+.daw select.dropdown.midifx-select:disabled { opacity: 0.5; }
+.midifx-slider { width: 100%; min-width: 0; accent-color: var(--accent); }
+.midifx-check { justify-self: start; accent-color: var(--accent); }
+
 .input-pick { display: flex; flex-direction: column; gap: 6px; width: 100%; }
 .input-pick-row { display: flex; flex-direction: column; gap: 2px; font-size: 10px; color: var(--muted); }
 .input-pick-row .dropdown { width: 100%; padding: 2px 4px; font-size: 10.5px; }

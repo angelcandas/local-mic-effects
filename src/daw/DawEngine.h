@@ -8,6 +8,7 @@
 #include "Recorder.h"
 #include "Edit.h"
 #include "Instruments.h"
+#include "MidiEffects.h"
 #include "PluginInsert.h"
 #include "dsp/FxChain.h"
 
@@ -332,6 +333,7 @@ private:
         juce::AudioBuffer<float> instrumentBuffer;
         juce::MidiBuffer midi;
         juce::MidiBuffer audition;          // addLiveMidi for this track, played next block
+        midifx::Processor midiFx;           // the MIDI effects' running state (arp, chord, scale)
         std::bitset<128> sounding;          // notes the timeline has started and not ended
         std::bitset<128> ccTouched;         // controllers the timeline has sent (put back when it stops)
         bool bendTouched = false, pressureTouched = false;
@@ -419,6 +421,7 @@ private:
         int output = -1; // index into Graph::returns, or -1 for the master
         std::vector<Clip> clips;
         std::vector<MidiEvent> midiEvents; // MIDI tracks, in time order
+        midifx::Chain midiFx;              // MIDI tracks: their MIDI effects' settings, in order
 
         // Latency compensation, before the inserts (audio thread).
         Delay delay;
@@ -511,7 +514,7 @@ private:
     static void renderClip (const Clip&, juce::AudioBuffer<float>&, juce::int64 blockStart, int numSamples) noexcept;
     void renderBlock (Graph&, juce::AudioBuffer<float>& output, int outputOffset, int numChannels, int numSamples,
                       const float* const* inputs, int numInputs, const juce::MidiBuffer* midi, int midiOffset) noexcept;
-    void renderInstrument (Track&, bool isPlaying, bool fresh, juce::int64 blockStart, int numSamples,
+    void renderInstrument (Track&, const TempoMap&, bool isPlaying, bool fresh, juce::int64 blockStart, int numSamples,
                            const juce::MidiBuffer* midi, int midiOffset) noexcept;
     void recordMidi (const juce::MidiBuffer&, int midiOffset, int numSamples, juce::int64 blockStart) noexcept;
     void drainRecordedMidi();
