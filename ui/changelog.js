@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 223,
+ "latest": 224,
  "days": [
   {
    "date": "2026-11-25",
    "entries": [
+    {
+     "title": "Vocoder",
+     "text": "Your voice plays a built-in synth: hold keys on a MIDI keyboard, or it follows the song's chords (else a drone on the key). Saw, pulse or ensemble sound, 16 to 32 bands, formant and a clear-words control. In Live and as a DAW insert.",
+     "prs": [
+      224
+     ]
+    },
     {
      "title": "Feedback Guard",
      "text": "A Live effect that catches the mic ringing through the speakers and notches that note before it howls, while your singing goes through untouched. Ring out before the show to fix the notches for the room.",
