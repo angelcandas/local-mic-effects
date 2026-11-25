@@ -9,6 +9,7 @@ import { DeviceChain, effectName, insertSwitches } from "./devices.js";
 import { MacroPanel } from "./macros.js";
 import { LibraryBrowser, loopText } from "./browser.js";
 import { PianoRoll } from "./pianoroll.js";
+import { createMidiFxPanel } from "./midifx.js";
 import { markLearnable } from "./midilearn.js";
 import { TakeLanes } from "./takes.js";
 import { AutomationLanes } from "./automation.js";
@@ -4330,6 +4331,7 @@ class DawScreen {
     if (owner) this.rack?.update(owner);
     if (owner && this.macroPanel?.owner.id === owner.id) this.macroPanel.update(owner);
     if (owner && this.panelInput?.id === owner.id) this.panelInput.update(owner);
+    if (owner && this.midiFxPanel?.id === owner.id) this.midiFxPanel.update(owner);
     if (owner && this.chainGains?.id === owner.id) {
       this.chainGains.input.knob.update(owner.inGain ?? 0);
       this.chainGains.output.knob.update(owner.outGain ?? 0);
@@ -4639,6 +4641,12 @@ class DawScreen {
       box.title = "Input: which inputs of your audio interface this track records and monitors";
       box.append(html("span", "chain-gain-title", "Input"), picker.element);
       chain.append(box);
+    }
+    // Before a MIDI track's instrument: its MIDI effects (arp, chord, scale lock).
+    this.midiFxPanel = null;
+    if (!isMaster && !isCue && !isReturn && owner.kind === "midi") {
+      this.midiFxPanel = createMidiFxPanel(owner, { daw, button, popMenu, toast: (...a) => toast(...a) });
+      chain.append(this.midiFxPanel.element);
     }
     this.macroPanel?.destroy();
     this.macroPanel = null;

@@ -1,6 +1,7 @@
 #include "Edit.h"
 #include "RackInsert.h"
 #include "PluginInsert.h"
+#include "MidiEffects.h"
 
 #include "dsp/FxModules.h"
 
@@ -740,6 +741,104 @@ void Edit::setInstrument (int trackId, const InstrumentInfo& info)
 juce::ValueTree Edit::getInstrument (int trackId) const
 {
     return getTrack (trackId).getChildWithName (ids::INSTRUMENT);
+}
+
+juce::ValueTree Edit::addMidiFx (int trackId, const juce::String& type, int index)
+{
+    auto track = getTrack (trackId);
+    midifx::Type kind;
+    const auto existing = getMidiFxOf (track);
+    if (! track.isValid() || ! isMidiTrack (track) || ! midifx::typeFromKey (type, kind) || existing.size() >= midifx::maxEffects)
+        return {};
+
+    juce::ValueTree fx (ids::MIDIFX);
+    fx.setProperty (ids::id, takeNextId(), nullptr);
+    fx.setProperty (ids::type, type, nullptr);
+    fx.setProperty ("on", true, nullptr);
+    if (kind == midifx::Type::arp)
+    {
+        fx.setProperty ("rate", 0.25, nullptr);
+        fx.setProperty ("pattern", "up", nullptr);
+        fx.setProperty ("octaves", 1, nullptr);
+        fx.setProperty ("gate", 0.8, nullptr);
+        fx.setProperty ("latch", false, nullptr);
+    }
+    else if (kind == midifx::Type::chord)
+    {
+        fx.setProperty ("shape", "key", nullptr);
+        fx.setProperty ("level", 0.85, nullptr);
+    }
+    else
+    {
+        fx.setProperty ("scale", "song", nullptr);
+        fx.setProperty ("root", 0, nullptr);
+        fx.setProperty ("snap", "nearest", nullptr);
+    }
+
+    // Among the track's MIDI effects: before the one now at `index`, else after the last
+    // (or after the instrument when there are none).
+    int at = -1;
+    if (index >= 0 && index < existing.size())
+        at = track.indexOf (existing[index]);
+    else if (! existing.isEmpty())
+        at = track.indexOf (existing.getLast()) + 1;
+    else if (const auto instrument = track.getChildWithName (ids::INSTRUMENT); instrument.isValid())
+        at = track.indexOf (instrument) + 1;
+    track.addChild (fx, at, undoTarget);
+    return fx;
+}
+
+void Edit::setMidiFx (int id, const juce::String& name, const juce::var& value)
+{
+    auto fx = getMidiFx (id);
+    if (! fx.isValid())
+        return;
+
+    juce::var v = value;
+    if (name == "on" || name == "latch")              v = (bool) value;
+    else if (name == "rate")                          v = juce::jlimit (1.0 / 32.0, 4.0, (double) value);
+    else if (name == "octaves")                       v = juce::jlimit (1, 4, (int) value);
+    else if (name == "gate")                          v = juce::jlimit (0.05, 1.0, (double) value);
+    else if (name == "level")                         v = juce::jlimit (0.0, 1.0, (double) value);
+    else if (name == "root")                          v = ((int) value % 12 + 12) % 12;
+    else if (name == "pattern" || name == "shape" || name == "scale" || name == "snap") v = value.toString();
+    else return;
+
+    if (fx[juce::Identifier (name)] != v)
+        fx.setProperty (juce::Identifier (name), v, undoTarget);
+}
+
+void Edit::removeMidiFx (int id)
+{
+    if (auto fx = getMidiFx (id); fx.isValid())
+        fx.getParent().removeChild (fx, undoTarget);
+}
+
+void Edit::moveMidiFx (int id, int index)
+{
+    auto fx = getMidiFx (id);
+    if (! fx.isValid())
+        return;
+    auto track = fx.getParent();
+    const auto list = getMidiFxOf (track);
+    index = juce::jlimit (0, list.size() - 1, index);
+    if (list[index] == fx)
+        return;
+    track.moveChild (track.indexOf (fx), track.indexOf (list[index]), undoTarget);
+}
+
+juce::ValueTree Edit::getMidiFx (int id) const
+{
+    return findById (ids::MIDIFX, id);
+}
+
+juce::Array<juce::ValueTree> Edit::getMidiFxOf (const juce::ValueTree& track)
+{
+    juce::Array<juce::ValueTree> list;
+    for (const auto& child : track)
+        if (child.hasType (ids::MIDIFX))
+            list.add (child);
+    return list;
 }
 
 juce::ValueTree Edit::addMidiClip (int trackId, double startSeconds, double lengthSeconds, const juce::String& name)
