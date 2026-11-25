@@ -176,6 +176,8 @@ set(MICFX_DSP_SOURCES
     src/Looper.h
     src/MidiMap.cpp
     src/MidiMap.h
+    src/MidiClock.cpp
+    src/MidiClock.h
     src/LiveHistory.cpp
     src/LiveHistory.h
     src/Macros.h

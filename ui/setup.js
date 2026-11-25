@@ -24,11 +24,21 @@ export function describeAudio(state) {
   // The effects in the monitored path (lookahead, FFT frames, plug-ins) add to what you hear.
   const effects = Number(state.effectsMs) || 0;
   const roundTrip = `${Number(state.latencyMs).toFixed(1)} ms round trip` + (effects >= 0.5 ? ` + ${effects.toFixed(1)} ms effects` : "");
-  return [state.device, rateText(state.rate), String(state.buffer), roundTrip, `CPU ${Math.round(state.cpu)} %`].join(" · ");
+  return [state.device, rateText(state.rate), String(state.buffer), roundTrip, `CPU ${Math.round(state.cpu)} %`, clockText(state.clock)]
+    .filter(Boolean).join(" · ");
+}
+
+// The MIDI clock, short, for the status strip: "Clock in 120.0 BPM", "Clock out", or nothing.
+export function clockText(clock) {
+  if (!clock || typeof clock !== "object") return "";
+  const bpm = Number(clock.followBpm) || 0;
+  if (clock.follow && bpm > 0) return `Clock in ${bpm.toFixed(1)} BPM${clock.followRunning ? " ▶" : ""}`;
+  if (clock.follow) return "Clock in: waiting";
+  return clock.sending ? "Clock out" : "";
 }
 
 export function initSetup() {
-  let state = null, lastXruns = null, dropoutAt = -Infinity;
+  let state = null, lastXruns = null, dropoutAt = -Infinity, settings = null;
   const strips = [];
 
   // One strip in each hint line (DAW and Live); both show the same.
@@ -82,9 +92,10 @@ export function initSetup() {
       strip.classList.toggle("is-error", Boolean(next.available && !next.device));
     }
     firstRun.update();
+    settings?.update(next);
   };
   const firstRun = createFirstRun(() => state, show);
-  const settings = createSettings(() => state, show, firstRun);
+  settings = createSettings(() => state, show, firstRun);
 
   const poll = () => { if (!document.hidden) audioSetup("status").then(show).catch(() => {}); };
   setInterval(poll, POLL_MS);
@@ -225,6 +236,61 @@ function createSettings(getState, show, firstRun) {
   const hint = html("p", "setup-note", "Smaller buffers are quicker but need more CPU. 128 samples at 48 kHz is a good start; raise it if you hear clicks.");
   audio.append(hint);
 
+  // MIDI clock: drive drum machines, synths or other apps from MicFX's tempo, or follow theirs.
+  const clockSection = section("MIDI clock");
+  const sendSelect = html("select", "dropdown clock-send");
+  sendSelect.setAttribute("aria-label", "Send MIDI clock to");
+  sendSelect.title = "Sends 24 ticks per beat with Start, Stop and the song position. DAW: follows the song's transport and tempo. Live: the Live tempo, starting and stopping with the looper.";
+  sendSelect.addEventListener("change", () => clockCall({ send: sendSelect.value }));
+  row(clockSection, "Send clock to", sendSelect);
+
+  const stoppedBox = Object.assign(html("input"), { type: "checkbox" });
+  stoppedBox.addEventListener("change", () => clockCall({ whileStopped: stoppedBox.checked }));
+  const stoppedLabel = html("label", "setup-check");
+  stoppedLabel.append(stoppedBox, html("span", "", "Keep the clock running while stopped"));
+  stoppedLabel.title = "The other gear shows the tempo before you press play";
+  row(clockSection, "", stoppedLabel);
+
+  const offset = Object.assign(html("input", "setup-number clock-offset"), { type: "number", min: "-100", max: "100", step: "1" });
+  offset.setAttribute("aria-label", "Clock offset in milliseconds");
+  offset.title = "If the other gear plays late, send the clock earlier (negative); if it plays early, later";
+  offset.addEventListener("change", () => clockCall({ offsetMs: Math.max(-100, Math.min(100, Number(offset.value) || 0)) }));
+  row(clockSection, "Clock offset", offset, html("span", "setup-value", "ms"));
+
+  const followSelect = html("select", "dropdown clock-follow");
+  followSelect.setAttribute("aria-label", "Follow MIDI clock from");
+  followSelect.title = "Live: the clock's tempo drives the echo and the looper's bars. DAW: its Start, Stop and Continue play and stop the song (the song keeps its own tempo).";
+  followSelect.addEventListener("change", () => clockCall({ follow: followSelect.value }));
+  const followStatus = html("span", "setup-value clock-status");
+  row(clockSection, "Follow clock from", followSelect, followStatus);
+  const clockError = html("p", "setup-note setup-error");
+  clockError.hidden = true;
+  clockSection.append(clockError,
+    html("p", "setup-note", "Live mode: a clock coming in sets the tempo of the echo and the looper's bars, ahead of a tapped tempo. DAW: the song's tempo stays yours; the other gear's Start, Stop and Continue play and stop it."));
+
+  const fill = (select, items, chosen, extra) => {
+    const options = [new Option("Off", ""), ...extra, ...items.map((d) => new Option(String(d.name), String(d.id)))];
+    // A saved device that isn't plugged in stays listed, so it's clear what's chosen.
+    if (chosen && !options.some((o) => o.value === chosen)) options.push(new Option("(not connected)", chosen));
+    select.replaceChildren(...options);
+    select.value = chosen || "";
+  };
+  const showClock = (clock, withDevices) => {
+    if (!clock || typeof clock !== "object") return;
+    if (withDevices) {
+      const virtual = clock.canVirtual ? [new Option("MicFX Clock (for other apps)", "virtual")] : [];
+      fill(sendSelect, Array.isArray(clock.outputs) ? clock.outputs : [], String(clock.send || ""), virtual);
+      fill(followSelect, Array.isArray(clock.inputs) ? clock.inputs : [], String(clock.follow || ""), []);
+    }
+    stoppedBox.checked = Boolean(clock.whileStopped);
+    if (document.activeElement !== offset) offset.value = String(Math.round(Number(clock.offsetMs) || 0));
+    const bpm = Number(clock.followBpm) || 0;
+    followStatus.textContent = !clock.follow ? "" : bpm > 0 ? `${bpm.toFixed(1)} BPM${clock.followRunning ? " · playing" : ""}` : "No clock coming in";
+    clockError.textContent = String(clock.error || "");
+    clockError.hidden = !clock.error;
+  };
+  const clockCall = (options) => audioSetup("midiClock", options).then((next) => { show(next); showClock(next?.clock, true); }).catch(() => {});
+
   const recording = section("Recording");
   const folderText = html("span", "setup-value");
   row(recording, "Recordings folder", folderText,
@@ -286,6 +352,10 @@ function createSettings(getState, show, firstRun) {
       dryBox.checked = document.querySelector(".record-dry")?.getAttribute("aria-pressed") === "true";
       aiCall({ action: "state" });
       uiPref("uiScale").then((value) => { scale.value = String(Number(value) || 100); }).catch(() => {});
+      audioSetup("clockDevices").then((next) => showClock(next?.clock, true)).catch(() => {});
+    },
+    update(state) {
+      if (!backdrop.hidden) showClock(state?.clock, false);
     },
   };
   return api;

@@ -9,6 +9,7 @@
 #include "LiveInstruments.h"
 #include "Looper.h"
 #include "MidiMap.h"
+#include "MidiClock.h"
 #include "PitchTap.h"
 #include "LiveHistory.h"
 #include "Macros.h"
@@ -163,6 +164,10 @@ public:
     // the voice (after the voice's limiter), heard, looped and recorded with it.
     LiveInstruments& getLiveInstruments() noexcept          { return liveInstruments; }
 
+    // MIDI clock sync (standalone app): the clock out follows the DAW transport, or in Live
+    // mode the Live tempo with Start / Stop from the looper; the clock in sets the Live tempo.
+    midiclock::Sync& getMidiClock() noexcept                 { return midiClock; }
+
     // DAW mode (standalone app): the mic feeds the DAW engine's tracks instead of the
     // Live chain. The session, its engine and its project file. Message thread.
     daw::Edit& getDawEdit() noexcept                         { return dawEdit; }
@@ -259,6 +264,11 @@ private:
     juce::AudioBuffer<float> backingBuffer;
     fx::LoudnessMeter backingMeter;
     bool backingWasPlaying = false;
+
+    midiclock::Sync midiClock; // before the engine, which sends to it
+    double liveClockBeat = 0.0;  // Live mode's clock out: beats since the looper started
+    bool liveClockRunning = false;
+    void sendLiveClock (double bpm, int numSamples) noexcept;
 
     juce::SharedResourcePointer<daw::PluginHost> pluginHost; // before the engine, which loads instruments through it
     daw::Edit dawEdit;

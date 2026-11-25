@@ -159,6 +159,8 @@ PluginEditor::PluginEditor (PluginProcessor& p)
         looper.setVolume ((float) settings.getDoubleValue ("looper.volume", 1.0));
     }
 
+    restoreMidiClock();
+
     // Which of the interface's inputs is the Live mic is an app preference too.
     processorRef.setLiveInput (settings.getIntValue ("liveInput", 0));
 
@@ -481,6 +483,10 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                    processorRef.setLiveInput (chosen);
                                    settings.setValue ("liveInput", chosen);
                                }
+
+                               if (action == "midiClock" && args.size() > 1)
+                                   setMidiClock (args[1]);
+                               result->setProperty ("clock", describeMidiClock (action == "midiClock" || action == "clockDevices"));
 
                                result->setProperty ("available", true);
                                result->setProperty ("inputMuted", (bool) holder->getMuteInputValue().getValue());
@@ -1215,6 +1221,7 @@ juce::var PluginEditor::describeWindow() const
 
 void PluginEditor::timerCallback()
 {
+    pumpMidiClock();
     if (daw != nullptr)
         daw->tick();
     if (practice != nullptr && ! processorRef.isDawMode())
@@ -1760,6 +1767,148 @@ juce::var PluginEditor::describeLiveInstruments()
     result->setProperty ("inputs", inputs);
     result->setProperty ("deviceInputs", juce::JUCEApplicationBase::isStandaloneApp());
     return juce::var (result);
+}
+
+//==============================================================================
+void PluginEditor::restoreMidiClock()
+{
+    if (! juce::JUCEApplicationBase::isStandaloneApp())
+        return;
+
+    auto& clock = processorRef.getMidiClock();
+    clock.sender.setWhileStopped (settings.getBoolValue ("midiClock.whileStopped", true));
+    clock.setOffsetMs (settings.getDoubleValue ("midiClock.offsetMs", 0.0));
+
+    // A device that isn't plugged in keeps its setting; the window says it couldn't open.
+    if (const auto out = settings.getValue ("midiClock.send"); out.isNotEmpty())
+        midiClockError = clock.output.open (out);
+
+    if (const auto in = settings.getValue ("midiClock.follow"); in.isNotEmpty())
+    {
+       #if JucePlugin_Build_Standalone
+        if (auto* holder = juce::StandalonePluginHolder::getInstance())
+            holder->deviceManager.setMidiInputDeviceEnabled (in, true);
+       #endif
+        clock.setFollowSource (in);
+    }
+}
+
+void PluginEditor::setMidiClock (const juce::var& options)
+{
+    auto& clock = processorRef.getMidiClock();
+
+    if (options.hasProperty ("send"))
+    {
+        const auto id = options["send"].toString();
+        midiClockError = clock.output.open (id);
+        settings.setValue ("midiClock.send", id);
+    }
+
+    if (options.hasProperty ("follow"))
+    {
+        const auto id = options["follow"].toString();
+       #if JucePlugin_Build_Standalone
+        // The clock comes through the app's MIDI inputs: the one followed has to be on.
+        if (auto* holder = juce::StandalonePluginHolder::getInstance(); holder != nullptr && id.isNotEmpty())
+            holder->deviceManager.setMidiInputDeviceEnabled (id, true);
+       #endif
+        clock.setFollowSource (id);
+        settings.setValue ("midiClock.follow", id);
+    }
+
+    if (options.hasProperty ("whileStopped"))
+    {
+        clock.sender.setWhileStopped ((bool) options["whileStopped"]);
+        settings.setValue ("midiClock.whileStopped", (bool) options["whileStopped"]);
+    }
+
+    if (options.hasProperty ("offsetMs"))
+    {
+        clock.setOffsetMs ((double) options["offsetMs"]);
+        settings.setValue ("midiClock.offsetMs", clock.getOffsetMs());
+    }
+}
+
+juce::var PluginEditor::describeMidiClock (bool withDevices)
+{
+    auto& clock = processorRef.getMidiClock();
+    auto* result = new juce::DynamicObject();
+    result->setProperty ("send", settings.getValue ("midiClock.send"));
+    result->setProperty ("sending", clock.output.isOpen());
+    result->setProperty ("follow", clock.getFollowSource());
+    result->setProperty ("followBpm", clock.getFollowedBpm());
+    result->setProperty ("followRunning", clock.isFollowing() && clock.follower.isRunning());
+    result->setProperty ("whileStopped", clock.sender.getWhileStopped());
+    result->setProperty ("offsetMs", clock.getOffsetMs());
+    result->setProperty ("error", midiClockError);
+
+    if (withDevices)
+    {
+        const auto list = [] (const juce::Array<juce::MidiDeviceInfo>& devices)
+        {
+            juce::Array<juce::var> items;
+            for (const auto& device : devices)
+            {
+                auto* item = new juce::DynamicObject();
+                item->setProperty ("id", device.identifier);
+                item->setProperty ("name", device.name);
+                items.add (juce::var (item));
+            }
+            return items;
+        };
+
+        // Our own virtual output isn't one to send to (or follow) itself.
+        auto outputs = juce::MidiOutput::getAvailableDevices();
+        auto inputs = juce::MidiInput::getAvailableDevices();
+        const auto isOurs = [] (const juce::MidiDeviceInfo& d) { return d.name.contains (midiclock::Output::virtualName); };
+        outputs.removeIf (isOurs);
+        inputs.removeIf (isOurs);
+        result->setProperty ("outputs", list (outputs));
+        result->setProperty ("inputs", list (inputs));
+        result->setProperty ("canVirtual", midiclock::Output::canMakeVirtual());
+    }
+    return juce::var (result);
+}
+
+void PluginEditor::pumpMidiClock()
+{
+    auto& clock = processorRef.getMidiClock();
+
+   #if JucePlugin_Build_Standalone
+    // The clock's messages go out when the samples they belong to are heard.
+    if (clock.output.isOpen() && juce::JUCEApplicationBase::isStandaloneApp())
+        if (auto* holder = juce::StandalonePluginHolder::getInstance())
+            if (auto* device = holder->deviceManager.getCurrentAudioDevice())
+                if (const auto rate = device->getCurrentSampleRate(); rate > 0.0)
+                    clock.setLatencyMs (1000.0 * (device->getOutputLatencyInSamples() + device->getCurrentBufferSizeSamples()) / rate);
+   #endif
+
+    // The followed clock's transport plays the DAW song (not while recording, and Live mode
+    // has no song: the clock only sets its tempo).
+    auto& engine = processorRef.getDawEngine();
+    midiclock::Follower::Event event;
+    while (clock.follower.popEvent (event))
+    {
+        if (! processorRef.isDawMode() || engine.isRecording())
+            continue;
+
+        using Type = midiclock::Follower::Event::Type;
+        switch (event.type)
+        {
+            case Type::start:    engine.seek (0); engine.play(); break;
+            case Type::resume:   engine.play(); break;
+            case Type::stop:     engine.stop(); break;
+            case Type::position:
+                engine.seek ((juce::int64) std::llround (processorRef.getDawEdit().getTempoMap().toSeconds (event.sixteenths / 4.0)
+                                                         * engine.getSampleRate()));
+                break;
+        }
+    }
+
+    // The looper's bars follow the clock's tempo.
+    if (const auto bpm = clock.getFollowedBpm(); bpm > 0.0)
+        if (auto& looper = processorRef.getLooper(); std::abs (looper.getBpm() - bpm) > 0.05)
+            looper.setTempo (bpm, looper.getBeatsPerBar());
 }
 
 void PluginEditor::applyComputerAudio (bool restart)

@@ -1708,6 +1708,10 @@ body.is-daw .setlist-drawer, body.is-daw .stage-view { display: none; }
 .setup-row-label { flex: none; width: 130px; color: var(--muted); }
 .setup-value { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .setup-check { display: flex; align-items: center; gap: 6px; }
+.setup-number { width: 64px; padding: 5px 7px; border: 1px solid var(--line); border-radius: 6px; background: rgba(0, 0, 0, 0.25); color: var(--text); font: inherit; }
+.setup-row .dropdown.clock-send, .setup-row .dropdown.clock-follow { max-width: 260px; }
+.setup-error { color: #ff8a7a; }
+.setup-error[hidden] { display: none; }
 .open-in-daw[hidden] { display: none; }
 
 /* The library in Live: search, and each effect's presets folded under it. */

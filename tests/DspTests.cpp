@@ -50,6 +50,7 @@
 #include "CaptureRing.h"
 #include "ComputerAudio.h"
 #include "LiveInstruments.h"
+#include "MidiClock.h"
 #include "dsp/DriftRing.h"
 #include "instruments/InstrumentEditor.h"
 #include "instruments/Registry.h"
@@ -8094,6 +8095,199 @@ namespace
         }
 
         return out;
+    }
+
+    void testMidiClock()
+    {
+        std::cout << "\nMIDI clock sync\n";
+        using midiclock::Sender;
+
+        const auto drain = [] (Sender& sender)
+        {
+            std::vector<Sender::Message> out;
+            Sender::Message m;
+            while (sender.peek (m)) { out.push_back (m); sender.pop(); }
+            return out;
+        };
+        const auto ticks = [] (const std::vector<Sender::Message>& messages)
+        {
+            std::vector<double> times;
+            for (const auto& m : messages)
+                if (m.bytes[0] == 0xf8)
+                    times.push_back (m.ms);
+            return times;
+        };
+        // Plays `seconds` at `bpm` from `fromBeat` in 512-sample blocks, the block times exact.
+        double clockMs = 1000.0;
+        const auto play = [&] (Sender& sender, double fromBeat, double seconds, double bpm, bool playing = true)
+        {
+            const auto block = 512;
+            auto beat = fromBeat;
+            for (int done = 0; done < (int) (seconds * sampleRate); done += block)
+            {
+                sender.beginBlock (clockMs, sampleRate, block);
+                const auto step = playing ? bpm / 60.0 * block / sampleRate : 0.0;
+                sender.span (playing, beat, beat + step, bpm, 0, block);
+                beat += step;
+                clockMs += 1000.0 * block / sampleRate;
+            }
+            return beat;
+        };
+
+        {
+            Sender sender;
+            play (sender, 0.0, 0.1, 120.0);
+            check (drain (sender).empty(), "nothing is sent while the clock out is off");
+
+            sender.setEnabled (true);
+            sender.setWhileStopped (false);
+            const auto startMs = clockMs;
+            const auto end = play (sender, 0.0, 2.0, 120.0);
+            const auto messages = drain (sender);
+            const auto t = ticks (messages);
+            check (! messages.empty() && messages.front().bytes[0] == 0xfa && std::abs (messages.front().ms - startMs) < 1.0e-6,
+                   "playing from the start sends Start first");
+            check (t.size() == (size_t) std::ceil (end * 24.0 - 1.0e-9), "24 ticks per beat (" + juce::String ((int) t.size()) + " in 2 s at 120 BPM)");
+            auto worst = 0.0;
+            for (size_t i = 1; i < t.size(); ++i)
+                worst = std::max (worst, std::abs (t[i] - t[i - 1] - 1000.0 / 48.0));
+            check (! t.empty() && std::abs (t.front() - startMs) < 1.0e-6 && worst < 1.0e-6, "the ticks are evenly spaced, the first on beat 1");
+
+            play (sender, end, 0.02, 120.0, false);
+            const auto stopped = drain (sender);
+            check (stopped.size() == 1 && stopped.front().bytes[0] == 0xfc, "stopping sends Stop (and no ticks while stopped when that's off)");
+
+            sender.setWhileStopped (true);
+            play (sender, end, 1.0, 90.0, false);
+            const auto idle = ticks (drain (sender));
+            check (std::abs ((int) idle.size() - 36) <= 1, "while stopped the ticks keep going at the tempo (" + juce::String ((int) idle.size()) + " in 1 s at 90 BPM)");
+
+            // From the middle: song position (the next sixteenth) and Continue; the ticks start there.
+            sender.setWhileStopped (false);
+            const auto fromMs = clockMs;
+            play (sender, 8.1, 0.5, 120.0);
+            const auto resumed = drain (sender);
+            const auto rt = ticks (resumed);
+            const auto spp = resumed.size() > 1 ? (resumed[0].bytes[1] | (resumed[0].bytes[2] << 7)) : -1;
+            check (resumed.size() > 2 && resumed[0].bytes[0] == 0xf2 && spp == 33 && resumed[1].bytes[0] == 0xfb,
+                   "playing from beat 8.1 sends song position 33 (sixteenths) then Continue");
+            check (! rt.empty() && std::abs (rt.front() - (fromMs + (8.25 - 8.1) / 2.0 * 1000.0)) < 0.05, "and the first tick lands on that sixteenth");
+
+            // A jump while playing (the loop going back): Stop, the new position, Continue.
+            const auto jumpBeat = 4.0;
+            play (sender, jumpBeat, 0.05, 120.0);
+            const auto jumped = drain (sender);
+            check (jumped.size() > 3 && jumped[0].bytes[0] == 0xfc && jumped[1].bytes[0] == 0xf2 && (jumped[1].bytes[1] | (jumped[1].bytes[2] << 7)) == 16
+                   && jumped[2].bytes[0] == 0xfb, "a jump while playing sends Stop, song position and Continue");
+
+            sender.setEnabled (false);
+            play (sender, 4.2, 0.05, 120.0);
+            const auto off = drain (sender);
+            check (off.size() == 1 && off.front().bytes[0] == 0xfc, "turning the clock out off while playing sends Stop");
+        }
+
+        {
+            // The block times wobble; the clock doesn't.
+            Sender sender;
+            sender.setEnabled (true);
+            sender.setWhileStopped (false);
+            juce::Random random (7);
+            auto beat = 0.0, ideal = 5000.0;
+            for (int b = 0; b < 400; ++b)
+            {
+                sender.beginBlock (ideal + random.nextDouble() * 2.0, sampleRate, 256);
+                const auto step = 120.0 / 60.0 * 256 / sampleRate;
+                sender.span (true, beat, beat + step, 120.0, 0, 256);
+                beat += step;
+                ideal += 1000.0 * 256 / sampleRate;
+            }
+            const auto t = ticks (drain (sender));
+            auto worst = 0.0;
+            for (size_t i = 100; i < t.size(); ++i)
+                worst = std::max (worst, std::abs (t[i] - t[i - 1] - 1000.0 / 48.0));
+            check (worst < 0.3, "callback jitter of 2 ms moves the ticks by under 0.3 ms (" + juce::String (worst, 3) + ")");
+        }
+
+        {
+            midiclock::Follower follower;
+            juce::Random random (3);
+            auto now = 10.0;
+            const auto feed = [&] (double bpm, double seconds)
+            {
+                const auto interval = 60.0 / (bpm * 24.0);
+                for (auto end = now + seconds; now < end; now += interval)
+                    follower.tick (now + (random.nextDouble() - 0.5) * 0.002); // USB MIDI: about +-1 ms
+            };
+
+            follower.handle (juce::MidiMessage::midiStart(), now);
+            feed (120.0, 1.0);
+            check (std::abs (follower.getBpm (now) - 120.0) < 0.35, "a clock at 120 BPM with 1 ms jitter reads " + juce::String (follower.getBpm (now), 1) + " after a second");
+            feed (120.0, 3.0);
+            const auto settled = follower.getBpm (now);
+            auto changes = 0;
+            for (int i = 0; i < 10; ++i)
+            {
+                feed (120.0, 0.5);
+                changes += juce::exactlyEqual (follower.getBpm (now), settled) ? 0 : 1;
+            }
+            check (std::abs (settled - 120.0) < 0.15 && changes == 0, "then it settles on " + juce::String (settled, 1) + " and stays there");
+            check (follower.isRunning(), "Start makes it running");
+
+            feed (90.0, 1.0);
+            check (std::abs (follower.getBpm (now) - 90.0) < 0.5, "a change to 90 BPM is followed within a second (" + juce::String (follower.getBpm (now), 1) + ")");
+            check (juce::exactlyEqual (follower.getBpm (now + 1.0), 0.0), "no ticks for a second: no tempo");
+
+            follower.handle (juce::MidiMessage::midiStop(), now);
+            follower.handle (juce::MidiMessage::songPositionPointer (64), now);
+            follower.handle (juce::MidiMessage::midiContinue(), now);
+            std::vector<midiclock::Follower::Event> events;
+            midiclock::Follower::Event e;
+            while (follower.popEvent (e)) events.push_back (e);
+            using Type = midiclock::Follower::Event::Type;
+            check (events.size() == 4 && events[0].type == Type::start && events[1].type == Type::stop && events[2].type == Type::position
+                   && events[2].sixteenths == 64 && events[3].type == Type::resume, "Start, Stop, song position and Continue come out in order");
+
+            midiclock::Sync sync;
+            sync.setFollowSource ("dev-a");
+            auto clock = juce::MidiMessage::midiClock();
+            clock.setTimeStamp (juce::Time::getMillisecondCounterHiRes() * 0.001);
+            sync.handleIncoming ("dev-b", juce::MidiMessage::midiStart());
+            sync.handleIncoming ("dev-a", juce::MidiMessage::midiStop());
+            check (sync.follower.popEvent (e) && e.type == Type::stop && ! sync.follower.popEvent (e), "only the followed input counts");
+        }
+
+        {
+            // The DAW transport drives the clock out, on the song's tempo map.
+            daw::Edit edit;
+            edit.setTempo (100.0);
+            daw::DawEngine engine (edit);
+            Sender sender;
+            sender.setEnabled (true);
+            sender.setWhileStopped (false);
+            engine.setClockSender (&sender);
+            engine.prepare (sampleRate, blockSize);
+            engine.rebuildNow();
+            engine.play();
+            auto ms = 0.0;
+            for (int done = 0; done < (int) sampleRate; done += blockSize)
+            {
+                sender.beginBlock (ms, sampleRate, blockSize);
+                juce::AudioBuffer<float> out (2, blockSize);
+                engine.process (out, 2, blockSize);
+                ms += 1000.0 * blockSize / sampleRate;
+            }
+            const auto messages = drain (sender);
+            const auto t = ticks (messages);
+            const auto beats = (double) (((int) sampleRate + blockSize - 1) / blockSize * blockSize) / sampleRate * 100.0 / 60.0;
+            check (! messages.empty() && messages.front().bytes[0] == 0xfa && t.size() == (size_t) std::ceil (beats * 24.0), "DAW: Start, then 24 ticks a beat at 100 BPM (" + juce::String ((int) t.size()) + ")");
+            engine.stop();
+            juce::AudioBuffer<float> out (2, blockSize);
+            sender.beginBlock (ms, sampleRate, blockSize);
+            engine.process (out, 2, blockSize);
+            const auto stopped = drain (sender);
+            check (stopped.size() == 1 && stopped.front().bytes[0] == 0xfc, "DAW: stopping the song sends Stop");
+            engine.setClockSender (nullptr);
+        }
     }
 
     void testMidiEffects()
@@ -22178,6 +22372,14 @@ int main()
     juce::ScopedJuceInitialiser_GUI juce;
     micfx::inst::setKitStarterEnabled (false); // the tests count on an empty Kit; testStarterContent turns it on for itself
 
+    // MICFX_TEST_ONLY=clock: just MIDI clock sync.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "clock")
+    {
+        testMidiClock();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=midifx: just the MIDI effects.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "midifx")
     {
@@ -22601,6 +22803,7 @@ int main()
     testMidiTracks();
     testMidiFiles();
     testMidiEffects();
+    testMidiClock();
     testInstruments();
     testKit();
     testSampler();

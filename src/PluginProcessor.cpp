@@ -148,6 +148,7 @@ void PluginProcessor::prepareToPlay (double sampleRate, int samplesPerBlock)
     backingBuffer.setSize (juce::jmax (2, getTotalNumOutputChannels()), juce::jmax (samplesPerBlock, 4096));
     backingMeter.prepare (sampleRate);
     backingWasPlaying = false;
+    dawEngine.setClockSender (&midiClock.sender);
     dawEngine.prepare (sampleRate, samplesPerBlock);
     chordFollower.prepare (sampleRate);
     mixGuardGain = 1.0f;
@@ -266,10 +267,29 @@ void PluginProcessor::syncLiveMacros()
         }
 }
 
+void PluginProcessor::sendLiveClock (double bpm, int numSamples) noexcept
+{
+    // Live mode's song is the loop: Start when the looper starts recording or playing, Stop
+    // when it stops or is cleared. The beats run at the Live tempo from that start.
+    const auto state = looper.getState();
+    const auto running = state != Looper::State::empty && state != Looper::State::stopped;
+    if (running && ! liveClockRunning)
+        liveClockBeat = 0.0;
+    liveClockRunning = running;
+
+    const auto rate = getSampleRate() > 0.0 ? getSampleRate() : 48000.0;
+    const auto beats = running ? bpm / 60.0 * numSamples / rate : 0.0;
+    midiClock.sender.span (running, liveClockBeat, liveClockBeat + beats, bpm, 0, numSamples);
+    liveClockBeat += beats;
+}
+
 double PluginProcessor::getLiveTempo() noexcept
 {
-    // The echo card's tap, else the host's tempo (in the plug-in), else the looper's,
-    // which follows the setlist song.
+    // The MIDI clock being followed, else the echo card's tap, else the host's tempo (in the
+    // plug-in), else the looper's, which follows the setlist song.
+    if (const auto clock = midiClock.getFollowedBpm(); clock > 0.0)
+        return clock;
+
     if (const auto tapped = echoTapTempo.load (std::memory_order_relaxed); tapped > 0.0)
         return tapped;
 
@@ -288,6 +308,9 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     const auto numIn      = getTotalNumInputChannels();
     const auto numOut     = getTotalNumOutputChannels();
     const auto numSamples = buffer.getNumSamples();
+
+    // The clock out's messages are due when this block's samples are heard.
+    midiClock.sender.beginBlock (juce::Time::getMillisecondCounterHiRes() + midiClock.getAheadMs(), getSampleRate(), numSamples);
 
     if (dawMode.load())
     {
@@ -356,7 +379,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
     pitchTap.process (buffer.getReadPointer (0), numSamples, multitrack.getPosition());
     soundCheck.capture (buffer.getReadPointer (0), numSamples); // the same raw mic, for Sound check
 
-    chain.setTempo (getLiveTempo());
+    const auto liveTempo = getLiveTempo();
+    chain.setTempo (liveTempo);
 
     if (! dryCompare.load())
         chain.process (context);
@@ -409,6 +433,8 @@ void PluginProcessor::processBlock (juce::AudioBuffer<float>& buffer, juce::Midi
         }
         applyPeakGuard (buffer, numOut, numSamples);
     }
+
+    sendLiveClock (liveTempo, numSamples);
 
     // Where this block sits on the multitrack timeline. The playback is added after the
     // voice is recorded, so takes contain only the voice.

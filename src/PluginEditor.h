@@ -65,6 +65,14 @@ private:
     juce::var describeComputerAudio();
     void applyComputerAudio (bool restart);
     juce::String computerAudioError;
+    // MIDI clock sync (MidiClock.h): restored from the app settings, its state for the Settings
+    // window (with the MIDI devices when asked), the options from the page, and on the timer:
+    // the output latency, the followed clock's start / stop for the DAW and its tempo for the looper.
+    void restoreMidiClock();
+    juce::var describeMidiClock (bool withDevices);
+    void setMidiClock (const juce::var& options);
+    void pumpMidiClock();
+    juce::String midiClockError;
     // Live mode's MIDI instruments (LiveInstruments.h): their state for the page, saving each
     // slot (with its sound) as an app preference, and their own windows.
     juce::var describeLiveInstruments();
