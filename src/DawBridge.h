@@ -138,6 +138,7 @@ private:
     bool handleMidi (const juce::String& command, const juce::var& args, Complete&);
     // The step sequencer's commands (patterns, parts, steps, pattern blocks, pattern mode).
     bool handlePatterns (const juce::String& command, const juce::var& args, Complete&);
+    int finishPerformance(); // the clip launcher's performance recording, written as one undo step
     juce::var describePatterns() const;
     juce::var describePatternClips() const;
     juce::var describeKeyNames (int trackId) const;
