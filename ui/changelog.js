@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 225,
+ "latest": 229,
  "days": [
   {
    "date": "2026-11-25",
    "entries": [
+    {
+     "title": "Clip launcher",
+     "text": "A Launch tab with scenes and slots: launch loops and one-shots in time, record what you play into the song, and let the AI build and launch scenes.",
+     "prs": [
+      229
+     ]
+    },
     {
      "title": "Vocoder",
      "text": "Your voice plays a built-in synth: hold keys on a MIDI keyboard, or it follows the song's chords (else a drone on the key). Saw, pulse or ensemble sound, 16 to 32 bands, formant and a clear-words control. In Live and as a DAW insert.",
