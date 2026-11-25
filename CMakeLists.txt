@@ -52,6 +52,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/clipeditor.js
         ui/clipenvelope.js
         ui/warptool.js
+        ui/voicealign.js
         ui/hitpointtool.js
         ui/tempotool.js
         ui/pitchedit.js
@@ -118,6 +119,8 @@ set(MICFX_DSP_SOURCES
     src/analysis/Analysis.h
     src/analysis/Alignment.cpp
     src/analysis/Alignment.h
+    src/analysis/VocalAlign.cpp
+    src/analysis/VocalAlign.h
     src/analysis/Key.cpp
     src/analysis/Key.h
     src/analysis/Chords.cpp
@@ -209,6 +212,8 @@ set(MICFX_DSP_SOURCES
     src/daw/MidiFileIO.h
     src/daw/Hitpoints.h
     src/daw/Quantize.cpp
+    src/daw/VoiceAlign.cpp
+    src/daw/VoiceAlign.h
     src/daw/Quantize.h
     src/daw/Warp.cpp
     src/daw/TempoMap.cpp

@@ -56,6 +56,8 @@
 #include "instruments/Kit.h"
 #include "instruments/Sampler.h"
 #include "daw/Quantize.h"
+#include "daw/VoiceAlign.h"
+#include "analysis/VocalAlign.h"
 #include "daw/Hitpoints.h"
 #include "daw/Patterns.h"
 #include "daw/Loops.h"
@@ -20760,6 +20762,204 @@ void testLiveInput()
 }
 
 
+// Vocal alignment (market item 8): a double lined up with its lead, syllable by syllable.
+struct SungSyllable { double start, length; float midi; int vowel; };
+
+static juce::AudioBuffer<float> makeSyllables (const std::vector<SungSyllable>& syllables, double seconds, float formantScale, float detune, int seed)
+{
+    // Vowels as two formants (Hz).
+    static const float formants[][2] = { { 800, 1200 }, { 500, 1900 }, { 300, 2300 }, { 500, 900 }, { 320, 800 } };
+    juce::AudioBuffer<float> out (1, (int) (seconds * sampleRate));
+    out.clear();
+    juce::Random random (seed);
+    const auto twoPi = juce::MathConstants<double>::twoPi;
+    for (const auto& s : syllables)
+    {
+        const auto begin = (int) (s.start * sampleRate);
+        const auto consonant = (int) (0.025 * sampleRate), voiced = (int) (s.length * sampleRate) - consonant;
+        float previous = 0.0f;
+        for (int i = 0; i < consonant && begin + i < out.getNumSamples(); ++i)
+        {
+            const auto noise = random.nextFloat() * 2.0f - 1.0f;
+            out.addSample (0, begin + i, 0.08f * (noise - previous)); // bright: a "t" or an "s"
+            previous = noise;
+        }
+        const auto f0 = 440.0 * std::pow (2.0, (s.midi + detune - 69.0f) / 12.0);
+        const auto& f = formants[s.vowel % 5];
+        std::vector<float> amps;
+        for (int h = 1; h * f0 < 6000.0; ++h)
+        {
+            const auto hz = (float) (h * f0);
+            float a = 0.02f;
+            for (auto peak : f)
+                a += std::exp (-0.5f * juce::square ((hz - peak * formantScale) / 150.0f));
+            amps.push_back (a / (float) h * 2.0f);
+        }
+        for (int i = 0; i < voiced; ++i)
+        {
+            const auto at = begin + consonant + i;
+            if (at >= out.getNumSamples())
+                break;
+            const auto envelope = juce::jmin (1.0f, i / (float) (0.015 * sampleRate), (voiced - i) / (float) (0.03 * sampleRate));
+            double v = 0.0;
+            for (size_t h = 0; h < amps.size(); ++h)
+                v += amps[h] * std::sin (twoPi * f0 * (double) (h + 1) * i / sampleRate);
+            out.addSample (0, at, (float) (0.08 * envelope * v));
+        }
+    }
+    return out;
+}
+
+static void testVocalAlign()
+{
+    std::cout << "\nVocal alignment: a double lined up with its lead\n";
+    namespace align = analysis::align;
+
+    // The lead: two phrases of syllables; the double sings them each a little early or
+    // late and a little shorter or longer, with another voice (formants 8% higher).
+    std::vector<SungSyllable> lead, dub;
+    juce::Random random (11);
+    double at = 0.5;
+    for (int k = 0; k < 14; ++k)
+    {
+        const auto length = 0.2 + 0.25 * random.nextDouble();
+        lead.push_back ({ at, length, 60.0f + (float) ((k * 5) % 9), (k * 3) % 5 });
+        at += length + (k == 6 ? 0.6 : 0.05 + 0.1 * random.nextDouble());
+    }
+    double previousEnd = 0.0;
+    for (const auto& s : lead)
+    {
+        const auto start = juce::jmax (previousEnd + 0.03, s.start + (random.nextDouble() * 2.0 - 1.0) * 0.06);
+        const auto length = s.length * (0.85 + 0.3 * random.nextDouble());
+        dub.push_back ({ start, length, s.midi, s.vowel });
+        previousEnd = start + length;
+    }
+    const auto seconds = at + 1.0;
+    const auto leadAudio = makeSyllables (lead, seconds, 1.0f, 0.0f, 1);
+    const auto dubAudio = makeSyllables (dub, seconds, 1.08f, 0.4f, 2);
+
+    const auto errors = [&] (const std::vector<align::Marker>& markers, double strength, bool ends)
+    {
+        std::vector<double> e;
+        for (size_t k = 0; k < lead.size(); ++k)
+        {
+            const auto from = dub[k].start + (ends ? dub[k].length : 0.0), want = lead[k].start + (ends ? lead[k].length : 0.0);
+            e.push_back (std::abs (align::mapTime (markers, from) - (from + strength * (want - from))));
+        }
+        std::sort (e.begin(), e.end());
+        return e;
+    };
+    const auto ms = [] (double s) { return juce::String (s * 1000.0, 1) + " ms"; };
+
+    const auto before = errors ({}, 1.0, false);
+    const auto found = align::align (leadAudio, dubAudio, sampleRate);
+    const auto starts = errors (found.markers, 1.0, false), ends = errors (found.markers, 1.0, true);
+    check (found.related && found.match > 0.6f, "the double sings what the lead sings (" + juce::String (juce::roundToInt (found.match * 100.0f)) + "% matched, "
+               + juce::String (juce::roundToInt (found.chance * 100.0f)) + "% by chance)");
+    check (starts[starts.size() / 2] < 0.008 && starts[starts.size() - 2] < 0.015,
+           "syllables start with the lead's: median " + ms (starts[starts.size() / 2]) + ", second worst " + ms (starts[starts.size() - 2])
+               + " (was median " + ms (before[before.size() / 2]) + ", worst " + ms (before.back()) + ")");
+    check (ends[ends.size() / 2] < 0.015, "and end with them: median " + ms (ends[ends.size() / 2]));
+
+    align::Options half;
+    half.strength = 0.5;
+    const auto halfway = errors (align::align (leadAudio, dubAudio, sampleRate, half).markers, 0.5, false);
+    check (halfway[halfway.size() / 2] < 0.008, "50% strength moves them halfway (median " + ms (halfway[halfway.size() / 2]) + ")");
+
+    // Stretch limits hold between every two markers.
+    align::Options tight;
+    tight.maxStretch = 1.1;
+    tight.gapStretch = 1.1;
+    const auto limited = align::align (leadAudio, dubAudio, sampleRate, tight);
+    auto worstRatio = 1.0;
+    for (size_t k = 1; k < limited.markers.size(); ++k)
+    {
+        const auto ratio = (limited.markers[k].target - limited.markers[k - 1].target) / (limited.markers[k].source - limited.markers[k - 1].source);
+        worstRatio = juce::jmax (worstRatio, ratio, 1.0 / ratio);
+    }
+    check (! limited.markers.empty() && worstRatio <= 1.1 + 1.0e-6, "a 1.1x limit holds (worst " + juce::String (worstRatio, 3) + "x)");
+
+    // A harmony a third above, sung by the other voice: still lined up.
+    {
+        auto third = dub;
+        for (auto& s : third)
+            s.midi += 4.0f;
+        const auto harmony = align::align (leadAudio, makeSyllables (third, seconds, 1.08f, 0.0f, 3), sampleRate);
+        const auto e = errors (harmony.markers, 1.0, false);
+        check (harmony.related && e[e.size() / 2] < 0.01, "a harmony a third above lines up too (median " + ms (e[e.size() / 2]) + ", "
+                   + juce::String (juce::roundToInt (harmony.match * 100.0f)) + "% matched)");
+    }
+
+    // Recorded in a noisy room (hiss 30 dB under the voice): still lined up.
+    {
+        auto noisy = dubAudio;
+        juce::Random hiss (5);
+        for (int i = 0; i < noisy.getNumSamples(); ++i)
+            noisy.addSample (0, i, 0.004f * (hiss.nextFloat() * 2.0f - 1.0f));
+        const auto e = errors (align::align (leadAudio, noisy, sampleRate).markers, 1.0, false);
+        check (e[e.size() / 2] < 0.01, "with room hiss under the double (median " + ms (e[e.size() / 2]) + ")");
+    }
+
+    // Something else entirely isn't lined up.
+    {
+        // Another line: its own words (vowels) and rhythm.
+        std::vector<SungSyllable> line;
+        double t = 0.4;
+        for (int k = 0; k < 20; ++k)
+        {
+            const auto length = 0.12 + 0.12 * random.nextDouble();
+            line.push_back ({ t, length, 64.0f + (float) ((k * 3) % 7), (k * 2 + 1) % 5 });
+            t += length + 0.08 + 0.15 * random.nextDouble();
+        }
+        const auto other = align::align (leadAudio, makeSyllables (line, seconds, 1.0f, 0.0f, 4), sampleRate);
+        check (! other.related && other.markers.empty(), "another line with its own words isn't lined up (" + juce::String (juce::roundToInt (other.match * 100.0f)) + "% matched, "
+                   + juce::String (juce::roundToInt (other.chance * 100.0f)) + "% by chance)");
+        const auto drums = align::align (leadAudio, makeDrumLoop (seconds), sampleRate);
+        check (! drums.related, "nor a drum loop (" + juce::String (juce::roundToInt (drums.match * 100.0f)) + "% matched)");
+    }
+    juce::AudioBuffer<float> silence (1, (int) (seconds * sampleRate));
+    silence.clear();
+    const auto silent = align::align (silence, dubAudio, sampleRate);
+    check (! silent.related, "nor anything with a silent lead");
+
+    // In the DAW: the double's clip is warped (its file untouched), and its notes tuned.
+    const auto folder = juce::File::createTempFile ("micfx-vocal-align");
+    folder.createDirectory();
+    const auto leadFile = folder.getChildFile ("lead.wav"), dubFile = folder.getChildFile ("double.wav");
+    writeWav (leadFile, leadAudio, sampleRate);
+    writeWav (dubFile, dubAudio, sampleRate);
+
+    daw::Edit edit;
+    daw::AudioPool pool;
+    pool.setSampleRate (sampleRate);
+    const auto leadTrack = (int) edit.addTrack ("Lead")[daw::ids::id];
+    const auto dubTrack = (int) edit.addTrack ("Double")[daw::ids::id];
+    edit.addClip (leadTrack, leadFile, 2.0, seconds);
+    const auto clip = (int) edit.addClip (dubTrack, dubFile, 2.0, seconds)[daw::ids::id];
+
+    daw::voicealign::Options options;
+    options.matchPitch = true;
+    const auto result = daw::voicealign::alignToGuide (edit, pool, { clip }, leadTrack, options);
+    const auto map = daw::Edit::getEffectiveWarp (edit.getClip (clip));
+    std::vector<double> e;
+    for (size_t k = 0; k < lead.size(); ++k)
+        e.push_back (std::abs (map.toTarget (dub[k].start) - lead[k].start));
+    std::sort (e.begin(), e.end());
+    check (result.aligned == 1 && result.error.isEmpty() && e[e.size() / 2] < 0.01,
+           "Align to lead warps the double's clip onto the lead (median " + ms (e[e.size() / 2]) + ")");
+
+    const auto notes = daw::Edit::getClipNotes (edit.getClip (clip));
+    int tuned = 0;
+    for (const auto& n : notes)
+        tuned += std::abs (n.shift + 0.4f) < 0.15f ? 1 : 0;
+    check (result.notes >= 10 && tuned >= 10, "and tunes its notes 40 cents down to the lead (" + juce::String (tuned) + " of " + juce::String ((int) notes.size()) + ")");
+
+    const auto again = daw::voicealign::alignToGuide (edit, pool, { clip }, dubTrack, options);
+    check (again.error.isNotEmpty(), "a clip isn't lined up with its own track");
+    folder.deleteRecursively();
+}
+
+
 int main()
 {
     std::cout << std::unitbuf;
@@ -21237,6 +21437,7 @@ int main()
     testSmoothing();
     testLiveInput();
     testStems();
+    testVocalAlign();
 #if MICFX_HAS_DEMUCS
     testStemPipeline();
 #endif

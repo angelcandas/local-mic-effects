@@ -7,6 +7,7 @@ haven't seen yet. To add an entry for your change, see "Adding entries" in
 
 ## 2026-11-24
 
+- **Align to lead.** Line a double, a harmony or a re-sung line up with the lead vocal, syllable by syllable, and optionally tune its notes to the lead's: the clip editor's Align section, or Align to lead… on a track. (#222)
 - **Chord track.** A lane under the ruler with the song's chords: detect them from the music or type them. Harmonies follow it, the piano roll shows each chord's notes, and Practice shows the chord playing now. (#221)
 
 ## 2026-11-19
