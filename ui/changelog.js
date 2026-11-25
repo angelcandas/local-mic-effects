@@ -1,15 +1,22 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 228,
+ "latest": 229,
  "days": [
   {
    "date": "2026-11-25",
    "entries": [
     {
      "title": "Voice repair",
-     "text": "Three new DAW effects for recorded voices: Breath Tamer turns down the breaths between phrases, Mouth De-click rebuilds lip smacks and tongue clicks, and Room Echo Reduction takes out the ring of the room it was recorded in. The Podcast and Streamer chains now use them.",
+     "text": "Three new DAW effects for recorded voices: Breath Tamer turns down the breaths between phrases, Mouth De-click rebuilds lip smacks and tongue clicks, and Room Echo Reduction takes out the ring of the room it was recorded in. The Podcast and Streamer chains now take out clicks and ease breaths.",
      "prs": [
       228
+     ]
+    },
+    {
+     "title": "Clip launcher",
+     "text": "A Launch tab with scenes and slots: launch loops and one-shots in time, record what you play into the song, and let the AI build and launch scenes.",
+     "prs": [
+      229
      ]
     },
     {

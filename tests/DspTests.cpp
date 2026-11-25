@@ -19327,6 +19327,12 @@ static void testPatterns()
                        && (bool) status["onLauncher"],
                    "the status reports what each track's launcher plays");
             check (ok (run ("backToSong")) && ok (run ("stopAllSlots")), "backToSong, stopAllSlots");
+            check (ok (run ("launchRecord", args ({ { "on", true } }))) && processor.getDawEngine().isRecordingPerformance()
+                       && ok (run ("launchRecord", args ({ { "on", false } }))) && ! processor.getDawEngine().isRecordingPerformance(),
+                   "launchRecord on and off");
+            const auto writtenSlot = run ("writeSlot", args ({ { "slot", slotId }, { "start", 40.0 }, { "passes", 1 } }));
+            check (ok (writtenSlot) && writtenSlot["clips"].size() == 1 && edit.getUndoManager().getUndoDescription() == "Launcher clip to song",
+                   "writeSlot puts a pass on the timeline");
             processor.getDawEngine().stop();
             check (ok (run ("removeScene", args ({ { "row", 2 } }))) && ! edit.getSlot ((int) slotId).isValid(),
                    "removeScene takes its slots");
@@ -19569,6 +19575,33 @@ static void testLauncher()
     engine.backToSong();
     render (engine, 2.0);
     check (! engine.isAnyOnLauncher(), "Back to song takes every track off the launcher");
+
+    // Recording a performance: what the launcher played lands on the timeline, a clip per pass.
+    edit.setLaunchQuantize ("none");
+    engine.rebuildNow();
+    engine.seek ((juce::int64) (30.0 * sampleRate));
+    render (engine, 0.1);
+    engine.startPerformance();
+    render (engine, 0.5);
+    const auto fired = (double) engine.getPosition() / sampleRate;
+    engine.launchSlot (audio, slot);
+    render (engine, 3.0);
+    engine.stopSlot (audio);
+    render (engine, 0.5);
+    edit.getUndoManager().beginNewTransaction();
+    const auto written = engine.finishPerformance();
+    juce::Array<juce::ValueTree> passes;
+    for (const auto& clip : edit.getTrack (audio))
+        if (clip.hasType (daw::ids::CLIP) && (double) clip[daw::ids::start] >= 29.0)
+            passes.add (clip);
+    std::sort (passes.begin(), passes.end(), [] (const juce::ValueTree& a, const juce::ValueTree& b) { return (double) a[daw::ids::start] < (double) b[daw::ids::start]; });
+    check (written == 2 && passes.size() == 2 && near ((double) passes[0][daw::ids::start], fired, 0.01)
+               && near ((double) passes[0][daw::ids::length], 2.0, 0.01) && near ((double) passes[1][daw::ids::start], fired + 2.0, 0.01)
+               && near ((double) passes[1][daw::ids::length], 1.0, 0.02),
+           "a recorded performance is written onto the track, a clip per pass (" + juce::String (written) + " clips)");
+    edit.getUndoManager().undo();
+    check (! edit.getClip ((int) passes[0][daw::ids::id]).isValid(), "and undoes in one step");
+    check (! engine.isRecordingPerformance() && engine.finishPerformance() == 0, "finishing twice writes nothing more");
     engine.stop();
 
     folder.deleteRecursively();

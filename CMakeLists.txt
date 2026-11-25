@@ -60,6 +60,8 @@ juce_add_binary_data(MicFX_WebUI
         ui/chordlane.js
         ui/patterns.js
         ui/patterns.css
+        ui/launcher.js
+        ui/launcher.css
         ui/patternlane.js
         ui/drawtool.js
         ui/browser.js

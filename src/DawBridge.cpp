@@ -416,7 +416,7 @@ namespace
             { "addSlotFromClip", "Clip to launcher" }, { "addMidiSlot", "New launcher clip" }, { "moveSlot", "Move launcher clip" },
             { "removeSlot", "Delete launcher clip" }, { "setSlot", "Launcher clip change" }, { "setScenes", "Scenes" },
             { "insertScene", "Insert scene" }, { "removeScene", "Delete scene" }, { "duplicateScene", "Duplicate scene" },
-            { "setSceneName", "Rename scene" }, { "setLaunchQuantize", "Launch quantize" },
+            { "setSceneName", "Rename scene" }, { "setLaunchQuantize", "Launch quantize" }, { "writeSlot", "Launcher clip to song" }, { "launchRecord", "Record performance" },
             { "setPart", "Pattern row" }, { "editPattern", "Edit pattern" }, { "setSteps", "Steps" },
             { "addPatternClip", "Place pattern" }, { "setPatternClip", "Pattern block change" },
             { "removePatternClip", "Delete pattern block" }, { "makePatternUnique", "Make pattern unique" },
@@ -1192,6 +1192,16 @@ juce::var DawBridge::describeSession()
     });
 }
 
+int DawBridge::finishPerformance()
+{
+    // One undo step for the whole performance.
+    edit.getUndoManager().beginNewTransaction ("Record performance");
+    const auto made = engine.finishPerformance();
+    edit.getUndoManager().beginNewTransaction();
+    sessionChanged = true;
+    return made;
+}
+
 juce::var DawBridge::describeKitPans (int trackId) const
 {
     // A Kit's pad pans by note ("36": -0.2), for the rack's pan knobs; void for other instruments.
@@ -1348,6 +1358,7 @@ juce::var DawBridge::describeStatus()
               return juce::var (launch);
           }() },
         { "onLauncher", engine.isAnyOnLauncher() },
+        { "launchRecording", engine.isRecordingPerformance() },
         { "midiNotes", [this]
           {
               juce::Array<juce::var> held;
@@ -1633,6 +1644,10 @@ void DawBridge::tick()
             engine.stopRecording();
             sessionChanged = true;
         }
+
+        // A performance being recorded is written when the transport stops.
+        if (engine.isRecordingPerformance() && ! engine.isPlaying())
+            finishPerformance();
 
         // Stop at the end of the song, unless recording or looping (pattern mode always loops)
         // or the clip launcher plays.
@@ -9046,6 +9061,21 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
         return true;
     }
 
+    // Recording a performance into the song: { on } (off writes it, one undo step) -> { ok, clips }.
+    if (command == "launchRecord")
+    {
+        if (arg (args, "on", false))
+        {
+            if (engine.isRecording()) { complete (error ("Stop recording first.")); return true; }
+            engine.startPerformance();
+            complete (object ({ { "ok", true }, { "error", juce::String() }, { "clips", 0 } }));
+        }
+        else
+            complete (object ({ { "ok", true }, { "error", juce::String() }, { "clips", finishPerformance() } }));
+        sessionChanged = true;
+        return true;
+    }
+
     if (command == "stopAllSlots") { engine.stopAllSlots(); ok(); return true; }
     if (command == "backToSong")   { engine.backToSong(); ok(); return true; }
 
@@ -9090,6 +9120,23 @@ bool DawBridge::handlePatterns (const juce::String& command, const juce::var& ar
         if (args.hasProperty ("loop"))  edit.setSlotLoop (slotId, arg (args, "loop", true));
         if (args.hasProperty ("name"))  edit.setSlotName (slotId, args["name"].toString());
         ok();
+        return true;
+    }
+
+    // A slot onto its track's timeline: { slot, start (s), passes? (1), length? (s; else the
+    // passes) } -> { ok, clips }.
+    if (command == "writeSlot")
+    {
+        const auto slot = edit.getSlot (arg (args, "slot", -1));
+        if (! slot.isValid()) { complete (error ("There's no such clip in the launcher.")); return true; }
+        const auto start = juce::jmax (0.0, arg (args, "start", 0.0));
+        const auto tempo = edit.getTempoMap();
+        const auto pass = tempo.toSeconds (tempo.toBeats (start) + daw::Edit::getSlotBeats (slot)) - start;
+        const auto length = args.hasProperty ("length") ? arg (args, "length", pass) : pass * juce::jlimit (1, 256, arg (args, "passes", 1));
+        juce::Array<juce::var> made;
+        for (auto clip : edit.writeSlotToTimeline ((int) slot[ids::id], start, length))
+            made.add (clip);
+        complete (object ({ { "ok", true }, { "error", juce::String() }, { "clips", made } }));
         return true;
     }
 
