@@ -221,6 +221,13 @@ export const MODULES = [
   { id: "deq", name: "Dynamic EQ", category: "cleanup", power: "deqOn", dawOnly: true,
     description: "A bell that cuts only while its band gets loud: harsh notes, a booming bass note",
     controls: [knob("deqFreq", "Freq"), knob("deqQ", "Q"), knob("deqThreshold", "Threshold"), knob("deqRange", "Range")] },
+
+  // Feedback protection: Live only (`liveOnly` keeps it out of the DAW's lists), always
+  // last in the chain. Its settings belong to the room, so presets and scenes leave them.
+  { id: "feedback", name: "Feedback Guard", category: "cleanup", power: "fbgOn", wide: true, liveOnly: true,
+    description: "Catches the mic ringing through the speakers and notches that note before it howls. Ring out before the show: no one sings, raise the level slowly, and each ring becomes a fixed notch",
+    controls: [knob("fbgSensitivity", "Sensitivity"), knob("fbgDepth", "Max cut"), knob("fbgRelease", "Release"),
+               toggle("fbgRingOut", "Ring out"), { type: "feedback-notches" }] },
 ];
 
 // Module key (C++ fx::getModuleKey) for each entry above, used by the DAW inserts and the
@@ -233,7 +240,7 @@ export const MODULE_KEYS = {
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
   echo: "echo", reverb: "reverb", plate: "plate", irverb: "irReverb", width: "width",
   meq: "masterEq", mb: "multiband", imager: "imager", limiter: "limiter", loudness: "loudness",
-  transient: "transient", deq: "dynamicEq",
+  transient: "transient", deq: "dynamicEq", feedback: "feedbackGuard",
 };
 
 // Whether a control with a `when` ({ param: [values] }) shows, given a way to read values.

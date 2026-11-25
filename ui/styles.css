@@ -1093,6 +1093,10 @@ select.dropdown {
 .fx-graph .fx-spectrum-in { fill: none; stroke: rgba(255, 255, 255, 0.16); stroke-width: 1; vector-effect: non-scaling-stroke; }
 .fx-graph .fx-dot { fill: none; stroke: #fff; stroke-width: 7; stroke-linecap: round; vector-effect: non-scaling-stroke; pointer-events: none; filter: drop-shadow(0 0 4px var(--cat)); }
 .fx-graph .fx-reduction { fill: var(--warn); opacity: 0.85; }
+.fx-graph.is-feedback .fx-reduction { opacity: 0.35; }
+.fx-graph.is-feedback .fx-curve { stroke: var(--warn); stroke-width: 1.5; }
+.fx-graph .fx-notch { stroke: var(--warn); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.fx-graph .fx-notch.is-fixed { stroke: var(--cat); }
 .fx-graph.is-dynamics.is-closed .fx-curve { opacity: 0.45; }
 .fx-graph .fx-band { transition: opacity 0.1s; }
 .fx-graph.is-curve .fx-curve { filter: drop-shadow(0 0 calc(var(--drive, 0) * 6px) var(--cat)); }
@@ -1724,3 +1728,10 @@ body.is-daw .setlist-drawer, body.is-daw .stage-view { display: none; }
 .whatsnew-list { margin: 0; padding-left: 18px; display: flex; flex-direction: column; gap: 6px; line-height: 1.4; }
 .whatsnew-list strong { color: var(--text); }
 .whatsnew-list li { color: var(--muted); }
+
+/* Feedback Guard's notch count and clear buttons (app.js FeedbackNotches). */
+.feedback-notches { display: flex; align-items: center; gap: 6px; flex-basis: 100%; font-size: 11px; color: var(--muted); }
+.feedback-notches .feedback-summary { margin-right: auto; font-variant-numeric: tabular-nums; }
+.feedback-notches .mini { flex: none; width: auto; height: auto; white-space: nowrap; padding: 3px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-raised); color: var(--muted); font: inherit; cursor: pointer; }
+.feedback-notches .mini:hover:not(:disabled) { color: var(--text); }
+.feedback-notches .mini:disabled { opacity: 0.4; cursor: default; }

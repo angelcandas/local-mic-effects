@@ -1,4 +1,5 @@
 #include "Setlist.h"
+#include "Parameters.h"
 
 namespace
 {
@@ -28,7 +29,7 @@ juce::String Setlist::captureSound() const
 {
     juce::StringArray pairs;
     for (auto* p : processor.getParameters())
-        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (p); ranged != nullptr && ranged->getParameterID() != "inputGain")
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (p); ranged != nullptr && ! Parameters::belongsToRoom (ranged->getParameterID()))
             pairs.add (ranged->getParameterID() + "=" + juce::String (ranged->convertFrom0to1 (ranged->getValue()), 6));
     return pairs.joinIntoString (";");
 }
@@ -151,7 +152,7 @@ bool Setlist::loadSong (int index, juce::String& warning)
     };
 
     for (auto* p : processor.getParameters())
-        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (p); ranged != nullptr && ranged->getParameterID() != "inputGain")
+        if (auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (p); ranged != nullptr && ! Parameters::belongsToRoom (ranged->getParameterID()))
             if (const auto it = values.find (ranged->getParameterID()); it != values.end())
                 set (*ranged, ranged->convertTo0to1 (it->second));
 

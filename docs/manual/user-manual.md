@@ -70,7 +70,7 @@ Live mode runs the effects below in one chain. Each can be switched on or off, a
 
 | Group | Effects |
 | --- | --- |
-| Clean-up | High-pass, Denoise, Noise Gate, EQ, Parametric EQ, Smooth, Compressor, Opto Compressor, Auto Level, De-esser |
+| Clean-up | High-pass, Denoise, Noise Gate, EQ, Parametric EQ, Smooth, Compressor, Opto Compressor, Auto Level, De-esser, Feedback Guard |
 | Pitch | Autotune, Pitch Shift (with formant), Harmonizer |
 | Character | Exciter, Saturation, Amp, Radio, Bitcrusher, Robot, Filter, Auto-wah |
 | Modulation | Tremolo, Vibrato, Chorus, Flanger, Phaser |
@@ -156,6 +156,16 @@ A seven-band EQ for mixing: low cut and high cut (24 dB per octave), a low shelf
 ![Smooth card in Live mode](images/smooth-card-live.png)
 
 Finds frequencies that ring or sound harsh and turns them down automatically, only when they stick out. It is the standard cure for a harsh vocal. Resolution is **fast**, **balanced** (default) or **quality**; higher quality costs a little more latency. Smooth does not touch the lowest few hundred Hz, so it leaves the body of your voice alone.
+
+### Feedback Guard
+
+![The Feedback Guard card](images/feedback-guard.png)
+
+Stops the howl you get when the mic hears its own speakers. It listens to what goes out (it always plays last in the chain) for a narrow note that holds still and keeps getting louder, and puts a very narrow notch on it, starting at -6 dB and going 3 dB deeper while it still grows, up to **Max cut**. Up to 8 notches. A sung note moves and has its harmonics, so it isn't notched; a held note without vibrato takes longer to count. **Sensitivity** sets how quickly it acts. Notches caught while you sing let go after the room has been quiet for **Release** seconds.
+
+**Ring out** is for the sound check, before the show: with no one singing, turn the input gain or the speakers up slowly until the room starts to ring, then back off. Each ring it catches becomes a **fixed** notch (drawn in the effect's colour; the caught ones are yellow) that stays, with the session, until you press **Clear all**. **Clear caught** lets go of the others only.
+
+Its settings belong to the room, like the input gain: presets, scenes and setlist songs leave them alone, and saved chains leave it out. It is Live only; the DAW doesn't offer it.
 
 ### Auto Level
 

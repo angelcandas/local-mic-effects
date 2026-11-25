@@ -527,6 +527,62 @@ const views = {
     };
   },
 
+  // Feedback protection: the spectrum going out, and the summed response of the notches in
+  // use right now (Q 30, src/dsp/FeedbackGuard.h): fixed Ring out notches drawn solid, the
+  // ones caught while singing in the warning colour. The dashed line is Max cut.
+  feedbackGuard({ get }) {
+    const RANGE = 24;
+    const element = frame("is-filter is-feedback");
+    frequencyGrid(element);
+    const spectrum = spectrumLayer(element);
+    const fill = path(element, "fx-reduction"), curve = path(element, "fx-curve");
+    const depth = svg("line", { class: "fx-threshold", x1: 0, x2: W });
+    element.append(depth);
+    const marks = svg("g");
+    element.append(marks);
+    label(element, 3, 11, "Notches");
+    const yOfCut = (db) => clamp(db / RANGE) * H * 0.8;
+    let lastKey = "";
+
+    return {
+      element,
+      update() {
+        const y = yOfCut(get("fbgDepth"));
+        depth.setAttribute("y1", y);
+        depth.setAttribute("y2", y);
+      },
+      live(reading) {
+        spectrum(reading);
+        const notches = reading?.notches ?? [];
+        const key = notches.map((n) => `${n.hz}:${n.cut}:${n.fixed}`).join(",");
+        if (key !== lastKey) {
+          lastKey = key;
+          const filters = notches.filter((n) => n.cut > 0.05).map((n) => biquad("peak", n.hz, 30, -n.cut));
+          if (!filters.length) {
+            fill.setAttribute("d", "");
+            curve.setAttribute("d", "");
+          } else {
+            // Finer steps than the other curves: a Q 30 notch is a few pixels wide.
+            const points = [];
+            for (let x = 0; x <= W; x += 0.5) {
+              const f = fOfX(x);
+              const cut = -filters.reduce((sum, filter) => sum + magnitudeDb(filter, f), 0);
+              points.push(`${x.toFixed(1)},${yOfCut(cut).toFixed(1)}`);
+            }
+            curve.setAttribute("d", `M${points.join(" L")}`);
+            fill.setAttribute("d", `M0,0 L${points.join(" L")} L${W},0 Z`);
+          }
+          marks.replaceChildren(...notches.map((n) => svg("line", {
+            class: n.fixed ? "fx-notch is-fixed" : "fx-notch", x1: xOfF(n.hz), x2: xOfF(n.hz), y1: H - 8, y2: H,
+          })));
+        }
+        if (!reading) return "";
+        if (reading.ringOut) return notches.length ? `Ring out: ${notches.filter((n) => n.fixed).length} fixed` : "Ring out: listening";
+        return notches.length ? `${notches.length} notch${notches.length === 1 ? "" : "es"}` : "";
+      },
+    };
+  },
+
   // Input level (x) against output level (y), -60..0 dB.
   // Mastering (src/dsp/Mastering.h).
   masterEq({ get, set, range }) {

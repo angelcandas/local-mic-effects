@@ -214,7 +214,7 @@ Parameters::Parameters (Layout& l)
         if (const auto type = (fx::ModuleType) i;
             type != fx::ModuleType::denoise && type != fx::ModuleType::autoLevel && type != fx::ModuleType::smooth
             && type != fx::ModuleType::cab && type != fx::ModuleType::irReverb && type != fx::ModuleType::amp
-            && type != fx::ModuleType::opto && type != fx::ModuleType::plate)
+            && type != fx::ModuleType::opto && type != fx::ModuleType::plate && type != fx::ModuleType::feedbackGuard)
             moduleGains (type);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
@@ -396,4 +396,18 @@ Parameters::Parameters (Layout& l)
     // Macros (Macros.h), last: eight knobs that each turn any of the values above.
     for (int m = 1; m <= 8; ++m)
         number (l, "macro" + juce::String (m), "Macro " + juce::String (m), 0.0f, 100.0f, 0.1f, 0.0f, "%");
+
+    // Feedback protection (FeedbackGuard.h), Live only, after the macros. Its values belong
+    // to the room: presets, scenes and setlist songs leave them alone (belongsToRoom).
+    toggle (l, "fbgOn", "Feedback Guard On");
+    percent (l, "fbgSensitivity", "Feedback Guard Sensitivity", 50.0f);
+    decibels (l, "fbgDepth", "Feedback Guard Max Cut", 3.0f, 24.0f, 12.0f);
+    number (l, "fbgRelease", "Feedback Guard Release", 1.0f, 60.0f, 0.5f, 10.0f, "s", 10.0f);
+    toggle (l, "fbgRingOut", "Feedback Guard Ring Out");
+    moduleGains (fx::ModuleType::feedbackGuard);
+}
+
+bool Parameters::belongsToRoom (const juce::String& id)
+{
+    return id == "inputGain" || id.startsWith ("fbg") || id.startsWith ("feedbackGuard");
 }

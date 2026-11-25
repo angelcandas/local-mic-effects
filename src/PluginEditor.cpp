@@ -379,6 +379,33 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                            complete ({});
                        })
 
+                       // (action) -> { fixed, notches }. Feedback protection's notches: "get", "clear" (the
+                       // ones found while singing) or "clearAll" (the fixed Ring out ones too).
+                       .withNativeFunction ("feedbackGuard", [this] (const auto& args, auto complete)
+                       {
+                           auto* guard = processorRef.getLiveChain().find<fx::modules::FeedbackGuardModule>();
+                           if (guard == nullptr)
+                           {
+                               complete ({});
+                               return;
+                           }
+                           const auto action = args.size() > 0 ? args[0].toString() : juce::String ("get");
+                           if (action == "clear" || action == "clearAll")
+                               guard->getGuard().clearNotches (action == "clearAll");
+                           int fixed = 0, total = 0;
+                           for (const auto& notch : guard->getGuard().getNotches())
+                           {
+                               ++total;
+                               fixed += notch.fixed ? 1 : 0;
+                           }
+                           if (action == "clearAll")
+                               fixed = total = 0; // the clear lands with the next block
+                           auto* result = new juce::DynamicObject();
+                           result->setProperty ("fixed", fixed);
+                           result->setProperty ("notches", total);
+                           complete (juce::var (result));
+                       })
+
                        .withNativeFunction ("moduleFile", [this] (const auto& args, auto complete)
                        {
                            const auto key = args.size() > 0 ? args[0].toString() : juce::String();

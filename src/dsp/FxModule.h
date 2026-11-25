@@ -18,6 +18,7 @@ enum class ModuleType
     robot, filter, autoWah, amp, cab, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, plate, irReverb, width,
     multiband, limiter, masterEq, imager, loudness, // mastering (see Mastering.h)
     transient, dynamicEq,
+    feedbackGuard, // Live only (see isLiveOnly)
 
     // Not a built-in effect: a third-party VST3/AU effect hosted as a DAW insert (see
     // daw/PluginInsert.h). It comes after numModuleTypes, so Live mode, the parameters
@@ -27,7 +28,7 @@ enum class ModuleType
     rack
 };
 
-inline constexpr int numModuleTypes = (int) ModuleType::dynamicEq + 1;
+inline constexpr int numModuleTypes = (int) ModuleType::feedbackGuard + 1;
 
 // A stable name for each type, for project files, parameter IDs and the UI.
 inline const char* getModuleKey (ModuleType type)
@@ -40,10 +41,17 @@ inline const char* getModuleKey (ModuleType type)
     static constexpr const char* keys[] = {
         "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "smooth", "compressor", "opto", "autoLevel", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
         "robot", "filter", "autoWah", "amp", "cab", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "plate", "irReverb", "width",
-        "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq"
+        "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq", "feedbackGuard"
     };
     static_assert (std::size (keys) == numModuleTypes);
     return keys[(size_t) type];
+}
+
+// Effects that only make sense on the Live mic: the DAW can't add them as inserts.
+// Feedback protection listens for the mic ringing through the speakers on stage.
+inline bool isLiveOnly (ModuleType type) noexcept
+{
+    return type == ModuleType::feedbackGuard;
 }
 
 //==============================================================================

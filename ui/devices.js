@@ -345,7 +345,7 @@ export class DeviceChain {
     this.kit.popMenu(box.left, box.bottom + 4, ({ item, heading, menu }) => {
       menu.classList.add("is-columns");
       for (const [categoryId, category] of Object.entries(CATEGORIES)) {
-        const modules = MODULES.filter((m) => m.category === categoryId);
+        const modules = MODULES.filter((m) => m.category === categoryId && !m.liveOnly);
         if (!modules.length) continue;
         heading(category.name);
         for (const module of modules) item(module.name, () => this.screen.addEffect(this.owner.id, module.id, index), { indent: true, hint: module.description ?? "" });
