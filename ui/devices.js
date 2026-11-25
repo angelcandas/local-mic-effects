@@ -647,7 +647,9 @@ export class DeviceCard {
     this.body.append(this.createFooter(parts));
     // As wide as its controls need: a one-knob effect is a narrow card.
     const widest = Math.max(1, ...parts.map((part) => part.controls.filter((c) => ["knob", "choice", "toggle", "keys"].includes(c.type)).length));
-    if (!this.element.classList.contains("is-wide")) this.element.style.setProperty("--card", `${clamp(widest * 62 + 28, 190, 290)}px`);
+    // (`minCard` on a module: room for a picture and a delay badge beside the name.)
+    const least = MODULES.find((m) => m.id === this.insert.module || MODULE_KEYS[m.id] === this.insert.type)?.minCard ?? 190;
+    if (!this.element.classList.contains("is-wide")) this.element.style.setProperty("--card", `${clamp(widest * 62 + 28, least, 290)}px`);
   }
 
   // An effect plug-in (VST3/AU): its name and maker, a button for its own window, its

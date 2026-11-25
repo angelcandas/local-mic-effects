@@ -399,6 +399,19 @@ The **Cue** strip, left of the master, is what you hear in your headphones while
 
 Under *Mastering* in Add effect and the library (DAW only): **Mastering EQ**, **Multiband Compressor** (three bands), **Stereo Imager** (width with mono bass and a correlation readout), **Limiter** (look-ahead brickwall) and a **Loudness Meter** (momentary, short-term and integrated LUFS against a target). Put them on the master.
 
+### Voice repair
+
+Under *Clean-up* in Add effect and the library (DAW only), for recorded vocals, podcasts and voice-overs. Each looks ahead, so it adds a delay the DAW makes up for:
+
+- **Breath Tamer** finds the breaths between phrases (quiet, unpitched, airy sounds well below your singing) and turns them down by **Reduction**, leaving words, "s" sounds and soft sung notes alone. Raise **Sensitivity** if it misses quieter or shorter breaths, lower it if it touches the starts of words. Set Reduction to about 10 dB to keep breaths natural; 30 dB nearly removes them. Adds 80 ms.
+- **Mouth De-click** rebuilds the tiny lip smacks, tongue ticks and saliva clicks a close mic picks up: each click's few samples are recreated from the sound either side of it. Consonants, notes starting and drum hits are left alone. Raise **Sensitivity** for softer clicks. Adds 10 ms.
+
+- **Room Echo Reduction** turns down the echo of the room the voice was recorded in (the boxy "bathroom" ring between and under the words) while the voice and its first reflections stay. With **Auto decay** on it works out how long the room rings from the moments the voice stops (the card shows it, e.g. "room 0.6 s"); switch it off to set **Decay** yourself. **Amount** sets how hard it works: 30 to 50 % sounds natural, more starts to thin the voice. Adds 21 ms.
+
+The cards show what they found while the song plays. The *Podcast and spoken word* chain now starts with Mouth De-click, Room Echo Reduction and a gentle Breath Tamer, and *Streamer and broadcast* with Mouth De-click and Breath Tamer. Loaded in Live mode, those chains leave the repair effects out (they look too far ahead for a live mic).
+
+![Room Echo Reduction and Breath Tamer in the Podcast chain](images/voice-repair.png)
+
 ### Automation lanes
 
 Automation makes a setting move over time: the voice comes up in the chorus, the echo opens on the last word, the guitar pans across.

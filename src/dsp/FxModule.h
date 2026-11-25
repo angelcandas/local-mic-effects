@@ -18,6 +18,7 @@ enum class ModuleType
     robot, vocoder, filter, autoWah, amp, cab, tremolo, vibrato, chorus, flanger, phaser, doubler, echo, reverb, plate, irReverb, width,
     multiband, limiter, masterEq, imager, loudness, // mastering (see Mastering.h)
     transient, dynamicEq,
+    breath, declick, dereverb, // voice repair (see VoiceRepair.h, Dereverb.h), DAW inserts
     feedbackGuard, // Live only (see isLiveOnly)
 
     // Not a built-in effect: a third-party VST3/AU effect hosted as a DAW insert (see
@@ -41,7 +42,7 @@ inline const char* getModuleKey (ModuleType type)
     static constexpr const char* keys[] = {
         "highPass", "denoise", "gate", "pitch", "eq", "paraEq", "smooth", "compressor", "opto", "autoLevel", "deEsser", "exciter", "saturation", "radio", "bitcrusher",
         "robot", "vocoder", "filter", "autoWah", "amp", "cab", "tremolo", "vibrato", "chorus", "flanger", "phaser", "doubler", "echo", "reverb", "plate", "irReverb", "width",
-        "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq", "feedbackGuard"
+        "multiband", "limiter", "masterEq", "imager", "loudness", "transient", "dynamicEq", "breath", "declick", "dereverb", "feedbackGuard"
     };
     static_assert (std::size (keys) == numModuleTypes);
     return keys[(size_t) type];
@@ -52,6 +53,13 @@ inline const char* getModuleKey (ModuleType type)
 inline bool isLiveOnly (ModuleType type) noexcept
 {
     return type == ModuleType::feedbackGuard;
+}
+
+// Effects that only make sense in the DAW: they look far ahead (tens of ms), too late for a
+// live mic. Live mode leaves them out of a chain it loads.
+inline bool isDawOnly (ModuleType type) noexcept
+{
+    return type == ModuleType::breath || type == ModuleType::declick || type == ModuleType::dereverb;
 }
 
 //==============================================================================

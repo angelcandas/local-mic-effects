@@ -16,6 +16,8 @@
 #include "GuitarAmp.h"
 #include "Convolver.h"
 #include "Vocoder.h"
+#include "VoiceRepair.h"
+#include "Dereverb.h"
 
 #include <memory>
 
@@ -1544,6 +1546,9 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::loudness:   return std::make_unique<modules::Loudness>();
         case ModuleType::transient:  return std::make_unique<modules::Transient>();
         case ModuleType::dynamicEq:  return std::make_unique<modules::DynamicEq>();
+        case ModuleType::breath:     return std::make_unique<modules::Breath>();
+        case ModuleType::declick:    return std::make_unique<modules::Declick>();
+        case ModuleType::dereverb:   return std::make_unique<modules::DereverbModule>();
         case ModuleType::feedbackGuard: return std::make_unique<modules::FeedbackGuardModule>();
         case ModuleType::plugin:     return {}; // made by daw::PluginInsert, from its plugin
         case ModuleType::rack:       return {}; // made by daw::RackInsert, from its chains

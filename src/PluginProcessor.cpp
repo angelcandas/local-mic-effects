@@ -746,8 +746,8 @@ void PluginProcessor::applyLiveChain (const juce::ValueTree& inserts)
                     return &chain[m];
             return nullptr;
         }();
-        if (module == nullptr || order.contains (key) || fx::isLiveOnly (module->getType()))
-            continue; // a plug-in, or a second one of an effect: Live has one of each
+        if (module == nullptr || order.contains (key) || fx::isLiveOnly (module->getType()) || fx::isDawOnly (module->getType()))
+            continue; // a plug-in, a second one of an effect (Live has one of each), or one too slow for a live mic
 
         for (int v = 0; v < module->getNumValues(); ++v)
             if (const juce::Identifier id (module->getValueId (v)); insert.hasProperty (id))

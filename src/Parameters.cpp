@@ -214,7 +214,8 @@ Parameters::Parameters (Layout& l)
         if (const auto type = (fx::ModuleType) i;
             type != fx::ModuleType::denoise && type != fx::ModuleType::autoLevel && type != fx::ModuleType::smooth
             && type != fx::ModuleType::cab && type != fx::ModuleType::irReverb && type != fx::ModuleType::amp
-            && type != fx::ModuleType::opto && type != fx::ModuleType::plate && type != fx::ModuleType::feedbackGuard && type != fx::ModuleType::vocoder)
+            && type != fx::ModuleType::opto && type != fx::ModuleType::plate && type != fx::ModuleType::feedbackGuard && type != fx::ModuleType::vocoder
+            && type != fx::ModuleType::breath && type != fx::ModuleType::declick && type != fx::ModuleType::dereverb)
             moduleGains (type);
 
     // Mastering effects (Mastering.h), added last so hosts keep the parameter order
@@ -419,6 +420,23 @@ Parameters::Parameters (Layout& l)
     percent (l, "vocoderUnvoiced", "Vocoder Unvoiced", 50.0f);
     percent (l, "vocoderMix", "Vocoder Mix", 100.0f);
     moduleGains (fx::ModuleType::vocoder);
+
+    // Voice repair (VoiceRepair.h, Dereverb.h), DAW inserts, after those: breaths turned
+    // down, mouth clicks rebuilt and the room's echo reduced.
+    toggle (l, "breathOn", "Breath Tamer On");
+    number (l, "breathReduction", "Breath Tamer Reduction", 0.0f, 30.0f, 0.1f, 12.0f, "dB");
+    percent (l, "breathSensitivity", "Breath Tamer Sensitivity", 50.0f);
+    moduleGains (fx::ModuleType::breath);
+
+    toggle (l, "declickOn", "Mouth De-click On");
+    percent (l, "declickSensitivity", "Mouth De-click Sensitivity", 50.0f);
+    moduleGains (fx::ModuleType::declick);
+
+    toggle (l, "dereverbOn", "Room Echo Reduction On");
+    percent (l, "dereverbAmount", "Room Echo Reduction Amount", 50.0f);
+    toggle (l, "dereverbAuto", "Room Echo Reduction Auto Decay", true);
+    number (l, "dereverbDecay", "Room Echo Reduction Decay", 0.15f, 4.0f, 0.01f, 0.6f, "s", 0.8f);
+    moduleGains (fx::ModuleType::dereverb);
 }
 
 bool Parameters::belongsToRoom (const juce::String& id)
