@@ -64,6 +64,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/drawtool.js
         ui/browser.js
         ui/pianoroll.js
+        ui/midifx.js
         ui/takes.js
         ui/automation.js
         ui/backing.js
@@ -209,6 +210,8 @@ set(MICFX_DSP_SOURCES
     src/daw/Templates.cpp
     src/daw/Templates.h
     src/daw/Hitpoints.cpp
+    src/daw/MidiEffects.cpp
+    src/daw/MidiEffects.h
     src/daw/MidiFileIO.cpp
     src/daw/MidiFileIO.h
     src/daw/Hitpoints.h

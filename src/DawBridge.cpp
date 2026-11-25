@@ -11,6 +11,7 @@
 #include "daw/Patterns.h"
 #include "daw/Loops.h"
 #include "daw/MidiFileIO.h"
+#include "daw/MidiEffects.h"
 #include "CaptureRing.h"
 #include "instruments/InstrumentProcessor.h"
 #include "instruments/Kit.h"
@@ -407,7 +408,8 @@ namespace
             { "addMarker", "Add marker" }, { "setMarker", "Marker change" }, { "removeMarker", "Delete marker" },
             { "defineTempo", "Tempo definition" }, { "tempoFromClip", "Project tempo from clip" }, { "stretchClip", "Stretch clip" },
             { "flattenClip", "Make warp permanent" }, { "quantize", "Quantize" }, { "alignVoice", "Align to lead" }, { "setHitpoints", "Hitpoints" }, { "hitpointAction", "Hitpoints" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
-            { "addInstrument", "Change instrument" }, { "key", "Song key" }, { "chords", "Chord track" }, { "fitChain", "Fit to this track" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
+            { "addInstrument", "Change instrument" }, { "addMidiFx", "Add MIDI effect" }, { "setMidiFx", "MIDI effect change" },
+            { "removeMidiFx", "Remove MIDI effect" }, { "moveMidiFx", "Move MIDI effect" }, { "key", "Song key" }, { "chords", "Chord track" }, { "fitChain", "Fit to this track" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addStarterPattern", "Add starter pattern" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
@@ -809,6 +811,27 @@ juce::var DawBridge::describeNotes (const juce::ValueTree& clip) const
     return notes;
 }
 
+// A MIDI track's MIDI effects (MIDIFX), in order, every value typed.
+static juce::var describeMidiFx (const juce::ValueTree& track)
+{
+    juce::Array<juce::var> list;
+    if (! daw::Edit::isMidiTrack (track))
+        return list;
+
+    for (const auto& fx : daw::Edit::getMidiFxOf (track))
+    {
+        const auto get = [&] (const char* name, const juce::var& fallback) { return fx.getProperty (name, fallback); };
+        list.add (object ({ { "id", (int) fx[ids::id] }, { "type", fx[ids::type].toString() }, { "on", (bool) get ("on", true) },
+                            { "rate", (double) get ("rate", 0.25) }, { "pattern", get ("pattern", "up").toString() },
+                            { "octaves", (int) get ("octaves", 1) }, { "gate", (double) get ("gate", 0.8) },
+                            { "latch", (bool) get ("latch", false) },
+                            { "shape", get ("shape", "key").toString() }, { "level", (double) get ("level", 0.85) },
+                            { "scale", get ("scale", "song").toString() }, { "root", (int) get ("root", 0) },
+                            { "snap", get ("snap", "nearest").toString() } }));
+    }
+    return list;
+}
+
 juce::var DawBridge::describeInstrument (const juce::ValueTree& track) const
 {
     if (! daw::Edit::isMidiTrack (track))
@@ -1051,6 +1074,7 @@ juce::var DawBridge::describeSession()
                               { "takesShown", (bool) track.getProperty (ids::takesShown, false) },
                               { "listenTake", daw::Edit::getListenTake (track) },
                               { "instrument", describeInstrument (track) },
+                              { "midiFx", describeMidiFx (track) },
                               { "keyNames", describeKeyNames ((int) track[ids::id]) },
                               { "kitPans", describeKitPans ((int) track[ids::id]) } }));
     }
@@ -8542,6 +8566,32 @@ bool DawBridge::handleMidi (const juce::String& command, const juce::var& args, 
         complete (object ({ { "ok", true }, { "error", juce::String() }, { "added", added } }));
         return true;
     }
+
+    // MIDI effects (arp, chord, scale) on a MIDI track, before its instrument.
+    if (command == "addMidiFx")
+    {
+        const auto fx = edit.addMidiFx (arg (args, "track", -1), args["type"].toString(), arg (args, "index", -1));
+        if (! fx.isValid())
+            complete (error ("MIDI effects go on MIDI tracks (up to 8 each)."));
+        else
+            complete (object ({ { "ok", true }, { "error", juce::String() }, { "id", (int) fx[ids::id] } }));
+        return true;
+    }
+
+    if (command == "setMidiFx")
+    {
+        const auto id = arg (args, "id", -1);
+        if (! edit.getMidiFx (id).isValid()) { complete (error ("That MIDI effect is gone.")); return true; }
+        if (auto* object = args.getDynamicObject())
+            for (const auto& property : object->getProperties())
+                if (property.name != juce::Identifier ("id") && property.name != juce::Identifier ("continue"))
+                    edit.setMidiFx (id, property.name.toString(), property.value);
+        complete (error ({}));
+        return true;
+    }
+
+    if (command == "removeMidiFx") { edit.removeMidiFx (arg (args, "id", -1)); complete (error ({})); return true; }
+    if (command == "moveMidiFx")   { edit.moveMidiFx (arg (args, "id", -1), arg (args, "index", 0)); complete (error ({})); return true; }
 
     if (command == "kitSample")
     {

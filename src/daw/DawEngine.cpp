@@ -464,7 +464,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         return;
     }
 
-    if (tree.hasType (ids::NOTE) || tree.hasType (ids::CTRL) || tree.hasType (ids::SLOT))
+    if (tree.hasType (ids::NOTE) || tree.hasType (ids::CTRL) || tree.hasType (ids::SLOT) || tree.hasType (ids::MIDIFX))
     {
         requestRebuild();
         return;
@@ -1186,7 +1186,10 @@ void DawEngine::rebuild()
         }
 
         if (track.strip->isMidi)
+        {
             buildMidiEvents (track, trackTree, sampleRate, end, graph->tempo, loopPattern);
+            track.midiFx = midifx::fromTrack (trackTree, edit.getKey(), edit.isKeyMinor());
+        }
 
         buildAutomation (track, *track.strip, trackTree);
 
@@ -2814,7 +2817,7 @@ void DawEngine::publishLaunch (Track& track) noexcept
     launch.progress.store (progress, std::memory_order_relaxed);
 }
 
-void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, bool launchChanged, juce::int64 blockStart, int numSamples,
+void DawEngine::renderInstrument (Track& track, const TempoMap& tempo, bool isPlaying, bool fresh, bool launchChanged, juce::int64 blockStart, int numSamples,
                                   const juce::MidiBuffer* input, int midiOffset) noexcept
 {
     auto& strip = *track.strip;
@@ -2938,6 +2941,19 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, bool
     {
         midi.addEvents (strip.audition, 0, -1, 0);
         strip.audition.clear();
+    }
+
+    // The MIDI effects (arp, chord, scale) between the notes and the instrument. A chain
+    // that just went empty still runs once, to end what it left sounding.
+    if (! track.midiFx.empty() || strip.midiFx.isActive())
+    {
+        midifx::Context context;
+        context.sampleRate = sampleRate;
+        context.playing = isPlaying;
+        const auto seconds = (double) windowStart / sampleRate;
+        context.beat = tempo.toBeats (seconds);
+        context.bpm = tempo.getBpmAt (seconds);
+        strip.midiFx.process (midi, track.midiFx, context, numSamples);
     }
 
     const juce::ScopedLock lock (instrument->getCallbackLock());
@@ -3097,7 +3113,7 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         // The instrument after the delay line: its notes are scheduled late instead, so
         // what's played live isn't delayed.
         if (strip.isMidi)
-            renderInstrument (track, isPlaying, fresh, launchChanged, blockStart, numSamples, midi, midiOffset);
+            renderInstrument (track, graph.tempo, isPlaying, fresh, launchChanged, blockStart, numSamples, midi, midiOffset);
 
         // Live input after the delay line: monitoring shouldn't wait for compensation. A
         // mono input plays on both sides, a stereo one left and right.
