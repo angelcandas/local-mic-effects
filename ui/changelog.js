@@ -1,7 +1,19 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 222,
+ "latest": 223,
  "days": [
+  {
+   "date": "2026-11-25",
+   "entries": [
+    {
+     "title": "Feedback Guard",
+     "text": "A Live effect that catches the mic ringing through the speakers and notches that note before it howls, while your singing goes through untouched. Ring out before the show to fix the notches for the room.",
+     "prs": [
+      223
+     ]
+    }
+   ]
+  },
   {
    "date": "2026-11-24",
    "entries": [
