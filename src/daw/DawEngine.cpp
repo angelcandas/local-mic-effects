@@ -327,6 +327,92 @@ void DawEngine::setPatternMode (int patternId)
     rebuild();
 }
 
+//==============================================================================
+void DawEngine::requestLaunch (int trackId, int code, bool now)
+{
+    auto& launch = launches[trackId];
+    if (launch == nullptr)
+        launch = std::make_shared<Launch>();
+
+    launch->requestNow = now;
+    launch->request = code;
+}
+
+void DawEngine::launchSlot (int trackId, int slotId)
+{
+    if (! realtime || ! edit.getTrack (trackId).isValid())
+        return;
+
+    const auto now = ! isPlaying();
+    requestLaunch (trackId, slotId, now);
+    if (now)
+        play();
+}
+
+void DawEngine::stopSlot (int trackId)
+{
+    if (realtime && edit.getTrack (trackId).isValid())
+        requestLaunch (trackId, launchStop, ! isPlaying());
+}
+
+void DawEngine::launchScene (int row)
+{
+    if (! realtime)
+        return;
+
+    // Every request first, so they're all picked up in the same block and start together.
+    const auto now = ! isPlaying();
+    bool any = false;
+    for (const auto& track : edit.getTracks())
+    {
+        const auto trackId = (int) track[ids::id];
+        const auto slot = edit.getSlotAt (trackId, row);
+        any = any || slot.isValid();
+        requestLaunch (trackId, slot.isValid() ? (int) slot[ids::id] : launchStop, now);
+    }
+
+    if (now && any)
+        play();
+}
+
+void DawEngine::stopAllSlots()
+{
+    for (const auto& track : edit.getTracks())
+        stopSlot ((int) track[ids::id]);
+}
+
+void DawEngine::backToSong()
+{
+    if (! realtime)
+        return;
+
+    for (const auto& [trackId, launch] : launches)
+        if (launch->onLauncherNow.load() || launch->queuedSlot.load() != noLaunch || launch->request.load() != noLaunch)
+            requestLaunch (trackId, launchSong, ! isPlaying());
+}
+
+DawEngine::LaunchState DawEngine::getLaunchState (int trackId) const
+{
+    LaunchState result;
+    if (const auto it = launches.find (trackId); it != launches.end())
+    {
+        const auto& launch = *it->second;
+        result.playing = launch.playingSlot.load();
+        result.queued = launch.request.load() != noLaunch ? launch.request.load() : launch.queuedSlot.load();
+        result.onLauncher = launch.onLauncherNow.load();
+        result.progress = launch.progress.load();
+    }
+    return result;
+}
+
+bool DawEngine::isAnyOnLauncher() const
+{
+    for (const auto& [trackId, launch] : launches)
+        if (launch->onLauncherNow.load())
+            return true;
+    return false;
+}
+
 std::bitset<128> DawEngine::getHeldNotes() const noexcept
 {
     std::bitset<128> held;
@@ -378,7 +464,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         return;
     }
 
-    if (tree.hasType (ids::NOTE) || tree.hasType (ids::CTRL))
+    if (tree.hasType (ids::NOTE) || tree.hasType (ids::CTRL) || tree.hasType (ids::SLOT))
     {
         requestRebuild();
         return;
@@ -435,7 +521,12 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
             || property == ids::key || property == ids::keyMinor)
             requestRebuild(); // the click follows the new tempo map (and so will musical clips); the harmonies the chords and key
         else if (property == ids::beatsPerBar)
+        {
             updateTempo();
+            requestRebuild(); // the launch quantize's bars
+        }
+        else if (property == ids::launchQuantize)
+            requestRebuild();
         else if (property == ids::loopOn || property == ids::loopStart || property == ids::loopEnd)
             updateLoop();
 
@@ -982,6 +1073,9 @@ void DawEngine::rebuild()
     if (realtime && edit.getCue().isValid())
         graph->cue = reuse (edit.getCue());
     graph->tempo = edit.getTempoMap();
+    graph->launchQuantize = edit.getLaunchQuantizeBeats();
+    graph->launchScratch.setSize (2, blockSize);
+    std::set<int> liveLaunches; // the tracks still there (the rest of `launches` goes)
     for (const auto& mark : edit.getChords())
     {
         bool ok = false;
@@ -1095,6 +1189,134 @@ void DawEngine::rebuild()
             buildMidiEvents (track, trackTree, sampleRate, end, graph->tempo, loopPattern);
 
         buildAutomation (track, *track.strip, trackTree);
+
+        // The clip launcher: the track's state (kept by id) and its slots, ready to play.
+        {
+            auto& launch = launches[trackId];
+            if (launch == nullptr)
+                launch = std::make_shared<Launch>();
+            track.launch = launch;
+            liveLaunches.insert (trackId);
+        }
+
+        if (realtime)
+        {
+            const auto toSamples = [this] (double seconds) { return (juce::int64) std::llround (seconds * sampleRate); };
+            const auto secondsPerBeat = 60.0 / graph->tempo.getBpmAtBeat (0.0);
+            const auto transpose = (int) std::lround ((double) trackTree.getProperty (ids::transpose, 0.0));
+
+            for (const auto& slotTree : trackTree)
+            {
+                if (! slotTree.hasType (ids::SLOT))
+                    continue;
+
+                const auto clipTree = Edit::getSlotClip (slotTree);
+                if (! clipTree.isValid())
+                    continue;
+
+                SlotPlay slot;
+                slot.id = (int) slotTree[ids::id];
+                slot.loop = Edit::getSlotLoop (slotTree);
+                slot.loopLength = juce::jmax ((juce::int64) 1, toSamples (Edit::getSlotBeats (slotTree) * secondsPerBeat));
+
+                const auto offset = juce::jmax (0.0, (double) clipTree[ids::offset]);
+                const auto clipLength = (double) clipTree[ids::length];
+
+                if (Edit::isMidiClip (clipTree))
+                {
+                    if (! track.strip->isMidi)
+                        continue;
+
+                    const auto clipTranspose = transpose + (int) std::lround ((double) clipTree.getProperty (ids::transpose, 0.0));
+                    const auto heard = juce::jmin (slot.loopLength, toSamples (clipLength));
+
+                    for (const auto& item : clipTree)
+                    {
+                        const auto time = (double) item[ids::time];
+                        if (time < offset || time >= offset + clipLength)
+                            continue;
+                        const auto at = toSamples (time - offset);
+                        if (at >= heard)
+                            continue;
+
+                        if (item.hasType (ids::NOTE))
+                        {
+                            const auto pitch = juce::jlimit (0, 127, (int) item[ids::pitch] + clipTranspose);
+                            const auto off = juce::jmin (heard - 1, toSamples (time - offset + (double) item[ids::length]));
+                            slot.events.push_back ({ at, pitch, juce::jlimit (1, 127, (int) item.getProperty (ids::velocity, 100)) });
+                            slot.events.push_back ({ juce::jmax (at + 1, off), pitch, 0 });
+                        }
+                        else if (item.hasType (ids::CTRL))
+                        {
+                            const auto kind = item[ids::kind].toString();
+                            const auto type = kind == Edit::controllerBend ? MidiEvent::bend : kind == Edit::controllerPressure ? MidiEvent::pressure : MidiEvent::cc;
+                            slot.events.push_back ({ at, juce::jlimit (0, 127, (int) item[ids::number]), Edit::clampControllerValue (kind, (int) item[ids::value]), type });
+                        }
+                    }
+
+                    const auto rank = [] (const MidiEvent& e) { return e.kind != MidiEvent::noteEvent ? 0 : e.velocity > 0 ? 2 : 1; };
+                    std::stable_sort (slot.events.begin(), slot.events.end(), [&] (const MidiEvent& a, const MidiEvent& b)
+                    {
+                        return a.time != b.time ? a.time < b.time : rank (a) < rank (b);
+                    });
+                }
+                else if (! track.strip->isMidi)
+                {
+                    const juce::File file (clipTree[ids::file].toString());
+                    const auto settings = getPlaybackSettings (clipTree);
+                    const auto clipId = (int) clipTree[ids::id];
+                    AudioPool::Hint hint;
+                    if (const auto it = lastClipAudio.find (clipId); it != lastClipAudio.end())
+                        if (const auto map = lastClipMap.find (clipId); map != lastClipMap.end() && map->second == settings.map)
+                            hint.previous = it->second;
+
+                    auto& clip = slot.clip;
+                    clip.audio = pool.getForPlayback (file, settings, hint);
+                    auto playedMap = settings.map;
+                    if (! settings.isNeutral())
+                        warpsInUse.insert (AudioPool::getWarpKey (file, settings));
+                    if (clip.audio == nullptr)
+                        if (const auto it = lastClipAudio.find (clipId); it != lastClipAudio.end())
+                        {
+                            clip.audio = it->second;
+                            if (const auto map = lastClipMap.find (clipId); map != lastClipMap.end())
+                                playedMap = map->second;
+                        }
+
+                    if (clip.audio != nullptr)
+                    {
+                        clipAudio[clipId] = clip.audio;
+                        clipMaps[clipId] = playedMap;
+
+                        const auto available = (juce::int64) clip.audio->getNumSamples();
+                        clip.start = 0;
+                        clip.offset = juce::jlimit ((juce::int64) 0, available, toSamples (offset));
+                        clip.length = juce::jmin (toSamples (clipLength), available - clip.offset, slot.loopLength);
+                        clip.gain = volumeToGain (clipTree.getProperty (ids::gain, 0.0f)) * (Edit::getPolarity (trackTree) ? -1.0f : 1.0f);
+                        clip.envelope = Edit::getClipEnvelope (clipTree);
+                        for (auto& point : clip.envelope)
+                            point.time *= sampleRate;
+
+                        // Its own fades, and short ones where it cuts into the file's audio (the
+                        // loop's seam stays seamless when the clip is the whole file).
+                        const auto edgeFade = toSamples (antiClickSeconds);
+                        const auto most = clip.length / 2;
+                        clip.fadeIn = juce::jmin (most, juce::jmax (toSamples ((double) clipTree.getProperty (ids::fadeIn, 0.0)),
+                                                                    clip.offset > 0 ? edgeFade : (juce::int64) 0));
+                        clip.fadeOut = juce::jmin (most, juce::jmax (toSamples ((double) clipTree.getProperty (ids::fadeOut, 0.0)),
+                                                                     clip.offset + clip.length < available ? edgeFade : (juce::int64) 0));
+                        if (clip.length <= 0)
+                            clip.audio = nullptr;
+                    }
+                }
+                else
+                {
+                    continue; // an audio clip on a MIDI track (or the other way): nothing to play
+                }
+
+                track.slots.push_back (std::move (slot));
+            }
+        }
 
         // Auditioning a take: its lane plays instead of the comp (live only: exports and
         // Auto Mix always hear the comp).
@@ -1262,6 +1484,9 @@ void DawEngine::rebuild()
     graph->masterBehind = maxLatency + maxReturnLatency;
     if (maxReturnLatency > 0)
         graph->direct.setSize (2, blockSize);
+
+    for (auto it = launches.begin(); it != launches.end();)
+        it = liveLaunches.count (it->first) > 0 ? std::next (it) : launches.erase (it);
 
     lastClipAudio = std::move (clipAudio);
     lastClipMap = std::move (clipMaps);
@@ -2278,7 +2503,318 @@ void DawEngine::recordMidi (const juce::MidiBuffer& midi, int midiOffset, int nu
     }
 }
 
-void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce::int64 blockStart, int numSamples,
+//==============================================================================
+// The clip launcher, audio thread.
+namespace
+{
+    constexpr double launchFadeSeconds = 0.006; // a change fades over this long
+}
+
+void DawEngine::pickUpLaunch (Graph& graph, Track& track, juce::int64 blockStart) noexcept
+{
+    auto& launch = *track.launch;
+    const auto code = launch.request.exchange (noLaunch);
+
+    if (code == noLaunch)
+    {
+        // The playhead went back past where the launch was asked for (the loop, a seek):
+        // it doesn't wait for the line again.
+        if (launch.pending != noLaunch && blockStart < launch.requestedAt)
+            launch.fireAt = blockStart;
+        return;
+    }
+
+    launch.pending = code;
+    launch.requestedAt = blockStart;
+
+    const auto quantize = graph.launchQuantize;
+    if (launch.requestNow.exchange (false) || quantize <= 0.0)
+    {
+        launch.fireAt = blockStart;
+        return;
+    }
+
+    const auto beat = graph.tempo.toBeats ((double) juce::jmax ((juce::int64) 0, blockStart) / sampleRate);
+    const auto line = std::ceil (beat / quantize - 1.0e-6) * quantize;
+    launch.fireAt = juce::jmax (blockStart, (juce::int64) std::llround (graph.tempo.toSeconds (line) * sampleRate));
+}
+
+const DawEngine::SlotPlay* DawEngine::findSlot (const Track& track, int slotId) noexcept
+{
+    if (slotId < 0)
+        return nullptr;
+    for (const auto& slot : track.slots)
+        if (slot.id == slotId)
+            return &slot;
+    return nullptr;
+}
+
+bool DawEngine::runLaunch (Track& track, bool isPlaying, juce::int64 blockStart) noexcept
+{
+    auto& launch = *track.launch;
+    auto changed = false;
+
+    if (! isPlaying)
+    {
+        // Stopping the transport stops the slots and what was waiting for a line; stops and
+        // Back to song asked while stopped happen at once (a launch starts the transport).
+        if (launch.wasPlaying && launch.pending != noLaunch)
+            launch.pending = noLaunch;
+        if (launch.pending == launchStop || launch.pending == launchSong)
+            launch.onLauncher = std::exchange (launch.pending, noLaunch) == launchStop;
+        if (launch.slot >= 0)
+            changed = true;
+        launch.slot = launch.fadeSlot = -1;
+        launch.timelineGain = launch.onLauncher ? 0.0f : 1.0f;
+        launch.wasPlaying = false;
+        return changed;
+    }
+
+    launch.wasPlaying = true;
+
+    if (launch.pending != noLaunch && launch.fireAt <= blockStart)
+    {
+        const auto what = std::exchange (launch.pending, noLaunch);
+
+        if (findSlot (track, launch.slot) != nullptr)
+        {
+            launch.fadeSlot = launch.slot;
+            launch.fadePhase = launch.phase;
+            launch.fadeGain = 1.0f;
+        }
+
+        launch.slot = -1;
+        if (findSlot (track, what) != nullptr)
+        {
+            launch.slot = what;
+            // A MIDI track's notes play late by its compensation delay, as its timeline's do.
+            launch.phase = track.strip->isMidi ? -(juce::int64) track.delay.samples : 0;
+            launch.onLauncher = true;
+        }
+        else
+        {
+            launch.onLauncher = what != launchSong;
+        }
+        changed = true;
+    }
+
+    if (launch.slot >= 0 && findSlot (track, launch.slot) == nullptr)
+    {
+        launch.slot = -1; // removed while it played
+        changed = true;
+    }
+
+    return changed;
+}
+
+void DawEngine::renderSlotAudio (const SlotPlay& slot, juce::int64 phase, juce::AudioBuffer<float>& buffer, int numSamples) noexcept
+{
+    if (slot.clip.audio == nullptr)
+        return;
+
+    for (int done = 0; done < numSamples;)
+    {
+        if (phase < 0)
+        {
+            const auto skip = (int) juce::jmin ((juce::int64) (numSamples - done), -phase);
+            done += skip;
+            phase += skip;
+            continue;
+        }
+
+        if (! slot.loop && phase >= slot.loopLength)
+            return;
+
+        const auto local = slot.loop ? phase % slot.loopLength : phase;
+        const auto count = (int) juce::jmin ((juce::int64) (numSamples - done), slot.loopLength - local);
+        juce::AudioBuffer<float> view (buffer.getArrayOfWritePointers(), 2, done, count);
+        renderClip (slot.clip, view, local, count);
+        done += count;
+        phase += count;
+    }
+}
+
+void DawEngine::renderLaunchAudio (Graph& graph, Track& track, bool isPlaying, juce::int64 blockStart, int numSamples) noexcept
+{
+    if (! isPlaying)
+        return;
+
+    auto& launch = *track.launch;
+    auto& buffer = track.strip->buffer;
+    auto& scratch = graph.launchScratch;
+    const auto step = (float) (numSamples / (launchFadeSeconds * sampleRate));
+
+    // The timeline's clips, fading out when the track goes onto the launcher and back in.
+    const auto target = launch.onLauncher ? 0.0f : 1.0f;
+    const auto from = launch.timelineGain;
+    const auto to = target > from ? juce::jmin (target, from + step) : juce::jmax (target, from - step);
+    launch.timelineGain = to;
+
+    if (from == 1.0f && to == 1.0f)
+    {
+        for (const auto& clip : track.clips)
+            renderClip (clip, buffer, blockStart, numSamples);
+    }
+    else if ((from > 0.0f || to > 0.0f) && ! track.clips.empty())
+    {
+        scratch.clear (0, numSamples);
+        for (const auto& clip : track.clips)
+            renderClip (clip, scratch, blockStart, numSamples);
+        for (int ch = 0; ch < 2; ++ch)
+            buffer.addFromWithRamp (ch, 0, scratch.getReadPointer (ch), numSamples, from, to);
+    }
+
+    if (const auto* slot = findSlot (track, launch.slot))
+        renderSlotAudio (*slot, launch.phase, buffer, numSamples);
+
+    if (launch.fadeSlot >= 0)
+    {
+        const auto* slot = findSlot (track, launch.fadeSlot);
+        const auto fadeFrom = launch.fadeGain, fadeTo = juce::jmax (0.0f, fadeFrom - step);
+
+        if (slot != nullptr && slot->clip.audio != nullptr)
+        {
+            scratch.clear (0, numSamples);
+            renderSlotAudio (*slot, launch.fadePhase, scratch, numSamples);
+            for (int ch = 0; ch < 2; ++ch)
+                buffer.addFromWithRamp (ch, 0, scratch.getReadPointer (ch), numSamples, fadeFrom, fadeTo);
+        }
+
+        launch.fadeGain = fadeTo;
+        launch.fadePhase += numSamples;
+        if (slot == nullptr || fadeTo <= 0.0f)
+            launch.fadeSlot = -1;
+    }
+}
+
+namespace
+{
+    // One timeline or slot event into an instrument's MIDI, keeping track of what sounds.
+    template <typename StripType, typename EventType>
+    void playMidiEvent (StripType& strip, juce::MidiBuffer& midi, const EventType& e, int at)
+    {
+        if (e.kind == EventType::cc)
+        {
+            midi.addEvent (juce::MidiMessage::controllerEvent (1, e.note, e.velocity), at);
+            strip.ccTouched.set ((size_t) e.note);
+        }
+        else if (e.kind == EventType::bend)
+        {
+            midi.addEvent (juce::MidiMessage::pitchWheel (1, e.velocity + 8192), at);
+            strip.bendTouched = true;
+        }
+        else if (e.kind == EventType::pressure)
+        {
+            midi.addEvent (juce::MidiMessage::channelPressureChange (1, e.velocity), at);
+            strip.pressureTouched = true;
+        }
+        else if (e.velocity > 0)
+        {
+            midi.addEvent (juce::MidiMessage::noteOn (1, e.note, (juce::uint8) e.velocity), at);
+            strip.sounding.set ((size_t) e.note);
+        }
+        else if (strip.sounding[(size_t) e.note])
+        {
+            midi.addEvent (juce::MidiMessage::noteOff (1, e.note), at);
+            strip.sounding.reset ((size_t) e.note);
+        }
+    }
+}
+
+void DawEngine::addSlotMidi (Track& track, juce::MidiBuffer& midi, bool fresh, int numSamples) noexcept
+{
+    auto& strip = *track.strip;
+    const auto& launch = *track.launch;
+    const auto* slot = findSlot (track, launch.slot);
+
+    if (slot == nullptr)
+        return;
+
+    const auto& events = slot->events;
+    auto phase = launch.phase;
+
+    // A new graph while it plays (an edit): notes still held at the playhead in the new
+    // events carry on; the rest stop.
+    if (fresh && strip.sounding.any())
+    {
+        std::bitset<128> keep;
+        if (phase >= 0 && (slot->loop || phase < slot->loopLength))
+        {
+            const auto local = slot->loop ? phase % slot->loopLength : phase;
+            for (const auto& e : events)
+            {
+                if (e.time >= local)
+                    break;
+                if (e.kind == MidiEvent::noteEvent)
+                    keep.set ((size_t) e.note, e.velocity > 0);
+            }
+        }
+
+        for (int note = 0; note < 128; ++note)
+            if (strip.sounding[(size_t) note] && ! keep[(size_t) note])
+                midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
+        strip.sounding &= keep;
+    }
+
+    for (int done = 0; done < numSamples;)
+    {
+        if (phase < 0)
+        {
+            const auto skip = (int) juce::jmin ((juce::int64) (numSamples - done), -phase);
+            done += skip;
+            phase += skip;
+            continue;
+        }
+
+        if (! slot->loop && phase >= slot->loopLength)
+            break;
+
+        const auto local = slot->loop ? phase % slot->loopLength : phase;
+        const auto count = (int) juce::jmin ((juce::int64) (numSamples - done), slot->loopLength - local);
+
+        auto it = std::lower_bound (events.begin(), events.end(), local, [] (const MidiEvent& e, juce::int64 t) { return e.time < t; });
+        for (; it != events.end() && it->time < local + count; ++it)
+            playMidiEvent (strip, midi, *it, done + (int) (it->time - local));
+
+        // The loop's end: whatever it still holds stops there.
+        if (local + count == slot->loopLength && strip.sounding.any())
+        {
+            for (int note = 0; note < 128; ++note)
+                if (strip.sounding[(size_t) note])
+                    midi.addEvent (juce::MidiMessage::noteOff (1, note), done + count - 1);
+            strip.sounding.reset();
+        }
+
+        done += count;
+        phase += count;
+    }
+}
+
+void DawEngine::advanceLaunch (Track& track, int numSamples) noexcept
+{
+    auto& launch = *track.launch;
+    if (launch.slot < 0)
+        return;
+
+    launch.phase += numSamples;
+    if (const auto* slot = findSlot (track, launch.slot); slot != nullptr && ! slot->loop && launch.phase >= slot->loopLength)
+        launch.slot = -1; // a one-shot that has played: the track stays on the launcher, silent
+}
+
+void DawEngine::publishLaunch (Track& track) noexcept
+{
+    auto& launch = *track.launch;
+    launch.playingSlot.store (launch.slot, std::memory_order_relaxed);
+    launch.queuedSlot.store (launch.pending, std::memory_order_relaxed);
+    launch.onLauncherNow.store (launch.onLauncher, std::memory_order_relaxed);
+
+    auto progress = 0.0f;
+    if (const auto* slot = findSlot (track, launch.slot); slot != nullptr && launch.phase >= 0)
+        progress = (float) (launch.phase % slot->loopLength) / (float) slot->loopLength;
+    launch.progress.store (progress, std::memory_order_relaxed);
+}
+
+void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, bool launchChanged, juce::int64 blockStart, int numSamples,
                                   const juce::MidiBuffer* input, int midiOffset) noexcept
 {
     auto& strip = *track.strip;
@@ -2294,7 +2830,23 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce
     const auto windowStart = blockStart - track.delay.samples;
     const auto jumped = isPlaying && strip.nextBlock != windowStart;
 
-    if (strip.sounding.any() && (fresh || ! isPlaying || jumped))
+    if (track.launch->onLauncher)
+    {
+        // On the launcher: its slot instead of the timeline (which picks up again as after
+        // a jump on the way back).
+        if (strip.sounding.any() && (launchChanged || ! isPlaying))
+        {
+            for (int note = 0; note < 128; ++note)
+                if (strip.sounding[(size_t) note])
+                    midi.addEvent (juce::MidiMessage::noteOff (1, note), 0);
+            strip.sounding.reset();
+        }
+
+        if (isPlaying)
+            addSlotMidi (track, midi, fresh, numSamples);
+        strip.nextBlock = -1;
+    }
+    else if (strip.sounding.any() && (fresh || ! isPlaying || jumped))
     {
         // A new graph while playing on (an edit, a note added by pattern recording): the
         // notes it still has sounding at the playhead carry on; the rest stop.
@@ -2315,7 +2867,7 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce
         strip.sounding &= keep;
     }
 
-    if (isPlaying)
+    if (isPlaying && ! track.launch->onLauncher)
     {
         const auto& events = track.midiEvents;
         auto it = std::lower_bound (events.begin(), events.end(), windowStart,
@@ -2358,39 +2910,11 @@ void DawEngine::renderInstrument (Track& track, bool isPlaying, bool fresh, juce
         }
 
         for (; it != events.end() && it->time < windowStart + numSamples; ++it)
-        {
-            const auto at = (int) (it->time - windowStart);
-
-            if (it->kind == MidiEvent::cc)
-            {
-                midi.addEvent (juce::MidiMessage::controllerEvent (1, it->note, it->velocity), at);
-                strip.ccTouched.set ((size_t) it->note);
-            }
-            else if (it->kind == MidiEvent::bend)
-            {
-                midi.addEvent (juce::MidiMessage::pitchWheel (1, it->velocity + 8192), at);
-                strip.bendTouched = true;
-            }
-            else if (it->kind == MidiEvent::pressure)
-            {
-                midi.addEvent (juce::MidiMessage::channelPressureChange (1, it->velocity), at);
-                strip.pressureTouched = true;
-            }
-            else if (it->velocity > 0)
-            {
-                midi.addEvent (juce::MidiMessage::noteOn (1, it->note, (juce::uint8) it->velocity), at);
-                strip.sounding.set ((size_t) it->note);
-            }
-            else if (strip.sounding[(size_t) it->note])
-            {
-                midi.addEvent (juce::MidiMessage::noteOff (1, it->note), at);
-                strip.sounding.reset ((size_t) it->note);
-            }
-        }
+            playMidiEvent (strip, midi, *it, (int) (it->time - windowStart));
 
         strip.nextBlock = windowStart + numSamples;
     }
-    else
+    else if (! isPlaying)
     {
         strip.nextBlock = -1;
 
@@ -2564,16 +3088,16 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         auto& strip = *track.strip;
         strip.buffer.clear (0, numSamples);
 
-        if (isPlaying)
-            for (const auto& clip : track.clips)
-                renderClip (clip, strip.buffer, blockStart, numSamples);
+        // The timeline's clips, or the launcher's slot (fading between them).
+        const auto launchChanged = runLaunch (track, isPlaying, blockStart);
+        renderLaunchAudio (graph, track, isPlaying, blockStart, numSamples);
 
         track.delay.process (strip.buffer, numSamples);
 
         // The instrument after the delay line: its notes are scheduled late instead, so
         // what's played live isn't delayed.
         if (strip.isMidi)
-            renderInstrument (track, isPlaying, fresh, blockStart, numSamples, midi, midiOffset);
+            renderInstrument (track, isPlaying, fresh, launchChanged, blockStart, numSamples, midi, midiOffset);
 
         // Live input after the delay line: monitoring shouldn't wait for compensation. A
         // mono input plays on both sides, a stereo one left and right.
@@ -2613,6 +3137,10 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 
         updatePeak (strip.peakLeft, strip.buffer.getMagnitude (0, 0, numSamples));
         updatePeak (strip.peakRight, strip.buffer.getMagnitude (1, 0, numSamples));
+
+        if (isPlaying)
+            advanceLaunch (track, numSamples);
+        publishLaunch (track);
 
         auto& into = track.output >= 0 ? graph.returns[(size_t) track.output].strip->buffer : direct;
         strip.direct.setTargetValue (strip.targetDirect.load (std::memory_order_relaxed));
@@ -3008,6 +3536,18 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
 
         if (const auto pos = position.load(); looping && pos < end && pos + chunk > end)
             chunk = (int) (end - pos);
+
+        // The launcher's requests, and a chunk that ends where a launch fires (so every
+        // change happens at a chunk's start).
+        {
+            const auto pos = position.load();
+            for (auto& track : active->tracks)
+            {
+                pickUpLaunch (*active, track, pos);
+                if (const auto& launch = *track.launch; playing.load() && launch.pending != noLaunch && launch.fireAt > pos && launch.fireAt < pos + chunk)
+                    chunk = (int) (launch.fireAt - pos);
+            }
+        }
 
         std::array<const float*, Edit::maxInputs> chunkInputs {};
         for (int i = 0; i < numInputs; ++i)

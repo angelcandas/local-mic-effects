@@ -19046,6 +19046,49 @@ static void testPatterns()
         check (ok (run ("removePattern", args ({ { "id", patternId } }))) && lastSession()["patternClips"].size() == 0, "removePattern removes its blocks");
         run ("undo");
         check (lastSession()["patternClips"].size() == 1, "undo brings them back");
+
+        // The clip launcher's commands (market item 14).
+        {
+            const auto slotId = run ("addMidiSlot", args ({ { "track", kit }, { "row", 2 }, { "beats", 8.0 } }));
+            check (slotId.isInt() && edit.getUndoManager().getUndoDescription() == "New launcher clip", "addMidiSlot completes with the slot's id");
+            check (! run ("addMidiSlot", args ({ { "track", 999 } })).isInt(), "and fails on a missing track");
+            check (ok (run ("setSlot", args ({ { "slot", slotId }, { "name", "Groove" }, { "loop", false } })))
+                       && ok (run ("setSceneName", args ({ { "row", 2 }, { "name", "Chorus" } })))
+                       && ok (run ("setLaunchQuantize", args ({ { "value", "beat" } })))
+                       && ! ok (run ("setLaunchQuantize", args ({ { "value", "3bars" } }))),
+                   "setSlot, setSceneName, setLaunchQuantize");
+            const auto session = lastSession();
+            juce::var kitTrack;
+            for (const auto& t : *session["tracks"].getArray())
+                if ((int) t["id"] == kit)
+                    kitTrack = t;
+            const auto slot = kitTrack["slots"][0];
+            check (kitTrack["slots"].size() == 1 && (int) slot["id"] == (int) slotId && (int) slot["row"] == 2 && near ((double) slot["beats"], 8.0)
+                       && ! (bool) slot["loop"] && slot["clip"]["name"].toString() == "Groove" && (bool) slot["clip"]["midi"]
+                       && session["scenes"][2].toString() == "Chorus" && (int) session["sceneCount"] == 8
+                       && session["launchQuantize"].toString() == "beat",
+                   "the session describes slots and scenes, typed");
+            processor.getDawEngine().rebuildNow();
+            check (! ok (run ("launchSlot", args ({ { "track", kit }, { "slot", 999 } }))), "launching a missing slot fails");
+            check (ok (run ("launchSlot", args ({ { "track", kit }, { "slot", slotId } }))) && processor.getDawEngine().isPlaying(),
+                   "launchSlot starts the transport");
+            juce::AudioBuffer<float> buffer (2, blockSize);
+            processor.getDawEngine().process (buffer, 2, blockSize);
+            events.clear();
+            bridge.tick();
+            juce::var status;
+            for (const auto& [name, payload] : events)
+                if (name == "dawStatus")
+                    status = juce::JSON::parse (juce::JSON::toString (payload, true));
+            const auto kitLaunch = status["launch"].getProperty (juce::Identifier (juce::String (kit)), {});
+            check ((int) kitLaunch["playing"] == (int) slotId && (bool) kitLaunch["on"]
+                       && (bool) status["onLauncher"],
+                   "the status reports what each track's launcher plays");
+            check (ok (run ("backToSong")) && ok (run ("stopAllSlots")), "backToSong, stopAllSlots");
+            processor.getDawEngine().stop();
+            check (ok (run ("removeScene", args ({ { "row", 2 } }))) && ! edit.getSlot ((int) slotId).isValid(),
+                   "removeScene takes its slots");
+        }
     }
 
     folder.deleteRecursively();
@@ -19086,6 +19129,207 @@ static float soundCheckValue (const SoundCheck::Plan& plan, const juce::String& 
         if (key == id)
             return value;
     return fallback;
+}
+
+//==============================================================================
+// The clip launcher (market item 14): slots and scenes in the Edit, quantized launches in
+// the engine, and the page's commands.
+static void testLauncher()
+{
+    std::cout << "\nClip launcher\n";
+
+    const auto near = [] (double a, double b, double tolerance = 1.0e-9) { return std::abs (a - b) < tolerance; };
+    const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-launcher", {});
+    folder.createDirectory();
+
+    const auto writeTone = [&] (const juce::String& name, double hz, double seconds)
+    {
+        juce::AudioBuffer<float> tone (2, (int) (seconds * sampleRate));
+        for (int i = 0; i < tone.getNumSamples(); ++i)
+            for (int ch = 0; ch < 2; ++ch)
+                tone.setSample (ch, i, 0.25f * (float) std::sin (juce::MathConstants<double>::twoPi * hz * i / sampleRate));
+        const auto file = folder.getChildFile (name);
+        writeWav (file, tone, sampleRate);
+        return file;
+    };
+
+    // How much of a frequency is in a stretch of the output (Goertzel, as a level).
+    const auto level = [] (const std::vector<float>& x, double fromSeconds, double toSeconds, double hz)
+    {
+        const auto from = (size_t) (fromSeconds * sampleRate), to = juce::jmin (x.size(), (size_t) (toSeconds * sampleRate));
+        const auto k = 2.0 * std::cos (juce::MathConstants<double>::twoPi * hz / sampleRate);
+        double s1 = 0.0, s2 = 0.0;
+        for (auto i = from; i < to; ++i)
+        {
+            const auto s0 = x[i] + k * s1 - s2;
+            s2 = s1;
+            s1 = s0;
+        }
+        const auto power = s1 * s1 + s2 * s2 - k * s1 * s2;
+        return std::sqrt (juce::jmax (0.0, power)) / juce::jmax (1.0, (double) (to - from));
+    };
+
+    const auto songFile = writeTone ("song.wav", 300.0, 12.0);
+    const auto loopFile = writeTone ("loop.wav", 1000.0, 2.0);
+
+    daw::Edit edit; // 120 BPM, 4/4: a bar is 2 s
+    const auto audio = (int) edit.addTrack ("Audio")[daw::ids::id];
+    const auto other = (int) edit.addTrack ("Other")[daw::ids::id];
+    const auto keys = (int) edit.addMidiTrack ("Keys", *daw::instruments::findBuiltin ("builtin:keys"))[daw::ids::id];
+    edit.addClip (audio, songFile, 0.0, 12.0);
+    const auto loopClip = (int) edit.addClip (audio, loopFile, 20.0, 2.0)[daw::ids::id];
+
+    // The model.
+    check (edit.getSceneCount() == daw::Edit::defaultScenes && edit.getLaunchQuantize() == "bar" && near (edit.getLaunchQuantizeBeats(), 4.0),
+           "a project starts with 8 scenes and bar quantize");
+    edit.getUndoManager().beginNewTransaction();
+    const auto slot = edit.addSlotFromClip (loopClip, audio, 0);
+    const auto slotTree = edit.getSlot (slot);
+    check (slot > 0 && near (daw::Edit::getSlotBeats (slotTree), 4.0) && daw::Edit::getSlotLoop (slotTree)
+               && near ((double) daw::Edit::getSlotClip (slotTree)[daw::ids::start], 0.0)
+               && (int) daw::Edit::getSlotClip (slotTree)[daw::ids::id] != loopClip,
+           "a clip goes into a slot as a copy from 0, its loop its length in beats");
+    check (edit.addSlotFromClip (loopClip, keys, 1) < 0, "an audio clip can't go on a MIDI track's slot");
+    check (edit.getClip ((int) daw::Edit::getSlotClip (slotTree)[daw::ids::id]).isValid()
+               && daw::Edit::getSlotOf (daw::Edit::getSlotClip (slotTree)) == slotTree,
+           "a slot's clip is found by id, and knows its slot");
+    edit.getUndoManager().undo();
+    check (! edit.getSlot (slot).isValid(), "and it undoes");
+    edit.getUndoManager().redo();
+
+    edit.getUndoManager().beginNewTransaction();
+    const auto midiSlot = edit.addMidiSlot (keys, 0);
+    const auto midiClip = (int) daw::Edit::getSlotClip (edit.getSlot (midiSlot))[daw::ids::id];
+    edit.addNote (midiClip, 60, 0.0, 0.5, 100);
+    check (midiSlot > 0 && near (daw::Edit::getSlotBeats (edit.getSlot (midiSlot)), 4.0) && edit.getClip (midiClip).getNumChildren() == 1,
+           "an empty MIDI slot is a bar long, and its notes are edited as any clip's");
+
+    // Scenes: insert, rename, duplicate, remove.
+    edit.getUndoManager().beginNewTransaction();
+    edit.setSceneName (0, "Verse");
+    edit.insertScene (0);
+    check ((int) edit.getSlot (slot)[daw::ids::row] == 1 && edit.getSceneName (1) == "Verse" && edit.getSceneName (0).isEmpty()
+               && edit.getSceneCount() == 9,
+           "inserting a scene moves the rows below down, names too");
+    edit.duplicateScene (1);
+    check (edit.getSlotAt (audio, 2).isValid() && edit.getSlotAt (keys, 2).isValid() && edit.getSceneName (2) == "Verse copy"
+               && (int) edit.getSlotAt (audio, 2)[daw::ids::id] != slot,
+           "duplicating a scene copies its slots into a new row below");
+    edit.removeScene (0);
+    edit.removeScene (1);
+    check ((int) edit.getSlot (slot)[daw::ids::row] == 0 && edit.getSceneName (0) == "Verse" && edit.getSceneCount() == 8
+               && ! edit.getSlotAt (audio, 1).isValid(),
+           "removing scenes takes their slots and moves the rest up");
+    const auto moved = edit.moveSlot (slot, other, 3, true);
+    check (moved > 0 && moved != slot && edit.getSlotAt (other, 3).isValid() && edit.getSlot (slot).isValid(), "copy a slot to another track's cell");
+    check (edit.moveSlot (slot, keys, 0) < 0, "an audio slot can't move to a MIDI track");
+    edit.removeSlot (moved);
+    edit.setLaunchQuantize ("beat");
+    check (near (edit.getLaunchQuantizeBeats(), 1.0), "launch quantize to the beat");
+    edit.setLaunchQuantize ("bar");
+
+    // Written onto the timeline: one clip per pass, the first part-way into the loop.
+    {
+        edit.getUndoManager().beginNewTransaction();
+        const auto made = edit.writeSlotToTimeline (slot, 30.0, 5.0, 0.5);
+        const auto a = edit.getClip (made[0]), b = edit.getClip (made[1]), c = edit.getClip (made[2]);
+        check (made.size() == 3 && near ((double) a[daw::ids::start], 30.0) && near ((double) a[daw::ids::offset], 0.5)
+                   && near ((double) a[daw::ids::length], 1.5) && near ((double) b[daw::ids::start], 31.5) && near ((double) b[daw::ids::length], 2.0)
+                   && near ((double) c[daw::ids::start], 33.5) && near ((double) c[daw::ids::length], 1.5)
+                   && a.getParent() == edit.getTrack (audio),
+               "a slot written to the timeline is a clip per pass");
+        edit.getUndoManager().undo();
+        check (! edit.getClip (made[0]).isValid(), "and it undoes");
+    }
+
+    // The engine.
+    daw::DawEngine engine (edit);
+    engine.prepare (sampleRate, blockSize);
+    engine.getAudioPool().loadNow (songFile);
+    engine.getAudioPool().loadNow (loopFile);
+    engine.loadAllNow();
+    engine.rebuildNow();
+
+    engine.seek ((juce::int64) (0.5 * sampleRate));
+    engine.play();
+    auto out = render (engine, 0.5); // to 1.0 s
+    check (level (out[0], 0.1, 0.5, 300.0) > 0.05 && level (out[0], 0.1, 0.5, 1000.0) < 0.01, "the song plays");
+
+    engine.launchSlot (audio, slot);
+    out = render (engine, 0.9); // to 1.9 s
+    auto state = engine.getLaunchState (audio);
+    check (state.queued == slot && state.playing == -1 && ! state.onLauncher, "a launch waits for the next bar");
+    check (level (out[0], 0.0, 0.85, 300.0) > 0.05, "the song plays on meanwhile");
+    out = render (engine, 1.6); // to 3.5 s
+    state = engine.getLaunchState (audio);
+    check (state.playing == slot && state.queued == daw::DawEngine::noLaunch && state.onLauncher, "the slot plays from the bar line");
+    check (level (out[0], 0.2, 1.5, 1000.0) > 0.05 && level (out[0], 0.2, 1.5, 300.0) < 0.01, "and the song's clip on that track stops");
+    out = render (engine, 1.0); // to 4.5 s: the loop came round at 4 s
+    check (level (out[0], 0.0, 1.0, 1000.0) > 0.05, "it loops");
+    check (std::abs (engine.getLaunchState (audio).progress - 0.25f) < 0.02f, "progress through the loop");
+
+    engine.stopSlot (audio);
+    out = render (engine, 2.0); // to 6.5 s: stops at 6 s
+    check (level (out[0], 0.0, 1.4, 1000.0) > 0.05 && rms (out[0], (size_t) (1.6 * sampleRate), (size_t) (2.0 * sampleRate)) < 1.0e-4f,
+           "a stop waits for the bar line, then the track is silent");
+    state = engine.getLaunchState (audio);
+    check (state.playing == -1 && state.onLauncher && engine.isAnyOnLauncher(), "and stays on the launcher");
+
+    engine.backToSong();
+    out = render (engine, 2.0); // to 8.5 s: back at 8 s
+    check (rms (out[0], (size_t) (0.1 * sampleRate), (size_t) (1.4 * sampleRate)) < 1.0e-4f && level (out[0], 1.6, 2.0, 300.0) > 0.05,
+           "Back to song picks up the timeline at the bar line");
+    check (! engine.getLaunchState (audio).onLauncher && ! engine.isAnyOnLauncher(), "and the track leaves the launcher");
+
+    // No quantize: at once. And a one-shot slot plays once.
+    edit.setLaunchQuantize ("none");
+    edit.setSlotLoop (slot, false);
+    engine.rebuildNow();
+    engine.launchSlot (audio, slot);
+    out = render (engine, 3.0); // 8.5 .. 11.5 s
+    check (level (out[0], 0.05, 1.9, 1000.0) > 0.05 && rms (out[0], (size_t) (2.1 * sampleRate), (size_t) (3.0 * sampleRate)) < 1.0e-4f,
+           "with no quantize a launch starts at once; a one-shot slot plays once");
+    state = engine.getLaunchState (audio);
+    check (state.playing == -1 && state.onLauncher, "then the track is silent on the launcher");
+    edit.setSlotLoop (slot, true);
+    edit.setLaunchQuantize ("bar");
+    engine.rebuildNow();
+
+    // Stopping the transport stops the slots; a launch while stopped starts it, at once.
+    engine.stop();
+    render (engine, 0.1);
+    check (engine.getLaunchState (audio).playing == -1, "the transport stopping stops the slots");
+    engine.seek ((juce::int64) (0.5 * sampleRate));
+    engine.launchSlot (audio, slot);
+    check (engine.isPlaying(), "a launch starts the transport");
+    out = render (engine, 0.5);
+    check (engine.getLaunchState (audio).playing == slot && level (out[0], 0.02, 0.5, 1000.0) > 0.05, "and plays at once");
+
+    // A scene: each track's slot in the row (MIDI notes too), together; empty cells stop.
+    edit.setTrackMute (audio, true); // to hear the MIDI slot alone
+    engine.launchScene (0);
+    out = render (engine, 2.0); // 1.0 .. 3.0 s, the line at 2 s
+    check (engine.getLaunchState (keys).playing == midiSlot && engine.getLaunchState (audio).playing == slot
+               && engine.getLaunchState (other).onLauncher && engine.getLaunchState (other).playing == -1,
+           "a scene launches the row on every track and stops the rest");
+    check (rms (out[0], (size_t) (1.0 * sampleRate), (size_t) (1.4 * sampleRate)) > rms (out[0], (size_t) (0.4 * sampleRate), (size_t) (0.9 * sampleRate)) * 1.2f,
+           "the MIDI slot's note sounds from the line");
+    out = render (engine, 2.0); // 3.0 .. 5.0 s: the MIDI loop comes round at 4 s
+    const auto keysTail = rms (out[0], (size_t) (0.8 * sampleRate), (size_t) (0.95 * sampleRate));
+    const auto keysAgain = rms (out[0], (size_t) (1.05 * sampleRate), (size_t) (1.3 * sampleRate));
+    check (keysAgain > keysTail * 1.2f, "and again each pass (" + juce::String (keysTail) + " -> " + juce::String (keysAgain) + ")");
+
+    // Removing a playing slot stops it; Back to song from everywhere.
+    edit.removeSlot (midiSlot);
+    engine.rebuildNow();
+    render (engine, 0.1);
+    check (engine.getLaunchState (keys).playing == -1, "a slot removed while it plays stops");
+    engine.backToSong();
+    render (engine, 2.0);
+    check (! engine.isAnyOnLauncher(), "Back to song takes every track off the launcher");
+    engine.stop();
+
+    folder.deleteRecursively();
 }
 
 static void testSingAlongSession()
@@ -21231,6 +21475,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=launcher: just the clip launcher.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "launcher")
+    {
+        testLauncher();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=patterns: just the step sequencer.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "patterns")
     {
@@ -21426,6 +21678,7 @@ int main()
     testDawFit();
     testEffectAutomation();
     testAutomationLanes();
+    testLauncher();
     testAutomationRecording();
     testAnalysisSpeed();
     testLatency();
