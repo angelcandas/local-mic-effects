@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 229,
+ "latest": 230,
  "days": [
   {
    "date": "2026-11-25",
    "entries": [
+    {
+     "title": "MIDI clock sync",
+     "text": "Keep drum machines, synths and other apps in time with MicFX, or MicFX in time with them. Settings → MIDI clock: send clock from the DAW song or Live mode's tempo and looper, or follow a clock coming in (it sets Live mode's echo and looper tempo, and plays and stops the DAW song).",
+     "prs": [
+      230
+     ]
+    },
     {
      "title": "Voice repair",
      "text": "Three new DAW effects for recorded voices: Breath Tamer turns down the breaths between phrases, Mouth De-click rebuilds lip smacks and tongue clicks, and Room Echo Reduction takes out the ring of the room it was recorded in. The Podcast and Streamer chains now take out clicks and ease breaths.",
