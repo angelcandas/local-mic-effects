@@ -230,6 +230,21 @@ export const MODULES = [
     description: "A bell that cuts only while its band gets loud: harsh notes, a booming bass note",
     controls: [knob("deqFreq", "Freq"), knob("deqQ", "Q"), knob("deqThreshold", "Threshold"), knob("deqRange", "Range")] },
 
+  // Voice repair (src/dsp/VoiceRepair.h), DAW mode: they look ahead, so they add a delay the
+  // DAW makes up for.
+  { id: "breath", name: "Breath Tamer", category: "cleanup", power: "breathOn", dawOnly: true, minCard: 250,
+    description: "Finds the breaths between phrases and turns them down, leaving the words alone. Adds 80 ms",
+    controls: [knob("breathReduction", "Reduction"), knob("breathSensitivity", "Sensitivity")] },
+
+  { id: "declick", name: "Mouth De-click", category: "cleanup", power: "declickOn", dawOnly: true, minCard: 250,
+    description: "Rebuilds the tiny lip smacks and tongue clicks a close mic picks up. Adds 10 ms",
+    controls: [knob("declickSensitivity", "Sensitivity")] },
+
+  { id: "dereverb", name: "Room Echo Reduction", category: "cleanup", power: "dereverbOn", dawOnly: true, minCard: 290,
+    description: "Turns down the echo of the room a voice was recorded in, keeping the voice itself. Auto finds how long the room rings. Adds 21 ms",
+    controls: [knob("dereverbAmount", "Amount"), toggle("dereverbAuto", "Auto decay"),
+               { ...knob("dereverbDecay", "Decay"), when: { dereverbAuto: [0] } }] },
+
   // Feedback protection: Live only (`liveOnly` keeps it out of the DAW's lists), always
   // last in the chain. Its settings belong to the room, so presets and scenes leave them.
   { id: "feedback", name: "Feedback Guard", category: "cleanup", power: "fbgOn", wide: true, liveOnly: true,
@@ -248,7 +263,7 @@ export const MODULE_KEYS = {
   vibrato: "vibrato", chorus: "chorus", flanger: "flanger", phaser: "phaser", doubler: "doubler",
   echo: "echo", reverb: "reverb", plate: "plate", irverb: "irReverb", width: "width",
   meq: "masterEq", mb: "multiband", imager: "imager", limiter: "limiter", loudness: "loudness",
-  transient: "transient", deq: "dynamicEq", feedback: "feedbackGuard",
+  transient: "transient", deq: "dynamicEq", breath: "breath", declick: "declick", dereverb: "dereverb", feedback: "feedbackGuard",
 };
 
 // Whether a control with a `when` ({ param: [values] }) shows, given a way to read values.

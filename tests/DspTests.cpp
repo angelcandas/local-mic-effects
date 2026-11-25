@@ -21150,7 +21150,10 @@ static void testFactoryChains()
             processor.applyLiveChain (inserts);
             const auto captured = processor.captureLiveChain();
             juce::StringArray want, got;
-            for (const auto& insert : inserts) if (insert.hasType ("INSERT")) want.add (insert["type"].toString());
+            for (const auto& insert : inserts)
+                if (const auto type = daw::Edit::moduleTypeFromKey (insert["type"].toString());
+                    insert.hasType ("INSERT") && ! (type && fx::isDawOnly (*type)))
+                    want.add (insert["type"].toString()); // voice repair stays in the DAW
             for (const auto& insert : captured) if (insert.hasType ("INSERT")) got.add (insert["type"].toString());
             check (want == got, name + ": loads in Live as written (" + got.joinIntoString (", ") + ")");
 
@@ -21844,6 +21847,328 @@ static void testVocoder()
 
 
 
+//==============================================================================
+// Voice repair (VoiceRepair.h): breaths turned down, mouth clicks rebuilt.
+namespace repairtest
+{
+    static constexpr double rate = 48000.0;
+
+    // A sung vowel-ish tone: 200 Hz with 20 falling harmonics and a little vibrato.
+    static std::vector<float> voice (double seconds, float rmsDb, double f0 = 200.0)
+    {
+        std::vector<float> out ((size_t) (seconds * rate));
+        auto phase = 0.0;
+        for (size_t n = 0; n < out.size(); ++n)
+        {
+            const auto f = f0 * (1.0 + 0.01 * std::sin (juce::MathConstants<double>::twoPi * 5.0 * (double) n / rate));
+            phase += juce::MathConstants<double>::twoPi * f / rate;
+            auto x = 0.0;
+            for (int k = 1; k <= 20; ++k)
+                x += std::sin (k * phase) / k;
+            out[n] = (float) x;
+        }
+        auto sum = 0.0;
+        for (auto x : out) sum += (double) x * x;
+        const auto scale = juce::Decibels::decibelsToGain (rmsDb) / std::sqrt (sum / (double) out.size());
+        for (auto& x : out) x = (float) (x * scale);
+        return out;
+    }
+
+    // Noise through a band (Hz), at an RMS level.
+    static std::vector<float> noise (double seconds, float rmsDb, double lowHz, double highHz, int seed)
+    {
+        juce::Random random (seed);
+        fx::Biquad hp, lp;
+        hp.setup (fx::Biquad::Type::highPass, rate, lowHz, 0.707);
+        lp.setup (fx::Biquad::Type::lowPass, rate, highHz, 0.707);
+        std::vector<float> out ((size_t) (seconds * rate));
+        for (auto& x : out)
+            x = lp.process (0, hp.process (0, random.nextFloat() * 2.0f - 1.0f));
+        auto sum = 0.0;
+        for (auto x : out) sum += (double) x * x;
+        const auto scale = juce::Decibels::decibelsToGain (rmsDb) / std::sqrt (sum / (double) out.size());
+        for (auto& x : out) x = (float) (x * scale);
+        return out;
+    }
+
+    static void append (std::vector<float>& to, const std::vector<float>& part) { to.insert (to.end(), part.begin(), part.end()); }
+
+    // Runs a module over a mono signal in 512-sample blocks and takes its delay back out.
+    static std::vector<float> run (fx::Module& module, const std::vector<float>& input)
+    {
+        module.prepare ({ rate, 512, 1 });
+        const auto latency = module.getLatencySamples();
+        std::vector<float> padded (input);
+        padded.resize (input.size() + (size_t) latency + 512, 0.0f);
+        for (size_t start = 0; start < padded.size(); start += 512)
+        {
+            const auto length = std::min<size_t> (512, padded.size() - start);
+            float* channels[] = { padded.data() + start };
+            juce::dsp::AudioBlock<float> block (channels, 1, length);
+            module.process (fx::Module::Context (block));
+        }
+        return { padded.begin() + latency, padded.begin() + latency + (std::ptrdiff_t) input.size() };
+    }
+
+    static float levelDb (const std::vector<float>& x, double from, double to)
+    {
+        const auto a = (size_t) (from * rate), b = std::min (x.size(), (size_t) (to * rate));
+        auto sum = 0.0;
+        for (auto n = a; n < b; ++n) sum += (double) x[n] * x[n];
+        return (float) (10.0 * std::log10 (sum / (double) std::max<size_t> (1, b - a) + 1.0e-20));
+    }
+
+    static std::unique_ptr<fx::Module> make (fx::ModuleType type, std::initializer_list<std::pair<const char*, float>> values)
+    {
+        auto module = fx::createModule (type);
+        for (const auto& [id, value] : values)
+            module->findValue (id)->store (value);
+        return module;
+    }
+}
+
+static void testVoiceRepair()
+{
+    std::cout << "\nVoice repair (breaths, mouth clicks, room echo)\n";
+    using namespace repairtest;
+
+    // Breaths: voice, a breath, voice, an "s", voice, a quiet sung phrase.
+    {
+        std::vector<float> take;
+        append (take, voice (1.0, -18.0f));
+        append (take, noise (0.4, -45.0f, 600.0, 4000.0, 1));   // 1.0 - 1.4: breath
+        append (take, voice (1.0, -18.0f, 220.0));
+        append (take, noise (0.1, -28.0f, 5000.0, 12000.0, 2)); // 2.4 - 2.5: "s"
+        append (take, voice (0.7, -18.0f, 180.0));
+        append (take, voice (0.6, -38.0f, 240.0));              // 3.2 - 3.8: soft phrase
+
+        auto tamer = make (fx::ModuleType::breath, { { "breathOn", 1.0f }, { "breathReduction", 12.0f } });
+        tamer->prepare ({ rate, 512, 1 });
+        check (std::abs (tamer->getLatencySamples() - 3840) < 50, "looks ahead 80 ms (" + juce::String (tamer->getLatencySamples()) + " samples)");
+        const auto out = run (*tamer, take);
+
+        const auto change = [&] (double from, double to) { return levelDb (out, from, to) - levelDb (take, from, to); };
+        const auto breath = change (1.05, 1.35);
+        check (breath < -8.0f, "the breath is turned down (" + juce::String (breath, 1) + " dB)");
+        const auto words = juce::jmax (std::abs (change (0.1, 0.95)), std::abs (change (1.45, 2.35)), std::abs (change (2.55, 3.15)));
+        check (words < 0.5f, "the singing is left alone (" + juce::String (words, 2) + " dB at most)");
+        const auto ess = change (2.41, 2.49);
+        check (ess > -3.0f, "an \"s\" next to the words is left alone (" + juce::String (ess, 1) + " dB)");
+        const auto soft = change (3.25, 3.75);
+        check (std::abs (soft) < 1.0f, "a soft sung phrase isn't taken for a breath (" + juce::String (soft, 1) + " dB)");
+
+        tamer->findValue ("breathOn")->store (0.0f);
+        check (tamer->getLatencySamples() == 0, "no delay while off");
+    }
+
+    // Clicks on top of singing.
+    {
+        const auto clean = voice (2.0, -20.0f);
+        auto clicky = clean;
+        std::vector<size_t> at;
+        for (auto n = (size_t) (0.1 * rate); n + 100 < clicky.size(); n += (size_t) (0.15 * rate))
+        {
+            at.push_back (n);
+            // A 0.3 ms ringing spike, bright, about the voice's peak.
+            for (int i = 0; i < 15; ++i)
+                clicky[n + (size_t) i] += (float) (0.25 * std::exp (-i / 4.0) * std::cos (juce::MathConstants<double>::twoPi * 7000.0 * i / rate));
+        }
+
+        auto declick = make (fx::ModuleType::declick, { { "declickOn", 1.0f } });
+        const auto fixedOut = run (*declick, clicky);
+        juce::DynamicObject readings;
+        declick->addReadings (readings);
+        const auto fixedCount = (int) readings.getProperty ("clicks");
+
+        auto before = 0.0, afterFix = 0.0;
+        for (auto n : at)
+            for (size_t i = n - 48; i < n + 96; ++i)
+            {
+                before += std::pow ((double) clicky[i] - clean[i], 2.0);
+                afterFix += std::pow ((double) fixedOut[i] - clean[i], 2.0);
+            }
+        const auto gainDb = (float) (10.0 * std::log10 (before / juce::jmax (1.0e-20, afterFix)));
+        check (gainDb > 15.0f, "clicks are taken out (" + juce::String (gainDb, 1) + " dB less click)");
+        check (fixedCount >= (int) at.size() * 9 / 10, "and counted (" + juce::String (fixedCount) + " of " + juce::String ((int) at.size()) + ")");
+
+        auto untouched = make (fx::ModuleType::declick, { { "declickOn", 1.0f } });
+        const auto plain = run (*untouched, clean);
+        auto worst = 0.0f;
+        for (size_t n = 0; n < clean.size(); ++n)
+        {
+            worst = juce::jmax (worst, std::abs (plain[n] - clean[n]));
+        }
+        check (worst < 1.0e-6f, "clean singing passes untouched (" + juce::String (worst, 8) + ")");
+
+        // Clicks in a pause (room noise only), and a "t" (a 6 ms burst) that must stay.
+        {
+            auto pause = noise (1.0, -62.0f, 100.0, 12000.0, 3);
+            auto withClicks = pause;
+            for (size_t n = 4800; n + 100 < withClicks.size() / 2; n += 4800)
+                for (int i = 0; i < 10; ++i)
+                    withClicks[n + (size_t) i] += (float) (0.03 * std::exp (-i / 3.0) * (i % 2 == 0 ? 1.0 : -1.0));
+            const auto burst = noise (0.006, -24.0f, 2000.0, 10000.0, 4);
+            const auto tAt = (size_t) (0.75 * rate);
+            for (size_t i = 0; i < burst.size(); ++i)
+                withClicks[tAt + i] += burst[i];
+
+            auto inPause = make (fx::ModuleType::declick, { { "declickOn", 1.0f } });
+            const auto out = run (*inPause, withClicks);
+            auto left = 0.0, was = 0.0;
+            for (size_t n = 0; n < pause.size() / 2; ++n)
+            {
+                left += std::pow ((double) out[n] - pause[n], 2.0);
+                was += std::pow ((double) withClicks[n] - pause[n], 2.0);
+            }
+            check (10.0 * std::log10 (was / juce::jmax (1.0e-20, left)) > 15.0, "clicks in a pause are taken out ("
+                   + juce::String (10.0 * std::log10 (was / juce::jmax (1.0e-20, left)), 1) + " dB)");
+            auto tMoved = 0.0f;
+            for (size_t i = tAt; i < tAt + burst.size(); ++i)
+                tMoved = juce::jmax (tMoved, std::abs (out[i] - withClicks[i]));
+            check (tMoved < 1.0e-6f, "a \"t\" is left alone (" + juce::String (tMoved, 6) + ")");
+        }
+
+        // Stereo: both sides are rebuilt at the same place.
+        {
+            auto left = clicky, right = clicky;
+            for (auto& x : right) x *= 0.5f;
+            auto stereo = make (fx::ModuleType::declick, { { "declickOn", 1.0f } });
+            stereo->prepare ({ rate, 512, 2 });
+            const auto latency = stereo->getLatencySamples();
+            left.resize (left.size() + (size_t) latency + 512, 0.0f);
+            right.resize (left.size(), 0.0f);
+            for (size_t start = 0; start + 512 <= left.size(); start += 512)
+            {
+                float* channels[] = { left.data() + start, right.data() + start };
+                juce::dsp::AudioBlock<float> block (channels, 2, 512);
+                stereo->process (fx::Module::Context (block));
+            }
+            auto err = 0.0, ratio = 0.0;
+            for (auto n : at)
+                for (size_t i = n - 48; i < n + 96; ++i)
+                {
+                    err += std::pow ((double) left[i + (size_t) latency] - clean[i], 2.0);
+                    ratio = juce::jmax (ratio, std::abs ((double) right[i + (size_t) latency] * 2.0 - left[i + (size_t) latency]));
+                }
+            check (10.0 * std::log10 (before / juce::jmax (1.0e-20, err)) > 15.0 && ratio < 1.0e-4, "stereo: both channels fixed alike");
+        }
+
+        // A note starting out of silence is not a click.
+        std::vector<float> onset ((size_t) (0.5 * rate), 0.0f);
+        append (onset, voice (0.5, -12.0f));
+        auto starts = make (fx::ModuleType::declick, { { "declickOn", 1.0f }, { "declickSensitivity", 100.0f } });
+        const auto started = run (*starts, onset);
+        auto moved = 0.0f;
+        for (size_t n = 0; n < onset.size(); ++n)
+            moved = juce::jmax (moved, std::abs (started[n] - onset[n]));
+        check (moved < 1.0e-6f, "a note starting from silence is left alone (" + juce::String (moved, 8) + ")");
+    }
+
+    // Room echo: sung bursts in a room ringing 0.8 s, echo as loud as the voice.
+    {
+        const auto burstsIn = [] ()
+        {
+            std::vector<float> dry;
+            for (int i = 0; i < 6; ++i)
+            {
+                append (dry, voice (0.25, -18.0f, 180.0 + 20.0 * i));
+                append (dry, std::vector<float> ((size_t) (0.35 * rate), 0.0f));
+            }
+            return dry;
+        };
+        const auto dry = burstsIn();
+
+        const auto room = [] (const std::vector<float>& x, double rt60)
+        {
+            const auto irLength = (size_t) (1.3 * rt60 * rate);
+            std::vector<float> ir (irLength, 0.0f);
+            juce::Random random (7);
+            ir[0] = 1.0f;
+            auto tail = 0.0;
+            for (size_t n = (size_t) (0.005 * rate); n < irLength; ++n)
+            {
+                ir[n] = (random.nextFloat() * 2.0f - 1.0f) * (float) std::exp (-3.0 * std::log (10.0) * (double) n / rate / rt60);
+                tail += (double) ir[n] * ir[n];
+            }
+            for (size_t n = 1; n < irLength; ++n)
+                ir[n] = (float) (ir[n] / std::sqrt (tail)); // as much echo as direct sound
+
+            auto order = 1;
+            while ((1 << order) < (int) (x.size() + irLength))
+                ++order;
+            juce::dsp::FFT fft (order);
+            const auto size = (size_t) 1 << order;
+            std::vector<float> a (2 * size, 0.0f), b (2 * size, 0.0f);
+            std::copy (x.begin(), x.end(), a.begin());
+            std::copy (ir.begin(), ir.end(), b.begin());
+            fft.performRealOnlyForwardTransform (a.data());
+            fft.performRealOnlyForwardTransform (b.data());
+            for (size_t k = 0; k <= size / 2; ++k)
+            {
+                const std::complex<float> p (a[2 * k], a[2 * k + 1]), q (b[2 * k], b[2 * k + 1]);
+                const auto r = p * q;
+                a[2 * k] = r.real();
+                a[2 * k + 1] = r.imag();
+            }
+            for (size_t k = size / 2 + 1; k < size; ++k)
+            {
+                a[2 * k] = a[2 * (size - k)];
+                a[2 * k + 1] = -a[2 * (size - k) + 1];
+            }
+            fft.performRealOnlyInverseTransform (a.data());
+            return std::vector<float> (a.begin(), a.begin() + (std::ptrdiff_t) x.size());
+        };
+
+        const auto wet = room (dry, 0.8);
+        auto module = make (fx::ModuleType::dereverb, { { "dereverbOn", 1.0f } });
+        module->prepare ({ rate, 512, 1 });
+        check (module->getLatencySamples() == 1024, "one 1024-sample frame of delay");
+        const auto out = run (*module, wet);
+        juce::DynamicObject readings;
+        module->addReadings (readings);
+        const auto found = (float) readings.getProperty ("decay");
+        check (found > 0.5f && found < 1.2f, "finds how long the room rings (" + juce::String (found, 2) + " s for 0.8 s)");
+
+        // Second pass with the decay found, as in a song after the first phrases.
+        const auto out2 = run (*module, wet);
+        auto gapsIn = 0.0, gapsOut = 0.0, voiceIn = 0.0, voiceOut = 0.0, directIn = 0.0;
+        for (int i = 1; i < 6; ++i)
+        {
+            const auto start = i * 0.6;
+            gapsIn += std::pow (10.0, levelDb (wet, start - 0.28, start - 0.02) / 10.0);
+            gapsOut += std::pow (10.0, levelDb (out2, start - 0.28, start - 0.02) / 10.0);
+            voiceIn += std::pow (10.0, levelDb (wet, start + 0.03, start + 0.25) / 10.0);
+            voiceOut += std::pow (10.0, levelDb (out2, start + 0.03, start + 0.25) / 10.0);
+            directIn += std::pow (10.0, levelDb (dry, start + 0.03, start + 0.25) / 10.0);
+        }
+        const auto tail = (float) (10.0 * std::log10 (gapsOut / gapsIn));
+        const auto words = (float) (10.0 * std::log10 (voiceOut / voiceIn));
+        const auto toDry = (float) (10.0 * std::log10 (voiceOut / directIn));
+        check (tail < -8.0f, "the echo between phrases is turned down (" + juce::String (tail, 1) + " dB)");
+        check (words > -4.0f, "the voice keeps its level (" + juce::String (words, 1) + " dB, "
+                                  + juce::String (toDry, 1) + " dB from the dry voice)");
+
+        // A dry voice hardly changes.
+        auto clean = make (fx::ModuleType::dereverb, { { "dereverbOn", 1.0f } });
+        const auto dryOut = run (*clean, dry);
+        auto dIn = 0.0, dOut = 0.0;
+        for (int i = 0; i < 6; ++i)
+        {
+            dIn += std::pow (10.0, levelDb (dry, i * 0.6 + 0.03, i * 0.6 + 0.25) / 10.0);
+            dOut += std::pow (10.0, levelDb (dryOut, i * 0.6 + 0.03, i * 0.6 + 0.25) / 10.0);
+        }
+        const auto dryChange = (float) (10.0 * std::log10 (dOut / dIn));
+        check (dryChange > -2.0f, "a dry voice keeps its level (" + juce::String (dryChange, 1) + " dB)");
+
+        // Decay by hand.
+        auto manual = make (fx::ModuleType::dereverb, { { "dereverbOn", 1.0f }, { "dereverbAuto", 0.0f }, { "dereverbDecay", 1.5f } });
+        run (*manual, wet);
+        juce::DynamicObject manualReadings;
+        manual->addReadings (manualReadings);
+        check (std::abs ((float) manualReadings.getProperty ("decay") - 1.5f) < 0.01f, "Decay by hand when Auto is off");
+    }
+}
+
 int main()
 {
     std::cout << std::unitbuf;
@@ -21884,6 +22209,14 @@ int main()
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "feedback")
     {
         testFeedbackGuard();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
+    // MICFX_TEST_ONLY=repair: just voice repair.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "repair")
+    {
+        testVoiceRepair();
         std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
         return failures == 0 ? 0 : 1;
     }
@@ -22336,6 +22669,7 @@ int main()
     testAutoMixSends();
     testDynamics();
     testFeedbackGuard();
+    testVoiceRepair();
     testVocalDynamics();
     testSpace();
     testColour();

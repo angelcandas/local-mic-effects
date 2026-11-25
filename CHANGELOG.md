@@ -7,6 +7,7 @@ haven't seen yet. To add an entry for your change, see "Adding entries" in
 
 ## 2026-11-25
 
+- **Voice repair.** Three new DAW effects for recorded voices: Breath Tamer turns down the breaths between phrases, Mouth De-click rebuilds lip smacks and tongue clicks, and Room Echo Reduction takes out the ring of the room it was recorded in. The Podcast and Streamer chains now take out clicks and ease breaths. (#228)
 - **Clip launcher.** A Launch tab with scenes and slots: launch loops and one-shots in time, record what you play into the song, and let the AI build and launch scenes. (#229)
 - **Sidechain.** A compressor, noise gate or dynamic EQ can listen to another track: music that ducks under your voice, a bass that makes room for the kick, guitars that dip only where the voice sits. Pick the track under Listens to on the effect. (#227)
 - **Vocoder.** Your voice plays a built-in synth: hold keys on a MIDI keyboard, or it follows the song's chords (else a drone on the key). Saw, pulse or ensemble sound, 16 to 32 bands, formant and a clear-words control. In Live and as a DAW insert. (#224)

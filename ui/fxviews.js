@@ -866,6 +866,95 @@ const views = {
     };
   },
 
+  // Breath Tamer: the last few seconds of how far it turned the sound down (each dip a
+  // breath), with Reduction as the dashed line.
+  breath({ get }) {
+    const MAX = 30, HISTORY = 120; // dB shown; about 4 s of readings
+    const element = frame("is-ride");
+    const floor = svg("line", { class: "grid dashed", x1: 0, x2: W });
+    element.append(floor);
+    const fill = path(element, "fx-fill"), curve = path(element, "fx-curve");
+    label(element, 3, H - 3, "Breaths turned down");
+    const history = [];
+    let found = 0;
+    const yOf = (db) => 4 + clamp(db / MAX) * (H - 8);
+    const draw = () => {
+      if (!history.some((db) => db > 0.05)) { curve.setAttribute("d", ""); fill.setAttribute("d", ""); return; }
+      const points = history.map((db, i) => `${((i / (HISTORY - 1)) * W).toFixed(1)},${yOf(db).toFixed(1)}`);
+      curve.setAttribute("d", `M${points.join(" L")}`);
+      fill.setAttribute("d", `M0,4 L${points.join(" L")} L${(((history.length - 1) / (HISTORY - 1)) * W).toFixed(1)},4 Z`);
+    };
+    return {
+      element,
+      update() {
+        const y = yOf(get("breathReduction"));
+        floor.setAttribute("y1", y);
+        floor.setAttribute("y2", y);
+      },
+      live(reading) {
+        if (!reading) { history.length = 0; found = 0; draw(); return ""; }
+        history.push(reading.reduction ?? 0);
+        if (history.length > HISTORY) history.shift();
+        found += reading.breaths ?? 0;
+        draw();
+        return found ? `${found} breath${found === 1 ? "" : "s"}` : "";
+      },
+    };
+  },
+
+  // Room Echo Reduction: how far each band is turned down now (the bars), and the room's
+  // decay in use in the corner.
+  dereverb() {
+    const BANDS = 32, LOW = 60, HIGH = 16000, MAX_CUT = 24; // Dereverb::numBands
+    const element = frame("is-denoise");
+    frequencyGrid(element);
+    const edges = Array.from({ length: BANDS + 1 }, (_, b) => xOfF(LOW * Math.pow(HIGH / LOW, b / BANDS)));
+    const bars = edges.slice(0, BANDS).map((x, b) => {
+      const bar = svg("rect", { class: "fx-reduction", x: x + 0.4, width: Math.max(0.6, edges[b + 1] - x - 0.8), y: 0, height: 0 });
+      element.append(bar);
+      return bar;
+    });
+    label(element, 3, 11, "Echo taken out");
+    let shown = new Array(BANDS).fill(0);
+    return {
+      element,
+      update() {},
+      live(reading) {
+        const cut = reading?.reduction ?? [];
+        shown = shown.map((v, b) => Math.max(cut[b] ?? 0, v - 0.75));
+        bars.forEach((bar, b) => bar.setAttribute("height", clamp(shown[b] / MAX_CUT) * H * 0.75));
+        return reading?.decay ? `room ${reading.decay.toFixed(1)} s` : "";
+      },
+    };
+  },
+
+  // Mouth De-click: a tick for every click it rebuilt over the last few seconds.
+  declick() {
+    const HISTORY = 120;
+    const element = frame("is-ride");
+    element.append(svg("line", { class: "grid zero", x1: 0, x2: W, y1: H - 6, y2: H - 6 }));
+    const ticks = path(element, "fx-curve");
+    label(element, 3, 11, "Clicks fixed");
+    const history = [];
+    let total = 0;
+    const draw = () => {
+      const d = history.map((count, i) => count ? `M${((i / (HISTORY - 1)) * W).toFixed(1)},${H - 6} V${(H - 6 - Math.min(1, count / 3) * (H - 24)).toFixed(1)}` : "").join(" ");
+      ticks.setAttribute("d", d);
+    };
+    return {
+      element,
+      update() {},
+      live(reading) {
+        if (!reading) { history.length = 0; total = 0; draw(); return ""; }
+        history.push(reading.clicks ?? 0);
+        if (history.length > HISTORY) history.shift();
+        total += reading.clicks ?? 0;
+        draw();
+        return total ? `${total} fixed` : "";
+      },
+    };
+  },
+
   compressor({ get, set, range }) {
     // Glue always has at least a 10 dB knee (src/dsp/VocalDynamics.h).
     const knee = () => (Math.round(get("compStyle") ?? 0) === 2 ? Math.max(10, get("compKnee") ?? 0) : get("compKnee") ?? 0);

@@ -39,6 +39,8 @@
   white-space: nowrap;
 }
 .insert-latency[hidden] { display: none; }
+/* On a narrow card the name keeps some room beside the delay badge. */
+.insert .insert-head .insert-name { min-width: 38%; }
 
 /* A name of its own reads in italics, so it's clear it isn't the effect's. */
 .insert.is-renamed .insert-head .insert-name { font-style: italic; }

@@ -213,9 +213,16 @@ bool PresetLibrary::isLiveChain (const juce::ValueTree& inserts)
         if (! insert.hasType (INSERT))
             continue;
         const auto type = insert[typeId].toString();
-        bool builtIn = false;
+        bool builtIn = false, dawOnly = false;
         for (int t = 0; t < fx::numModuleTypes && ! builtIn; ++t)
-            builtIn = type == fx::getModuleKey ((fx::ModuleType) t);
+            if (type == fx::getModuleKey ((fx::ModuleType) t))
+            {
+                builtIn = true;
+                dawOnly = fx::isDawOnly ((fx::ModuleType) t);
+            }
+
+        if (dawOnly)
+            continue; // Live loads the chain without it (voice repair looks too far ahead)
 
         if (! builtIn || ! seen.insert (type).second)
             return false;
