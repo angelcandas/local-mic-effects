@@ -622,7 +622,8 @@ namespace
     {
     public:
         LiveMidiRouter (juce::AudioDeviceManager& m, juce::AudioProcessor* processor)
-            : manager (m), instruments (getInstruments (processor))
+            : manager (m), instruments (getInstruments (processor)),
+              clock (dynamic_cast<PluginProcessor*> (processor) != nullptr ? &dynamic_cast<PluginProcessor*> (processor)->getMidiClock() : nullptr)
         {
             if (instruments == nullptr)
                 return;
@@ -645,11 +646,16 @@ namespace
 
         void handleIncomingMidiMessage (juce::MidiInput* source, const juce::MidiMessage& message) override
         {
-            instruments->handleMidi (source != nullptr ? source->getIdentifier() : juce::String(), message);
+            const auto id = source != nullptr ? source->getIdentifier() : juce::String();
+            // MIDI clock in (both modes): the followed input's clock, start and stop.
+            if (clock != nullptr && message.getRawDataSize() > 0 && message.getRawData()[0] >= 0xf0)
+                clock->handleIncoming (id, message);
+            instruments->handleMidi (id, message);
         }
 
         juce::AudioDeviceManager& manager;
         LiveInstruments* instruments = nullptr;
+        midiclock::Sync* clock = nullptr;
     };
 
     class MicFXWindow final : public juce::StandaloneFilterWindow,

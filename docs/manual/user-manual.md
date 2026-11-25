@@ -44,7 +44,16 @@ After every rebuild the app's signature changes, so macOS asks for microphone ac
 
 At the bottom right of both modes a strip shows the audio device, sample rate, buffer, the round-trip latency and the CPU load ("Scarlett 2i2 · 48 kHz · 128 · 5.4 ms round trip · CPU 12 %"). Click it for the audio settings. It turns **amber** for 10 seconds after a dropout (try a larger buffer) and when the input is muted, and **red** when no audio device is open.
 
-**File → Settings…** (**Ctrl+,**) gathers the app's choices in one window: **Audio** (device and buffer advice), **Recording** (the recordings folder, a dry copy of the mic), **Look** (UI size, 80 to 150 %) and **Help**.
+**File → Settings…** (**Ctrl+,**) gathers the app's choices in one window: **Audio** (device and buffer advice), **MIDI clock** (below), **Recording** (the recordings folder, a dry copy of the mic), **Look** (UI size, 80 to 150 %) and **Help**.
+
+### MIDI clock sync
+
+Settings → **MIDI clock** keeps drum machines, synths, loopers and other apps in time with MicFX, or MicFX in time with them (standalone app).
+
+- **Send clock to**: a MIDI output, or **MicFX Clock** (a virtual port other apps on this computer can pick; not on Windows). MicFX sends 24 ticks per beat with Start, Stop, Continue and the song position. In the DAW it follows the song: its tempo and tempo changes, the loop, and seeks (Stop, the new position, Continue). In Live mode it runs at the Live tempo (a clock coming in, else the echo's tap, else the looper's tempo), with Start when the looper starts recording or playing and Stop when it stops or is cleared. Each message goes out when its sound is heard, after the interface's output latency.
+- **Keep the clock running while stopped**: the other gear shows the tempo before you press play.
+- **Clock offset** (−100 to +100 ms): if the other gear plays late, send earlier (negative); if early, later.
+- **Follow clock from**: a MIDI input (MicFX turns it on). In Live mode the clock's tempo, smoothed and shown to 0.1 BPM, sets the echo's tempo and the looper's bars, ahead of a tapped tempo. In the DAW the other gear's Start, Stop, Continue and song position play, stop and move the song (not while recording); the song keeps its own tempo. The status strip shows **Clock in 120.0 BPM** (▶ while the other gear plays), or **Clock out** while sending.
 
 The **Options** button in the title bar also has **Save the Live sound to a file…**, **Load a Live sound from a file…** and **Reset the Live sound**. Scenes and setlist songs (3.4, 3.5) are the better way to keep a sound.
 

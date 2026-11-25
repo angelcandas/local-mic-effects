@@ -18,6 +18,8 @@
 #include <optional>
 #include <set>
 
+namespace midiclock { class Sender; }
+
 namespace daw
 {
 // Plays an Edit: every track's clips through its insert chain, volume and pan, summed
@@ -259,6 +261,11 @@ public:
     void collectPatternNotes();
     // Note numbers being played on the MIDI input right now (for the piano roll's keys).
     std::bitset<128> getHeldNotes() const noexcept;
+
+    // MIDI clock out (MidiClock.h): every stretch of every block tells it where the playhead
+    // is on the tempo map, so the clock follows the song, its tempo changes, the loop and
+    // seeks. Set before the audio starts; null for none.
+    void setClockSender (midiclock::Sender* sender) noexcept { clockSender = sender; }
 
     // Click on every beat at the project tempo while playing (accent on the first beat
     // of each bar, from the Edit's time signature).
@@ -757,6 +764,7 @@ private:
     std::atomic<juce::int64> recordStart { 0 };
     std::atomic<bool> loopRecording { false }; // recording inside the loop: playback wraps, each pass a take
     std::atomic<juce::int64> recordingLatency { 0 }, midiRecordingLatency { 0 };
+    midiclock::Sender* clockSender = nullptr;
 
     // MIDI recording: the audio thread pushes what's played (note on/off, sustain pedal)
     // with its timeline time; the message thread collects it.

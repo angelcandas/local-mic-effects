@@ -1,4 +1,5 @@
 #include "DawEngine.h"
+#include "MidiClock.h"
 #include "Patterns.h"
 #include "RackInsert.h"
 
@@ -3826,6 +3827,16 @@ void DawEngine::process (juce::AudioBuffer<float>& output, int numChannels, int 
         std::array<const float*, Edit::maxInputs> chunkInputs {};
         for (int i = 0; i < numInputs; ++i)
             chunkInputs[(size_t) i] = inputs[i] != nullptr ? inputs[i] + done : nullptr;
+
+        if (clockSender != nullptr && realtime)
+        {
+            const auto pos = position.load();
+            const auto isPlaying = playing.load();
+            const auto& tempo = active->tempo;
+            const auto from = tempo.toBeats ((double) pos / sampleRate);
+            const auto to = isPlaying ? tempo.toBeats ((double) (pos + chunk) / sampleRate) : from;
+            clockSender->span (isPlaying, from, to, tempo.getBpmAtBeat (juce::jmax (0.0, from)), done, chunk);
+        }
 
         renderBlock (*active, output, done, numChannels, chunk, chunkInputs.data(), numInputs, midi, done);
 
