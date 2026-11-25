@@ -1057,6 +1057,54 @@ void DawActions::build()
             });
         });
 
+    add ("effect.sidechain", "Sidechain: a compressor, gate or dynamic EQ on tracks listens to another track instead of itself "
+                             "(e.g. a compressor on the music that ducks it under the voice, or a gate opened by the kick). "
+                             "Adds the effect when the track has none. source \"none\" goes back to listening to itself.", "Sidechain",
+        { P ("tracks", "tracks", targetHelp, true),
+          withChoices (P ("type", "string", "compressor (default), gate or dynamicEq"), { "compressor", "gate", "dynamicEq" }),
+          P ("source", "string", "The track it listens to (id, number, name or role), or \"none\"", true) },
+        [=, &edit] (const juce::var& args, Complete complete)
+        {
+            const auto type = args.getProperty ("type", "compressor").toString().trim();
+            if (type != "compressor" && type != "gate" && type != "dynamicEq") { complete (fail ("Only a compressor, gate or dynamicEq can listen to another track.")); return; }
+
+            auto source = 0;
+            if (args["source"].toString().trim().toLowerCase() != "none")
+            {
+                juce::String problem;
+                const auto sources = resolveTracks (args["source"], problem);
+                if (sources.empty()) { complete (fail (problem.isNotEmpty() ? problem : "There's no such track to listen to.")); return; }
+                source = sources.front();
+            }
+
+            forTracks (args, "tracks", complete, [&] (const std::vector<int>& found)
+            {
+                auto changed = 0;
+                for (const auto id : found)
+                {
+                    if (id == source)
+                        continue;
+                    auto insertId = -1;
+                    for (const auto& insert : daw::Edit::getInserts (edit.getTrack (id)))
+                        if (insert[ids::type].toString() == type) { insertId = (int) insert[ids::id]; break; }
+                    if (insertId < 0 && source == 0)
+                        continue;
+                    if (insertId < 0)
+                    {
+                        const auto added = call ("addInsert", obj ({ { "track", id }, { "type", type } }));
+                        if (! added.isInt() || (int) added < 0) continue;
+                        insertId = (int) added;
+                    }
+                    call ("setInsertListenTo", obj ({ { "id", insertId }, { "track", source } }));
+                    ++changed;
+                }
+                if (changed == 0) { complete (fail ("Nothing changed: " + labels (found) + " can't listen to that track.")); return; }
+                complete (done (source == 0 ? "The " + type + " on " + labels (found) + " listens to its own track again."
+                                            : "The " + type + " on " + labels (found) + " now listens to " + trackLabel (source) + ".",
+                                { { "tracks", ofTracks (found) } }));
+            });
+        });
+
     add ("return.add", "Add a return track (a shared effect for sends), e.g. a reverb or echo return.", "Add return",
         { P ("name", "string", "Name"), P ("effect", "string", "The effect's key, e.g. reverb") },
         [this] (const juce::var& args, Complete complete)

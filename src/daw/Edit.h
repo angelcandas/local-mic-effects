@@ -26,7 +26,9 @@
 //     CUE  id (cueId), cueOn, voice, music, volume (dB): the headphone (cue) mix, see "Cue mix"
 //       INSERTS ...   (its own effects on the live voice; keep them free of delay)
 //         INSERT  type ("eq", "echo", ...), id, plus one property per module value,
-//                 file (the impulse response a cab or IR reverb plays through; missing = none)
+//                 file (the impulse response a cab or IR reverb plays through; missing = none),
+//                 listenTo (sidechain: a compressor, gate or dynamic EQ whose detector hears
+//                 that TRACK id, after its effects and before its fader; missing = itself)
 //         INSERT  type "plugin", id, pluginOn, pluginInGain, pluginOutGain, plugin, name, format,
 //                 vendor, description, state   (a VST3/AU effect, see PluginInsert.h)
 //     TRACK  id, name, colour, volume (dB), pan (-1..1), mute, solo, arm, monitor, transpose,
@@ -137,6 +139,7 @@ namespace ids
     MICFX_DAW_ID (TAKE) MICFX_DAW_ID (take) MICFX_DAW_ID (takesShown) MICFX_DAW_ID (listenTake)
     MICFX_DAW_ID (PATTERN) MICFX_DAW_ID (PART) MICFX_DAW_ID (PATTERNCLIP) MICFX_DAW_ID (track) MICFX_DAW_ID (drum)
     MICFX_DAW_ID (label) MICFX_DAW_ID (ab) MICFX_DAW_ID (abOther) // an insert's own name, A/B
+    MICFX_DAW_ID (listenTo) // an insert's sidechain: the TRACK id its detector hears
     MICFX_DAW_ID (section) MICFX_DAW_ID (letter)
     MICFX_DAW_ID (rows) MICFX_DAW_ID (stepNote) MICFX_DAW_ID (step) MICFX_DAW_ID (swing) MICFX_DAW_ID (pattern) MICFX_DAW_ID (row)
     MICFX_DAW_ID (muted) MICFX_DAW_ID (levels)
@@ -860,6 +863,15 @@ public:
     // The insert's own name ("label"); empty goes back to the effect's name.
     void setInsertName (int insertId, const juce::String&);
     static juce::String getInsertName (const juce::ValueTree& insert) { return insert[ids::label].toString(); }
+
+    // Sidechain: a compressor, gate or dynamic EQ that listens to another track (its sound
+    // after its effects, before its fader) instead of the sound it changes, such as music
+    // that ducks under the voice. 0 (or its own track, or a track that's gone) is itself.
+    // False when the insert can't listen (another effect) or the track doesn't exist.
+    // One undo step.
+    bool setInsertListenTo (int insertId, int trackId);
+    static int getInsertListenTo (const juce::ValueTree& insert) { return (int) insert.getProperty (ids::listenTo, 0); }
+    static bool canListen (const juce::ValueTree& insert);
 
     // A/B: every insert of a built-in effect can hold a second set of values. The first
     // switch makes B a copy of A; after that, switching swaps which set is playing (ab: 0

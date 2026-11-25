@@ -391,7 +391,7 @@ void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Ide
         if (property == ids::state || property == ids::name || property == ids::vendor || property == ids::description
             || property == ids::label || property == ids::ab || property == ids::abOther)
             return;
-        if (property == ids::plugin || property.toString() == "panel")
+        if (property == ids::plugin || property.toString() == "panel" || property == ids::listenTo)
         {
             requestRebuild();
             return;
@@ -1053,6 +1053,7 @@ void DawEngine::rebuild()
     std::set<juce::String> warpsInUse;
     std::map<int, AudioPool::Audio> clipAudio;
     std::map<int, warp::Map> clipMaps;
+    std::map<int, size_t> trackIndex; // track id -> index in graph->tracks
 
     for (const auto& trackTree : edit.getTracks())
     {
@@ -1239,6 +1240,7 @@ void DawEngine::rebuild()
             }
         }
 
+        trackIndex[trackId] = graph->tracks.size();
         graph->tracks.push_back (std::move (track));
     }
 
@@ -1265,6 +1267,8 @@ void DawEngine::rebuild()
     graph->masterBehind = maxLatency + maxReturnLatency;
     if (maxReturnLatency > 0)
         graph->direct.setSize (2, blockSize);
+
+    buildListeners (*graph, trackIndex, maxLatency, maxReturnLatency);
 
     lastClipAudio = std::move (clipAudio);
     lastClipMap = std::move (clipMaps);
@@ -2575,8 +2579,9 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
                                                                  : cue->latencyAtBuild);
     monitorLatency.store (juce::jmax (0, slowestMonitored), std::memory_order_relaxed);
 
-    for (auto& track : graph.tracks)
+    for (const auto trackIndex : graph.trackOrder)
     {
+        auto& track = graph.tracks[trackIndex];
         auto& strip = *track.strip;
         strip.buffer.clear (0, numSamples);
 
@@ -2617,7 +2622,17 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         playEffectLanes (track, isPlaying, blockStart);
 
         auto block = juce::dsp::AudioBlock<float> (strip.buffer).getSubBlock (0, (size_t) numSamples);
+        feedKeys (graph, track, numSamples);
         strip.chain.process (fx::Module::Context (block));
+        takeKeys (track);
+
+        // A sidechain source: its sound after its effects, for the inserts listening to it.
+        if (track.isKey)
+        {
+            track.keyOut.copyFrom (0, 0, strip.buffer, 0, 0, numSamples);
+            track.keyOut.copyFrom (1, 0, strip.buffer, 1, 0, numSamples);
+            track.keyLength = numSamples;
+        }
 
         if (! track.sends.empty())
             feedSends (track, true);
@@ -2654,7 +2669,9 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         const auto busTime = blockStart - graph.returnsBehind;
         playEffectLanes (bus, isPlaying, busTime);
         auto block = juce::dsp::AudioBlock<float> (strip.buffer).getSubBlock (0, (size_t) numSamples);
+        feedKeys (graph, bus, numSamples);
         strip.chain.process (fx::Module::Context (block));
+        takeKeys (bus);
 
         if (! bus.sends.empty())
             feedSendsFrom (bus.sends, strip, true);
@@ -2684,7 +2701,9 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     const auto masterTime = blockStart - graph.masterBehind;
     playEffectLanes (graph.masterAutomation, isPlaying, masterTime);
     auto block = juce::dsp::AudioBlock<float> (master.buffer).getSubBlock (0, (size_t) numSamples);
+    feedKeys (graph, graph.masterAutomation, numSamples);
     master.chain.process (fx::Module::Context (block));
+    takeKeys (graph.masterAutomation);
 
     playVolumeAndPan (graph.masterAutomation, master, isPlaying, masterTime, numSamples);
     updatePeak (master.peakLeft, master.buffer.getMagnitude (0, 0, numSamples));
@@ -2737,6 +2756,134 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 }
 
 //==============================================================================
+void DawEngine::buildListeners (Graph& graph, const std::map<int, size_t>& trackIndex, int maxLatency, int maxReturnLatency)
+{
+    // The delay of the inserts before `module` in a chain (one inside a rack: those
+    // before the rack).
+    const auto latencyBefore = [] (Strip& strip, const fx::Module* module)
+    {
+        int total = 0;
+        for (int m = 0; m < strip.chain.size(); ++m)
+        {
+            auto& top = strip.chain[m];
+            if (&top == module)
+                return total;
+            if (auto* rack = dynamic_cast<RackInsert*> (&top))
+                for (const auto& member : rack->members)
+                    if (member.module.get() == module)
+                        return total;
+            total += top.getLatencySamples();
+        }
+        return total;
+    };
+
+    // `behind`: how far after the tracks' chains (where the keys are taken) this channel's
+    // chain hears its input. A key reaching an insert later than its own sound can't be
+    // sped up: on a track, inserts after the listener that add delay make it that late.
+    const auto collect = [&] (Automation& channel, Strip& strip, int ownTrack, int behind)
+    {
+        for (const auto& [insertId, module] : strip.modulesByInsertId)
+        {
+            const auto tree = strip.insertTrees.find (insertId);
+            if (tree == strip.insertTrees.end() || ! module->canListen())
+                continue;
+
+            const auto sourceId = Edit::getInsertListenTo (tree->second);
+            const auto source = trackIndex.find (sourceId);
+            if (sourceId == 0 || sourceId == ownTrack || source == trackIndex.end())
+                continue;
+
+            KeyListener listener;
+            listener.module = module;
+            listener.source = source->second;
+            listener.key.setSize (2, graph.blockSize);
+            listener.key.clear();
+            listener.delay.setDelay (ownTrack != 0 ? 0 : juce::jmax (0, behind + latencyBefore (strip, module)));
+            channel.listeners.push_back (std::move (listener));
+
+            auto& sourceTrack = graph.tracks[source->second];
+            if (! sourceTrack.isKey)
+            {
+                sourceTrack.isKey = true;
+                sourceTrack.keyOut.setSize (2, graph.blockSize);
+                sourceTrack.keyOut.clear();
+            }
+        }
+    };
+
+    // (A track's chain hears its input as far behind as the keys come out of theirs, less
+    // its own inserts' delay up to the listener: a key is never early there, so no delay.)
+    for (const auto& [id, index] : trackIndex)
+        collect (graph.tracks[index], *graph.tracks[index].strip, id, 0);
+    for (auto& bus : graph.returns)
+        collect (bus, *bus.strip, 0, graph.returnsBehind - maxLatency);
+    collect (graph.masterAutomation, *graph.master, 0, maxReturnLatency);
+
+    // Play order: each track after the tracks it listens to, otherwise as listed. A cycle
+    // (two tracks that listen to each other) starts with the first of them, which hears
+    // its key from the block before.
+    const auto n = graph.tracks.size();
+    std::vector<bool> placed (n, false);
+    graph.trackOrder.clear();
+    graph.trackOrder.reserve (n);
+
+    const auto ready = [&] (size_t t)
+    {
+        return std::all_of (graph.tracks[t].listeners.begin(), graph.tracks[t].listeners.end(),
+                            [&] (const KeyListener& listener) { return placed[listener.source]; });
+    };
+
+    while (graph.trackOrder.size() < n)
+    {
+        bool progressed = false;
+        for (size_t t = 0; t < n; ++t)
+        {
+            if (! placed[t] && ready (t))
+            {
+                placed[t] = true;
+                graph.trackOrder.push_back (t);
+                progressed = true;
+            }
+        }
+
+        if (! progressed)
+            for (size_t t = 0; t < n; ++t)
+                if (! placed[t])
+                {
+                    placed[t] = true;
+                    graph.trackOrder.push_back (t);
+                    break;
+                }
+    }
+}
+
+void DawEngine::feedKeys (Graph& graph, Automation& channel, int numSamples) noexcept
+{
+    for (auto& listener : channel.listeners)
+    {
+        const auto& source = graph.tracks[listener.source];
+        const auto available = juce::jlimit (0, numSamples, source.keyLength);
+
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            if (available > 0)
+                listener.key.copyFrom (ch, 0, source.keyOut, ch, 0, available);
+            if (available < numSamples)
+                listener.key.clear (ch, available, numSamples - available);
+        }
+
+        listener.delay.process (listener.key, numSamples);
+        const float* channels[] = { listener.key.getReadPointer (0), listener.key.getReadPointer (1) };
+        listener.module->setKey (channels, 2, numSamples);
+    }
+}
+
+void DawEngine::takeKeys (Automation& channel) noexcept
+{
+    for (auto& listener : channel.listeners)
+        listener.module->clearKey();
+}
+
 void DawEngine::buildAutomation (Automation& automation, Strip& strip, const juce::ValueTree& channel)
 {
     const auto trackId = (int) channel[ids::id];

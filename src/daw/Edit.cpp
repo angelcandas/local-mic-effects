@@ -3220,6 +3220,32 @@ void Edit::setInsertName (int insertId, const juce::String& name)
         insert.setProperty (ids::label, trimmed, undoTarget);
 }
 
+bool Edit::canListen (const juce::ValueTree& insert)
+{
+    const auto type = insert[ids::type].toString();
+    return type == "compressor" || type == "gate" || type == "dynamicEq";
+}
+
+bool Edit::setInsertListenTo (int insertId, int trackId)
+{
+    auto insert = getInsert (insertId);
+    if (! insert.isValid() || ! canListen (insert))
+        return false;
+
+    const auto owner = getChannelOf (insert);
+    if (trackId == 0 || (owner.hasType (ids::TRACK) && (int) owner[ids::id] == trackId))
+    {
+        insert.removeProperty (ids::listenTo, undoTarget);
+        return true;
+    }
+
+    if (! getTrack (trackId).isValid())
+        return false;
+
+    insert.setProperty (ids::listenTo, trackId, undoTarget);
+    return true;
+}
+
 // A value set as text ("id=value;id=value"), for the set that isn't playing.
 static juce::String writeValueSet (const juce::ValueTree& insert, const juce::StringArray& valueIds)
 {

@@ -384,6 +384,18 @@ private:
         void process (juce::AudioBuffer<float>&, int numSamples) noexcept;
     };
 
+    // Sidechain: an insert whose detector hears a track (Edit::setInsertListenTo). Before
+    // its channel's chain plays, the source track's key (its sound after its effects,
+    // before its fader) is copied in, delayed to line up with where the insert hears its
+    // own sound, and handed to the module (audio thread).
+    struct KeyListener
+    {
+        fx::Module* module = nullptr;
+        size_t source = 0; // index into Graph::tracks
+        Delay delay;
+        juce::AudioBuffer<float> key;
+    };
+
     struct Send
     {
         std::shared_ptr<SendLevel> level;
@@ -411,6 +423,7 @@ private:
         };
         std::vector<Lane> lanes;
         bool automating = false;
+        std::vector<KeyListener> listeners; // its sidechained inserts
     };
 
     struct Track : Automation
@@ -424,6 +437,12 @@ private:
 
         // Latency compensation, before the inserts (audio thread).
         Delay delay;
+
+        // Sidechain source: what its chain played last (2 channels, `keyLength` samples),
+        // kept while an insert anywhere listens to it (audio thread).
+        bool isKey = false;
+        juce::AudioBuffer<float> keyOut;
+        int keyLength = 0;
     };
 
     // A return track: what the tracks send it, through its own strip, into the master.
@@ -449,6 +468,9 @@ private:
         // returns' effects when they add latency (otherwise unused).
         juce::AudioBuffer<float> direct;
         Delay directDelay;
+        // The order the tracks play in: a sidechain's source before the tracks that listen
+        // to it (a cycle hears its key one block late). Indices into `tracks`.
+        std::vector<size_t> trackOrder;
         int blockSize = 512; // the strips' buffer size: the most one chunk can render
         bool fresh = true;   // not played yet: notes from the previous graph get their note-offs
         TempoMap tempo;      // for the click
@@ -510,6 +532,10 @@ private:
     void retirePreview (juce::AudioBuffer<float>*) noexcept;
 
     static void renderClip (const Clip&, juce::AudioBuffer<float>&, juce::int64 blockStart, int numSamples) noexcept;
+    // Sidechains: every listening insert of the new graph, and the tracks' play order.
+    void buildListeners (Graph&, const std::map<int, size_t>& trackIndex, int maxLatency, int maxReturnLatency);
+    static void feedKeys (Graph&, Automation&, int numSamples) noexcept;
+    static void takeKeys (Automation&) noexcept;
     void renderBlock (Graph&, juce::AudioBuffer<float>& output, int outputOffset, int numChannels, int numSamples,
                       const float* const* inputs, int numInputs, const juce::MidiBuffer* midi, int midiOffset) noexcept;
     void renderInstrument (Track&, const TempoMap&, bool isPlaying, bool fresh, juce::int64 blockStart, int numSamples,
