@@ -67,6 +67,11 @@
 //         NOTE  id, pitch, time (BEATS from the pattern's start), length (beats), velocity
 //     PATTERNCLIP  id, pattern (a PATTERN id), start (beats), length (beats), row (0..15), mute,
 //                  offset (beats into the pattern where the block starts; 0 <= offset < its length)
+//     SCENE  row, name   (the clip launcher's scene names; a row without one is unnamed)
+//   (PROJECT also has sceneCount, the launcher's rows, and launchQuantize, see "Clip launcher")
+//   (a TRACK also holds the launcher's SLOTs:)
+//       SLOT  id, row (the scene it sits in), beats (its loop length), loop (false: plays once)
+//         CLIP ...   (what it plays: an audio or MIDI clip, as on the timeline, start 0)
 //     RETURN  id, name, colour, volume, pan, mute, solo, inGain, outGain,
 //             group (true: a group track, see below), folded (a group's tracks are hidden)
 //       INSERTS ...
@@ -145,6 +150,8 @@ namespace ids
     MICFX_DAW_ID (panAutomation) // a TRACK's pan over time, see setLane
     MICFX_DAW_ID (CHAIN) // a rack's chain (INSERT type "rack", see RackInsert.h)
     MICFX_DAW_ID (CUE) MICFX_DAW_ID (cueOn) MICFX_DAW_ID (voice) MICFX_DAW_ID (music) // the cue mix
+    MICFX_DAW_ID (SLOT) MICFX_DAW_ID (SCENE) MICFX_DAW_ID (beats) MICFX_DAW_ID (loop) // the clip launcher
+    MICFX_DAW_ID (sceneCount) MICFX_DAW_ID (launchQuantize)
 #undef MICFX_DAW_ID
 }
 
@@ -745,6 +752,58 @@ public:
     // up to whole beats), and a block of it in the clip's place. Returns the pattern's id,
     // or -1.
     int midiClipToPattern (int clipId);
+
+    //==============================================================================
+    // Clip launcher: a grid of slots, a column per track and a row per scene. A slot holds
+    // one clip (a copy, start 0: audio on audio tracks, MIDI on MIDI tracks) and plays it
+    // as a loop `beats` long (or once), apart from the song: a track playing a slot leaves
+    // its timeline until "Back to song" (see DawEngine's launcher). One slot per cell. A
+    // scene is a row: launching it launches the row's slot on every track. Rows count from
+    // 0; there are getSceneCount() of them. Each call is one undoable edit.
+    static constexpr int defaultScenes = 8, maxScenes = 64;
+    static constexpr double minSlotBeats = 0.25, maxSlotBeats = 1024.0;
+
+    juce::ValueTree getSlot (int slotId) const;
+    juce::ValueTree getSlotAt (int trackId, int row) const;
+    juce::Array<juce::ValueTree> getSlots (int trackId) const;  // in row order
+    static juce::ValueTree getSlotClip (const juce::ValueTree& slot);
+    static double getSlotBeats (const juce::ValueTree& slot);
+    static bool getSlotLoop (const juce::ValueTree& slot) { return (bool) slot.getProperty (ids::loop, true); }
+    static juce::ValueTree getSlotOf (const juce::ValueTree& clip); // the SLOT a clip is in, or invalid
+
+    // A copy of a timeline clip (or a take's) in a cell of a track of the same kind; its loop
+    // is the clip's length in beats (whole beats when it's within 2 % of them). Replaces what
+    // the cell held. Returns the slot's id, or -1.
+    int addSlotFromClip (int clipId, int trackId, int row);
+    // An empty MIDI clip in a cell of a MIDI track, `beats` long (0: a bar). Slot id or -1.
+    int addMidiSlot (int trackId, int row, double beats = 0.0);
+    // To another cell (a track of the same kind), or a copy there; the cell's slot is
+    // replaced. Returns the moved or new slot's id, or -1.
+    int moveSlot (int slotId, int trackId, int row, bool copy = false);
+    void removeSlot (int slotId);
+    void setSlotBeats (int slotId, double beats);
+    void setSlotLoop (int slotId, bool loop);
+    void setSlotName (int slotId, const juce::String&); // its clip's name
+
+    int getSceneCount() const; // the sceneCount (8 when unset), and at least one past the lowest slot
+    void setSceneCount (int count); // rows past the new count lose their slots
+    void insertScene (int row);     // an empty row; the rows from there move down
+    void removeScene (int row);     // with its slots; the rows below move up
+    void duplicateScene (int row);  // a copy of the row's slots in a new row below it
+    juce::String getSceneName (int row) const;
+    void setSceneName (int row, const juce::String&);
+
+    // Where launches wait for: "none" (at once), "beat", "bar" (the default), "2bars", "4bars".
+    juce::String getLaunchQuantize() const;
+    void setLaunchQuantize (const juce::String& key);
+    double getLaunchQuantizeBeats() const; // 0 for "none"
+    static juce::StringArray getLaunchQuantizeKeys();
+
+    // A slot written onto its track's timeline from `startSeconds` for `lengthSeconds`, one clip
+    // per pass of its loop (the first starting `phaseSeconds` into it; a one-shot slot: just the
+    // one pass), as a performance recording does. The track's own clips there stay (newer clips
+    // play over older ones, see removeOverlaps). Returns the new clips' ids.
+    juce::Array<int> writeSlotToTimeline (int slotId, double startSeconds, double lengthSeconds, double phaseSeconds = 0.0);
 
     // Edits made while one of these is alive don't go into the undo history (pattern
     // recording adds notes as they're played, then makes them one undo step at the end).
