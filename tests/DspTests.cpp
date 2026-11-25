@@ -3160,6 +3160,298 @@ namespace
         check (insert, "shared reverb off: a plate insert on the voice");
     }
 
+    // Feedback protection (FeedbackGuard.h): a mic and speaker loop with more than unity
+    // gain at one frequency, simulated sample by sample (the speaker's sound reaches the mic
+    // 10 ms later through a resonant room), with and without the guard.
+    struct FeedbackLoop
+    {
+        double ringHz = 2000.0;
+        float loopGain = 1.12f;   // +1 dB around the loop at ringHz: it grows
+        int delay = 480;          // samples from speaker to mic (>= the block size)
+        fx::Biquad room;
+        std::vector<float> history;
+        int at = 0;
+
+        FeedbackLoop (double hz, float gain) : ringHz (hz), loopGain (gain)
+        {
+            room.setup (fx::Biquad::Type::bandPass, sampleRate, ringHz, 8.0);
+            history.assign ((size_t) delay, 0.0f);
+        }
+
+        // Runs `voice` through the loop (and the guard when given); returns the output.
+        std::vector<float> run (const std::vector<float>& voice, fx::FeedbackGuard* guard, int block = 256)
+        {
+            std::vector<float> out (voice.size());
+            std::vector<float> left ((size_t) block), right ((size_t) block);
+            for (size_t start = 0; start < voice.size(); start += (size_t) block)
+            {
+                const auto n = (int) juce::jmin ((size_t) block, voice.size() - start);
+                for (int i = 0; i < n; ++i)
+                {
+                    const auto back = history[(size_t) ((at + i) % delay)];
+                    left[(size_t) i] = right[(size_t) i] = voice[start + (size_t) i] + loopGain * room.process (0, back);
+                }
+                float* channels[] = { left.data(), right.data() };
+                juce::dsp::AudioBlock<float> audio (channels, 2, (size_t) n);
+                if (guard != nullptr)
+                    guard->process (audio);
+                for (int i = 0; i < n; ++i)
+                {
+                    const auto y = std::tanh (left[(size_t) i]); // the speaker can't go past full scale
+                    history[(size_t) ((at + i) % delay)] = y;
+                    out[start + (size_t) i] = y;
+                }
+                at = (at + n) % delay;
+            }
+            return out;
+        }
+    };
+
+    float rmsDb (const std::vector<float>& signal, double fromSeconds, double toSeconds)
+    {
+        const auto from = (size_t) (fromSeconds * sampleRate), to = juce::jmin (signal.size(), (size_t) (toSeconds * sampleRate));
+        double sum = 0.0;
+        for (auto i = from; i < to; ++i)
+            sum += (double) signal[i] * signal[i];
+        return (float) (10.0 * std::log10 (sum / (double) juce::jmax ((size_t) 1, to - from) + 1.0e-20));
+    }
+
+    // A sung note: 10 harmonics with vibrato (rate Hz, depth cents), optional noise.
+    std::vector<float> makeSungNote (float hz, double seconds, float vibratoCents, float peak = 0.3f)
+    {
+        std::vector<float> samples ((size_t) (seconds * sampleRate));
+        double phase = 0.0;
+        for (size_t i = 0; i < samples.size(); ++i)
+        {
+            const auto t = (double) i / sampleRate;
+            const auto f = hz * std::pow (2.0, vibratoCents / 1200.0 * std::sin (juce::MathConstants<double>::twoPi * 5.5 * t));
+            phase += juce::MathConstants<double>::twoPi * f / sampleRate;
+            double value = 0.0;
+            for (int h = 1; h <= 10; ++h)
+                value += std::sin (phase * h) / h;
+            const auto fade = juce::jmin (1.0, t / 0.05, (seconds - t) / 0.05);
+            samples[i] = (float) (value * peak / 2.0 * fade);
+        }
+        return samples;
+    }
+
+    void testFeedbackGuard()
+    {
+        std::cout << "\nFeedback protection\n";
+
+        // A noise burst starts the ring; then the room is left alone.
+        std::vector<float> burst ((size_t) (4.0 * sampleRate), 0.0f);
+        juce::Random random (11);
+        for (size_t i = 0; i < (size_t) (0.1 * sampleRate); ++i)
+            burst[i] = (random.nextFloat() * 2.0f - 1.0f) * 0.01f;
+
+        {
+            FeedbackLoop open (2000.0, 1.12f);
+            const auto howl = open.run (burst, nullptr);
+            check (rmsDb (howl, 3.5, 4.0) > -12.0f, "without the guard the loop howls (" + juce::String (rmsDb (howl, 3.5, 4.0), 1) + " dB)");
+
+            FeedbackLoop guarded (2000.0, 1.12f);
+            fx::FeedbackGuard guard;
+            guard.prepare (sampleRate);
+            const auto out = guarded.run (burst, &guard);
+            const auto notches = guard.getNotches();
+            const auto near = ! notches.empty() && std::abs (notches[0].hz - 2000.0f) < 15.0f;
+            check (rmsDb (out, 3.5, 4.0) < -40.0f, "with the guard the ring dies away (" + juce::String (rmsDb (out, 3.5, 4.0), 1) + " dB)");
+            check (notches.size() == 1 && near, "one notch, on the ringing frequency ("
+                   + (notches.empty() ? juce::String ("none") : juce::String (notches[0].hz, 1) + " Hz, -" + juce::String (notches[0].cutDb, 1) + " dB") + ")");
+
+            // How loud it got before the notch caught it.
+            float worst = 0.0f;
+            for (auto v : out)
+                worst = juce::jmax (worst, std::abs (v));
+            check (worst < 0.5f, "caught before it gets loud (peak " + juce::String (juce::Decibels::gainToDecibels (worst), 1) + " dBFS)");
+        }
+
+        // A stronger loop needs a deeper notch: the guard deepens it step by step.
+        {
+            FeedbackLoop guarded (1250.0, 2.5f); // +8 dB: one -6 dB notch isn't enough
+            fx::FeedbackGuard guard;
+            guard.prepare (sampleRate);
+            const auto out = guarded.run (burst, &guard);
+            const auto notches = guard.getNotches();
+            // At +8 dB the neighbouring frequencies (100 Hz apart, the 10 ms trip) ring too.
+            float deepest = 0.0f;
+            bool inRoom = ! notches.empty();
+            juce::String list;
+            for (const auto& n : notches)
+            {
+                deepest = juce::jmax (deepest, n.cutDb);
+                inRoom = inRoom && n.hz > 950.0f && n.hz < 1550.0f;
+                list << " " << juce::String (n.hz, 0) << "/-" << juce::String (n.cutDb, 1);
+            }
+            check (rmsDb (out, 3.5, 4.0) < -40.0f && inRoom && deepest >= 8.5f,
+                   "a +8 dB loop: notches go deeper until it stops (" + list.trim() + ", " + juce::String (rmsDb (out, 3.5, 4.0), 1) + " dB)");
+        }
+
+        // While someone sings into a room that rings.
+        {
+            auto voice = makeSungNote (220.0f, 4.0, 40.0f, 0.2f);
+            FeedbackLoop guarded (3150.0, 1.12f);
+            fx::FeedbackGuard guard;
+            guard.prepare (sampleRate);
+            const auto out = guarded.run (voice, &guard);
+            FeedbackLoop open (3150.0, 1.12f);
+            const auto howl = open.run (voice, nullptr);
+            const auto notches = guard.getNotches();
+            check (notches.size() == 1 && std::abs (notches[0].hz - 3150.0f) < 60.0f && rmsDb (out, 3.0, 4.0) < rmsDb (howl, 3.0, 4.0) - 10.0f,
+                   "singing through a ringing room: the ring is notched, the howl doesn't build ("
+                   + juce::String (rmsDb (out, 3.0, 4.0), 1) + " vs " + juce::String (rmsDb (howl, 3.0, 4.0), 1) + " dB; notches:"
+                   + [&] { juce::String list; for (const auto& n : notches) list << " " << juce::String (n.hz, 0); return list; }() + ")");
+        }
+
+        // A ring that starts while a steady note is held (no vibrato, many harmonics around).
+        {
+            auto voice = makeSungNote (196.0f, 4.0, 0.0f, 0.2f);
+            FeedbackLoop guarded (2000.0, 1.12f);
+            fx::FeedbackGuard guard;
+            guard.prepare (sampleRate);
+            const auto out = guarded.run (voice, &guard);
+            const auto notches = guard.getNotches();
+            check (notches.size() == 1 && std::abs (notches[0].hz - 2000.0f) < 60.0f,
+                   "a ring under a steady held note is still caught (" + juce::String ((int) notches.size()) + " notches)");
+        }
+
+        // Singing in a room that doesn't ring: no notches.
+        {
+            int falseNotches = 0;
+            juce::StringArray which;
+            for (const auto hz : { 110.0f, 196.0f, 262.0f, 440.0f, 659.0f })
+                for (const auto vibrato : { 0.0f, 8.0f, 50.0f })
+                {
+                    fx::FeedbackGuard guard;
+                    guard.prepare (sampleRate);
+                    auto note = makeSungNote (hz, 3.0, vibrato);
+                    float* channels[] = { note.data() };
+                    for (size_t start = 0; start < note.size(); start += 256)
+                    {
+                        juce::dsp::AudioBlock<float> audio (channels, 1, start, juce::jmin ((size_t) 256, note.size() - start));
+                        guard.process (audio);
+                    }
+                    if (! guard.getNotches().empty())
+                    {
+                        ++falseNotches;
+                        which.add (juce::String (hz) + " Hz/" + juce::String (vibrato) + " ct");
+                    }
+                }
+            check (falseNotches == 0, "held sung notes (with and without vibrato) aren't notched" + (which.isEmpty() ? juce::String() : ": " + which.joinIntoString (", ")));
+        }
+
+        // A sung note that swells (a crescendo, steady pitch): still not feedback.
+        {
+            fx::FeedbackGuard guard;
+            guard.prepare (sampleRate);
+            auto note = makeSungNote (330.0f, 3.0, 0.0f, 0.05f);
+            for (size_t i = 0; i < note.size(); ++i)
+                note[i] *= (float) std::pow (10.0, 12.0 / 20.0 * (double) i / (double) note.size()); // +12 dB over 3 s
+            float* channels[] = { note.data() };
+            for (size_t start = 0; start < note.size(); start += 256)
+            {
+                juce::dsp::AudioBlock<float> audio (channels, 1, start, juce::jmin ((size_t) 256, note.size() - start));
+                guard.process (audio);
+            }
+            check (guard.getNotches().empty(), "a steady note that swells isn't notched");
+        }
+
+        // Ring out: the notches it finds stay; the ones caught while singing let go after quiet.
+        {
+            FeedbackLoop room (2000.0, 1.12f);
+            fx::FeedbackGuard guard;
+            guard.prepare (sampleRate);
+            fx::FeedbackGuard::Settings settings;
+            settings.ringOut = true;
+            settings.releaseSeconds = 1.0f;
+            guard.setSettings (settings);
+            room.run (burst, &guard);
+            const auto fixed = guard.getFixedNotches();
+            check (fixed.size() == 1 && std::abs (fixed[0].hz - 2000.0f) < 15.0f, "ring out: the ring becomes a fixed notch");
+
+            settings.ringOut = false;
+            settings.releaseSeconds = 30.0f;
+            guard.setSettings (settings);
+            FeedbackLoop other (900.0, 1.12f);
+            other.run (burst, &guard); // also passes through the fixed 2 kHz notch
+            const auto both = guard.getNotches();
+            check (both.size() == 2, "a ring during the show adds a notch caught while singing (" + juce::String ((int) both.size()) + ")");
+
+            settings.releaseSeconds = 1.0f;
+            guard.setSettings (settings);
+            std::vector<float> silence ((size_t) (6.0 * sampleRate), 0.0f);
+            float* channels[] = { silence.data() };
+            for (size_t start = 0; start < silence.size(); start += 256)
+            {
+                juce::dsp::AudioBlock<float> audio (channels, 1, start, 256);
+                guard.process (audio);
+            }
+            const auto after = guard.getNotches();
+            check (after.size() == 1 && after[0].fixed, "after quiet, the caught one lets go and the fixed one stays");
+
+            guard.reset();
+            check (guard.getFixedNotches().size() == 1, "switching off and on keeps the fixed notches");
+
+            guard.clearNotches (true);
+            for (size_t start = 0; start < (size_t) (2.0 * sampleRate); start += 256)
+            {
+                juce::dsp::AudioBlock<float> audio (channels, 1, start, 256);
+                guard.process (audio);
+            }
+            check (guard.getNotches().empty(), "Clear all lets go of the fixed ones too");
+        }
+
+        // In the processor: last in the chain, kept by presets, saved with the session, Live only.
+        {
+            PluginProcessor processor;
+            processor.prepareToPlay (sampleRate, blockSize);
+            check (processor.getChainOrder()[processor.getChainOrder().size() - 1] == "feedbackGuard", "feedback protection plays last");
+            processor.setChainOrder ({ "feedbackGuard", "reverb" });
+            check (processor.getChainOrder()[0] == "reverb" && processor.getChainOrder()[processor.getChainOrder().size() - 1] == "feedbackGuard",
+                   "and stays last when the chain is reordered");
+
+            auto* on = processor.getState().getParameter ("fbgOn");
+            on->setValueNotifyingHost (1.0f);
+            processor.setCurrentProgram (processor.getNumPrograms() > 1 ? 1 : 0);
+            check (on->getValue() >= 0.5f, "a preset leaves it on (it belongs to the room)");
+
+            auto* guard = processor.getLiveChain().find<fx::modules::FeedbackGuardModule>();
+            guard->getGuard().setFixedNotches ({ { 2500.0f, 9.0f, true } });
+            juce::MemoryBlock saved;
+            processor.getStateInformation (saved);
+            PluginProcessor restored;
+            restored.setStateInformation (saved.getData(), (int) saved.getSize());
+            const auto back = restored.getLiveChain().find<fx::modules::FeedbackGuardModule>()->getGuard().getFixedNotches();
+            check (back.size() == 1 && std::abs (back[0].hz - 2500.0f) < 0.01f && std::abs (back[0].cutDb - 9.0f) < 0.01f,
+                   "the fixed notches are saved with the session");
+
+            juce::ValueTree chain = processor.captureLiveChain();
+            bool inSaved = false;
+            for (const auto& insert : chain)
+                inSaved = inSaved || insert["type"].toString() == "feedbackGuard";
+            check (! inSaved, "a saved Live chain leaves it out");
+            check (! daw::Edit::moduleTypeFromKey ("feedbackGuard").has_value(), "the DAW can't add it as an insert");
+        }
+
+        // CPU: one guard on a stereo stream.
+        {
+            fx::FeedbackGuard guard;
+            guard.prepare (sampleRate);
+            auto voice = makeSungNote (220.0f, 10.0, 40.0f);
+            std::vector<float> right = voice;
+            float* channels[] = { voice.data(), right.data() };
+            const auto started = juce::Time::getMillisecondCounterHiRes();
+            for (size_t start = 0; start + 256 <= voice.size(); start += 256)
+            {
+                juce::dsp::AudioBlock<float> audio (channels, 2, start, 256);
+                guard.process (audio);
+            }
+            const auto ms = juce::Time::getMillisecondCounterHiRes() - started;
+            std::cout << "  info  10 s of stereo through the guard in " << ms << " ms\n";
+        }
+    }
+
     void testDynamics()
     {
         std::cout << "\nTransient shaper and dynamic EQ\n";
@@ -20938,6 +21230,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=feedback: just feedback protection.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "feedback")
+    {
+        testFeedbackGuard();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=chords: the chord detector, the harmonies and the chord track.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "chords")
     {
@@ -21368,6 +21668,7 @@ int main()
     testMasterTemplatesAndLanes();
     testAutoMixSends();
     testDynamics();
+    testFeedbackGuard();
     testVocalDynamics();
     testSpace();
     testColour();

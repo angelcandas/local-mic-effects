@@ -2833,10 +2833,10 @@ juce::ValueTree Edit::getInserts (const juce::ValueTree& trackOrMaster)
 std::optional<fx::ModuleType> Edit::moduleTypeFromKey (const juce::String& key)
 {
     for (int i = 0; i < fx::numModuleTypes; ++i)
-        if (key == fx::getModuleKey ((fx::ModuleType) i))
+        if (key == fx::getModuleKey ((fx::ModuleType) i) && ! fx::isLiveOnly ((fx::ModuleType) i))
             return (fx::ModuleType) i;
 
-    return std::nullopt;
+    return std::nullopt; // also the Live-only effects (feedback protection): not a DAW insert
 }
 
 juce::ValueTree Edit::addInsert (int trackId, fx::ModuleType type, int index)

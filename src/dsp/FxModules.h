@@ -4,6 +4,7 @@
 #include "ParametricEq.h"
 #include "FxModule.h"
 #include "Dynamics.h"
+#include "FeedbackGuard.h"
 #include "AutoLevel.h"
 #include "Mastering.h"
 #include "PitchEngine.h"
@@ -1541,6 +1542,7 @@ inline std::unique_ptr<Module> createModule (ModuleType type)
         case ModuleType::loudness:   return std::make_unique<modules::Loudness>();
         case ModuleType::transient:  return std::make_unique<modules::Transient>();
         case ModuleType::dynamicEq:  return std::make_unique<modules::DynamicEq>();
+        case ModuleType::feedbackGuard: return std::make_unique<modules::FeedbackGuardModule>();
         case ModuleType::plugin:     return {}; // made by daw::PluginInsert, from its plugin
         case ModuleType::rack:       return {}; // made by daw::RackInsert, from its chains
     }

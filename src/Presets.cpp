@@ -1,4 +1,5 @@
 #include "Presets.h"
+#include "Parameters.h"
 
 const std::vector<Preset>& getPresets()
 {
@@ -176,7 +177,7 @@ void applyPreset (juce::AudioProcessor& processor, const Preset& preset)
     {
         auto* ranged = dynamic_cast<juce::RangedAudioParameter*> (parameter);
 
-        if (ranged == nullptr || ranged->getParameterID() == "inputGain")
+        if (ranged == nullptr || Parameters::belongsToRoom (ranged->getParameterID()))
             continue;
 
         auto target = ranged->getDefaultValue();

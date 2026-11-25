@@ -1,4 +1,5 @@
 #include "Scenes.h"
+#include "Parameters.h"
 
 namespace
 {
@@ -28,7 +29,7 @@ Scenes::~Scenes()
 
 bool Scenes::isSceneParameter (const juce::RangedAudioParameter& parameter)
 {
-    return parameter.getParameterID() != "inputGain"; // the mic's level belongs to the room, like in presets
+    return ! Parameters::belongsToRoom (parameter.getParameterID()); // the mic's level and feedback guard belong to the room, like in presets
 }
 
 juce::ValueTree Scenes::getTree() const

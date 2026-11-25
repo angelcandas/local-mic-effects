@@ -417,6 +417,7 @@ export class LibraryBrowser {
     const out = [];
     const effects = [];
     for (const m of MODULES) {
+      if (m.liveOnly) continue; // feedback protection: not a DAW insert
       const colour = CATEGORIES[m.category]?.color;
       if (this.matches(m.name) || this.matches(m.description ?? ""))
         effects.push(this.item({ key: `fx:${m.id}`, name: m.name, detail: CATEGORIES[m.category]?.name, colour, title: `${m.name}: ${m.description ?? ""}`,
@@ -594,7 +595,7 @@ export class LibraryBrowser {
   effectItems() {
     const list = [];
     for (const [categoryId, category] of Object.entries(CATEGORIES)) {
-      const children = MODULES.filter((m) => m.category === categoryId && (this.matches(m.name) || this.matches(m.description ?? "")))
+      const children = MODULES.filter((m) => m.category === categoryId && !m.liveOnly && (this.matches(m.name) || this.matches(m.description ?? "")))
         .flatMap((m) => {
           const presets = FX_PRESETS[m.id] ?? [];
           const open = this.openFx.has(m.id);
