@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 223,
+ "latest": 225,
  "days": [
   {
    "date": "2026-11-25",
    "entries": [
+    {
+     "title": "MIDI effects and velocity lane",
+     "text": "Put an arpeggiator, a chord maker or a scale lock before a MIDI track's instrument: arpeggios on the beat, the song key's chords from single notes, wrong notes kept in key. The piano roll gets a Velocity lane to draw how hard each note plays.",
+     "prs": [
+      225
+     ]
+    },
     {
      "title": "Feedback Guard",
      "text": "A Live effect that catches the mic ringing through the speakers and notches that note before it howls, while your singing goes through untouched. Ring out before the show to fix the notches for the room.",
