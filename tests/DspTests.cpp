@@ -8096,6 +8096,224 @@ namespace
         return out;
     }
 
+    void testMidiEffects()
+    {
+        std::cout << "\nMIDI effects (arpeggiator, chord, scale lock)\n";
+        using namespace daw::midifx;
+
+        struct Event { juce::int64 time; bool on; int note; int velocity; };
+        // Runs `input` (absolute sample times) through a chain in blocks, as the engine does.
+        const auto run = [] (Processor& processor, const Chain& chain, std::vector<Event> input, juce::int64 length,
+                             bool playing = true, double bpm = 120.0, int block = 512, juce::int64 startAt = 0)
+        {
+            std::vector<Event> output;
+            for (juce::int64 start = 0; start < length; start += block)
+            {
+                const auto n = (int) std::min ((juce::int64) block, length - start);
+                juce::MidiBuffer midi;
+                for (const auto& e : input)
+                    if (e.time >= start && e.time < start + n)
+                        midi.addEvent (e.on ? juce::MidiMessage::noteOn (1, e.note, (juce::uint8) e.velocity) : juce::MidiMessage::noteOff (1, e.note), (int) (e.time - start));
+                Context context;
+                context.sampleRate = 48000.0;
+                context.playing = playing;
+                context.bpm = bpm;
+                context.beat = (double) (start + startAt) / 48000.0 * bpm / 60.0;
+                processor.process (midi, chain, context, n);
+                for (const auto metadata : midi)
+                {
+                    const auto m = metadata.getMessage();
+                    if (m.isNoteOnOrOff())
+                        output.push_back ({ start + metadata.samplePosition, m.isNoteOn(), m.getNoteNumber(), m.getVelocity() });
+                }
+            }
+            return output;
+        };
+        const auto ons = [] (const std::vector<Event>& events)
+        {
+            std::vector<std::pair<juce::int64, int>> list;
+            for (const auto& e : events)
+                if (e.on)
+                    list.emplace_back (e.time, e.note);
+            return list;
+        };
+        const auto describe = [] (const std::vector<std::pair<juce::int64, int>>& list)
+        {
+            juce::String text;
+            for (const auto& [t, n] : list)
+                text << n << "@" << (int) t << " ";
+            return text.trim();
+        };
+
+        // Scale lock to the song key (C major), nearest note, ties go down.
+        {
+            Settings scale; scale.id = 1; scale.type = Type::scale; scale.scaleMask = getSongScaleMask (0, false);
+            Processor p;
+            const auto out = run (p, { scale }, { { 0, true, 61, 100 }, { 100, false, 61, 0 }, { 200, true, 64, 90 }, { 300, false, 64, 0 } }, 512);
+            check (out.size() == 4 && out[0].note == 60 && out[0].on && out[1].note == 60 && ! out[1].on && out[2].note == 64 && out[3].note == 64,
+                   "scale lock moves C# to C in C major and ends it with the played note");
+
+            scale.drop = true;
+            Processor q;
+            const auto dropped = run (q, { scale }, { { 0, true, 61, 100 }, { 100, false, 61, 0 }, { 200, true, 62, 90 } }, 512);
+            check (dropped.size() == 1 && dropped[0].note == 62, "drop mode leaves out notes outside the scale");
+
+            Settings minor = fromTree ([] { juce::ValueTree t (daw::ids::MIDIFX); t.setProperty (daw::ids::type, "scale", nullptr); return t; }(), 9, true);
+            check (minor.scaleMask == getSongScaleMask (0, false), "A minor has the notes of C major");
+            juce::ValueTree own (daw::ids::MIDIFX);
+            own.setProperty (daw::ids::type, "scale", nullptr);
+            own.setProperty ("scale", "pentatonicMinor", nullptr);
+            own.setProperty ("root", 9, nullptr);
+            const auto pent = fromTree (own, 0, false);
+            check (pent.scaleMask == ((1 << 9) | (1 << 0) | (1 << 2) | (1 << 4) | (1 << 7)), "a scale of its own on a root (A minor pentatonic)");
+        }
+
+        // Chords: the song key's triad and seventh, and fixed shapes.
+        {
+            Settings chord; chord.id = 2; chord.type = Type::chord; chord.inKeyNotes = 3; chord.scaleMask = getSongScaleMask (0, false); chord.level = 0.5f;
+            Processor p;
+            const auto out = run (p, { chord }, { { 0, true, 62, 100 }, { 100, false, 62, 0 } }, 512);
+            check (describe (ons (out)) == "62@0 65@0 69@0", "a triad in C major on D is D minor (" + describe (ons (out)) + ")");
+            check (out.size() == 6 && out[1].velocity == 50, "the added notes play at the chord's level");
+
+            chord.inKeyNotes = 4;
+            Processor q;
+            check (describe (ons (run (q, { chord }, { { 0, true, 67, 100 } }, 64))) == "67@0 71@0 74@0 77@0", "a seventh in key on G is G7");
+
+            Settings octave; octave.id = 3; octave.type = Type::chord; octave.intervals = { 0, 12 }; octave.numIntervals = 2;
+            Processor r;
+            const auto shared = run (r, { octave }, { { 0, true, 60, 100 }, { 10, true, 72, 100 }, { 100, false, 60, 0 }, { 200, false, 72, 0 } }, 512);
+            std::vector<std::pair<juce::int64, int>> offs;
+            for (const auto& e : shared) if (! e.on) offs.emplace_back (e.time, e.note);
+            check (describe (offs) == "60@100 72@200 84@200", "a note two played notes share ends with the last of them (" + describe (offs) + ")");
+        }
+
+        // The arpeggiator, playing at 120 BPM in sixteenths (6000 samples a step at 48 kHz).
+        {
+            Settings arp; arp.id = 4; arp.type = Type::arp; arp.rate = 0.25; arp.gate = 0.5f;
+            Processor p;
+            const auto out = run (p, { arp }, { { 0, true, 67, 100 }, { 0, true, 60, 100 }, { 0, true, 64, 100 },
+                                                { 24000, false, 60, 0 }, { 24000, false, 64, 0 }, { 24000, false, 67, 0 } }, 48000);
+            check (describe (ons (out)) == "60@0 64@6000 67@12000 60@18000", "up: the held notes low to high on the sixteenths, until let go (" + describe (ons (out)) + ")");
+            bool gated = false;
+            for (const auto& e : out) gated = gated || (! e.on && e.note == 60 && e.time == 3000);
+            check (gated, "a step lasts its gate (half a step)");
+            int open = 0;
+            for (const auto& e : out) open += e.on ? 1 : -1;
+            check (open == 0, "every arp note ends");
+
+            arp.pattern = Pattern::down; arp.octaves = 2;
+            Processor q;
+            const auto down = ons (run (q, { arp }, { { 0, true, 60, 100 }, { 0, true, 64, 100 } }, 6000 * 5));
+            check (describe (down) == "76@0 72@6000 64@12000 60@18000 76@24000", "down over two octaves (" + describe (down) + ")");
+
+            arp.pattern = Pattern::upDown; arp.octaves = 1;
+            Processor u;
+            const auto updown = ons (run (u, { arp }, { { 0, true, 60, 100 }, { 0, true, 64, 100 }, { 0, true, 67, 100 } }, 6000 * 6));
+            check (describe (updown) == "60@0 64@6000 67@12000 64@18000 60@24000 64@30000", "up and down without repeating the ends (" + describe (updown) + ")");
+
+            // A note pressed between grid lines waits for the next one while playing...
+            arp.pattern = Pattern::up;
+            Processor w;
+            const auto late = ons (run (w, { arp }, { { 1000, true, 60, 100 } }, 13000));
+            check (describe (late) == "60@6000 60@12000", "while playing, the arp starts on the next grid line (" + describe (late) + ")");
+            // ...and plays straight away when stopped.
+            Processor s;
+            const auto stopped = ons (run (s, { arp }, { { 1000, true, 60, 100 } }, 13000, false));
+            check (describe (stopped) == "60@1000 60@7000", "stopped, the arp starts when the key goes down (" + describe (stopped) + ")");
+
+            // Latch: the notes keep playing after the keys are let go.
+            arp.latch = true;
+            Processor l;
+            const auto latched = ons (run (l, { arp }, { { 0, true, 60, 100 }, { 100, false, 60, 0 } }, 6000 * 3));
+            check (latched.size() == 3, "latch keeps the arp going after the keys are let go");
+
+            // Through a scale lock first: the arp plays what the scale made.
+            arp.latch = false;
+            Settings scale; scale.id = 5; scale.type = Type::scale; scale.scaleMask = getSongScaleMask (0, false);
+            Processor c;
+            const auto chained = ons (run (c, { scale, arp }, { { 0, true, 61, 100 }, { 0, true, 66, 100 } }, 12000));
+            check (describe (chained) == "60@0 65@6000", "effects run in order: scale lock, then the arp (" + describe (chained) + ")");
+        }
+
+        // A chain that changes ends what it left sounding.
+        {
+            Settings chord; chord.id = 6; chord.type = Type::chord;
+            Processor p;
+            run (p, { chord }, { { 0, true, 60, 100 } }, 512);
+            juce::MidiBuffer midi;
+            p.process (midi, {}, {}, 512);
+            int offs = 0;
+            for (const auto metadata : midi) offs += metadata.getMessage().isNoteOff() ? 1 : 0;
+            check (offs == 3 && ! p.isActive(), "removing the effect ends the three chord notes");
+        }
+
+        // The model: MIDI tracks only, settings clamped, order, undo.
+        daw::Edit edit;
+        const auto keys = (int) edit.addMidiTrack ("Keys", *daw::instruments::findBuiltin ("builtin:keys"))[daw::ids::id];
+        const auto audio = (int) edit.addTrack ("Voice")[daw::ids::id];
+        check (! edit.addMidiFx (audio, "arp").isValid() && ! edit.addMidiFx (keys, "flanger").isValid(), "MIDI effects go on MIDI tracks, known kinds only");
+        edit.getUndoManager().beginNewTransaction();
+        const auto arpId = (int) edit.addMidiFx (keys, "arp")[daw::ids::id];
+        const auto scaleId = (int) edit.addMidiFx (keys, "scale", 0)[daw::ids::id];
+        auto list = daw::Edit::getMidiFxOf (edit.getTrack (keys));
+        check (list.size() == 2 && (int) list[0][daw::ids::id] == scaleId && (int) list[1][daw::ids::id] == arpId, "a new effect goes where it's put");
+        edit.setMidiFx (arpId, "octaves", 9);
+        edit.setMidiFx (arpId, "rate", 0.125);
+        edit.setMidiFx (arpId, "bogus", 1);
+        check ((int) edit.getMidiFx (arpId)["octaves"] == 4 && (double) edit.getMidiFx (arpId)["rate"] == 0.125 && ! edit.getMidiFx (arpId).hasProperty ("bogus"),
+               "settings are clamped and unknown ones ignored");
+        edit.moveMidiFx (arpId, 0);
+        list = daw::Edit::getMidiFxOf (edit.getTrack (keys));
+        check ((int) list[0][daw::ids::id] == arpId, "an effect moves in the chain");
+        const auto chain = fromTrack (edit.getTrack (keys), -1, false);
+        check (chain.size() == 2 && chain[0].type == Type::arp && chain[0].rate == 0.125 && chain[0].octaves == 4 && chain[1].type == Type::scale,
+               "the engine reads the chain in order");
+        edit.getUndoManager().beginNewTransaction();
+        edit.getUndoManager().undo();
+        check (daw::Edit::getMidiFxOf (edit.getTrack (keys)).isEmpty(), "undo takes the effects away");
+        edit.getUndoManager().redo();
+        const auto copy = edit.duplicateTrack (keys);
+        const auto copied = daw::Edit::getMidiFxOf (edit.getTrack (copy));
+        check (copied.size() == 2 && (int) copied[0][daw::ids::id] != arpId, "a duplicated track keeps its MIDI effects with new ids");
+
+        // End to end: a scale lock on a Keys track plays A# as A (440 Hz) in C major.
+        {
+            daw::Edit song;
+            song.setKey (0, false);
+            daw::DawEngine engine (song);
+            engine.prepare (sampleRate, blockSize);
+            const auto track = (int) song.addMidiTrack ("Keys", *daw::instruments::findBuiltin ("builtin:keys"))[daw::ids::id];
+            const auto clip = (int) song.addMidiClip (track, 0.0, 1.0)[daw::ids::id];
+            song.addNote (clip, 70, 0.1, 0.6, 100);
+            song.addMidiFx (track, "scale");
+            engine.rebuildNow();
+            if (auto* tines = dynamic_cast<micfx::inst::InstrumentProcessor*> (engine.getInstrument (track).get()))
+            {
+                for (const auto* id : { "tremDepth", "chorus", "room", "drive", "release", "tone", "bark", "bell" })
+                    if (auto* parameter = tines->getState().getParameter (id))
+                        parameter->setValueNotifyingHost (0.0f);
+                engine.captureInstrumentStates();
+                engine.rebuildNow();
+            }
+            engine.play();
+            auto out = render (engine, 1.0);
+            engine.stop();
+            const auto f = estimateFrequency (out[0], (size_t) (0.25 * sampleRate), (size_t) (0.6 * sampleRate));
+            check (std::abs (f - 440.0) < 3.0, "the engine plays the notes through the MIDI effects (" + juce::String (f, 1) + " Hz)");
+
+            // Switched off: the note plays as written (A#, 466 Hz).
+            song.setMidiFx ((int) daw::Edit::getMidiFxOf (song.getTrack (track))[0][daw::ids::id], "on", false);
+            engine.rebuildNow();
+            engine.seek (0);
+            engine.play();
+            out = render (engine, 1.0);
+            engine.stop();
+            const auto g = estimateFrequency (out[0], (size_t) (0.25 * sampleRate), (size_t) (0.6 * sampleRate));
+            check (std::abs (g - 466.16) < 4.0, "an effect switched off lets the notes through (" + juce::String (g, 1) + " Hz)");
+        }
+    }
+
     void testMidiFiles()
     {
         std::cout << "\nMIDI files (import and export)\n";
@@ -9025,6 +9243,30 @@ namespace
         run ("undo");
         check (trackCount (lastSession()) == 1, "Add track undoes in one step");
         run ("redo");
+
+        // MIDI effects from the page: added, set (one undo step each), typed in the session.
+        {
+            const auto midiTrack = (int) edit.addMidiTrack ("Keys", *daw::instruments::findBuiltin ("builtin:keys"))[daw::ids::id];
+            const auto fx = run ("addMidiFx", args ({ { "track", midiTrack }, { "type", "arp" } }));
+            check (ok (fx) && ok (run ("setMidiFx", args ({ { "id", (int) fx["id"] }, { "rate", 0.125 }, { "pattern", "down" }, { "latch", true } }))),
+                   "addMidiFx and setMidiFx complete");
+            check (! ok (run ("addMidiFx", args ({ { "track", (int) edit.getTracks()[0][daw::ids::id] }, { "type", "arp" } }))), "MIDI effects need a MIDI track");
+            // Saved and loaded, every value is text: the session still types them.
+            for (auto child : daw::Edit::getMidiFxOf (edit.getTrack (midiTrack)))
+                for (int i = 0; i < child.getNumProperties(); ++i)
+                    child.setProperty (child.getPropertyName (i), child.getProperty (child.getPropertyName (i)).toString(), nullptr);
+            session = lastSession();
+            juce::var described;
+            for (const auto& t : *session["tracks"].getArray())
+                if ((int) t["id"] == midiTrack)
+                    described = t["midiFx"][0];
+            check (described["rate"].isDouble() && std::abs ((double) described["rate"] - 0.125) < 1.0e-9 && described["latch"].isBool() && (bool) described["latch"]
+                       && described["octaves"].isInt() && described["pattern"].toString() == "down" && described["on"].isBool(),
+                   "the session lists a track's MIDI effects with typed values");
+            run ("removeMidiFx", args ({ { "id", (int) fx["id"] } }));
+            check (daw::Edit::getMidiFxOf (edit.getTrack (midiTrack)).isEmpty(), "removeMidiFx removes it");
+            edit.removeTrack (midiTrack);
+        }
 
         // The cue mix: in the session, switched and set from the page, effects on it.
         check (ok (run ("setCue", args ({ { "on", true }, { "voice", -3.0 }, { "music", -9.0 } }))), "setCue completes");
@@ -20969,6 +21211,14 @@ int main()
     juce::ScopedJuceInitialiser_GUI juce;
     micfx::inst::setKitStarterEnabled (false); // the tests count on an empty Kit; testStarterContent turns it on for itself
 
+    // MICFX_TEST_ONLY=midifx: just the MIDI effects.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "midifx")
+    {
+        testMidiEffects();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=instruments runs just those (quicker while working on them).
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "instruments")
     {
@@ -21350,6 +21600,7 @@ int main()
     testStereoInputs();
     testMidiTracks();
     testMidiFiles();
+    testMidiEffects();
     testInstruments();
     testKit();
     testSampler();

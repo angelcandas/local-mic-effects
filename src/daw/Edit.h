@@ -40,6 +40,12 @@
 //       INSERTS ...
 //       SEND  id, target (a RETURN's id), level (dB), pre (true = before the fader)
 //       INSTRUMENT  id, plugin, name, format, vendor, description, state   (MIDI tracks)
+//       MIDIFX  id, type ("arp", "chord" or "scale"), on, and its settings (MIDI tracks; the notes go
+//               through them in order before the instrument, see MidiEffects.h):
+//               arp: rate (beats per step), pattern ("up", "down", "upDown", "played", "random",
+//                    "together"), octaves (1..4), gate (0.05..1), latch
+//               chord: shape (midifx::getShapes keys; "key" = the song key's triad), level (added notes' velocity, 0..1)
+//               scale: scale ("song" or a midifx::getScales key), root (0..11, C = 0), snap ("nearest" or "drop")
 //       CLIP  id, name, file, start, offset, length, gain (dB), fadeIn, fadeOut, mute,
 //             transpose (semitones), warp (warp::Map as text),
 //             stretch (warp::Algorithm key; mix when missing), formant (keep formants),
@@ -119,7 +125,7 @@ namespace ids
     MICFX_DAW_ID (hitpoints) MICFX_DAW_ID (hitFilter) MICFX_DAW_ID (grooves) // hitpoints: see Hitpoints.h
     MICFX_DAW_ID (beatMap) // a clip's tempo definition, see Edit::BeatMap
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
-    MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (CTRL) MICFX_DAW_ID (number) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
+    MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (CTRL) MICFX_DAW_ID (MIDIFX) MICFX_DAW_ID (number) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
     MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (chords) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (mixPriority) MICFX_DAW_ID (autoMixAudition) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
@@ -359,6 +365,17 @@ public:
     juce::ValueTree addMidiTrack (const juce::String& name, const InstrumentInfo&, int index = -1);
     void setInstrument (int trackId, const InstrumentInfo&); // replaces the track's instrument (a MIDI track)
     juce::ValueTree getInstrument (int trackId) const;
+
+    // MIDI effects on a MIDI track (MIDIFX, before its instrument). addMidiFx puts a new one
+    // with its default settings at `index` among them (-1: last); invalid when the track isn't
+    // MIDI, the type is unknown or it has midifx::maxEffects already. setMidiFx sets one
+    // setting (clamped as MidiEffects reads it; unknown names are ignored).
+    juce::ValueTree addMidiFx (int trackId, const juce::String& type, int index = -1);
+    void setMidiFx (int id, const juce::String& name, const juce::var& value);
+    void removeMidiFx (int id);
+    void moveMidiFx (int id, int index); // to `index` among the track's MIDI effects
+    juce::ValueTree getMidiFx (int id) const;
+    static juce::Array<juce::ValueTree> getMidiFxOf (const juce::ValueTree& track);
 
     // An empty MIDI clip on a MIDI track. Returns it, or an invalid tree.
     juce::ValueTree addMidiClip (int trackId, double startSeconds, double lengthSeconds, const juce::String& name = {});
