@@ -133,8 +133,11 @@ public:
     // sessions sound the same; any change moves it to vocal::ExpanderGate.
     bool usesOriginal() const noexcept
     {
-        return get (range) >= 79.95f && get (hold) < 0.5f && std::abs (get (release) - 150.0f) < 0.5f && ! flag (focus);
+        return get (range) >= 79.95f && get (hold) < 0.5f && std::abs (get (release) - 150.0f) < 0.5f && ! flag (focus)
+            && ! hasKey(); // the original gate can't listen to another track
     }
+
+    bool canListen() const noexcept override { return true; }
 
     void addReadings (juce::DynamicObject& readings) override
     {
@@ -177,7 +180,7 @@ private:
         else
         {
             auto block = c.getOutputBlock();
-            expander.process (block);
+            expander.process (block, getKey (0), getKey (1), getKeyLength());
         }
     }
 
@@ -383,8 +386,11 @@ public:
     // (juce::dsp::Compressor), so saved sessions sound the same.
     bool usesOriginal() const noexcept
     {
-        return index (style) == 0 && get (knee) < 0.01f && get (mix) >= 99.99f && ! flag (autoMakeup);
+        return index (style) == 0 && get (knee) < 0.01f && get (mix) >= 99.99f && ! flag (autoMakeup)
+            && ! hasKey(); // the original compressor can't listen to another track
     }
+
+    bool canListen() const noexcept override { return true; }
 
     void addReadings (juce::DynamicObject& readings) override
     {
@@ -440,7 +446,7 @@ private:
         else
         {
             auto block = c.getOutputBlock();
-            voice.process (block);
+            voice.process (block, getKey (0), getKey (1), getKeyLength());
         }
     }
 

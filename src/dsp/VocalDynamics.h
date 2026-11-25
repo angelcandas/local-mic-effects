@@ -155,7 +155,10 @@ public:
         }
     }
 
-    void process (juce::dsp::AudioBlock<float>& block) noexcept
+    // With a key (sidechain), the detector hears it instead of the block: `keyLeft` and
+    // `keyRight` (may be the same) for `keyLength` samples, silence after.
+    void process (juce::dsp::AudioBlock<float>& block, const float* keyLeft = nullptr, const float* keyRight = nullptr,
+                  size_t keyLength = 0) noexcept
     {
         const auto numChannels = std::min<size_t> (block.getNumChannels(), 2);
         const auto numSamples = block.getNumSamples();
@@ -173,8 +176,16 @@ public:
         for (size_t i = 0; i < numSamples; ++i)
         {
             auto peak = 0.0f;
-            for (size_t ch = 0; ch < numChannels; ++ch)
-                peak = std::max (peak, std::abs (block.getSample ((int) ch, (int) i)));
+            if (keyLeft != nullptr)
+            {
+                if (i < keyLength)
+                    peak = std::max (std::abs (keyLeft[i]), std::abs (keyRight != nullptr ? keyRight[i] : keyLeft[i]));
+            }
+            else
+            {
+                for (size_t ch = 0; ch < numChannels; ++ch)
+                    peak = std::max (peak, std::abs (block.getSample ((int) ch, (int) i)));
+            }
 
             float target = 0.0f;
 
@@ -402,7 +413,10 @@ public:
 
     bool isOpen() const noexcept { return open; }
 
-    void process (juce::dsp::AudioBlock<float>& block) noexcept
+    // With a key (sidechain), it opens on the key's level instead of the block's (see
+    // VoiceCompressor::process).
+    void process (juce::dsp::AudioBlock<float>& block, const float* keyLeft = nullptr, const float* keyRight = nullptr,
+                  size_t keyLength = 0) noexcept
     {
         const auto numChannels = std::min<size_t> (block.getNumChannels(), 2);
         const auto holdSamples = (int) (settings.holdMs * 0.001f * (float) sampleRate);
@@ -411,9 +425,12 @@ public:
         for (size_t i = 0; i < block.getNumSamples(); ++i)
         {
             auto squared = 0.0f;
-            for (size_t ch = 0; ch < numChannels; ++ch)
+            const auto detectorChannels = keyLeft != nullptr ? (size_t) 2 : numChannels;
+            for (size_t ch = 0; ch < detectorChannels; ++ch)
             {
-                auto x = block.getSample ((int) ch, (int) i);
+                auto x = keyLeft == nullptr ? block.getSample ((int) ch, (int) i)
+                       : i >= keyLength ? 0.0f
+                       : ch == 0 ? keyLeft[i] : (keyRight != nullptr ? keyRight[i] : keyLeft[i]);
                 if (settings.focus)
                     x = focusHigh.process (ch, focusLow.process (ch, x));
                 squared = std::max (squared, x * x);

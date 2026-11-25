@@ -4652,6 +4652,8 @@ class DawScreen {
     const list = html("div", "insert-list");
     this.rack = new DeviceChain(list, owner, this, {
       daw, button, popMenu, ValueKnob, toast: (...a) => toast(...a), parameterInfo: () => parameterInfo, dbText, reducedMotion: REDUCED_MOTION,
+      // The tracks a compressor, gate or dynamic EQ can listen to (sidechain).
+      listenSources: () => (this.session.tracks ?? []).map((track) => ({ id: track.id, name: track.name })),
     });
 
     // The chain's own input and output gain, with meters, either side of the effects.

@@ -108,6 +108,10 @@ public:
     static constexpr double attackSeconds = 0.005, releaseSeconds = 0.08;
     static constexpr int chunk = 16; // samples between bell updates
 
+    // Sidechain: the band is measured on the key (another track), the bell cuts this one,
+    // so a voice can make room for itself in the guitars at the frequencies it needs.
+    bool canListen() const noexcept override { return true; }
+
     void addReadings (juce::DynamicObject& readings) override
     {
         readings.setProperty ("reduction", std::round (peakReduction.exchange (0.0f, std::memory_order_relaxed) * 10.0f) / 10.0f);
@@ -151,6 +155,9 @@ private:
         const auto channels = juce::jmin ((size_t) 2, block.getNumChannels());
         const auto n = (int) block.getNumSamples();
         float deepest = 0.0f;
+        const float* key[] = { getKey (0), getKey (1) };
+        const auto keyLength = (int) getKeyLength();
+        const auto detectorChannels = key[0] != nullptr ? (size_t) 2 : channels;
 
         for (int start = 0; start < n; start += chunk)
         {
@@ -159,9 +166,10 @@ private:
             for (int i = start; i < end; ++i)
             {
                 float power = 0.0f;
-                for (size_t ch = 0; ch < channels; ++ch)
+                for (size_t ch = 0; ch < detectorChannels; ++ch)
                 {
-                    const auto y = detector.process (ch, block.getSample ((int) ch, i));
+                    const auto x = key[0] == nullptr ? block.getSample ((int) ch, i) : i < keyLength ? key[ch][i] : 0.0f;
+                    const auto y = detector.process (ch, x);
                     power = std::max (power, y * y);
                 }
                 envelope += (power > envelope ? attackA : releaseA) * (power - envelope);

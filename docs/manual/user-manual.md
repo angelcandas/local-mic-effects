@@ -399,6 +399,18 @@ The **Cue** strip, left of the master, is what you hear in your headphones while
 
 Under *Mastering* in Add effect and the library (DAW only): **Mastering EQ**, **Multiband Compressor** (three bands), **Stereo Imager** (width with mono bass and a correlation readout), **Limiter** (look-ahead brickwall) and a **Loudness Meter** (momentary, short-term and integrated LUFS against a target). Put them on the master.
 
+### Sidechain: an effect that listens to another track
+
+A **Compressor**, **Noise Gate** or **Dynamic EQ** on a track, return or the master can react to another track instead of its own sound. Pick that track under **Listens to** at the bottom of the effect's card (*Itself* is the usual).
+
+- **Music that ducks under the voice**: a Compressor on the music (or on a group of it) listening to the vocal. Set the threshold so it takes off 2 to 4 dB while you sing.
+- **Bass that makes room for the kick**: a fast Compressor on the bass listening to the kick.
+- **Make room only where the voice needs it**: a Dynamic EQ on the guitars at about 2-3 kHz listening to the vocal cuts just that band while you sing.
+- **Gated pads or a pumping effect**: a Noise Gate on the pad listening to a drum track.
+- The key is the other track's sound after its effects and before its fader, so a muted track still works as a key: keep a track muted just to drive the effect.
+- The key stays in time with the effects (delays such as look-ahead are made up for). Two tracks that listen to each other still play; one hears the other a few milliseconds late.
+- Saved chains don't keep the track they listened to (it belongs to that project). The AI control action is `effect.sidechain`.
+
 ### Automation lanes
 
 Automation makes a setting move over time: the voice comes up in the chorus, the echo opens on the last word, the guitar pans across.
