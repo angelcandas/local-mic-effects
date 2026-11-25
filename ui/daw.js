@@ -20,6 +20,7 @@ import { SongMapView } from "./songmap.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { CHORD_ROW, createChordLane } from "./chordlane.js";
 import { createPatternsPanel } from "./patterns.js";
+import { createLauncherPanel } from "./launcher.js";
 import { createPatternLane, drawGhosts } from "./patternlane.js";
 import { createDrawTool } from "./drawtool.js";
 import { drawClipEnvelope, pressClipEnvelope } from "./clipenvelope.js";
@@ -61,7 +62,7 @@ const prefs = {
   set(key, value) { try { localStorage.setItem(`micfx.daw.${key}`, JSON.stringify(value)); } catch { /* no storage */ } },
 };
 
-const DOCK_TABS = ["effects", "track", "patterns", "mixer"];
+const DOCK_TABS = ["effects", "track", "patterns", "launch", "mixer"];
 const MIXER_HEIGHT = 400; // px: the bottom panel opens at least this tall for the mixer
 const TRACK_COLOURS = ["#8c7bff", "#3fd9c6", "#ffb547", "#ff6fb1", "#5aafff", "#9be15d", "#ff8a5c", "#c78bff"];
 
@@ -1385,7 +1386,10 @@ class DawScreen {
       () => this.cycleAutomationMode());
     const loopPunch = html("div", "tb-joined");
     loopPunch.append(this.loopButton, this.punchButton, this.automateButton);
-    const centre = zone("zone-transport", buttons, clock, loopPunch, this.modeSwitch, mic);
+    // Shown while tracks play the clip launcher: hands them all back to their timeline.
+    this.backToSongButton = button("back-to-song", "Back to song", "Some tracks play the clip launcher (the Launch tab). Click to hand every track back to the song, on the next quantize line", () => daw("backToSong"));
+    this.backToSongButton.hidden = true;
+    const centre = zone("zone-transport", buttons, clock, loopPunch, this.modeSwitch, this.backToSongButton, mic);
 
     //---------------------------------------------------------------- right: tools, features, view
     this.tools = html("div", "segmented tools");
@@ -3954,6 +3958,7 @@ class DawScreen {
     this.inspector = this.root.querySelector(".inspector");
     this.inspectorKey = "";
     this.patternsPanel = createPatternsPanel(this, daw, { popMenu, toast: (...args) => toast(...args) });
+    this.launcherPanel = createLauncherPanel(this, daw, { popMenu, toast: (...args) => toast(...args), trackColour });
 
     // The bar above the effects panel: drag to resize, double-click or its button to fold away.
     const main = this.root.querySelector(".daw-main");
@@ -4255,7 +4260,25 @@ class DawScreen {
       const clip = track.clips.find((c) => c.id === id);
       if (clip) return { clip, track };
     }
+    // A clip in the launcher (its MIDI notes open in the piano roll like a song clip's).
+    for (const track of this.session?.tracks ?? []) {
+      const slot = track.slots?.find((s) => s.clip.id === id);
+      if (slot) return { clip: slot.clip, track, slot };
+    }
     return null;
+  }
+
+  // A song clip copied into the launcher: the first empty cell of its track.
+  async copyToLauncher(clip) {
+    const found = this.findClip(clip.id);
+    if (!found || found.slot) return;
+    const row = this.launcherPanel.firstFreeRow(found.track);
+    const result = await daw("addSlotFromClip", { clip: clip.id, track: found.track.id, row });
+    if (typeof result === "number") {
+      this.setDockTab("launch");
+      this.setDock(true);
+      toast(`Copied to the launcher (${found.track.name}, scene ${row + 1}). Click it there to play it as a loop.`, "", "undo");
+    }
   }
 
   renderInspector() {
@@ -4276,6 +4299,22 @@ class DawScreen {
     }
     const found = this.findClip(this.selectedClip);
     if (!found) this.selectedClip = null;
+
+    if (this.dockTab === "launch") {
+      // The clip launcher keeps itself (it redraws only when its tracks or clips change).
+      if (this.inspectorKey !== "launch") {
+        this.inspectorKey = "launch";
+        this.inspector.replaceChildren(this.launcherPanel.element);
+        this.clipPanel?.dispose?.();
+        this.clipEditor?.dispose?.();
+        this.clipPanel = this.rhythmPanel = this.clipEditor = null;
+        this.rack = null;
+        this.chainGains = null;
+      }
+      this.launcherPanel.update(session);
+      this.watchInserts(-1);
+      return;
+    }
 
     if (this.dockTab === "patterns") {
       // The pattern rack keeps itself (it redraws only when its pattern or tracks change).
@@ -6339,6 +6378,21 @@ class DawScreen {
     this.clipEditor?.setStatus?.(status);
     this.windowEditor?.setStatus?.(status);
     if (this.dockTab === "patterns") this.patternsPanel.setStatus(status);
+    if (this.dockTab === "launch") this.launcherPanel.setStatus(status);
+    this.showLauncherState(status);
+  }
+
+  // Tracks playing the clip launcher instead of their timeline: their song clips dim, and Back
+  // to song shows by the transport.
+  showLauncherState(status) {
+    const on = Object.entries(status.launch ?? {}).filter(([, state]) => state.on).map(([id]) => id).join(",");
+    const first = this.rows?.firstElementChild ?? null; // the rows are drawn again now and then
+    if (on === this.launcherKey && first === this.launcherFirstRow) return;
+    this.launcherKey = on;
+    this.launcherFirstRow = first;
+    const ids = new Set(on ? on.split(",") : []);
+    this.rows?.querySelectorAll(".track-row[data-track]").forEach((row) => row.classList.toggle("on-launcher", ids.has(row.dataset.track)));
+    if (this.backToSongButton) this.backToSongButton.hidden = !ids.size;
   }
 
   tickMeters(elapsed) {
@@ -7054,6 +7108,7 @@ class DawScreen {
       item("Mute", () => this.run("muteClip"), { checked: Boolean(clip.mute), shortcut: "Shift+M" });
       if (!audio) item("Export as MIDI file…", () => this.exportMidi({ clip: clip.id }), { hint: "Save this clip's notes as a .mid file" });
       item("Loop this clip", () => this.run("loopClip"), { shortcut: "Ctrl+L" });
+      item("Copy to the launcher", () => this.copyToLauncher(clip), { hint: "A copy in the clip launcher (the Launch tab), to play as a loop apart from the song" });
       item("Zoom to the clip", () => this.run("zoomClip"), { shortcut: "Z" });
       if (audio) {
         item("Edit pitch and warp\u2026", () => this.openClipEditor(), { shortcut: "W", hint: "Opens the clip editor window: transpose the clip, warp it, drag notes in time" });

@@ -1631,6 +1631,89 @@ void DawEngine::publish (std::unique_ptr<Graph> graph)
 }
 
 //==============================================================================
+void DawEngine::notePerformance (Track& track, juce::int64 blockStart, bool jumped, bool fresh) noexcept
+{
+    auto& launch = *track.launch;
+    const auto current = launch.onLauncher ? launch.slot : -1;
+    const auto push = [this, &track] (int slot, juce::int64 time, juce::int64 phase)
+    {
+        const auto scope = performanceFifo.write (1);
+        if (scope.blockSize1 == 1)
+            performanceData[(size_t) scope.startIndex1] = { track.strip->id, slot, time, phase };
+    };
+    // How far into the slot's content: a MIDI track's notes play late by its compensation
+    // delay, so on its timeline the content starts that much earlier.
+    const auto phase = launch.phase + (track.strip->isMidi ? (juce::int64) track.delay.samples : 0);
+
+    if (fresh)
+        launch.notedSlot = -1;
+
+    if (jumped && launch.notedSlot >= 0)
+    {
+        push (-1, performanceNext, 0);
+        launch.notedSlot = -1;
+    }
+
+    if (current != launch.notedSlot)
+    {
+        push (current, blockStart, juce::jmax ((juce::int64) 0, phase));
+        launch.notedSlot = current;
+    }
+}
+
+void DawEngine::startPerformance()
+{
+    if (! realtime)
+        return;
+
+    collectPerformance();
+    performanceEvents.clear();
+    performanceFresh = true;
+    performanceOn = true;
+}
+
+void DawEngine::collectPerformance()
+{
+    const auto scope = performanceFifo.read (performanceFifo.getNumReady());
+    if (performanceOn.load())
+        scope.forEach ([this] (int index) { performanceEvents.push_back (performanceData[(size_t) index]); });
+}
+
+int DawEngine::finishPerformance()
+{
+    if (! performanceOn.exchange (false))
+        return 0;
+
+    performanceOn = true; // what's still in the fifo belongs to it
+    collectPerformance();
+    performanceOn = false;
+    const auto end = position.load();
+
+    // Per track: each slot noted plays until the track's next change (or the end).
+    int made = 0;
+    std::map<int, std::vector<PerformanceEvent>> byTrack;
+    for (const auto& e : performanceEvents)
+        byTrack[e.track].push_back (e);
+
+    for (const auto& [trackId, events] : byTrack)
+        for (size_t i = 0; i < events.size(); ++i)
+        {
+            const auto& e = events[i];
+            if (e.slot < 0 || ! edit.getSlot (e.slot).isValid())
+                continue;
+
+            const auto until = i + 1 < events.size() ? events[i + 1].time : end;
+            if (until <= e.time)
+                continue;
+
+            made += edit.writeSlotToTimeline (e.slot, (double) e.time / sampleRate, (double) (until - e.time) / sampleRate,
+                                              (double) e.phase / sampleRate).size();
+        }
+
+    performanceEvents.clear();
+    return made;
+}
+
 void DawEngine::startPreview (juce::AudioBuffer<float>&& audio, float gain, bool loop, int delaySamples)
 {
     collectPreviews();
@@ -3107,6 +3190,11 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
                                                                  : cue->latencyAtBuild);
     monitorLatency.store (juce::jmax (0, slowestMonitored), std::memory_order_relaxed);
 
+    // Performance recording: a new start, or the playhead jumped (the loop, a seek).
+    const auto noting = isPlaying && performanceOn.load (std::memory_order_relaxed);
+    const auto notingFresh = noting && performanceFresh.exchange (false);
+    const auto notingJumped = noting && ! notingFresh && performanceNext >= 0 && blockStart != performanceNext;
+
     for (const auto trackIndex : graph.trackOrder)
     {
         auto& track = graph.tracks[trackIndex];
@@ -3115,6 +3203,8 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 
         // The timeline's clips, or the launcher's slot (fading between them).
         const auto launchChanged = runLaunch (track, isPlaying, blockStart);
+        if (noting)
+            notePerformance (track, blockStart, notingJumped, notingFresh);
         renderLaunchAudio (graph, track, isPlaying, blockStart, numSamples);
 
         track.delay.process (strip.buffer, numSamples);
@@ -3285,6 +3375,8 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
         renderClick (graph.tempo, output, outputOffset, numChannels, numSamples, blockStart);
         position = blockStart + numSamples;
     }
+
+    performanceNext = noting ? blockStart + numSamples : -1;
 }
 
 //==============================================================================

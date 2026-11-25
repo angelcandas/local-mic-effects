@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 227,
+ "latest": 229,
  "days": [
   {
    "date": "2026-11-25",
    "entries": [
+    {
+     "title": "Clip launcher",
+     "text": "A Launch tab with scenes and slots: launch loops and one-shots in time, record what you play into the song, and let the AI build and launch scenes.",
+     "prs": [
+      229
+     ]
+    },
     {
      "title": "Sidechain",
      "text": "A compressor, noise gate or dynamic EQ can listen to another track: music that ducks under your voice, a bass that makes room for the kick, guitars that dip only where the voice sits. Pick the track under Listens to on the effect.",

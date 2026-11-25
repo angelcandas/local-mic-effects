@@ -1480,6 +1480,106 @@ void DawActions::build()
             if (! (bool) started["ok"]) { auto finish = std::move (waitingToMidi); waitingToMidi = nullptr; finish (started); }
         });
 
+    //============================================================================ clip launcher
+    add ("launcher.get", "The clip launcher (the Launch tab): its scenes (rows) and each track's clips in them, what plays, and the launch quantize.", "", {},
+        [this, &edit, &engine] (const juce::var&, Complete complete)
+        {
+            juce::Array<juce::var> scenes, tracks;
+            for (int row = 0; row < edit.getSceneCount(); ++row)
+                scenes.add (obj ({ { "scene", row + 1 }, { "name", edit.getSceneName (row) } }));
+            for (const auto& track : edit.getTracks())
+            {
+                const auto id = (int) track[ids::id];
+                const auto state = engine.getLaunchState (id);
+                juce::Array<juce::var> clips;
+                for (const auto& slot : edit.getSlots (id))
+                    clips.add (obj ({ { "scene", (int) slot[ids::row] + 1 }, { "name", daw::Edit::getSlotClip (slot)[ids::name].toString() },
+                                      { "beats", daw::Edit::getSlotBeats (slot) }, { "loop", daw::Edit::getSlotLoop (slot) },
+                                      { "playing", state.playing == (int) slot[ids::id] } }));
+                tracks.add (obj ({ { "track", trackLabel (id) }, { "onLauncher", state.onLauncher }, { "clips", clips } }));
+            }
+            complete (done ("The launcher has " + juce::String (edit.getSceneCount()) + " scenes.",
+                            { { "scenes", scenes }, { "tracks", tracks }, { "quantize", edit.getLaunchQuantize() } }));
+        });
+
+    add ("launcher.add", "Put a copy of a song clip into the clip launcher: the track's clip playing at `from` (or its first clip), in a scene (default: the track's first empty one). It plays as a loop as long as the clip. One undo step.", "Clip to launcher",
+        { P ("track", "track", "The track whose clip to copy", true), P ("from", "time", "Pick the clip playing at this time"),
+          withRange (P ("scene", "number", "The scene (row), from 1"), 1, daw::Edit::maxScenes),
+          P ("name", "string", "A name for it (e.g. \"Verse groove\")") },
+        [this, &edit] (const juce::var& args, Complete complete)
+        {
+            juce::String problem;
+            const auto found = resolveTracks (args["track"], problem);
+            if (found.empty()) { complete (fail (problem)); return; }
+            const auto at = args.hasProperty ("from") ? resolveTime (args["from"], problem) : std::optional<double>();
+            if (args.hasProperty ("from") && ! at) { complete (fail (problem)); return; }
+
+            const auto trackId = found.front();
+            int clipId = -1;
+            for (const auto& clip : edit.getTrack (trackId))
+            {
+                if (! clip.hasType (ids::CLIP)) continue;
+                if (clipId < 0 || (at && number (clip, ids::start) <= *at && number (clip, ids::start) + number (clip, ids::length) > *at))
+                    clipId = (int) clip[ids::id];
+            }
+            if (clipId < 0) { complete (fail (trackLabel (trackId) + " has no clip to copy.")); return; }
+
+            auto row = (int) args.getProperty ("scene", 0) - 1;
+            if (row < 0)
+                for (row = 0; edit.getSlotAt (trackId, row).isValid() && row < daw::Edit::maxScenes - 1; ++row) {}
+            const auto made = call ("addSlotFromClip", obj ({ { "clip", clipId }, { "track", trackId }, { "row", row } }));
+            if (! made.isInt()) { complete (made); return; }
+            if (args.hasProperty ("name")) call ("setSlot", obj ({ { "slot", made }, { "name", args["name"] } }));
+            complete (done ("Copied " + trackLabel (trackId) + "'s clip into scene " + juce::String (row + 1) + ".", { { "scene", row + 1 } }));
+        });
+
+    add ("launcher.launch", "Play from the clip launcher: a whole scene (every track's clip in that row), or one track's clip in a scene. It starts on the next launch-quantize line (at once when stopped).", "",
+        { withRange (P ("scene", "number", "The scene (row), from 1", true), 1, daw::Edit::maxScenes), P ("track", "track", "Just this track's clip in the scene") },
+        [this, &edit] (const juce::var& args, Complete complete)
+        {
+            const auto row = (int) args["scene"] - 1;
+            if (! args.hasProperty ("track"))
+            {
+                const auto result = call ("launchScene", obj ({ { "row", row } }));
+                complete ((bool) result["ok"] ? done ("Launched scene " + juce::String (row + 1) + ".") : result);
+                return;
+            }
+            juce::String problem;
+            const auto found = resolveTracks (args["track"], problem);
+            if (found.empty()) { complete (fail (problem)); return; }
+            const auto slot = edit.getSlotAt (found.front(), row);
+            if (! slot.isValid()) { complete (fail (trackLabel (found.front()) + " has no clip in scene " + juce::String (row + 1) + ".")); return; }
+            const auto result = call ("launchSlot", obj ({ { "track", found.front() }, { "slot", (int) slot[ids::id] } }));
+            complete ((bool) result["ok"] ? done ("Launched " + trackLabel (found.front()) + "'s clip in scene " + juce::String (row + 1) + ".") : result);
+        });
+
+    add ("launcher.stop", "Stop clip launcher clips: on the given tracks, or all. Those tracks stay silent until launcher.back.", "",
+        { P ("tracks", "tracks", "Which tracks (default: all)") },
+        [=] (const juce::var& args, Complete complete)
+        {
+            if (! args.hasProperty ("tracks")) { call ("stopAllSlots", obj ({})); complete (done ("Stopping every launcher clip.")); return; }
+            forTracks (args, "tracks", complete, [&] (const std::vector<int>& found)
+            {
+                for (const auto id : found) call ("stopSlot", obj ({ { "track", id } }));
+                complete (done ("Stopping " + labels (found) + "."));
+            });
+        });
+
+    add ("launcher.back", "Back to song: every track playing the clip launcher goes back to its timeline (on the next launch-quantize line).", "", {},
+        [=] (const juce::var&, Complete complete)
+        {
+            call ("backToSong", obj ({}));
+            complete (done ("Back to the song."));
+        });
+
+    add ("launcher.scene", "Name a clip launcher scene (e.g. \"Chorus\").", "Rename scene",
+        { withRange (P ("scene", "number", "The scene (row), from 1", true), 1, daw::Edit::maxScenes), P ("name", "string", "Its name (empty: none)", true) },
+        [=] (const juce::var& args, Complete complete)
+        {
+            call ("setSceneName", obj ({ { "row", (int) args["scene"] - 1 }, { "name", args["name"] } }));
+            complete (done ("Scene " + juce::String ((int) args["scene"]) + " is \"" + args["name"].toString() + "\"."));
+        });
+
     //============================================================================ history
     add ("history.undo", "Undo the last change (any action is one step).", "", {},
         [&edit] (const juce::var&, Complete complete)
