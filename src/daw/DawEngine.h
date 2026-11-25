@@ -623,7 +623,8 @@ private:
             for (const auto& macro : child)
                 if (macro.hasProperty (ids::automation))
                     return true;
-        return ! (child.hasType (ids::MARKER) || child.hasType (ids::MACROS) || child.hasType (ids::SCENE));
+        return ! (child.hasType (ids::MARKER) || child.hasType (ids::MACROS) || child.hasType (ids::SCENE)
+                  || child.hasType (ids::MIXES) || child.hasType (ids::MIX)); // mix versions are stored, not played
     }
     void valueTreeChildAdded (juce::ValueTree& parent, juce::ValueTree& child) override        { if (isPlayed (parent, child)) requestRebuild(); }
     void valueTreeChildRemoved (juce::ValueTree& parent, juce::ValueTree& child, int) override { if (child.hasType (ids::CLIP)) previews.erase ((int) child[ids::id]); if (isPlayed (parent, child)) requestRebuild(); }

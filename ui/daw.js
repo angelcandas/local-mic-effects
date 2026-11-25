@@ -219,6 +219,9 @@ function closeMenu() {
   openMenu = null;
 }
 let menuClosedOn = null; // the anchor whose menu a press on it just closed
+// An arranger section's kinds (Edit::addSection), in menu order.
+const SECTION_KINDS = ["intro", "verse", "chorus", "bridge", "outro", "part"];
+
 function popMenu(x, y, fill, anchor = null) {
   if (anchor && menuClosedOn === anchor) { menuClosedOn = null; return null; }
   closeMenu();
@@ -1133,8 +1136,51 @@ class DawScreen {
     else if (step < 0) this.seek(0);
   }
 
+  // The arranger's sections (markers with a length), in time order.
+  sections() {
+    return this.markers.filter((m) => m.length > 0 && m.section).sort((a, b) => a.time - b.time);
+  }
+
+  async sectionCommand(action, marker, to) {
+    const result = await daw("section", { action, id: marker.id, ...(to === undefined ? {} : { to }) });
+    if (!result?.ok) return; // daw() shows the error
+    if (action === "duplicate") toast(`"${marker.name}" copied after itself, on every track.`);
+    if (action === "delete") toast(`"${marker.name}" and its music are gone; Ctrl+Z brings them back.`);
+  }
+
+  // Drag a section by its label: it (and its music on every track) goes to the section edge
+  // nearest the pointer; a line shows where it will land.
+  dragSection(event, marker, flag, span, line) {
+    const sections = this.sections();
+    const edges = [...new Set(sections.flatMap((m) => [m.time, m.time + m.length]).map((t) => Math.round(t * 1e4) / 1e4))]
+      .filter((t) => t < marker.time - 1e-3 || t > marker.time + marker.length + 1e-3);
+    const box = this.ruler.getBoundingClientRect();
+    const drop = html("div", "section-drop");
+    const dropRuler = html("div", "section-drop is-ruler");
+    let target = null;
+    drag(event, (dx, dy, e) => {
+      const at = (e.clientX - box.left) / this.zoom;
+      const left = marker.time + dx / this.zoom;
+      flag.style.left = `${Math.max(0, left) * this.zoom}px`;
+      if (span) span.style.left = `${Math.max(0, left) * this.zoom}px`;
+      flag.classList.add("is-dragging");
+      target = edges.length ? edges.reduce((best, t) => (Math.abs(t - at) < Math.abs(best - at) ? t : best), edges[0]) : null;
+      if (target === null) return;
+      drop.style.left = `${this.headWidth + target * this.zoom}px`;
+      dropRuler.style.left = `${target * this.zoom}px`;
+      if (!drop.isConnected) { this.inner.append(drop); this.ruler.append(dropRuler); }
+    }, (moved) => {
+      drop.remove();
+      dropRuler.remove();
+      flag.classList.remove("is-dragging");
+      if (!moved) return this.seek(marker.time);
+      if (target === null) { toast("Add another section to move this one around."); return this.renderMarkers(); }
+      this.sectionCommand("move", marker, target).then(() => this.renderMarkers());
+    });
+  }
+
   renderMarkers() {
-    this.ruler.querySelectorAll(".marker, .marker-span").forEach((m) => m.remove());
+    this.ruler.querySelectorAll(".marker, .marker-span, .marker-span-edge").forEach((m) => m.remove());
     this.inner.querySelectorAll(".marker-line").forEach((m) => m.remove());
     for (const marker of this.markers) {
       const flag = html("div", "marker");
@@ -1146,11 +1192,28 @@ class DawScreen {
         flag.classList.add("is-section");
         flag.style.setProperty("--section", marker.colour || "var(--warn)");
         flag.style.maxWidth = `${Math.max(24, marker.length * this.zoom - 2)}px`;
-        flag.title = `${marker.name} (song section, ${spokenDuration(marker.length)})\nClick to go here · Drag to move · Double-click to rename · Right-click to loop it`;
+        flag.title = `${marker.name} (song section, ${spokenDuration(marker.length)})\nClick to go here · Drag to move the section and its music · Alt+drag to move only the label · Double-click to rename · Right-click to duplicate, delete or loop it`;
         span = html("div", "marker-span");
         span.style.setProperty("--section", marker.colour || "var(--warn)");
         span.style.left = `${marker.time * this.zoom}px`;
         span.style.width = `${marker.length * this.zoom}px`;
+        // Its end: drag to make the section longer or shorter (the label only, the music stays).
+        const edge = html("div", "marker-span-edge");
+        edge.title = "Drag to change where the section ends";
+        edge.style.left = `${(marker.time + marker.length) * this.zoom - 3}px`;
+        edge.addEventListener("pointerdown", (event) => {
+          event.stopPropagation();
+          if (event.button !== 0) return;
+          let end = marker.time + marker.length;
+          drag(event, (dx, dy, e) => {
+            end = Math.max(marker.time + 0.25, this.snapTime(marker.time + marker.length + dx / this.zoom, e));
+            span.style.width = `${(end - marker.time) * this.zoom}px`;
+            edge.style.left = `${end * this.zoom - 3}px`;
+          }, (moved) => {
+            if (moved) daw("section", { action: "range", id: marker.id, start: marker.time, length: end - marker.time });
+          });
+        });
+        this.ruler.append(edge);
       }
       const name = html("span", "marker-name", marker.name);
       const remove = button("marker-remove", "×", "Delete the marker", (event) => { event.stopPropagation(); daw("removeMarker", { id: marker.id }); });
@@ -1159,6 +1222,7 @@ class DawScreen {
       flag.addEventListener("pointerdown", (event) => {
         event.stopPropagation(); // not the ruler's (a right-click there would move the playhead)
         if (event.button !== 0) return;
+        if (section && !event.altKey) return this.dragSection(event, marker, flag, span, line);
         let time = marker.time;
         drag(event, (dx, dy, e) => {
           time = this.snapTime(marker.time + dx / this.zoom, e);
@@ -1174,13 +1238,32 @@ class DawScreen {
         event.preventDefault();
         event.stopPropagation();
         const next = this.markers.filter((m) => m.time > marker.time + 0.01).sort((a, b) => a.time - b.time)[0];
-        popMenu(event.clientX, event.clientY, ({ item, rule }) => {
+        popMenu(event.clientX, event.clientY, ({ item, rule, heading }) => {
           item("Go here", () => this.seek(marker.time));
           item("Rename", () => flag.dispatchEvent(new MouseEvent("dblclick", { bubbles: false })), { hint: "Or double-click the marker" });
           if (section) item("Loop this section", () => daw("loop", { on: true, start: marker.time, end: marker.time + marker.length }));
           else item(next ? `Loop to "${next.name}"` : "Loop to the next marker", () => daw("loop", { on: true, start: marker.time, end: next.time }), { disabled: !next });
-          rule();
-          item("Delete", () => daw("removeMarker", { id: marker.id }), { danger: true });
+          if (section) {
+            const sections = this.sections(), index = sections.findIndex((m) => m.id === marker.id);
+            const before = sections[index - 1], after = sections[index + 1];
+            rule();
+            item("Duplicate section", () => this.sectionCommand("duplicate", marker), { hint: "A copy of its music on every track (with automation, chords and tempo) right after it; the rest of the song moves right" });
+            item(before ? `Move before "${before.name}"` : "Move earlier", () => this.sectionCommand("move", marker, before.time),
+                 { disabled: !before, hint: "Swap it with the section before it, music and all" });
+            item(after ? `Move after "${after.name}"` : "Move later", () => this.sectionCommand("move", marker, after.time + after.length),
+                 { disabled: !after, hint: "Swap it with the section after it, music and all" });
+            heading("Kind");
+            for (const kind of SECTION_KINDS)
+              item(kind[0].toUpperCase() + kind.slice(1), () => daw("section", { action: "kind", id: marker.id, kind }),
+                   { checked: marker.section === kind, indent: true });
+            rule();
+            item("Delete section and its music", () => this.sectionCommand("delete", marker),
+                 { danger: true, hint: "Cut its stretch out of the whole song: everything after it moves left" });
+            item("Remove the section label", () => daw("removeMarker", { id: marker.id }), { hint: "Only the label goes; the music stays" });
+          } else {
+            rule();
+            item("Delete", () => daw("removeMarker", { id: marker.id }), { danger: true });
+          }
         });
       });
       flag.addEventListener("dblclick", (event) => {
@@ -1430,6 +1513,11 @@ class DawScreen {
     this.assistButton = button("tool has-label assist-button", "Assist ▾", "Assist: every smart tool in one menu, by what it works on (the song, the selected track, the selected clip)",
                                (event) => this.openAssistMenu(event.currentTarget));
     this.assistButton.setAttribute("aria-haspopup", "menu");
+    // Mix versions: named snapshots of the mix to switch between and compare.
+    this.mixVersionButton = button("tool has-label mixversion-button", "Versions ▾",
+                                   "Mix versions: keep this mix as a version, try another, and switch between them to compare",
+                                   (event) => this.openMixVersionMenu(event.currentTarget));
+    this.mixVersionButton.setAttribute("aria-haspopup", "menu");
     this.buildActivity();
 
     // The mixer is a tab of the bottom panel: this shows or hides it.
@@ -1442,7 +1530,7 @@ class DawScreen {
     this.moreButton.hidden = true;
 
     this.drawTool = createDrawTool(this, daw, { toast: (...args) => toast(...args) });
-    const right = zone("zone-work", this.tools, this.drawTool.chip, snap, this.assistButton, this.autoMixButton, this.mixCheckButton, this.activity.button,
+    const right = zone("zone-work", this.tools, this.drawTool.chip, snap, this.assistButton, this.autoMixButton, this.mixCheckButton, this.mixVersionButton, this.activity.button,
                       html("span", "tb-sep"), this.libraryButton, this.viewTabs, this.dockButton, this.pianoButton, help, this.moreButton);
     bar.append(left, html("span", "tb-spacer"), centre, html("span", "tb-spacer"), right);
 
@@ -1485,6 +1573,7 @@ class DawScreen {
       { level: 6, element: this.assistButton, label: "Assist…", run: () => this.openAssistMenu(this.moreButton) },
       { level: 6, element: this.punchButton, label: "Punch", run: () => this.togglePunch(), checked: () => Boolean(this.session?.punch) },
       { level: 5, element: this.mixCheckButton, label: "Mix Check…", run: () => this.mixCheck.toggle() },
+      { level: 5, element: this.mixVersionButton, label: "Mix versions…", run: () => this.openMixVersionMenu(this.moreButton) },
     ];
     this.foldLevel = 0;
     // Only a change of width matters (folding changes the height when it wraps).
@@ -1509,6 +1598,38 @@ class DawScreen {
     this.returnOnStop = on;
     prefs.set("returnOnStop", on);
     this.renderTransport();
+  }
+
+  // Mix versions: pick one to hear it (the mix you leave is kept in its version), compare
+  // with the one before, make a new one from the mix as it is, rename or delete.
+  openMixVersionMenu(anchor) {
+    const mixes = this.session?.mixes ?? { versions: [] };
+    const current = mixes.versions.find((m) => m.id === mixes.current);
+    const previous = mixes.versions.find((m) => m.id === mixes.previous);
+    const box = anchor.getBoundingClientRect();
+    popMenu(box.left, box.bottom + 4, ({ item, rule, heading }) => {
+      heading("Mix versions");
+      if (!mixes.versions.length)
+        item("No versions yet", () => {}, { disabled: true, hint: "Make one to keep this mix while you try another" });
+      for (const mix of mixes.versions)
+        item(mix.name, () => daw("mixVersion", { action: "recall", id: mix.id }),
+             { checked: mix.id === mixes.current, hint: "Switch to this mix (what you change in the one you leave is kept in it)" });
+      rule();
+      item(previous ? `Compare with "${previous.name}"` : "Compare", () => daw("mixVersion", { action: "compare" }),
+           { disabled: !previous, hint: "Switch back and forth between this version and the one before" });
+      item("New version from this mix", async () => {
+        const result = await daw("mixVersion", { action: "add" });
+        if (result?.ok) toast(mixes.versions.length ? "A new version: change the mix freely, the others stay as they were."
+                                                    : "Your mix so far is kept as \"Mix 1\"; you're now on \"Mix 2\". Change it freely and compare.");
+      }, { hint: "Keep the mix as it is now as a new version and carry on in it" });
+      if (current) {
+        rule();
+        item(`Rename "${current.name}"…`, () => askName(anchor, { value: current.name, placeholder: "Version name" },
+                                                       (name) => daw("mixVersion", { action: "rename", id: current.id, name })));
+        item(`Delete "${current.name}"`, () => daw("mixVersion", { action: "remove", id: current.id }),
+             { danger: true, hint: "The mix you hear stays; only the stored version goes" });
+      }
+    }, anchor);
   }
 
   // New, Open, the recent projects, Save as and Import (Save and Export stay as buttons).
@@ -1584,6 +1705,11 @@ class DawScreen {
   renderTransport() {
     const s = this.session;
     if (!s) return;
+
+    const mixes = s.mixes ?? { versions: [] };
+    const currentMix = mixes.versions.find((m) => m.id === mixes.current);
+    this.mixVersionButton.textContent = currentMix ? `${currentMix.name} ▾` : "Versions ▾";
+    this.mixVersionButton.classList.toggle("is-set", Boolean(currentMix));
 
     this.saveButton.classList.toggle("is-dirty", s.project.dirty || !s.project.open);
     this.showTempoValue();
@@ -2130,6 +2256,8 @@ class DawScreen {
       rule();
       item("Delete time", () => this.rangeCommand("deleteTime"), { shortcut: "Ctrl+Shift+Delete", hint: "Cut this stretch out of the whole song: everything after it moves left" });
       item("Insert silence", () => this.rangeCommand("insertSilence"), { hint: "Push the whole song from the range's start right by its length" });
+      item("Make it a song section", () => daw("section", { action: "add", start: range.start, length: range.end - range.start }),
+           { hint: "A section on the ruler over the range: drag it to move its music, right-click to duplicate or delete it" });
       rule();
       item("Export the range…", () => this.rangeCommand("export"), { hint: "Export only this stretch of the song" });
       item("Clear the range", () => this.setTimeRange(null), { shortcut: "Esc" });
@@ -6963,6 +7091,12 @@ class DawScreen {
         if (this.markers.some((m) => Math.abs(m.time - snapped) < 0.01)) return toast("There is a marker here already.");
         daw("addMarker", { time: snapped });
       });
+      const sections = this.sections();
+      const inside = sections.some((m) => time >= m.time && time < m.time + m.length);
+      const nextSection = sections.find((m) => m.time > barStart + 1e-3);
+      const sectionEnd = Math.min(map.toSeconds(map.toBeats(barStart) + 8 * bars), nextSection ? nextSection.time : Infinity);
+      item("Add a section here", () => daw("section", { action: "add", start: barStart, length: sectionEnd - barStart }),
+           { disabled: inside, hint: inside ? "There is a section here already" : "Up to 8 bars from this bar, to the next section" });
       item("Loop this bar", () => daw("loop", { on: true, start: barStart, end: barEnd }));
       item("Loop range", () => this.toggleLoop(), { checked: Boolean(loop.on), shortcut: "L" });
       if (track) {

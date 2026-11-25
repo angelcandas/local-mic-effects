@@ -27,7 +27,7 @@ namespace
     void restoreTypes (juce::ValueTree tree)
     {
         static const juce::Identifier textIds[] { ids::name, ids::file, ids::rebalance, ids::rebalanceFrom, ids::colour, ids::type, ids::kind, ids::plugin,
-                                                  ids::format, ids::vendor, ids::description, ids::state };
+                                                  ids::format, ids::vendor, ids::description, ids::state, ids::mix };
         static const juce::Identifier boolIds[] { ids::mute, ids::solo, ids::arm, ids::monitor, ids::monitorAuto, ids::loopOn, ids::keyMinor, ids::drum };
         static const juce::Identifier intIds[] { ids::id, ids::version, ids::key };
 

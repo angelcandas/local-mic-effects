@@ -1136,6 +1136,33 @@ body.is-daw .chip--live { display: none; }
   border-left-color: var(--section, var(--warn));
   background: color-mix(in srgb, var(--section, var(--warn)) 30%, var(--panel));
 }
+.marker-span-edge {
+  position: absolute;
+  bottom: 0;
+  z-index: 4;
+  width: 6px;
+  height: 14px;
+  cursor: ew-resize;
+}
+.marker.is-dragging {
+  opacity: 0.85;
+  box-shadow: 0 2px 8px rgb(0 0 0 / 35%);
+  z-index: 6;
+}
+.section-drop {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  z-index: 7;
+  width: 2px;
+  margin-left: -1px;
+  background: var(--accent);
+  pointer-events: none;
+}
+.section-drop.is-ruler {
+  top: auto;
+  height: 100%;
+}
 .marker-span {
   position: absolute;
   bottom: 0;
@@ -2980,3 +3007,5 @@ body.is-daw .library-hint { display: none; }
   color: var(--text);
   font: 700 11.5px var(--mono);
 }
+.mixversion-button { white-space: nowrap; }
+.mixversion-button.is-set { color: var(--text, inherit); }

@@ -450,6 +450,9 @@ std::pair<float, float> DawEngine::takePeaks (int trackId)
 //==============================================================================
 void DawEngine::valueTreePropertyChanged (juce::ValueTree& tree, const juce::Identifier& property)
 {
+    if (tree.hasType (ids::MIXES) || tree.hasType (ids::MIX))
+        return; // stored mix versions: recalling one changes the live tree, which is heard
+
     if (tree.hasType (ids::INSTRUMENT))
     {
         // A different plugin needs a new instrument; its saved settings and names don't.

@@ -19,8 +19,8 @@
 //     MARKER  id, name, time
 //             (a song section from the song map also has length (seconds), colour, section
 //              (its kind: "intro", "verse", "chorus", "bridge", "outro", "part") and letter
-//              (0 = A: sections that sound alike share it); market item 18's arrangement
-//              ranges can adopt these as they are)
+//              (0 = A: sections that sound alike share it). These are the arranger's
+//              sections: moving, duplicating or deleting one moves its music, see rearrange)
 //     MASTER  volume (dB)
 //       INSERTS
 //     CUE  id (cueId), cueOn, voice, music, volume (dB): the headphone (cue) mix, see "Cue mix"
@@ -155,6 +155,7 @@ namespace ids
     MICFX_DAW_ID (CUE) MICFX_DAW_ID (cueOn) MICFX_DAW_ID (voice) MICFX_DAW_ID (music) // the cue mix
     MICFX_DAW_ID (SLOT) MICFX_DAW_ID (SCENE) MICFX_DAW_ID (beats) MICFX_DAW_ID (loop) // the clip launcher
     MICFX_DAW_ID (sceneCount) MICFX_DAW_ID (launchQuantize)
+    MICFX_DAW_ID (MIXES) MICFX_DAW_ID (MIX) MICFX_DAW_ID (current) MICFX_DAW_ID (previous) MICFX_DAW_ID (mix) // mix versions
 #undef MICFX_DAW_ID
 }
 
@@ -358,6 +359,69 @@ public:
     void setSongSections (const std::vector<SectionMarker>&);
     juce::Array<juce::ValueTree> getSongSections() const; // in time order
     static bool isSection (const juce::ValueTree& marker) { return marker.hasProperty (ids::section); }
+
+    //==============================================================================
+    // Arrangement (see Arrangement.cpp): the song rearranged by whole stretches of musical
+    // time, across every track at once. Each piece takes the song between two beats (as the
+    // tempo map counts them now) and puts it at another beat: its clips (cut at the piece's
+    // edges, MIDI and take lanes too), automation lanes, tempo points, markers and sections,
+    // chords, pattern blocks and the loop range all go along. A stretch in no piece is cut
+    // out; one in two pieces is copied. Where nothing lands the song is silent, lanes holding
+    // their value. The tempo inside a piece goes with it, so its music keeps its length.
+    // One undoable edit when the caller wraps it in one transaction.
+    struct ArrangePiece
+    {
+        double fromBeat = 0.0, toBeat = 0.0; // toBeat >= songEndBeat: to the end of the song
+        double atBeat = 0.0;
+    };
+    static constexpr double songEndBeat = 1.0e9;
+    void rearrange (const std::vector<ArrangePiece>&);
+
+    // The arranger's section commands (a section is a MARKER with a length). Each returns
+    // false (and changes nothing) for a marker that isn't a section, or a move onto itself.
+    // moveSection puts the section's music (and the section) at `toSeconds`, a time outside it
+    // (usually another section's edge): what was between closes up behind it.
+    bool moveSection (int markerId, double toSeconds);
+    int duplicateSection (int markerId);  // a copy right after it, pushing the rest right; -> the copy's id, or -1
+    bool deleteSection (int markerId);    // removes its stretch of the song; the rest moves left
+    // Time edits the Range tool shares: cut [start, end) out of the song / push the song from
+    // `start` right by `length` seconds (silence, at the tempo there).
+    void deleteTime (double startSeconds, double endSeconds);
+    void insertTime (double startSeconds, double lengthSeconds);
+
+    // A section by hand (from a range, or "Add section"): kind "intro", "verse", "chorus",
+    // "bridge", "outro" or "part"; no name names it after its kind. Its colour follows its kind.
+    // Sections don't overlap: sections it covers go, ones it overlaps are cut back.
+    juce::ValueTree addSection (double startSeconds, double lengthSeconds, const juce::String& kind = "part", const juce::String& name = {});
+    // A section's edges (its label only; the music stays), and its kind (and colour).
+    void setSectionRange (int markerId, double startSeconds, double lengthSeconds);
+    void setSectionKind (int markerId, const juce::String& kind);
+    static juce::String getSectionColour (const juce::String& kind, int letter);
+
+    //==============================================================================
+    // Mix versions (see MixVersions.cpp): named snapshots of the mix to switch between and
+    // compare, like tabs of the mix. A version holds every track's fader, pan, mute and solo,
+    // input and output gain, output and group, polarity and nudge, sends, effects, macros and
+    // automation lanes, plus the returns and groups and the master; not the clips, the takes,
+    // the instruments or the arrangement. The current version is the one being played and
+    // edited: switching away stores the mix as it is into it, so nothing is lost by switching.
+    //   MIXES  current (the MIX id being played; missing: none), previous (the one before it)
+    //     MIX  id, name, mix (the snapshot: a ValueTree, binary, base64)
+    // Tracks added after a version was made keep their own mix when it's recalled (their sends
+    // and output to returns it doesn't have are dropped). Each call is one undoable edit.
+    juce::Array<juce::ValueTree> getMixVersions() const;
+    int getCurrentMixVersion() const;  // -1: none
+    int getPreviousMixVersion() const; // -1: none
+    // A new version from the mix as it is now, and it becomes current. The first time, the
+    // mix so far is kept first as its own version ("Mix 1"), so there are two to compare.
+    juce::ValueTree addMixVersion (const juce::String& name = {});
+    bool recallMixVersion (int mixId);  // the current one gets the live mix first
+    void updateMixVersion (int mixId);  // stores the live mix into it
+    void renameMixVersion (int mixId, const juce::String& name);
+    void removeMixVersion (int mixId);  // the mix that plays stays as it is
+    // The live mix as a snapshot, and a snapshot played (both as a MIXSNAP tree).
+    juce::ValueTree captureMix() const;
+    void applyMix (const juce::ValueTree& snapshot);
 
     //==============================================================================
     // MIDI tracks, instruments and notes.
