@@ -16,6 +16,8 @@ import { buildRack } from "./racks.js";
 
 const PITCH_PARTS = ["tune", "pitch", "harmony"].map((id) => MODULES.find((m) => m.id === id));
 const MOD = IS_MAC ? "Cmd" : "Ctrl";
+// Effects whose detector can hear another track (the DAW's sidechain).
+const SIDECHAIN_TYPES = new Set(["compressor", "gate", "dynamicEq"]);
 
 // The effect's own name for an insert type ("Pitch" for the shared pitch insert).
 // The switches that turn a DAW insert on and off (the pitch insert has one per part;
@@ -644,6 +646,8 @@ export class DeviceCard {
       this.body.append(row);
     }
 
+    // Sidechain (DAW): which track its detector hears, itself unless another is picked.
+    if (SIDECHAIN_TYPES.has(insert.type) && this.kit.listenSources) this.body.append(this.createSidechain());
     this.body.append(this.createFooter(parts));
     // As wide as its controls need: a one-knob effect is a narrow card.
     const widest = Math.max(1, ...parts.map((part) => part.controls.filter((c) => ["knob", "choice", "toggle", "keys"].includes(c.type)).length));
@@ -958,6 +962,42 @@ export class DeviceCard {
     return knob.element;
   }
 
+  // "Listens to": itself, or another track as the key (sidechain). A muted track still
+  // works as a key, so a track can be there only to drive this effect.
+  createSidechain() {
+    const wrapper = html("label", "insert-sidechain");
+    const select = html("select", "dropdown");
+    select.setAttribute("aria-label", `What ${this.effectName} listens to`);
+    wrapper.title = `Sidechain: what ${this.effectName.toLowerCase()} listens to. Pick another track (the voice, the kick) to `
+      + "move this one with it, such as music that ducks under the voice. Mute that track to use it only as the key.";
+    wrapper.append(html("span", "insert-sidechain-icon", "\u21aa"), html("span", "name", "Listens to"), select);
+    select.addEventListener("change", async () => {
+      const result = await this.kit.daw("setInsertListenTo", { id: this.insert.id, track: Number(select.value) });
+      if (result && result.ok === false && result.error) this.kit.toast(result.error);
+    });
+    this.sidechain = { wrapper, select, key: null };
+    return wrapper;
+  }
+
+  updateSidechain(insert) {
+    const { wrapper, select } = this.sidechain;
+    const own = this.verbs.chain?.owner?.id;
+    const listenTo = Number(insert.listenTo) || 0;
+    const sources = this.kit.listenSources().filter((track) => track.id !== own);
+    const key = sources.map((track) => `${track.id}:${track.name}`).join("|");
+    if (key !== this.sidechain.key) {
+      this.sidechain.key = key;
+      select.replaceChildren(new Option("Itself", "0"), ...sources.map((track) => new Option(track.name || `Track ${track.id}`, String(track.id))));
+    }
+    select.value = String(listenTo);
+    if (select.selectedIndex < 0) select.value = "0";
+    const source = sources.find((track) => track.id === listenTo);
+    wrapper.classList.toggle("is-set", Boolean(source));
+    this.nameElement.classList.toggle("is-keyed", Boolean(source));
+    if (source) this.nameElement.dataset.tip = `${this.effectName} listens to ${source.name} (sidechain)`;
+    else delete this.nameElement.dataset.tip;
+  }
+
   // Its name typed in place; `commit` gets the text (Enter or leaving it; Escape cancels).
   editName(commit) {
     if (this.head.querySelector(".insert-name-entry")) return;
@@ -995,6 +1035,7 @@ export class DeviceCard {
       element.setAttribute("aria-pressed", String((insert.values[param] ?? 0) >= 0.5));
     for (const { param, widget, panel } of this.controls) if (!panel) widget.update(insert.values[param]); // (the panel's: renderPanel)
     this.filePicker?.update(insert.file);
+    if (this.sidechain) this.updateSidechain(insert);
     this.view?.update();
     for (const { power, row } of this.parts) row.hidden = (insert.values[power] ?? 0) < 0.5;
     for (const [control, element] of this.conditional)

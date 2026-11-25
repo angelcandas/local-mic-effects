@@ -20,6 +20,13 @@ export const CHANGELOG = {
      ]
     },
     {
+     "title": "Sidechain",
+     "text": "A compressor, noise gate or dynamic EQ can listen to another track: music that ducks under your voice, a bass that makes room for the kick, guitars that dip only where the voice sits. Pick the track under Listens to on the effect.",
+     "prs": [
+      227
+     ]
+    },
+    {
      "title": "Vocoder",
      "text": "Your voice plays a built-in synth: hold keys on a MIDI keyboard, or it follows the song's chords (else a drone on the key). Saw, pulse or ensemble sound, 16 to 32 bands, formant and a clear-words control. In Live and as a DAW insert.",
      "prs": [

@@ -272,6 +272,14 @@ juce::String PresetLibrary::saveChain (const juce::String& name, const juce::Val
             continue;
         auto copy = insert.createCopy();
         copy.removeProperty (idId, nullptr); // ids belong to a project
+        // So do the tracks a sidechain listens to (in racks too).
+        std::function<void (juce::ValueTree)> forget = [&forget] (juce::ValueTree tree)
+        {
+            tree.removeProperty ("listenTo", nullptr);
+            for (auto child : tree)
+                forget (child);
+        };
+        forget (copy);
         chain.appendChild (copy, nullptr);
     }
     if (macros.isValid())

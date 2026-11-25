@@ -21481,6 +21481,159 @@ static void testVocalAlign()
     folder.deleteRecursively();
 }
 
+// Sidechain inputs (market item 15): a compressor, gate or dynamic EQ whose detector
+// hears another track.
+static void testSidechain()
+{
+    std::cout << "\nSidechain inputs\n";
+
+    const auto folder = juce::File::createTempFile ("micfx-sidechain");
+    folder.createDirectory();
+
+    // The music: a steady 1 kHz tone at -14 dBFS for 2 s. The voice (the key): silent for
+    // 1 s, then loud (-1 dBFS) for 1 s.
+    juce::AudioBuffer<float> music (2, (int) (2.0 * sampleRate)), voice (2, (int) (2.0 * sampleRate));
+    for (int i = 0; i < music.getNumSamples(); ++i)
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            music.setSample (ch, i, 0.2f * (float) std::sin (juce::MathConstants<double>::twoPi * 1000.0 * i / sampleRate));
+            voice.setSample (ch, i, i < (int) sampleRate ? 0.0f : 0.9f * (float) std::sin (juce::MathConstants<double>::twoPi * 330.0 * i / sampleRate));
+        }
+    const auto musicFile = folder.getChildFile ("music.wav"), voiceFile = folder.getChildFile ("voice.wav");
+    writeWav (musicFile, music, sampleRate);
+    writeWav (voiceFile, voice, sampleRate);
+
+    daw::Edit edit;
+    for (const auto& r : edit.getReturns())
+        edit.removeReturn ((int) r[daw::ids::id]);
+    daw::DawEngine engine (edit);
+    engine.prepare (sampleRate, blockSize);
+    engine.getAudioPool().loadNow (musicFile);
+    engine.getAudioPool().loadNow (voiceFile);
+
+    // The music first, the voice after it: the voice must play first for the key to be ready.
+    const auto musicTrack = (int) edit.addTrack ("Music")[daw::ids::id];
+    const auto voiceTrack = (int) edit.addTrack ("Voice")[daw::ids::id];
+    edit.addClip (musicTrack, musicFile, 0.0, 2.0);
+    edit.addClip (voiceTrack, voiceFile, 0.0, 2.0);
+    edit.setTrackMute (voiceTrack, true); // a ghost key: heard by the sidechain only
+
+    const auto play = [&] (double seconds = 1.9)
+    {
+        engine.rebuildNow();
+        engine.seek (0);
+        engine.play();
+        const auto out = render (engine, seconds);
+        engine.stop();
+        return out;
+    };
+    const auto rmsAt = [] (const std::vector<float>& x, double from, double to)
+    {
+        return rms (x, (size_t) (from * sampleRate), (size_t) (to * sampleRate));
+    };
+    const auto db = [] (float ratio) { return juce::Decibels::gainToDecibels (ratio); };
+
+    const auto comp = (int) edit.addInsert (musicTrack, fx::ModuleType::compressor)[daw::ids::id];
+    edit.setInsertValue (comp, "compThreshold", -10.0f);
+    edit.setInsertValue (comp, "compRatio", 20.0f);
+    edit.setInsertValue (comp, "compAttack", 0.1f);
+    edit.setInsertValue (comp, "compRelease", 50.0f);
+
+    auto out = play();
+    const auto before = rmsAt (out[0], 0.5, 0.9), after = rmsAt (out[0], 1.3, 1.8);
+    check (before > 0.1f && std::abs (db (after / before)) < 0.1f, "listening to itself, a compressor above the music's level leaves it alone");
+
+    check (! edit.setInsertListenTo (comp, 12345), "a track that doesn't exist can't be the key");
+    edit.getUndoManager().beginNewTransaction();
+    check (edit.setInsertListenTo (comp, voiceTrack) && daw::Edit::getInsertListenTo (edit.getInsert (comp)) == voiceTrack,
+           "the compressor listens to the voice");
+    out = play();
+    const auto ducked = db (rmsAt (out[0], 1.3, 1.8) / rmsAt (out[0], 0.5, 0.9));
+    check (ducked < -6.0f, "the music ducks under the (muted) voice (" + juce::String (ducked, 1) + " dB)");
+    check (std::abs (db (rmsAt (out[0], 0.5, 0.9) / before)) < 0.1f, "and plays as before while the voice is silent");
+
+    // The voice comes in at 1.0 s, which isn't on a block boundary: the key arrives in the
+    // same block (the voice plays first though it's listed later), so the music is already
+    // down 2-4 ms after it.
+    const auto early = db (rmsAt (out[0], 1.002, 1.004) / before);
+    check (early < -6.0f, "the key is heard in the same block, with no delay (" + juce::String (early, 1) + " dB 2 ms in)");
+
+    edit.getUndoManager().beginNewTransaction();
+    check (edit.setInsertListenTo (comp, musicTrack) && ! edit.getInsert (comp).hasProperty (daw::ids::listenTo),
+           "its own track as the key is the same as none");
+    edit.getUndoManager().undo();
+    check (daw::Edit::getInsertListenTo (edit.getInsert (comp)) == voiceTrack, "undo brings the sidechain back");
+
+    // A gate on the music opened by the voice: shut while it's silent, open while it sings.
+    edit.removeInsert (comp);
+    const auto gate = (int) edit.addInsert (musicTrack, fx::ModuleType::gate)[daw::ids::id];
+    edit.setInsertValue (gate, "gateThreshold", -30.0f);
+    edit.setInsertListenTo (gate, voiceTrack);
+    out = play();
+    check (rmsAt (out[0], 0.5, 0.9) < 0.002f && std::abs (db (rmsAt (out[0], 1.3, 1.8) / before)) < 0.5f,
+           "a gate on the music opens only while the voice plays");
+
+    // A dynamic EQ on the music at 1 kHz, measured on the voice: cuts the band while it sings.
+    edit.removeInsert (gate);
+    const auto deq = (int) edit.addInsert (musicTrack, fx::ModuleType::dynamicEq)[daw::ids::id];
+    edit.setInsertValue (deq, "deqFreq", 1000.0f);
+    edit.setInsertValue (deq, "deqQ", 0.5f);
+    edit.setInsertValue (deq, "deqThreshold", -40.0f);
+    edit.setInsertValue (deq, "deqRange", 9.0f);
+    edit.setInsertListenTo (deq, voiceTrack);
+    out = play();
+    const auto carved = db (rmsAt (out[0], 1.3, 1.8) / rmsAt (out[0], 0.5, 0.9));
+    check (carved < -5.0f && std::abs (db (rmsAt (out[0], 0.5, 0.9) / before)) < 0.3f,
+           "a dynamic EQ cuts the music's band while the voice sings (" + juce::String (carved, 1) + " dB)");
+    edit.removeInsert (deq);
+
+    check (! edit.setInsertListenTo ((int) edit.addInsert (musicTrack, fx::ModuleType::reverb)[daw::ids::id], voiceTrack),
+           "an effect without a detector can't listen to another track");
+    for (const auto& insert : daw::Edit::getInserts (edit.getTrack (musicTrack)))
+        edit.removeInsert ((int) insert[daw::ids::id]);
+
+    // Two tracks that listen to each other: both play (one hears its key a block late).
+    const auto a = (int) edit.addInsert (musicTrack, fx::ModuleType::compressor)[daw::ids::id];
+    const auto b = (int) edit.addInsert (voiceTrack, fx::ModuleType::compressor)[daw::ids::id];
+    edit.setInsertListenTo (a, voiceTrack);
+    edit.setInsertListenTo (b, musicTrack);
+    out = play (0.5);
+    check (rmsAt (out[0], 0.1, 0.4) > 0.1f, "a sidechain cycle still plays");
+    edit.removeInsert (a);
+    edit.removeInsert (b);
+
+    // On a return, behind an effect that adds delay (21 ms): the key is delayed to match,
+    // so the duck starts with the voice, not 21 ms before it.
+    const auto bus = (int) edit.addReturn ("Bus")[daw::ids::id];
+    for (const auto& insert : daw::Edit::getInserts (edit.getReturn (bus)))
+        edit.removeInsert ((int) insert[daw::ids::id]);
+    edit.setTrackOutput (musicTrack, bus);
+    const auto smooth = (int) edit.addInsert (bus, fx::ModuleType::smooth)[daw::ids::id];
+    edit.setInsertValue (smooth, "smoothDepth", 0.0f);
+    edit.setInsertValue (smooth, "smoothResolution", 2.0f);
+    const auto busComp = (int) edit.addInsert (bus, fx::ModuleType::compressor)[daw::ids::id];
+    edit.setInsertValue (busComp, "compThreshold", -10.0f);
+    edit.setInsertValue (busComp, "compRatio", 20.0f);
+    edit.setInsertValue (busComp, "compAttack", 0.1f);
+    edit.setInsertListenTo (busComp, voiceTrack);
+    engine.rebuildNow();
+    const auto delay = engine.getInsertLatencySamples (smooth) / sampleRate;
+    out = play();
+    const auto level = rmsAt (out[0], 0.5, 0.9);
+    const auto justBefore = db (rmsAt (out[0], 1.0 + delay - 0.012, 1.0 + delay - 0.002) / level);
+    const auto justAfter = db (rmsAt (out[0], 1.0 + delay + 0.003, 1.0 + delay + 0.012) / level);
+    check (delay > 0.01 && std::abs (justBefore) < 0.5f && justAfter < -6.0f,
+           "on a return, the key waits for the effects before it (" + juce::String (delay * 1000.0, 1) + " ms: "
+               + juce::String (justBefore, 1) + " dB before the voice, " + juce::String (justAfter, 1) + " dB after)");
+
+    edit.removeTrack (voiceTrack);
+    engine.rebuildNow();
+    out = play (0.5);
+    check (rmsAt (out[0], 0.1, 0.4) > 0.1f, "a key track that's deleted: the compressor listens to itself again");
+
+    folder.deleteRecursively();
+}
+
 //==============================================================================
 // Vocoder (market item 12): the voice's vowels on a built-in synth, played by keys held,
 // the song's chords or a drone on the key.
@@ -22044,6 +22197,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=sidechain: just the sidechain inputs.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "sidechain")
+    {
+        testSidechain();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=feedback: just feedback protection.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "feedback")
     {
@@ -22428,6 +22589,7 @@ int main()
     testLiveMacros();
     testRacks();
     testReturns();
+    testSidechain();
     testPreview();
     testGroups();
     testMastering();

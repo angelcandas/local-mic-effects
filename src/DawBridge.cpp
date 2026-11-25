@@ -397,7 +397,7 @@ namespace
             { "editNotes", "Edit notes" }, { "editControllers", "Edit controllers" }, { "addInsert", "Add effect" }, { "addPluginInsert", "Add plug-in" }, { "removeInsert", "Remove effect" },
             { "moveInsert", "Move effect" }, { "setInsert", "Effect change" }, { "insertFile", "Load effect file" }, { "pasteInserts", "Paste effects" },
             { "duplicateInsert", "Duplicate effect" }, { "copyInsert", "Copy effect" }, { "replaceInsert", "Replace effect" },
-            { "renameInsert", "Rename effect" }, { "insertAB", "Effect A/B" }, { "loadChain", "Load chain" },
+            { "renameInsert", "Rename effect" }, { "setInsertListenTo", "Sidechain" }, { "insertAB", "Effect A/B" }, { "loadChain", "Load chain" },
             { "groupInserts", "Group into a rack" }, { "ungroupInsert", "Ungroup rack" }, { "addRackChain", "Add chain" },
             { "removeRackChain", "Remove chain" }, { "renameRackChain", "Rename chain" }, { "setPluginPanel", "Plug-in knobs" },
             { "setMacro", "Macro" }, { "mapMacro", "Map to macro" }, { "unmapMacro", "Unmap from macro" }, { "nameMacro", "Name macro" },
@@ -718,7 +718,7 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
         auto* values = new juce::DynamicObject();
         for (int i = 0; i < insert.getNumProperties(); ++i)
             if (const auto name = insert.getPropertyName (i); name != ids::id && name != ids::type && name != ids::file
-                && name != ids::label && name != ids::ab && name != ids::abOther
+                && name != ids::label && name != ids::ab && name != ids::abOther && name != ids::listenTo
                 && (! isPlugin || (name.toString().startsWith ("plugin") && name != ids::plugin)
                     || (name.toString().startsWith ("p") && name.toString().substring (1).containsOnly ("0123456789"))))
                 values->setProperty (name, number (insert, name));
@@ -730,6 +730,13 @@ juce::var DawBridge::describeInserts (const juce::ValueTree& owner) const
                                { "name", daw::Edit::getInsertName (insert) },
                                { "ab", daw::Edit::hasAB (insert) ? juce::String (daw::Edit::isShowingB (insert) ? "b" : "a") : juce::String() },
                                { "latencyMs", std::round (latency * 1000.0 / juce::jmax (1.0, engine.getSampleRate()) * 100.0) / 100.0 } });
+
+        // Sidechain: the track its detector hears (0: itself, or a track that's gone).
+        if (daw::Edit::canListen (insert))
+        {
+            const auto source = daw::Edit::getInsertListenTo (insert);
+            entry.getDynamicObject()->setProperty ("listenTo", source != 0 && edit.getTrack (source).isValid() ? source : 0);
+        }
 
         // An effect plugin: which one, whether it's running (or why not), and its window.
         if (isPlugin)
@@ -6045,6 +6052,18 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     }
 
     if (command == "renameInsert") { edit.setInsertName (id, args["name"].toString()); ok(); return; }
+
+    // { id, track }: a compressor, gate or dynamic EQ listens to that track (0: itself).
+    if (command == "setInsertListenTo")
+    {
+        if (! edit.setInsertListenTo (id, (int) args["track"]))
+        {
+            complete (error ("That effect can't listen to another track."));
+            return;
+        }
+        ok();
+        return;
+    }
 
     // { id, action: "switch" | "copy" }: play the other value set (the first switch makes
     // B a copy of A), or write the playing set over the other.

@@ -138,6 +138,24 @@ public:
     // Delay this module adds to the signal, in samples.
     virtual int getLatencySamples() const noexcept { return 0; }
 
+    //==============================================================================
+    // Sidechain (DAW inserts): effects whose detector can hear another track instead of
+    // the sound they change (a compressor that ducks the music under the voice, a gate
+    // opened by the kick). The engine hands the key over before each process() call and
+    // takes it back after: the key's samples line up with the block. Null: its own sound.
+    virtual bool canListen() const noexcept { return false; }
+
+    // Audio thread. `channels` stay valid until the next setKey; 1 or 2 channels.
+    void setKey (const float* const* channels, int numChannels, int numSamples) noexcept
+    {
+        keyChannels[0] = numChannels > 0 && channels != nullptr ? channels[0] : nullptr;
+        keyChannels[1] = numChannels > 1 && channels != nullptr ? channels[1] : keyChannels[0];
+        keyLength = keyChannels[0] != nullptr ? (size_t) juce::jmax (0, numSamples) : 0;
+        keyStart = 0;
+    }
+    void clearKey() noexcept { setKey (nullptr, 0, 0); }
+    bool hasKey() const noexcept { return keyLength > 0 && canListen(); }
+
     // The song's tempo, for effects that sync to it (the echo). Called with the current
     // tempo (bpm, 0 when there is none) before each block or whenever it changes; any
     // thread. Most effects ignore it.
@@ -252,6 +270,7 @@ public:
             if (capture && start < captureLength)
                 std::copy_n (slice.getChannelPointer (0), std::min (length, captureLength - start), scopeInput.begin() + (std::ptrdiff_t) start);
 
+            keyStart = start;
             render (Context (slice));
 
             if (gainsOn)
@@ -296,6 +315,17 @@ protected:
     static float fraction (const Value& value) noexcept { return get (value) / 100.0f; }
     static bool  flag (const Value& value) noexcept     { return get (value) >= 0.5f; }
     static int   index (const Value& value) noexcept    { return juce::roundToInt (get (value)); }
+
+    // In render(): the key's samples for this slice (channel 0 or 1), or null when it
+    // listens to itself. A key shorter than the block reads as silence past its end.
+    const float* getKey (int channel) const noexcept
+    {
+        if (! hasKey() || keyStart >= keyLength)
+            return nullptr;
+        return keyChannels[channel > 0 ? 1 : 0] + keyStart;
+    }
+    // Samples of the key left from this slice's start.
+    size_t getKeyLength() const noexcept { return keyLength > keyStart ? keyLength - keyStart : 0; }
 
     virtual void prepareModule (const juce::dsp::ProcessSpec&) = 0;
     virtual void resetModule() = 0;
@@ -376,6 +406,8 @@ private:
     std::deque<Entry> entries; // a deque keeps references stable as values are added
     bool wasOn = false;
     double sampleRate = 48000.0;
+    const float* keyChannels[2] {};
+    size_t keyLength = 0, keyStart = 0;
 
     JUCE_DECLARE_NON_COPYABLE (Module)
 };

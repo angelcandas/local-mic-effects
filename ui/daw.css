@@ -797,6 +797,24 @@ body.is-daw .chip--live { display: none; }
 .insert-choice { display: flex; flex-direction: column; align-items: center; gap: 4px; }
 .insert-choice .name { color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; }
 
+/* Sidechain: what a compressor, gate or dynamic EQ listens to. */
+.insert-sidechain {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 8px;
+  padding: 4px 6px;
+  border: 1px solid transparent;
+  border-radius: 8px;
+}
+.insert-sidechain .name { flex: none; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; }
+.insert-sidechain .dropdown { flex: 1 1 0; min-width: 0; }
+.daw .insert-sidechain select.dropdown { height: 26px; }
+.insert-sidechain-icon { flex: none; color: var(--muted); font-size: 13px; }
+.insert-sidechain.is-set { border-color: color-mix(in srgb, var(--cat) 55%, transparent); background: color-mix(in srgb, var(--cat) 10%, transparent); }
+.insert-sidechain.is-set .insert-sidechain-icon, .insert-sidechain.is-set .name { color: var(--cat); }
+.insert-name.is-keyed::after { content: " \21aa"; color: var(--cat); font-weight: 500; }
+
 .led-switch {
   flex: none;
   width: 14px;
