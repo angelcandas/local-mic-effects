@@ -5083,6 +5083,58 @@ juce::var DawBridge::handleGuide (const juce::var& args)
     return object ({ { "ok", true }, { "guide", describeGuide() } });
 }
 
+// A practice track from a MIDI file: its melody (the non-drum part with the highest average pitch among
+// the busier ones: a lead sits above the accompaniment) as the guide, on the file's own tempo.
+juce::var DawBridge::guideFromMidi (const juce::File& file, double start)
+{
+    daw::midifile::Song song;
+    juce::String reason;
+    if (! daw::midifile::read (file, song, reason))
+        return error (reason);
+
+    size_t busiest = 0;
+    for (const auto& part : song.parts)
+        if (! part.drums)
+            busiest = juce::jmax (busiest, part.notes.size());
+
+    const daw::midifile::Part* lead = nullptr;
+    auto leadPitch = -1.0;
+    for (const auto& part : song.parts)
+    {
+        if (part.drums || part.notes.empty() || part.notes.size() * 2 < busiest)
+            continue;
+        auto sum = 0.0;
+        for (const auto& n : part.notes)
+            sum += n.pitch;
+        const auto mean = sum / (double) part.notes.size();
+        if (mean > leadPitch)
+        {
+            leadPitch = mean;
+            lead = &part;
+        }
+    }
+    if (lead == nullptr)
+        return error ("There is no melody to sing in " + file.getFileName() + " (only drums?).");
+
+    const daw::TempoMap fileTempo (song.tempo.empty() ? edit.getTempoMap().getPoints() : song.tempo);
+    if (start < 0.0)
+        start = (double) engine.getPosition() / engine.getSampleRate();
+
+    // One voice: where two notes sound together the later one cuts the earlier short.
+    std::vector<daw::Edit::GuideNote> notes;
+    for (const auto& n : lead->notes)
+        notes.push_back ({ start + fileTempo.toSeconds (n.beat), start + fileTempo.toSeconds (n.beat + n.beats), (float) n.pitch });
+    std::stable_sort (notes.begin(), notes.end(), [] (const auto& a, const auto& b) { return a.start < b.start; });
+    for (size_t i = 0; i + 1 < notes.size(); ++i)
+        notes[i].end = juce::jmin (notes[i].end, notes[i + 1].start);
+    notes.erase (std::remove_if (notes.begin(), notes.end(), [] (const auto& n) { return n.end - n.start < 0.02; }), notes.end());
+    if (notes.empty())
+        return error ("There is no melody to sing in " + file.getFileName() + ".");
+
+    setPracticeGuide (lead->name.isNotEmpty() ? lead->name : file.getFileNameWithoutExtension(), notes);
+    return object ({ { "ok", true }, { "guide", describeGuide() }, { "notes", (int) notes.size() } });
+}
+
 void DawBridge::setPracticeGuide (const juce::String& name, const std::vector<daw::Edit::GuideNote>& notes)
 {
     daw::Edit::Guide guide;
@@ -8316,6 +8368,21 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
 
     if (command == "guide")
     {
+        // "fromMidi" { file?, start? }: the melody of a .mid file (asks which, unless { file } is given).
+        if (args["action"].toString() == "fromMidi")
+        {
+            const auto start = arg (args, "start", -1.0);
+            if (args["file"].toString().isNotEmpty())
+            {
+                const juce::File file (args["file"].toString());
+                complete (file.existsAsFile() ? guideFromMidi (file, start) : error ("That file isn't there any more."));
+                return;
+            }
+            withChooser ("Choose a MIDI file with the melody", juce::File::getSpecialLocation (juce::File::userMusicDirectory), "*.mid;*.midi",
+                         Flags::openMode | Flags::canSelectFiles,
+                         [this, start] (const juce::File& file) { return guideFromMidi (file, start); }, complete);
+            return;
+        }
         complete (handleGuide (args));
         return;
     }

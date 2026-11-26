@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 235,
+ "latest": 236,
  "days": [
   {
    "date": "2026-11-26",
    "entries": [
+    {
+     "title": "Practice labels on the lyrics line, and a practice track from a MIDI file",
+     "text": "The coach's cues for the line being sung (Grit, Piano, Prepare position...) show above the words of the karaoke line. In the DAW, File > New practice track from MIDI... turns the melody of a .mid file into the guide lane to sing along to while you record.",
+     "prs": [
+      236
+     ]
+    },
     {
      "title": "Labels, a melody editor and a count-in for Practice",
      "text": "Right-click a note in Practice to write a cue on it (Grit, Prepare position, Slower, Piano, Forte...) from a shared label library you can edit. Edit notes lets you fix the melody when backing singers confuse it: move, resize, split, merge or delete notes, or take a whole phrase out. A count-in before the song, and the Library now shows each song's best and last pass.",

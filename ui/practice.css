@@ -149,6 +149,8 @@ body.is-daw .practice-toggle, body.is-daw .practice {
 .practice-karaoke-now.is-waiting { opacity: 0.75; }
 .practice-karaoke-word { transition: color 0.08s; }
 .practice-karaoke-word.is-sung { color: #fff; text-shadow: 0 0 12px rgba(140, 123, 255, 0.55); }
+.practice-karaoke-cues { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; min-height: 0; }
+.practice-karaoke-cues .practice-label-chip { pointer-events: none; padding: 1px 7px; font-size: 11px; }
 .practice-karaoke-next { min-height: 16px; font-size: 13px; color: var(--faint, #566077); }
 .practice-library-button.has-lyrics::after { content: ""; display: inline-block; width: 5px; height: 5px; margin-left: 5px; border-radius: 50%;
                                              background: var(--accent); vertical-align: middle; }

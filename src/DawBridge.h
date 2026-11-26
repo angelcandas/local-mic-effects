@@ -246,6 +246,7 @@ private:
     juce::var describeChords() const;
     juce::var handleGuide (const juce::var& args);
     juce::var describeGuide() const;
+    juce::var guideFromMidi (const juce::File& file, double start);
     int setAutotunesToKey();
 
     // Song map (src/analysis/Structure.h): sections, bars and the performance's tempo.
