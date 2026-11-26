@@ -11,6 +11,8 @@ body.is-daw .practice-toggle, body.is-daw .practice {
   --close: #ffc94d;
   --off: #ff7a90;
   --target: #8c7bff;
+  --flat: #5aa9ff;
+  --sharp: #ff9a5a;
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -191,3 +193,48 @@ body.is-daw .practice-toggle, body.is-daw .practice {
 .practice-overlay-card .practice-progress-bar { flex: none; height: 6px; }
 .practice-overlay-buttons { display: flex; justify-content: flex-end; gap: 8px; }
 .practice-overlay-card .practice-overlay-buttons .tool { align-self: auto; }
+
+/* Take review: your recording's pitch over the song's notes (practicereview.js). */
+.practice.is-reviewing > .practice-stage,
+.practice.is-reviewing > .practice-karaoke,
+.practice.is-reviewing > .practice-sections,
+.practice.is-reviewing > .practice-phrases,
+.practice.is-reviewing > .practice-loop { display: none; }
+.practice-review { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+.practice-review[hidden] { display: none; }
+.practice-review-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.practice-review-head strong { font-size: 14px; }
+.practice-review-score { min-width: 40px; padding: 2px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel);
+                         font-size: 20px; font-weight: 700; text-align: center; font-variant-numeric: tabular-nums; }
+.practice-review-score:empty { display: none; }
+.practice-review-score.is-good { color: var(--good); }
+.practice-review-score.is-close { color: var(--close); }
+.practice-review-score.is-off { color: var(--off); }
+.practice-review-summary { flex: 1; min-width: 160px; color: var(--muted); font-size: 12px; }
+.practice-review-zoom { display: flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11.5px; }
+.practice-review-zoom input { width: 90px; accent-color: var(--accent); }
+.practice-review-legend { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; font-size: 11px; color: var(--muted); }
+.practice-review-legend small { margin-left: auto; font-size: 11px; }
+.practice-review-key::before { content: ""; display: inline-block; width: 18px; height: 4px; margin-right: 6px; vertical-align: middle; border-radius: 2px; background: var(--good); }
+.practice-review-key.is-flat::before { background: var(--flat); }
+.practice-review-key.is-sharp::before { background: var(--sharp); }
+.practice-review-key.is-off::before { background: var(--faint, #566077); }
+.practice-review-stage { position: relative; flex: 1; min-height: 220px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px;
+                         background: var(--panel); cursor: grab; touch-action: none; }
+.practice-review-stage:active { cursor: grabbing; }
+.practice-review-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.practice-review-overview { position: relative; height: 34px; border: 1px solid var(--line); border-radius: 8px; background: #080a0e; cursor: pointer; touch-action: none; }
+.practice-review-overview canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.practice-review-empty { text-align: center; color: var(--muted); padding: 10px 24px; }
+.practice-review-empty[hidden] { display: none; }
+.practice-review-empty .big { color: var(--text); font-size: 15px; font-weight: 650; margin: 0 0 4px; }
+.practice-review-empty p { margin: 0 auto; max-width: 520px; }
+.practice-review-focus-title { font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); margin-bottom: 6px; }
+.practice-review-focus-list { display: flex; gap: 8px; overflow-x: auto; padding-bottom: 4px; }
+.practice-review-card { flex: 0 0 200px; display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: var(--panel); }
+.practice-review-card-top { display: flex; align-items: center; gap: 8px; }
+.practice-review-card-top small { margin-left: auto; color: var(--muted); font-family: var(--mono); }
+.practice-review-card-what { font-size: 12px; color: var(--text); min-height: 16px; }
+.practice-review-card-buttons { display: flex; gap: 6px; }
+.practice-review-card-buttons .tool { padding: 3px 8px; font-size: 11.5px; }
+.practice-review-button[disabled] { opacity: 0.5; }

@@ -10,6 +10,7 @@
 // The song plays on the Live tracks, so the transport at the bottom drives it.
 import * as Juce from "./juce/index.js";
 import { clamp, formatDuration, html } from "./widgets.js";
+import { TakeReview } from "./practicereview.js";
 
 const practice = Juce.getNativeFunction("practice");
 const transport = Juce.getNativeFunction("transport");
@@ -78,10 +79,18 @@ export class PracticeView {
     this.open = false;
 
     this.build();
+    this.review = new TakeReview({
+      practice, section, noteName, foldToOctave, scoreClass,
+      now: () => this.now(), isPlaying: () => this.clock.playing,
+      goTo: (seconds) => this.goTo(seconds), loopPhrase: (i) => this.loopPhrase(i),
+    });
 
     toggle.addEventListener("click", () => this.show(!this.open));
     document.addEventListener("keydown", (event) => {
-      if (event.key === "Escape" && this.open && !event.defaultPrevented && !/^(INPUT|SELECT|TEXTAREA)$/.test(event.target?.tagName ?? "")) this.show(false);
+      if (event.key === "Escape" && this.open && !event.defaultPrevented && !/^(INPUT|SELECT|TEXTAREA)$/.test(event.target?.tagName ?? "")) {
+        if (this.review.open) this.review.show(false);
+        else this.show(false);
+      }
     });
     const backend = window.__JUCE__.backend;
     backend.addEventListener("practice", (event) => this.onPractice(event));
@@ -178,6 +187,10 @@ export class PracticeView {
                                       { type: "button", title: "How this pass went, and the phrases worth looping" });
     this.reportButton.addEventListener("click", () => practice("report").then((report) => this.showReport(report, true)));
 
+    this.reviewButton = Object.assign(html("button", "tool practice-review-button", "Review take"),
+                                      { type: "button", title: "See what you sang over the song's notes, to find where to work on your tuning" });
+    this.reviewButton.addEventListener("click", () => this.review.show(true));
+
     this.passLabel = html("div", "practice-pass");
     this.passLabel.append(html("span", "practice-pass-value", "–"), html("small", "", "this pass"));
 
@@ -185,7 +198,7 @@ export class PracticeView {
                                     { type: "button", title: "Leave Practice and go back to the Live view (Esc)" });
     this.exitButton.addEventListener("click", () => this.show(false));
 
-    bar.append(title, this.openButton, this.voiceButton, this.libraryButton, this.lyricsButton, guide, sync, speedLabel, keyLabel, restart, this.reportButton, this.passLabel, this.exitButton);
+    bar.append(title, this.openButton, this.voiceButton, this.libraryButton, this.lyricsButton, guide, sync, speedLabel, keyLabel, restart, this.reportButton, this.reviewButton, this.passLabel, this.exitButton);
 
     // Songs prepared before.
     this.library = html("div", "practice-library");
@@ -366,6 +379,7 @@ export class PracticeView {
     practice("view", { open: on }).then((state) => this.applyState(state)).catch(() => {});
     if (remember) Juce.getNativeFunction("uiPref")("practiceShown", on ? "1" : "0");
     if (on) this.draw();
+    else if (this.review.open) this.review.show(false);
   }
 
   //==============================================================================
@@ -631,6 +645,10 @@ export class PracticeView {
       this.buildSectionStrip();
       return;
     }
+    if (event.state === "review") {
+      this.review.onReview(event);
+      return;
+    }
     if (event.state === "rendering") {
       this.setMessage("Preparing the loop…");
       return;
@@ -763,6 +781,11 @@ export class PracticeView {
     const covered = html("small", "", report.looping ? "" : `${report.scored} of ${report.total} phrases`);
     const scoreRow = html("div", "practice-report-row");
     scoreRow.append(big, covered);
+    if (!report.looping) {
+      const see = Object.assign(html("button", "tool", "Review the take"), { type: "button", title: "Your pitch over the notes, with where to focus" });
+      see.addEventListener("click", () => this.review.show(true));
+      scoreRow.append(see);
+    }
     r.append(scoreRow);
 
     for (const [label, value, hint] of [["Pitch", report.pitch, "how close to the notes"],

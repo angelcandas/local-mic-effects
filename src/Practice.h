@@ -10,6 +10,7 @@
 #include "stems/StemSplitter.h"
 
 #include <functional>
+#include <map>
 #include <memory>
 #include <vector>
 
@@ -67,6 +68,10 @@ public:
     //                              background, once per song (kept in its cache folder); a
     //                              "practice" event { state: "sections", sections } follows
     //   "unloop"                   back to the whole song
+    //   "takes"                    -> [{ id, name, start, seconds, speed, semitones, muted }]: the recordings over this song
+    //   "review" { id }            listens to a take again (its pitch every 20 ms, in the song's time) and scores it against
+    //                              the notes it was sung over; "practice" { state: "review", review } follows (see describeReview)
+    //   "stopReview"               forgets a running review
     //   "lyrics" { text }          the song's lyrics, pasted (plain lines, or .lrc text with times): plain lines
     //                              are placed on the voice's notes (analysis::lyrics::align); kept in the song's
     //                              folder. Empty text clears them. -> describeLyrics()
@@ -234,6 +239,11 @@ private:
     struct Job;
     struct LoopJob;
     struct SectionsJob;
+    struct ReviewJob;
+
+    juce::var describeTakes() const;
+    void startReview (int trackId);
+    juce::var describeReview (const ReviewJob&) const;
 
     void startSpeed (double speed, double semitones);
     void startQuality();
@@ -326,6 +336,9 @@ private:
     std::vector<analysis::structure::Section> sections;
     bool sectionsKnown = false;
     std::shared_ptr<SectionsJob> sectionsJob;
+    std::shared_ptr<ReviewJob> reviewJob;
+    // The key and speed a take was recorded at (by file), kept in takes-v1.txt: the notes it is scored against.
+    mutable std::map<juce::String, std::pair<double, double>> takeShifts;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR (Practice)
 };

@@ -1,7 +1,19 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 231,
+ "latest": 233,
  "days": [
+  {
+   "date": "2026-11-26",
+   "entries": [
+    {
+     "title": "Review your takes",
+     "text": "In Practice, Review take shows what you sang over the song's notes: your pitch coloured flat, in tune or sharp along the whole song, a score and what was off for each phrase, and a Where to focus list to hear or loop the weakest phrases.",
+     "prs": [
+      233
+     ]
+    }
+   ]
+  },
   {
    "date": "2026-11-25",
    "entries": [

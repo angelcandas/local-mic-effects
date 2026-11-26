@@ -74,6 +74,18 @@ struct Practice::SectionsJob
     juce::File folder; // the song's cache folder, for the result
 };
 
+struct Practice::ReviewJob
+{
+    std::atomic<bool> cancel { false }, finished { false };
+    std::shared_ptr<const Multitrack::Track> track; // kept alive while it listens
+    double sampleRate = 48000.0;
+    coach::Song song;       // the notes as they played when the take was recorded
+    double start = 0.0, end = 0.0; // where the take sits in the song (seconds)
+    std::vector<coach::Frame> frames;
+    coach::Report report;
+    bool ok = false;
+};
+
 struct Practice::ShiftLoad
 {
     std::atomic<bool> cancel { false }, finished { false };
@@ -146,6 +158,8 @@ Practice::~Practice()
         loopJob->cancel = true;
     if (sectionsJob != nullptr)
         sectionsJob->cancel = true;
+    if (reviewJob != nullptr)
+        reviewJob->cancel = true;
     if (loop.active)
         endLoop();
     dropShift (pending);
@@ -511,6 +525,20 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
     {
         return describeReport();
     }
+    else if (action == "takes")
+    {
+        return describeTakes();
+    }
+    else if (action == "review")
+    {
+        startReview ((int) options.getProperty ("id", -1));
+    }
+    else if (action == "stopReview")
+    {
+        if (reviewJob != nullptr)
+            reviewJob->cancel = true;
+        reviewJob = nullptr;
+    }
     else if (action == "loop" && options.hasProperty ("section"))
     {
         startSectionLoop ((int) options.getProperty ("section", -1), (double) options.getProperty ("speed", 1.0),
@@ -804,8 +832,13 @@ juce::String Practice::takesSignature() const
     const auto rate = juce::jmax (1.0, multitrack.getSampleRate());
     for (const auto& track : multitrack.getTracks())
         if (track->isTake && track->file.existsAsFile())
+        {
+            // (the key and speed it was sung at, seen when it first shows up)
+            const auto found = takeShifts.emplace (track->file.getFullPathName(), std::make_pair (shift.speed, shift.semitones)).first;
             text << track->file.getFullPathName() << "|" << juce::String ((double) track->start / rate, 4) << "|"
-                 << juce::String (track->gain.load(), 3) << "|" << (track->muted.load() ? 1 : 0) << "\n";
+                 << juce::String (track->gain.load(), 3) << "|" << (track->muted.load() ? 1 : 0) << "|"
+                 << juce::String (found->second.first, 4) << "|" << juce::String (found->second.second, 4) << "\n";
+        }
     return text;
 }
 
@@ -823,6 +856,8 @@ void Practice::restoreTakes()
         if (parts.size() < 4)
             continue;
         const juce::File file (parts[0]);
+        if (parts.size() >= 6)
+            takeShifts[file.getFullPathName()] = { juce::jlimit (0.25, 4.0, parts[4].getDoubleValue()), parts[5].getDoubleValue() };
         if (! file.existsAsFile() || present.contains (file.getFullPathName() + "|"))
             continue;
         multitrack.addTake (file, (juce::int64) std::round (parts[1].getDoubleValue() * rate), parts[2].getFloatValue(), parts[3].getIntValue() != 0);
@@ -1009,6 +1044,15 @@ void Practice::tick()
             finishLoop (*finished);
     }
 
+    if (reviewJob != nullptr && reviewJob->finished)
+    {
+        const auto finished = reviewJob;
+        reviewJob = nullptr;
+        if (! finished->cancel)
+            emit ("practice", object ({ { "state", "review" }, { "review", finished->ok ? describeReview (*finished) : juce::var() },
+                                        { "error", finished->ok ? "" : "This take couldn't be read." } }));
+    }
+
     tickShift();
 
     if (guidePending)
@@ -1075,6 +1119,111 @@ void Practice::tick()
     // The backing's chord here (Multitrack listens to it for the harmonies), for the chord chip.
     emit ("practicePitch", object ({ { "time", round3 (displayTime) }, { "playing", playing }, { "midi", round2 (lastMidi) },
                                      { "frames", trail }, { "chord", processor.getMultitrack().getBackingChord (multitrack.getPosition()).getName() } }));
+}
+
+//==============================================================================
+juce::var Practice::describeTakes() const
+{
+    juce::Array<juce::var> list;
+    const auto& multitrack = processor.getMultitrack();
+    const auto rate = juce::jmax (1.0, multitrack.getSampleRate());
+    for (const auto& track : multitrack.getTracks())
+    {
+        if (! track->isTake)
+            continue;
+        const auto found = track->file != juce::File() ? takeShifts.find (track->file.getFullPathName()) : takeShifts.end();
+        list.add (object ({ { "id", track->id }, { "name", track->name }, { "start", round3 ((double) track->start / rate) },
+                            { "seconds", round3 (track->audio.getNumSamples() / rate) },
+                            { "speed", found != takeShifts.end() ? found->second.first : shift.speed },
+                            { "semitones", found != takeShifts.end() ? found->second.second : shift.semitones },
+                            { "muted", track->muted.load() } }));
+    }
+    return list;
+}
+
+// Listens to a take again: its pitch laid over the notes it was sung against.
+void Practice::startReview (int trackId)
+{
+    if (reviewJob != nullptr)
+        reviewJob->cancel = true;
+    reviewJob = nullptr;
+
+    const auto& multitrack = processor.getMultitrack();
+    std::shared_ptr<const Multitrack::Track> found;
+    for (const auto& track : multitrack.getTracks())
+        if (track->id == trackId && track->isTake && track->audio.getNumSamples() > 0)
+            found = track;
+
+    if (found == nullptr || baseSong.isEmpty())
+    {
+        emit ("practice", object ({ { "state", "review" }, { "review", juce::var() },
+                                    { "error", baseSong.isEmpty() ? "Open a song first." : "That take isn't ready yet." } }));
+        return;
+    }
+
+    auto newJob = std::make_shared<ReviewJob>();
+    newJob->track = found;
+    newJob->sampleRate = multitrack.getSampleRate();
+    newJob->start = (double) found->start / juce::jmax (1.0, newJob->sampleRate);
+    newJob->end = newJob->start + found->audio.getNumSamples() / juce::jmax (1.0, newJob->sampleRate);
+
+    // The notes as they played when it was recorded (its own key and speed).
+    const auto at = found->file != juce::File() ? takeShifts.find (found->file.getFullPathName()) : takeShifts.end();
+    const auto speed = at != takeShifts.end() ? at->second.first : shift.speed;
+    const auto semitones = at != takeShifts.end() ? at->second.second : shift.semitones;
+    newJob->song = baseSong.transformed (semitones, speed);
+    reviewJob = newJob;
+
+    juce::Thread::launch ([newJob]
+    {
+        const auto trackPitch = analysis::pitch::analyse (newJob->track->audio, newJob->sampleRate, [newJob] { return ! newJob->cancel.load(); });
+        if (! newJob->cancel)
+        {
+            newJob->frames = coach::framesFrom (trackPitch, newJob->start);
+            newJob->report = coach::score (newJob->song, newJob->frames, newJob->start - 0.5, newJob->end + 0.5);
+            newJob->ok = trackPitch.size() > 0;
+        }
+        newJob->finished = true;
+    });
+}
+
+// { take, name, start, end, notes: [start, end, pitch, phrase...], phrases: [start, end...], frames: [time, midi...] every
+// 20 ms, scores: { score, lean, notes: [...], phrases: [...] } } for the page.
+juce::var Practice::describeReview (const ReviewJob& r) const
+{
+    juce::Array<juce::var> notes, phrases, frames, noteScoresOut, phraseScoresOut;
+    for (const auto& n : r.song.notes)
+    {
+        notes.add (round3 (n.start));
+        notes.add (round3 (n.end));
+        notes.add (round2 (n.pitch));
+        notes.add (n.phrase);
+    }
+    for (const auto& p : r.song.phrases)
+    {
+        phrases.add (round3 (p.start));
+        phrases.add (round3 (p.end));
+    }
+
+    // (a frame every 5 ms is more than the picture can use: one in four)
+    for (size_t i = 0; i < r.frames.size(); i += 4)
+    {
+        frames.add (round2 (r.frames[i].time));
+        frames.add (round2 (r.frames[i].midi));
+    }
+
+    for (size_t i = 0; i < r.report.notes.size(); ++i)
+        if (r.report.phrases[(size_t) r.song.notes[i].phrase].scored)
+            noteScoresOut.add (describeNote ((int) i, r.report.notes[i]));
+    for (size_t i = 0; i < r.report.phrases.size(); ++i)
+        if (r.report.phrases[i].scored)
+            phraseScoresOut.add (describePhrase ((int) i, r.report.phrases[i]));
+
+    return object ({ { "take", r.track->id }, { "name", r.track->name }, { "start", round3 (r.start) }, { "end", round3 (r.end) },
+                     { "notes", notes }, { "phrases", phrases }, { "frames", frames },
+                     { "score", round2 (r.report.score) }, { "lean", round2 (r.report.lean) },
+                     { "noteScores", noteScoresOut }, { "phraseScores", phraseScoresOut },
+                     { "lowest", round2 (r.song.getLowest()) }, { "highest", round2 (r.song.getHighest()) } });
 }
 
 //==============================================================================
