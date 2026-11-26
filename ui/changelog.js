@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 234,
+ "latest": 235,
  "days": [
   {
    "date": "2026-11-26",
    "entries": [
+    {
+     "title": "Labels, a melody editor and a count-in for Practice",
+     "text": "Right-click a note in Practice to write a cue on it (Grit, Prepare position, Slower, Piano, Forte...) from a shared label library you can edit. Edit notes lets you fix the melody when backing singers confuse it: move, resize, split, merge or delete notes, or take a whole phrase out. A count-in before the song, and the Library now shows each song's best and last pass.",
+     "prs": [
+      235
+     ]
+    },
     {
      "title": "Practice guide in the DAW",
      "text": "Open in DAW from Practice now brings the song's melody along as a Guide lane under the ruler: the notes to sing scroll past as you record with a visual reference, not only the sound. Right-click it to nudge or remove it.",

@@ -199,7 +199,12 @@ body.is-daw .practice-toggle, body.is-daw .practice {
 .practice.is-reviewing > .practice-karaoke,
 .practice.is-reviewing > .practice-sections,
 .practice.is-reviewing > .practice-phrases,
-.practice.is-reviewing > .practice-loop { display: none; }
+.practice.is-reviewing > .practice-loop,
+.practice.is-editing-notes > .practice-stage,
+.practice.is-editing-notes > .practice-karaoke,
+.practice.is-editing-notes > .practice-sections,
+.practice.is-editing-notes > .practice-phrases,
+.practice.is-editing-notes > .practice-loop { display: none; }
 .practice-review { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
 .practice-review[hidden] { display: none; }
 .practice-review-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -238,3 +243,52 @@ body.is-daw .practice-toggle, body.is-daw .practice {
 .practice-review-card-buttons { display: flex; gap: 6px; }
 .practice-review-card-buttons .tool { padding: 3px 8px; font-size: 11.5px; }
 .practice-review-button[disabled] { opacity: 0.5; }
+
+/* Labels on notes (practicelabels.js). */
+.practice-label-chip { --label: #8c7bff; display: inline-flex; align-items: center; gap: 5px; padding: 3px 9px; border: 1px solid transparent; border-radius: 999px;
+                       background: color-mix(in srgb, var(--label) 22%, transparent); color: var(--text); font: inherit; font-size: 11.5px; cursor: pointer; }
+.practice-label-chip:hover { border-color: var(--label); }
+.practice-label-chip.is-on { background: var(--label); color: #10131a; font-weight: 650; }
+.practice-label-chip.is-preview { cursor: default; }
+.practice-label-icon { min-width: 12px; text-align: center; }
+.practice-labelpop { position: absolute; z-index: 6; width: 300px; display: flex; flex-direction: column; gap: 8px; padding: 10px; border: 1px solid var(--line-strong, var(--line));
+                     border-radius: 12px; background: var(--panel); box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5); cursor: default; }
+.practice-labelpop[hidden], .practice-labels[hidden] { display: none; }
+.practice-labelpop-title { font-size: 11.5px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }
+.practice-labelpop-chips { display: flex; flex-wrap: wrap; gap: 6px; max-height: 170px; overflow: auto; }
+.practice-labelpop-new { display: flex; gap: 6px; align-items: center; }
+.practice-labelpop-foot { display: flex; justify-content: space-between; }
+.practice-label-field { min-width: 0; flex: 1; padding: 4px 8px; border: 1px solid var(--line); border-radius: 8px; background: #080a0e; color: var(--text); font: inherit; font-size: 12px; }
+.practice-label-field.is-icon { flex: none; width: 44px; text-align: center; }
+.practice-label-colour { flex: none; width: 30px; height: 26px; padding: 0; border: 1px solid var(--line); border-radius: 6px; background: none; cursor: pointer; }
+.practice-labels { display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); }
+.practice-labels-head { display: flex; align-items: baseline; gap: 12px; }
+.practice-labels-head small { flex: 1; color: var(--muted); }
+.practice-labels-rows { display: grid; grid-template-columns: repeat(auto-fill, minmax(380px, 1fr)); gap: 6px 14px; max-height: 220px; overflow: auto; }
+.practice-labels-row { display: flex; align-items: center; gap: 6px; }
+.practice-labels-tools { display: flex; align-items: center; gap: 12px; }
+.practice-labels-json { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid var(--line); border-radius: 8px; background: #080a0e; color: var(--text); font: 11px var(--mono); }
+
+/* Melody editor (practicenotes.js). */
+.practice-notes { display: flex; flex-direction: column; gap: 8px; flex: 1; min-height: 0; }
+.practice-notes[hidden] { display: none; }
+.practice-notes-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.practice-notes-head .tool { padding: 3px 9px; font-size: 11.5px; }
+.practice-notes-head .tool[disabled] { opacity: 0.4; }
+.practice-notes-status { flex: 1; text-align: right; color: var(--muted); font-size: 11.5px; }
+.practice-notes-stage { position: relative; flex: 1; min-height: 240px; overflow: hidden; border: 1px solid var(--line); border-radius: 14px; background: var(--panel); touch-action: none; user-select: none; }
+.practice-notes-stage canvas { position: absolute; inset: 0; width: 100%; height: 100%; }
+.practice-notes-hint { margin: 0; color: var(--muted); font-size: 11.5px; }
+
+/* Count-in. */
+.practice-ready { position: absolute; inset: 0; z-index: 5; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 6px;
+                  background: rgba(8, 10, 14, 0.72); cursor: pointer; }
+.practice-ready[hidden] { display: none; }
+.practice-ready-number { font-size: 84px; font-weight: 750; line-height: 1; font-variant-numeric: tabular-nums; color: var(--accent-2, #8c7bff); }
+.practice-ready-text { font-size: 15px; font-weight: 600; }
+.practice-ready small { color: var(--muted); }
+
+/* A calmer picture: no animated bars or fades. */
+@media (prefers-reduced-motion: reduce) {
+  .practice *, .practice *::before, .practice *::after { animation: none !important; transition: none !important; }
+}

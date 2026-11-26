@@ -89,6 +89,8 @@ juce_add_binary_data(MicFX_WebUI
         ui/aiviews.js
         ui/practice.js
         ui/practicereview.js
+        ui/practicelabels.js
+        ui/practicenotes.js
         ui/setup.js
         ui/whatsnew.js
         ui/changelog.js

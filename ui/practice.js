@@ -11,6 +11,8 @@
 import * as Juce from "./juce/index.js";
 import { clamp, formatDuration, html } from "./widgets.js";
 import { TakeReview } from "./practicereview.js";
+import { LabelTools } from "./practicelabels.js";
+import { NoteEditor } from "./practicenotes.js";
 
 const practice = Juce.getNativeFunction("practice");
 const transport = Juce.getNativeFunction("transport");
@@ -85,10 +87,26 @@ export class PracticeView {
       goTo: (seconds) => this.goTo(seconds), loopPhrase: (i) => this.loopPhrase(i),
     });
 
+    this.labels = new LabelTools({
+      practice, section, stage: this.stage, getSong: () => this.song, now: () => this.now(),
+      secondsShown: SECONDS_SHOWN, playhead: PLAYHEAD, layout: () => this.lastLayout,
+    });
+    this.noteEditor = new NoteEditor({
+      practice, transport, section, noteName, now: () => this.now(), isPlaying: () => this.clock.playing,
+      goTo: (seconds) => this.goTo(seconds), getSong: () => this.song, say: (text, isError) => this.setMessage(text, isError),
+      isNeutral: () => {
+        const shift = this.song?.shift;
+        return !this.song?.loop && (!shift || (Math.abs(shift.speed - 1) < 0.001 && Math.abs(shift.semitones) < 0.004)) && !shift?.pending;
+      },
+    });
+    this.stage.addEventListener("contextmenu", (event) => { if (this.song && !event.defaultPrevented) this.labels.openFor(event); });
+
     toggle.addEventListener("click", () => this.show(!this.open));
     document.addEventListener("keydown", (event) => {
       if (event.key === "Escape" && this.open && !event.defaultPrevented && !/^(INPUT|SELECT|TEXTAREA)$/.test(event.target?.tagName ?? "")) {
-        if (this.review.open) this.review.show(false);
+        if (this.noteEditor.open) return;
+        if (!this.labels.pop.hidden) this.labels.closePop();
+        else if (this.review.open) this.review.show(false);
         else this.show(false);
       }
     });
@@ -177,11 +195,30 @@ export class PracticeView {
     keyLabel.append(html("span", "", "Key"), this.keySelect, this.centsSelect);
 
     const restart = Object.assign(html("button", "tool practice-restart", "From the top"), { type: "button", title: "Back to the start and play" });
-    restart.addEventListener("click", async () => {
-      await transport("stop");
-      await practice("reset");
-      transport("play");
+    restart.addEventListener("click", () => this.startFromTop());
+
+    // A count-in before the song starts, so you can take a breath and think of the first note.
+    this.countIn = 0;
+    const countLabel = html("label", "practice-speed");
+    countLabel.title = "Count down before the song starts from the top, with the first note to sing";
+    this.countSelect = select([[0, "Off"], [3, "3 · 2 · 1"], [5, "5 s"]], 0);
+    this.countSelect.addEventListener("change", () => {
+      this.countIn = Number(this.countSelect.value);
+      Juce.getNativeFunction("uiPref")("practiceCountIn", String(this.countIn));
     });
+    Juce.getNativeFunction("uiPref")("practiceCountIn").then((v) => {
+      const n = Number(v);
+      if ([3, 5].includes(n)) { this.countIn = n; this.countSelect.value = String(n); }
+    }).catch(() => {});
+    countLabel.append(html("span", "", "Count-in"), this.countSelect);
+
+    this.notesButton = Object.assign(html("button", "text-button practice-library-button", "Edit notes"),
+                                     { type: "button", title: "Fix the notes you're meant to sing: take out backing singers, move or split notes, fix an octave" });
+    this.notesButton.addEventListener("click", () => this.noteEditor.show(true));
+
+    this.labelsButton = Object.assign(html("button", "text-button practice-library-button", "Labels"),
+                                      { type: "button", title: "Cues for the singer (Grit, Prepare position, Slower, Piano, Forte...) you can put on notes: right-click a note. This opens the label library" });
+    this.labelsButton.addEventListener("click", () => this.labels.toggleEditor());
 
     this.reportButton = Object.assign(html("button", "tool practice-report-button", "Report"),
                                       { type: "button", title: "How this pass went, and the phrases worth looping" });
@@ -198,7 +235,7 @@ export class PracticeView {
                                     { type: "button", title: "Leave Practice and go back to the Live view (Esc)" });
     this.exitButton.addEventListener("click", () => this.show(false));
 
-    bar.append(title, this.openButton, this.voiceButton, this.libraryButton, this.lyricsButton, guide, sync, speedLabel, keyLabel, restart, this.reportButton, this.reviewButton, this.passLabel, this.exitButton);
+    bar.append(title, this.openButton, this.voiceButton, this.libraryButton, this.lyricsButton, this.labelsButton, this.notesButton, guide, sync, speedLabel, keyLabel, countLabel, restart, this.reportButton, this.reviewButton, this.passLabel, this.exitButton);
 
     // Songs prepared before.
     this.library = html("div", "practice-library");
@@ -249,7 +286,15 @@ export class PracticeView {
     this.chordChip = html("div", "practice-chord");
     this.chordChip.title = "The chord the song plays now";
     this.chordChip.hidden = true;
-    this.stage.append(this.canvas, this.tuner, this.chordChip, this.empty);
+    // "Get ready": the count-in before the song starts.
+    this.ready = html("div", "practice-ready");
+    this.ready.hidden = true;
+    this.readyNumber = html("div", "practice-ready-number");
+    this.readyText = html("div", "practice-ready-text");
+    this.ready.append(this.readyNumber, this.readyText, Object.assign(html("small", "", "Click to start now"), {}));
+    this.ready.addEventListener("pointerdown", (event) => { event.stopPropagation(); this.countToken++; this.ready.hidden = true; transport("play"); });
+    this.countToken = 0;
+    this.stage.append(this.canvas, this.tuner, this.chordChip, this.empty, this.ready);
     this.stage.addEventListener("pointerdown", (event) => this.onStageClick(event));
 
     // The song's sections (song map): click one to loop it.
@@ -354,7 +399,9 @@ export class PracticeView {
     for (const song of songs) {
       const row = html("div", `practice-library-row${song.current ? " is-current" : ""}`);
       const name = html("strong", "", song.name);
-      const info = html("small", "", [formatDuration(song.seconds), song.key, song.voiceOnly ? "voice only" : "", song.current ? "open now" : ""].filter(Boolean).join(" · "));
+      const info = html("small", "", [formatDuration(song.seconds), song.key, song.voiceOnly ? "voice only" : "",
+                                                    song.passes ? `best ${Math.round(song.best)} · last ${Math.round(song.last)} · ${song.passes} pass${song.passes === 1 ? "" : "es"}` : "",
+                                                    song.current ? "open now" : ""].filter(Boolean).join(" · "));
       const text = html("div", "practice-library-text");
       text.append(name, info);
       const open = Object.assign(html("button", "tool is-accent", "Open"), { type: "button" });
@@ -515,6 +562,8 @@ export class PracticeView {
       for (let i = 0; i + 1 < song.phrases.length; i += 2) phrases.push({ start: song.phrases[i], end: song.phrases[i + 1] });
       this.song = { ...song, notes, phrases };
     }
+    if (song && "annotations" in song) this.labels.setAnnotations(song.annotations);
+    else this.labels.match();
     if (song && "lyrics" in song) this.setLyrics(song.lyrics);
     if (!song) this.setLyrics([]);
     this.noteScores.clear();
@@ -643,6 +692,10 @@ export class PracticeView {
       if (event.error) this.setMessage(event.error, true);
       else if (Array.isArray(event.sections)) this.setMessage(event.sections.length ? "Click a section to loop it." : "No sections found in this song.");
       this.buildSectionStrip();
+      return;
+    }
+    if (event.state === "annotations") {
+      this.labels.setAnnotations(event.annotations);
       return;
     }
     if (event.state === "review") {
@@ -857,13 +910,32 @@ export class PracticeView {
     r.hidden = false;
   }
 
+  // Back to the start and play, after the count-in when it's on.
+  async startFromTop() {
+    const token = ++this.countToken;
+    await transport("stop");
+    await practice("reset");
+    const first = this.song?.notes?.[0];
+    if (this.countIn > 0 && first) {
+      this.readyText.textContent = `Get ready · first note ${noteName(first.pitch)}`;
+      this.ready.hidden = false;
+      for (let i = this.countIn; i > 0; --i) {
+        this.readyNumber.textContent = String(i);
+        await new Promise((resolve) => setTimeout(resolve, 1000));
+        if (token !== this.countToken) return; // (clicked, or started again)
+      }
+      this.ready.hidden = true;
+    }
+    transport("play");
+  }
+
   goTo(seconds) {
     transport("seek", seconds);
     if (!this.clock.playing) transport("play");
   }
 
   onStageClick(event) {
-    if (!this.song) return;
+    if (!this.song || event.button !== 0) return;
     const box = this.stage.getBoundingClientRect();
     const t = this.now() + ((event.clientX - box.left) / box.width - PLAYHEAD) * SECONDS_SHOWN;
     const phrase = this.song.phrases.findIndex((p) => t >= p.start - 0.3 && t <= p.end + 0.3);
@@ -986,6 +1058,9 @@ export class PracticeView {
       }
       previous = point;
     }
+
+    this.lastLayout = { top, rowHeight, ratio };
+    this.labels.draw(g, { x, y, pxPerSecond, barHeight, from, to, ratio, width });
 
     // The playhead.
     g.fillStyle = "rgba(255,255,255,0.35)";
