@@ -1565,10 +1565,12 @@ juce::var PluginEditor::describeTracks()
         entry->setProperty ("file", track->file.getFullPathName());
         entry->setProperty ("isTake", track->isTake);
         entry->setProperty ("start", (double) track->start / rate);
-        entry->setProperty ("length", (double) track->audio.getNumSamples() / rate);
+        // (a song track in another speed is longer or shorter on the timeline)
+        const auto stretch = track->stretched.load() ? 1.0 / multitrack.getSongSpeed() : 1.0;
+        entry->setProperty ("length", (double) track->audio.getNumSamples() / rate * stretch);
         entry->setProperty ("gain", track->gain.load());
         entry->setProperty ("muted", track->muted.load());
-        entry->setProperty ("peakSeconds", Multitrack::peakSeconds);
+        entry->setProperty ("peakSeconds", Multitrack::peakSeconds * stretch);
 
         juce::Array<juce::var> peaks;
         peaks.ensureStorageAllocated (track->peaks.size());

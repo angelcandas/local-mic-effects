@@ -116,6 +116,14 @@ Practice::Practice (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::fu
         songFolder = folder;
         lyrics = analysis::lyrics::Lyrics::fromString (folder.getChildFile (lyricsFileName).loadFileAsString());
         analysis::lyrics::timeWords (lyrics, baseSong);
+        if (const auto& mt = processor.getMultitrack(); std::abs (mt.getSongSpeed() - 1.0) > 1.0e-3 || std::abs (mt.getSongSemitones()) > 5.0e-3)
+        {
+            // (the editor was closed and opened again with the song in another key or speed)
+            shift.speed = mt.getSongSpeed();
+            shift.semitones = mt.getSongSemitones();
+            shift.live = true;
+            song = baseSong.transformed (shift.semitones, shift.speed);
+        }
         guidePending = true; // (its level and mute are set once the track is there)
         takesSeen = folder.getChildFile (takesFileName).loadFileAsString();
         takesReady = false; // (written again once the tracks are back and the song's takes are on them)
@@ -705,6 +713,7 @@ void Practice::install (const Prepared& prepared)
         shiftLoad->cancel = true;
     shiftLoad = nullptr;
     songFolder = prepared.folder;
+    processor.getMultitrack().setSongTransform (1.0, 0.0);
     lyrics = prepared.folder != juce::File() ? analysis::lyrics::Lyrics::fromString (prepared.folder.getChildFile (lyricsFileName).loadFileAsString())
                                              : analysis::lyrics::Lyrics();
 
@@ -856,7 +865,9 @@ void Practice::applyMutes()
         if (! (own || isShift || isPending || isLoop))
             continue;
 
-        const auto heard = loopRendered ? isLoop : shift.isActive() ? isShift : own;
+        if (own)
+            multitrack.setTrackStretched (track->id, true); // (it plays through the live key and speed change)
+        const auto heard = loopRendered ? isLoop : (shift.backingId >= 0 || shift.guideId >= 0) ? isShift : own;
         const auto isGuide = track->file == guideFile || track->id == shift.guideId || track->id == pending.guideId
                           || (loop.active && track->id == loop.guideId);
         const auto mute = ! heard || (isGuide && guideLevel <= 0.0f);
@@ -1365,66 +1376,19 @@ void Practice::startSpeed (double speed, double semitones)
     if (neutral)
     {
         // Back to the song as it is, where we are.
+        processor.getMultitrack().setSongTransform (1.0, 0.0);
         swapShift();
         return;
     }
 
+    // Live: the song's own tracks go through the stretcher (Multitrack::setSongTransform), so there's
+    // nothing to render or wait for, and no extra tracks. The notes follow (swapShift).
+    pending = {};
     pending.speed = speed;
     pending.semitones = semitones;
-
-    // Made before: load it (a moment) instead of rendering it again.
-    const auto cachedBacking = getShiftFile (songFolder, speed, semitones, false), cachedGuide = getShiftFile (songFolder, speed, semitones, true);
-    if (songFolder != juce::File() && cachedGuide.existsAsFile() && (backingFile == juce::File() || cachedBacking.existsAsFile()))
-    {
-        auto load = std::make_shared<ShiftLoad>();
-        load->speed = speed;
-        load->semitones = semitones;
-        load->guideFile = cachedGuide;
-        load->backingFile = backingFile != juce::File() ? cachedBacking : juce::File();
-        shiftLoad = load;
-        const auto rate = processor.getMultitrack().getSampleRate();
-        juce::Thread::launch ([load, rate]
-        {
-            auto guide = Multitrack::decode (load->guideFile, rate);
-            auto backing = load->backingFile != juce::File() ? Multitrack::decode (load->backingFile, rate) : Multitrack::Decoded {};
-            load->ok = guide.error.isEmpty() && (load->backingFile == juce::File() || backing.error.isEmpty());
-            load->guide = std::move (guide.audio);
-            load->backing = std::move (backing.audio);
-            load->finished = true;
-        });
-        emit ("practice", object ({ { "state", "shifting" }, { "shift", describeShift() } }));
-        return;
-    }
-
-    // Render it: empty tracks (muted until swapped in) filled piece by piece, the playhead's first.
-    auto& multitrack = processor.getMultitrack();
-    std::vector<KeySpeedRender::Part> parts;
-    for (const auto& track : multitrack.getTracks())
-    {
-        const auto voice = track->file == guideFile;
-        if (! voice && ! (backingFile != juce::File() && track->file == backingFile))
-            continue;
-
-        KeySpeedRender::Part part;
-        part.source = track;
-        part.voice = voice;
-        const auto length = KeySpeedRender::getLength (track->audio.getNumSamples(), speed);
-        const auto id = multitrack.addFilling (voice ? "Guide (new key)" : "Backing (new key)", track->audio.getNumChannels(), length,
-                                               0, true, part.fill);
-        (voice ? pending.guideId : pending.backingId) = id;
-        for (const auto& t : multitrack.getTracks())
-            if (t->id == id)
-                part.target = t;
-        parts.push_back (std::move (part));
-    }
-
-    if (parts.empty())
-        return;
-
-    pending.render = std::make_shared<KeySpeedRender> (multitrack.getSampleRate(), speed, semitones);
-    pending.render->start (std::move (parts), getOriginalTime() / speed);
-    applyGuideLevel();
-    emit ("practice", object ({ { "state", "shifting" }, { "shift", describeShift() } }));
+    pending.live = true;
+    processor.getMultitrack().setSongTransform (speed, semitones);
+    swapShift();
 }
 
 void Practice::swapShift()

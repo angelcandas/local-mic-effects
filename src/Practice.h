@@ -306,7 +306,8 @@ private:
         double speed = 1.0, semitones = 0.0;
         int backingId = -1, guideId = -1;        // its tracks (-1: none)
         std::shared_ptr<KeySpeedRender> render;  // still filling them in (null: done, or loaded)
-        bool isActive() const noexcept { return backingId >= 0 || guideId >= 0; }
+        bool live = false;                       // the song's own tracks play through the live stretcher
+        bool isActive() const noexcept { return live || backingId >= 0 || guideId >= 0; }
     } shift, pending;
     struct ShiftLoad;
     std::shared_ptr<ShiftLoad> shiftLoad; // a copy kept from before, loading

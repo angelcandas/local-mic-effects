@@ -333,6 +333,33 @@ void Multitrack::restoreSession (const juce::ValueTree& session)
     }
 }
 
+void Multitrack::setSongTransform (double speed, double semitones)
+{
+    speed = juce::jlimit (0.5, 1.5, speed);
+    semitones = juce::jlimit (-12.0, 12.0, semitones);
+    songSpeed = speed;
+    songSemitones = semitones;
+    songPitch = std::pow (2.0, semitones / 12.0);
+    publish();
+    if (onTracksChanged)
+        onTracksChanged();
+}
+
+void Multitrack::setTrackStretched (int id, bool stretched)
+{
+    for (auto& track : tracks)
+        if (track->id == id)
+        {
+            if (stretched && track->stretcher == nullptr)
+                track->stretcher = std::make_unique<SongStretcher>();
+            if (track->stretched.load() != stretched)
+            {
+                track->stretched = stretched;
+                publish();
+            }
+        }
+}
+
 void Multitrack::removeTrack (int id)
 {
     const auto it = std::find_if (tracks.begin(), tracks.end(), [id] (const auto& t) { return t->id == id; });
@@ -368,7 +395,7 @@ void Multitrack::publish()
     for (auto& track : tracks)
     {
         next.push_back (track.get());
-        end = juce::jmax (end, track->end());
+        end = juce::jmax (end, track->stretched.load() ? track->start + (juce::int64) ((double) track->audio.getNumSamples() / songSpeed.load()) : track->end());
     }
 
     {
@@ -445,13 +472,32 @@ void Multitrack::mix (juce::AudioBuffer<float>& buffer, int numChannels, int off
         if (track->muted.load())
             continue;
 
+        const auto speed = songSpeed.load(), pitch = songPitch.load();
+        const auto liveShift = track->stretched.load() && track->stretcher != nullptr && track->start == 0
+                       && (std::abs (speed - 1.0) > 1.0e-4 || std::abs (pitch - 1.0) > 1.0e-4);
         const auto from = juce::jmax (blockStart, track->start);
-        const auto to   = juce::jmin (blockEnd, track->end());
+        const auto to   = juce::jmin (blockEnd, liveShift ? (juce::int64) ((double) track->audio.getNumSamples() / speed) : track->end());
 
         if (from >= to)
             continue;
 
         const auto gain = track->gain.load();
+
+        if (liveShift)
+        {
+            // The song in another key or speed, made as it plays.
+            float* out[2] = { stretchBuffer[0].data(), stretchBuffer[1].data() };
+            for (auto a = from; a < to;)
+            {
+                const auto count = (int) juce::jmin ((juce::int64) stretchBuffer[0].size(), to - a);
+                track->stretcher->pull (track->audio, speed, pitch, a, out, 2, count);
+                for (int ch = 0; ch < numChannels; ++ch)
+                    juce::FloatVectorOperations::addWithMultiply (buffer.getWritePointer (ch) + offset + (int) (a - blockStart), out[juce::jmin (ch, 1)], gain, count);
+                a += count;
+            }
+            continue;
+        }
+
         const auto sourceChannels = track->audio.getNumChannels();
         const auto add = [&] (juce::int64 a, juce::int64 b)
         {
