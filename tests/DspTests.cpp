@@ -12366,6 +12366,100 @@ namespace
                    "a take in tune is reviewed: its pitch every 20 ms and a score for each phrase (" + review["score"].toString() + ")");
             practice.handle ("stopReview", {});
         }
+
+        // Labels: cues on notes and phrases, kept by start time; the library is shared and can be reset.
+        {
+            const auto defaults = practice.handle ("labels", {})["library"];
+            check (defaults.size() >= 10 && defaults[0]["text"].toString() == "Grit" && defaults[0]["icon"].toString().isNotEmpty(),
+                   "the label library starts with the usual vocal cues");
+
+            auto label = new juce::DynamicObject();
+            label->setProperty ("text", "Open the vowel");
+            label->setProperty ("icon", "o");
+            label->setProperty ("colour", "#12ab34");
+            auto labels = juce::Array<juce::var> { juce::var (label) };
+            auto args = new juce::DynamicObject();
+            args->setProperty ("kind", "note");
+            args->setProperty ("time", song.notes[1].start + 0.01);
+            args->setProperty ("labels", labels);
+            practice.handle ("annotate", juce::var (args));
+            check (practice.getAnnotations().size() == 1 && ! practice.getAnnotations()[0].phrase
+                       && std::abs (practice.getAnnotations()[0].time - song.notes[1].start) < 1.0e-9
+                       && practice.getAnnotations()[0].labels[0].colour == "#12ab34",
+                   "a label goes on the note that starts there");
+
+            auto phraseArgs = new juce::DynamicObject();
+            phraseArgs->setProperty ("kind", "phrase");
+            phraseArgs->setProperty ("time", song.phrases[1].start);
+            phraseArgs->setProperty ("labels", labels);
+            practice.handle ("annotate", juce::var (phraseArgs));
+            const auto text = Practice::labelsToText (practice.getAnnotations());
+            const auto back = Practice::labelsFromText (text);
+            check (back.size() == 2 && back[1].phrase && back[0].labels[0].text == "Open the vowel", "notes and phrases keep their labels in the song's folder text");
+
+            auto nothing = new juce::DynamicObject();
+            nothing->setProperty ("kind", "note");
+            nothing->setProperty ("time", 123.0); // no note starts there
+            nothing->setProperty ("labels", labels);
+            practice.handle ("annotate", juce::var (nothing));
+            auto clear = new juce::DynamicObject();
+            clear->setProperty ("kind", "note");
+            clear->setProperty ("time", song.notes[1].start);
+            practice.handle ("annotate", juce::var (clear));
+            check (practice.getAnnotations().size() == 1 && practice.getAnnotations()[0].phrase, "no label where no note starts; an empty set removes them");
+
+            auto saveArgs = new juce::DynamicObject();
+            saveArgs->setProperty ("library", labels);
+            check (practice.handle ("saveLabels", juce::var (saveArgs)).size() == 1 && practice.handle ("labels", {})["library"].size() == 1,
+                   "the library is replaced");
+            auto reset = new juce::DynamicObject();
+            reset->setProperty ("reset", true);
+            check (practice.handle ("saveLabels", juce::var (reset)).size() >= 10, "and back to the standard set");
+        }
+
+        // The melody editor: an edited list of notes replaces the notes to sing; scores start over.
+        {
+            const auto first = song.notes.front();
+            juce::Array<juce::var> flat;
+            for (const auto& [a, b, p] : std::vector<std::tuple<double, double, double>> { { 0.5, 1.0, 60.0 }, { 0.9, 1.5, 62.0 }, { 3.0, 3.5, 64.0 }, { 4.0, 3.0, 65.0 }, { 5.0, 5.5, 200.0 } })
+            {
+                flat.add (a);
+                flat.add (b);
+                flat.add (p);
+            }
+            const auto edited = Practice::songFromNotes (flat);
+            check (edited.notes.size() == 3 && std::abs (edited.notes[0].end - 0.9) < 1.0e-9 && edited.phrases.size() == 2,
+                   "an edited list is tidied: a note can't run into the next, backwards and absurd ones are dropped, phrases found again");
+
+            auto args = new juce::DynamicObject();
+            args->setProperty ("notes", flat);
+            practice.handle ("setMelody", juce::var (args));
+            check (practice.getSong().notes.size() == 3 && std::abs (practice.getSong().notes[2].pitch - 64.0f) < 1.0e-4f
+                       && practice.getNoteScores().size() == 3 && practice.getSong().notes[0].start != first.start,
+                   "the edited notes are what's sung and scored now");
+
+            juce::File folder = juce::File::createTempFile ("melody");
+            folder.createDirectory();
+            folder.getChildFile (Practice::melodyFileName).replaceWithText (song.toString());
+            check (Practice::readMelody (folder, song).notes.size() == song.notes.size(), "without edits the detected melody is used");
+            folder.getChildFile (Practice::editedMelodyFileName).replaceWithText (edited.toString());
+            check (Practice::readMelody (folder, song).notes.size() == 3, "with an edited file, that is what comes back when the song is opened");
+                        folder.deleteRecursively();
+
+            // The library keeps a song's best and last pass.
+            juce::File infoFolder = juce::File::createTempFile ("practice-info");
+            infoFolder.createDirectory();
+            Practice::LibraryEntry entry;
+            entry.name = "Song";
+            entry.best = 91.5f;
+            entry.last = 74.0f;
+            entry.passes = 4;
+            Practice::writeInfo (infoFolder, entry);
+            Practice::LibraryEntry back;
+            check (Practice::readInfo (infoFolder, back) && std::abs (back.best - 91.5f) < 0.05f && std::abs (back.last - 74.0f) < 0.05f && back.passes == 4,
+                   "a song's best and last pass score and its passes are kept in the library");
+            infoFolder.deleteRecursively();
+        }
     }
 
     void testPitchNotes()

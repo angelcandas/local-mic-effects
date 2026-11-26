@@ -81,6 +81,17 @@ public:
     //                { line, at }  or starts it at `at` (the song's time now, e.g. the playhead)
     // Lyrics are sent in the song's time as it plays (after a speed change or in a loop),
     // in describeSong()'s "lyrics"; "practice" { state: "lyrics", lyrics } after a change.
+    //   "setMelody" { notes }      replaces the notes to sing with an edited list ([start, end, pitch, ...] in the song as it is):
+    //                              the melody editor's result, kept in the song's folder (melody-edited-v1.txt, which is used
+    //                              from then on); scores start over. -> describeSong() notes in the page's own format
+    //   "resetMelody"              back to the notes found in the voice (the edits are deleted)
+    //   "labels"                   -> { library: [label], annotations: [...] }: the label library and this song's labels
+    //   "saveLabels" { library }   replaces the label library (shared by every song, kept in the settings)
+    //   "annotate" { kind, time, labels } puts labels on a note or a phrase ("note" | "phrase", `time`: its start in the song
+    //                              as it plays now); `labels` is the whole set for it, each { text, icon, colour } (empty
+    //                              removes them). Kept in the song's folder; "practice" { state: "annotations" } follows.
+    // A label is { id, text, icon, colour }: a cue for the singer (Grit, Prepare position, Slower, Piano, Forte...)
+    // drawn above the note or phrase it is on. The annotations are sent in the song's time as it plays, like the lyrics.
     // Samples between the song leaving the app and being heard (the interface's output latency): where the
     // notes are drawn. Without it the picture uses the whole round trip.
     std::function<juce::int64()> outputLatency;
@@ -123,6 +134,8 @@ public:
         double seconds = 0.0;
         bool voiceOnly = false;
         juce::int64 opened = 0; // ms since 1970
+        float best = 0.0f, last = 0.0f; // pass scores (0 when never sung through)
+        int passes = 0;                 // passes that covered at least half of the song's phrases
     };
     static std::vector<LibraryEntry> getLibrary (const juce::File& root = getCacheRoot());
     // A song from its cache folder, without the original file. `error` is set when it's incomplete.
@@ -182,6 +195,31 @@ public:
     static std::vector<analysis::structure::Section> sectionsFromText (const juce::String&);
     static constexpr const char* sectionsFileName = "sections-v1.txt";
     static constexpr const char* lyricsFileName = "lyrics-v1.txt";
+    static constexpr const char* labelsFileName = "labels-v1.txt";
+    // The melody as edited by hand (see "setMelody"); used instead of melody-v1.txt when it's there.
+    static constexpr const char* editedMelodyFileName = "melody-edited-v1.txt";
+    static analysis::coach::Song readMelody (const juce::File& folder, const analysis::coach::Song& found);
+    // An edited list of notes as a song (sorted, bad ones dropped, phrases found again); `flat` is [start, end, pitch, ...].
+    static analysis::coach::Song songFromNotes (const juce::var& flat);
+    bool isMelodyEdited() const;
+
+    // A cue for the singer, and where it was put (the label is copied onto it, so it stays when the library changes).
+    struct Label
+    {
+        juce::String id, text, icon, colour; // colour: "#rrggbb"
+    };
+    struct Annotation
+    {
+        bool phrase = false; // else a note
+        double time = 0.0;   // its start, in the song as it is
+        std::vector<Label> labels;
+    };
+    static std::vector<Label> defaultLabels();
+    static juce::String labelsToText (const std::vector<Annotation>&);
+    static std::vector<Annotation> labelsFromText (const juce::String&);
+    static juce::var describeLabel (const Label&);
+    static Label labelFromVar (const juce::var&);
+    const std::vector<Annotation>& getAnnotations() const noexcept { return annotations; }
     // The takes recorded over this song (file, place, volume, mute), kept in its folder so
     // they come back whenever the song is opened again.
     static constexpr const char* takesFileName = "takes-v1.txt";
@@ -207,6 +245,10 @@ public:
     // { score, pitch, timing, steady, lean, timingSeconds, scored, total, weak: [i], phrases: [...] }:
     // the pass so far (or the last loop pass).
     juce::var describeReport() const;
+
+    // Remembers a finished pass in the song's library entry (best and last score, how many passes). A pass counts
+    // when at least half of the phrases were sung. Public for the tests.
+    void recordPass();
 
     bool isLooping() const noexcept { return loop.active; }
 
@@ -255,6 +297,11 @@ private:
     double getOriginalTime() const;      // where the playhead is, in the song as it is
     juce::var describeShift() const;
     juce::var describeLyrics() const;
+    juce::var describeAnnotations() const;
+    juce::var describeLabelLibrary() const;
+    void saveAnnotations();
+    void useMelody (analysis::coach::Song);
+    void annotate (bool phrase, double originalTime, std::vector<Label>);
     void saveLyrics();
     void startLoop (int phrase, double speed, double semitones);
     void startSectionLoop (int section, double speed, double semitones);
@@ -285,6 +332,7 @@ private:
     juce::File source, guideFile, backingFile;
     juce::File songFolder; // its cache folder
     analysis::lyrics::Lyrics lyrics; // in the song as it is
+    std::vector<Annotation> annotations; // in the song as it is
     float guideLevel = 0.35f;
     double visualSyncMs = 0.0; // the notes' picture against the sound
     juce::String takesSeen;     // the takes as last written (or read)

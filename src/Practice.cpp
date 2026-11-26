@@ -120,13 +120,14 @@ Practice::Practice (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::fu
     // song is picked up from its folder, not from what's on the tracks)
     if (folder.isDirectory() && melody.existsAsFile() && guide.existsAsFile())
     {
-        setSong (coach::Song::fromString (melody.loadFileAsString()));
+        setSong (readMelody (folder, coach::Song::fromString (melody.loadFileAsString())));
         songName = settings.getValue ("practice.name");
         source = juce::File (settings.getValue ("practice.source"));
         guideFile = guide;
         backingFile = juce::File (settings.getValue ("practice.backing"));
         songFolder = folder;
         lyrics = analysis::lyrics::Lyrics::fromString (folder.getChildFile (lyricsFileName).loadFileAsString());
+        annotations = labelsFromText (folder.getChildFile (labelsFileName).loadFileAsString());
         analysis::lyrics::timeWords (lyrics, baseSong);
         if (const auto& mt = processor.getMultitrack(); std::abs (mt.getSongSpeed() - 1.0) > 1.0e-3 || std::abs (mt.getSongSemitones()) > 5.0e-3)
         {
@@ -344,7 +345,10 @@ void Practice::writeInfo (const juce::File& folder, const LibraryEntry& e)
          << "source=" << e.source.getFullPathName() << "\n"
          << "seconds=" << juce::String (e.seconds, 3) << "\n"
          << "voiceOnly=" << (e.voiceOnly ? 1 : 0) << "\n"
-         << "opened=" << e.opened << "\n";
+         << "opened=" << e.opened << "\n"
+         << "best=" << juce::String (e.best, 1) << "\n"
+         << "last=" << juce::String (e.last, 1) << "\n"
+         << "passes=" << e.passes << "\n";
     folder.getChildFile (infoFileName).replaceWithText (text);
 }
 
@@ -367,6 +371,9 @@ bool Practice::readInfo (const juce::File& folder, LibraryEntry& e)
         else if (key == "seconds") e.seconds = value.getDoubleValue();
         else if (key == "voiceOnly") e.voiceOnly = value.getIntValue() != 0;
         else if (key == "opened") e.opened = value.getLargeIntValue();
+        else if (key == "best") e.best = value.getFloatValue();
+        else if (key == "last") e.last = value.getFloatValue();
+        else if (key == "passes") e.passes = value.getIntValue();
     }
     return e.name.isNotEmpty();
 }
@@ -445,6 +452,7 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
         for (const auto& e : getLibrary())
             list.add (object ({ { "id", e.folder.getFileName() }, { "name", e.name }, { "key", e.key }, { "seconds", round3 (e.seconds) },
                                 { "voiceOnly", e.voiceOnly }, { "opened", (double) e.opened },
+                                { "best", round2 (e.best) }, { "last", round2 (e.last) }, { "passes", e.passes },
                                 { "current", e.folder.getFullPathName() == settings.getValue ("practice.folder") && ! song.isEmpty() } }));
         return list;
     }
@@ -524,6 +532,59 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
     else if (action == "report")
     {
         return describeReport();
+    }
+    else if (action == "setMelody")
+    {
+        auto edited = songFromNotes (options["notes"]);
+        if (edited.isEmpty())
+            return object ({ { "ok", false }, { "error", "The song needs at least one note to sing." } });
+        if (songFolder.isDirectory())
+            songFolder.getChildFile (editedMelodyFileName).replaceWithText (edited.toString());
+        useMelody (std::move (edited));
+    }
+    else if (action == "resetMelody")
+    {
+        if (songFolder.isDirectory())
+        {
+            songFolder.getChildFile (editedMelodyFileName).deleteFile();
+            useMelody (coach::Song::fromString (songFolder.getChildFile (melodyFileName).loadFileAsString()));
+        }
+    }
+    else if (action == "labels")
+    {
+        return object ({ { "library", describeLabelLibrary() }, { "annotations", describeAnnotations() } });
+    }
+    else if (action == "saveLabels")
+    {
+        if ((bool) options.getProperty ("reset", false))
+        {
+            settings.removeValue ("practice.labelLibrary");
+            settings.saveIfNeeded();
+            return describeLabelLibrary();
+        }
+        juce::Array<juce::var> clean;
+        if (const auto* list = options["library"].getArray())
+            for (const auto& item : *list)
+            {
+                auto label = labelFromVar (item);
+                if (label.text.isEmpty())
+                    continue;
+                if (label.id.isEmpty())
+                    label.id = juce::Uuid().toString().substring (0, 8);
+                clean.add (describeLabel (label));
+            }
+        settings.setValue ("practice.labelLibrary", juce::JSON::toString (juce::var (clean), true));
+        settings.saveIfNeeded();
+        return describeLabelLibrary();
+    }
+    else if (action == "annotate")
+    {
+        std::vector<Label> labels;
+        if (const auto* list = options["labels"].getArray())
+            for (const auto& item : *list)
+                if (auto label = labelFromVar (item); label.text.isNotEmpty())
+                    labels.push_back (label);
+        annotate (options["kind"].toString() == "phrase", toOriginalTime ((double) options["time"]), std::move (labels));
     }
     else if (action == "takes")
     {
@@ -664,8 +725,8 @@ juce::var Practice::describeSong() const
 
     return object ({ { "name", songName }, { "file", source.getFullPathName() }, { "notes", notes }, { "phrases", phrases },
                      { "lowest", round2 (song.getLowest()) }, { "highest", round2 (song.getHighest()) },
-                     { "hasBacking", backingFile != juce::File() }, { "key", songKey },
-                     { "shift", describeShift() }, { "lyrics", describeLyrics() },
+                     { "hasBacking", backingFile != juce::File() }, { "edited", isMelodyEdited() }, { "key", songKey },
+                     { "shift", describeShift() }, { "lyrics", describeLyrics() }, { "annotations", describeAnnotations() },
                      { "sections", describeSections() },
                      { "loop", loop.active ? object ({ { "phrase", loop.phrase }, { "lastPhrase", loop.lastPhrase }, { "section", loop.section },
                                                        { "speed", loop.speed }, { "semitones", loop.semitones },
@@ -750,6 +811,8 @@ void Practice::install (const Prepared& prepared)
     processor.getMultitrack().setSongTransform (1.0, 0.0);
     lyrics = prepared.folder != juce::File() ? analysis::lyrics::Lyrics::fromString (prepared.folder.getChildFile (lyricsFileName).loadFileAsString())
                                              : analysis::lyrics::Lyrics();
+    annotations = prepared.folder != juce::File() ? labelsFromText (prepared.folder.getChildFile (labelsFileName).loadFileAsString())
+                                                  : std::vector<Annotation>();
 
     auto& multitrack = processor.getMultitrack();
     multitrack.pause();
@@ -801,7 +864,7 @@ void Practice::install (const Prepared& prepared)
     guideFile = prepared.guide;
     backingFile = prepared.backing;
     guidePending = true;
-    setSong (prepared.song);
+    setSong (readMelody (prepared.folder, prepared.song));
     analysis::lyrics::timeWords (lyrics, baseSong); // (the words' times aren't kept)
 
     settings.setValue ("practice.folder", prepared.folder.getFullPathName());
@@ -1084,7 +1147,10 @@ void Practice::tick()
 
     // The song stopped after some singing: the report for the pass.
     if (wasPlaying && ! playing && std::any_of (phraseScores.begin(), phraseScores.end(), [] (const auto& p) { return p.scored; }))
+    {
         emit ("practiceReport", describeReport());
+        recordPass();
+    }
     wasPlaying = playing;
 
     std::vector<coach::Frame> frames;
@@ -1224,6 +1290,25 @@ juce::var Practice::describeReview (const ReviewJob& r) const
                      { "score", round2 (r.report.score) }, { "lean", round2 (r.report.lean) },
                      { "noteScores", noteScoresOut }, { "phraseScores", phraseScoresOut },
                      { "lowest", round2 (r.song.getLowest()) }, { "highest", round2 (r.song.getHighest()) } });
+}
+
+void Practice::recordPass()
+{
+    if (songFolder == juce::File() || ! songFolder.isDirectory() || song.phrases.empty() || loop.active)
+        return;
+    int scored = 0;
+    for (const auto& p : phraseScores)
+        scored += p.scored ? 1 : 0;
+    if (scored * 2 < (int) song.phrases.size())
+        return;
+
+    LibraryEntry info;
+    if (! readInfo (songFolder, info))
+        return;
+    info.last = getPassScore();
+    info.best = juce::jmax (info.best, info.last);
+    ++info.passes;
+    writeInfo (songFolder, info);
 }
 
 //==============================================================================
@@ -1976,6 +2061,204 @@ void Practice::setLyrics (const juce::String& text)
         analysis::lyrics::timeWords (lyrics, baseSong);
     saveLyrics();
     emit ("practice", object ({ { "state", "lyrics" }, { "lyrics", describeLyrics() } }));
+}
+
+//==============================================================================
+std::vector<Practice::Label> Practice::defaultLabels()
+{
+    // The cues a vocal coach writes on a lead sheet (icons are UTF-8).
+    const auto make = [] (const char* id, const char* text, const char* icon, const char* colour)
+    {
+        return Label { id, text, juce::String::fromUTF8 (icon), colour };
+    };
+    return { make ("grit", "Grit", "\xF0\x9F\x94\xA5", "#ff7a5a"), make ("breath", "Breathe", "\xF0\x9F\x92\xA8", "#5aa9ff"),
+             make ("prepare", "Prepare position", "\xF0\x9F\x8E\xAF", "#ffc94d"), make ("slower", "Slower", "\xF0\x9F\x90\xA2", "#3fd9c6"),
+             make ("piano", "Piano (soft)", "p", "#8fb4ff"), make ("forte", "Forte (loud)", "f", "#ff9a5a"),
+             make ("belt", "Belt", "\xF0\x9F\x93\xA2", "#ff6b8a"), make ("head", "Head voice", "\xE2\x98\x81", "#b79bff"),
+             make ("vibrato", "Vibrato", "\xE3\x80\xB0", "#7be0a0"), make ("straight", "Straight tone", "\xE2\x80\x94", "#c8cfdd"),
+             make ("slide", "Slide in", "\xE2\x86\x97", "#e0b45a"), make ("accent", "Accent", ">", "#ff7a90") };
+}
+
+juce::var Practice::describeLabel (const Label& l)
+{
+    return object ({ { "id", l.id }, { "text", l.text }, { "icon", l.icon }, { "colour", l.colour } });
+}
+
+Practice::Label Practice::labelFromVar (const juce::var& v)
+{
+    Label l;
+    l.id = v["id"].toString().trim();
+    l.text = v["text"].toString().trim().substring (0, 40);
+    l.icon = v["icon"].toString().trim().substring (0, 4);
+    l.colour = v["colour"].toString().trim();
+    if (! (l.colour.length() == 7 && l.colour.startsWithChar ('#') && l.colour.substring (1).containsOnly ("0123456789abcdefABCDEF")))
+        l.colour = "#8c7bff";
+    return l;
+}
+
+juce::var Practice::describeLabelLibrary() const
+{
+    juce::Array<juce::var> list;
+    const auto saved = juce::JSON::parse (settings.getValue ("practice.labelLibrary"));
+    if (const auto* items = saved.getArray())
+        for (const auto& item : *items)
+            if (auto label = labelFromVar (item); label.text.isNotEmpty())
+                list.add (describeLabel (label));
+    if (list.isEmpty() && ! saved.isArray())
+        for (const auto& label : defaultLabels())
+            list.add (describeLabel (label));
+    return list;
+}
+
+juce::String Practice::labelsToText (const std::vector<Annotation>& all)
+{
+    juce::Array<juce::var> list;
+    for (const auto& a : all)
+    {
+        juce::Array<juce::var> labels;
+        for (const auto& l : a.labels)
+            labels.add (describeLabel (l));
+        list.add (object ({ { "kind", a.phrase ? "phrase" : "note" }, { "time", round3 (a.time) }, { "labels", labels } }));
+    }
+    return all.empty() ? juce::String() : juce::JSON::toString (juce::var (list), true);
+}
+
+std::vector<Practice::Annotation> Practice::labelsFromText (const juce::String& text)
+{
+    std::vector<Annotation> all;
+    const auto parsed = juce::JSON::parse (text);
+    if (const auto* list = parsed.getArray())
+        for (const auto& item : *list)
+        {
+            Annotation a;
+            a.phrase = item["kind"].toString() == "phrase";
+            a.time = (double) item["time"];
+            if (const auto* labels = item["labels"].getArray())
+                for (const auto& l : *labels)
+                    if (auto label = labelFromVar (l); label.text.isNotEmpty())
+                        a.labels.push_back (label);
+            if (! a.labels.empty() && std::isfinite (a.time))
+                all.push_back (std::move (a));
+        }
+    return all;
+}
+
+juce::var Practice::describeAnnotations() const
+{
+    // [{ kind, time (as it plays), labels: [label] }]
+    juce::Array<juce::var> list;
+    for (const auto& a : annotations)
+    {
+        juce::Array<juce::var> labels;
+        for (const auto& l : a.labels)
+            labels.add (describeLabel (l));
+        list.add (object ({ { "kind", a.phrase ? "phrase" : "note" }, { "time", round3 (toPlayingTime (a.time)) }, { "labels", labels } }));
+    }
+    return list;
+}
+
+void Practice::annotate (bool phrase, double originalTime, std::vector<Label> labels)
+{
+    // The note or phrase it's on: the one starting there (a hair either side).
+    const auto starts = [&]
+    {
+        std::vector<double> t;
+        if (phrase)
+            for (const auto& p : baseSong.phrases)
+                t.push_back (p.start);
+        else
+            for (const auto& n : baseSong.notes)
+                t.push_back (n.start);
+        return t;
+    }();
+    auto best = -1;
+    auto distance = 0.05;
+    for (int i = 0; i < (int) starts.size(); ++i)
+        if (std::abs (starts[(size_t) i] - originalTime) < distance)
+        {
+            distance = std::abs (starts[(size_t) i] - originalTime);
+            best = i;
+        }
+    if (best < 0)
+        return;
+
+    const auto time = starts[(size_t) best];
+    annotations.erase (std::remove_if (annotations.begin(), annotations.end(),
+                                       [&] (const Annotation& a) { return a.phrase == phrase && std::abs (a.time - time) < 1.0e-3; }),
+                       annotations.end());
+    if (! labels.empty())
+        annotations.push_back ({ phrase, time, std::move (labels) });
+    std::sort (annotations.begin(), annotations.end(), [] (const Annotation& a, const Annotation& b) { return a.time < b.time; });
+    saveAnnotations();
+    emit ("practice", object ({ { "state", "annotations" }, { "annotations", describeAnnotations() } }));
+}
+
+void Practice::saveAnnotations()
+{
+    if (songFolder == juce::File() || ! songFolder.isDirectory())
+        return;
+    const auto file = songFolder.getChildFile (labelsFileName);
+    const auto text = labelsToText (annotations);
+    if (text.isEmpty())
+        file.deleteFile();
+    else
+        file.replaceWithText (text);
+}
+
+//==============================================================================
+coach::Song Practice::readMelody (const juce::File& folder, const coach::Song& found)
+{
+    if (folder == juce::File())
+        return found;
+    const auto edited = folder.getChildFile (editedMelodyFileName);
+    if (! edited.existsAsFile())
+        return found;
+    auto song = coach::Song::fromString (edited.loadFileAsString());
+    return song.isEmpty() ? found : song;
+}
+
+coach::Song Practice::songFromNotes (const juce::var& flat)
+{
+    coach::Song result;
+    if (const auto* list = flat.getArray())
+        for (int i = 0; i + 2 < list->size(); i += 3)
+        {
+            coach::TargetNote n;
+            n.start = (double) (*list)[i];
+            n.end = (double) (*list)[i + 1];
+            n.pitch = (float) (double) (*list)[i + 2];
+            if (std::isfinite (n.start) && std::isfinite (n.end) && std::isfinite (n.pitch) && n.start >= 0.0 && n.end - n.start >= 0.02
+                && n.pitch >= 20.0f && n.pitch <= 110.0f)
+                result.notes.push_back (n);
+        }
+    std::stable_sort (result.notes.begin(), result.notes.end(), [] (const coach::TargetNote& a, const coach::TargetNote& b) { return a.start < b.start; });
+    // (a note can't run into the next: cut it back)
+    for (size_t i = 0; i + 1 < result.notes.size(); ++i)
+        result.notes[i].end = juce::jmin (result.notes[i].end, result.notes[i + 1].start);
+    result.notes.erase (std::remove_if (result.notes.begin(), result.notes.end(), [] (const coach::TargetNote& n) { return n.end - n.start < 0.02; }),
+                        result.notes.end());
+    coach::findPhrases (result);
+    return result;
+}
+
+bool Practice::isMelodyEdited() const
+{
+    return songFolder.isDirectory() && songFolder.getChildFile (editedMelodyFileName).existsAsFile();
+}
+
+// The notes to sing were changed by hand: the song goes on from here (a loop is left first).
+void Practice::useMelody (coach::Song edited)
+{
+    if (loop.active)
+        endLoop();
+    auto& multitrack = processor.getMultitrack();
+    setSong (std::move (edited));
+    song = baseSong.transformed (shift.semitones, shift.speed);
+    noteScores.assign (song.notes.size(), {});
+    phraseScores.assign (song.phrases.size(), {});
+    analysis::lyrics::timeWords (lyrics, baseSong);
+    restartFrom (multitrack.getPosition() / juce::jmax (1.0, multitrack.getSampleRate()));
+    emit ("practice", object ({ { "state", "ready" }, { "song", describeSong() }, { "fromCache", true }, { "quiet", true } }));
 }
 
 void Practice::saveLyrics()
