@@ -10510,6 +10510,32 @@ namespace
             check (std::abs (edit.getGuide().notes[0].start - 0.2) < 1.0e-9, "an undo step per change");
             run ("guide", { { "action", "clear" } });
             check (edit.getGuide().isEmpty() && session()["guide"].isVoid(), "cleared");
+
+            // A practice track from a MIDI file: the lead (higher, as busy as the other part), at 120 BPM.
+            {
+                daw::midifile::Song song;
+                daw::midifile::Part bass, lead, drums;
+                bass.name = "Bass";
+                lead.name = "Lead vocal";
+                drums.drums = true;
+                for (int i = 0; i < 4; ++i)
+                {
+                    bass.notes.push_back ({ 40, 100, (double) i, 1.0 });
+                    lead.notes.push_back ({ 67 + i, 100, (double) i, 0.5 });
+                    drums.notes.push_back ({ 36, 100, (double) i, 0.25 });
+                }
+                song.parts = { bass, lead, drums };
+                const auto midi = folder.getChildFile ("lead.mid");
+                juce::String reason;
+                check (daw::midifile::write (midi, song, reason), "the melody file is written");
+                const auto made = run ("guide", { { "action", "fromMidi" }, { "file", midi.getFullPathName() }, { "start", 2.0 } });
+                check ((bool) made["ok"] && edit.getGuide().name == "Lead vocal" && edit.getGuide().notes.size() == 4
+                           && edit.getGuide().notes[1].pitch == 68.0f && std::abs (edit.getGuide().notes[1].start - 2.5) < 0.01
+                           && std::abs (edit.getGuide().notes[1].end - 2.75) < 0.01,
+                       "the lead is the guide, from 2 s (" + juce::JSON::toString (made, true) + ")");
+                check (! (bool) run ("guide", { { "action", "fromMidi" }, { "file", folder.getChildFile ("nope.mid").getFullPathName() } })["ok"], "a missing file is an error");
+                run ("guide", { { "action", "clear" } });
+            }
         }
 
         // Detect: a keys track playing C, Am, F, G7 (a bar each at 120 BPM) and a "Vocal" on

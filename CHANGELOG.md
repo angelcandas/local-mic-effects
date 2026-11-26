@@ -7,6 +7,7 @@ haven't seen yet. To add an entry for your change, see "Adding entries" in
 
 ## 2026-11-26
 
+- **Practice labels on the lyrics line, and a practice track from a MIDI file.** The coach's cues for the line being sung (Grit, Piano, Prepare position...) show above the words of the karaoke line. In the DAW, File > New practice track from MIDI... turns the melody of a .mid file into the guide lane to sing along to while you record. (#236)
 - **Labels, a melody editor and a count-in for Practice.** Right-click a note in Practice to write a cue on it (Grit, Prepare position, Slower, Piano, Forte...) from a shared label library you can edit. Edit notes lets you fix the melody when backing singers confuse it: move, resize, split, merge or delete notes, or take a whole phrase out. A count-in before the song, and the Library now shows each song's best and last pass. (#235)
 - **Practice guide in the DAW.** Open in DAW from Practice now brings the song's melody along as a Guide lane under the ruler: the notes to sing scroll past as you record with a visual reference, not only the sound. Right-click it to nudge or remove it. (#234)
 - **Review your takes.** In Practice, Review take shows what you sang over the song's notes: your pitch coloured flat, in tune or sharp along the whole song, a score and what was off for each phrase, and a Where to focus list to hear or loop the weakest phrases. (#233)

@@ -317,8 +317,9 @@ export class PracticeView {
     this.karaoke.hidden = true;
     this.karaokeNow = html("div", "practice-karaoke-now");
     this.karaokeNext = html("div", "practice-karaoke-next");
-    this.karaoke.append(this.karaokeNow, this.karaokeNext);
-    this.karaokeLine = -2;
+    this.karaokeCues = html("div", "practice-karaoke-cues");
+    this.karaoke.append(this.karaokeCues, this.karaokeNow, this.karaokeNext);
+    this.karaokeLine = -2; this.karaokeCueLine = -2;
     this.buildLyricsEditor();
 
     // A modal card while a song is being prepared: nothing else in the view can be used meanwhile.
@@ -481,7 +482,7 @@ export class PracticeView {
       for (let i = 0; i + 1 < (line.words ?? []).length; i += 2) words.push({ text: line.words[i], start: Number(line.words[i + 1]) });
       return { ...line, start: Number(line.start), end: Number(line.end), words };
     });
-    this.karaokeLine = -2;
+    this.karaokeLine = -2; this.karaokeCueLine = -2;
     this.lyricsButton.classList.toggle("has-lyrics", this.lyrics.length > 0);
     if (!this.lyricsEditor.hidden) this.buildLyricsList();
   }
@@ -489,7 +490,7 @@ export class PracticeView {
   buildLyricsList() {
     const list = this.lyricsList;
     list.replaceChildren();
-    this.karaokeLine = -2; // (marks the line sung now again)
+    this.karaokeLine = -2; this.karaokeCueLine = -2; // (marks the line sung now again)
     if (!this.lyrics.length) {
       list.append(html("p", "practice-lyrics-note", this.song ? "No lyrics yet." : "Open a song first."));
       return;
@@ -520,6 +521,27 @@ export class PracticeView {
     // The line being sung, or the next one (shown a moment early).
     let index = lines.findIndex((l) => now < l.end + 0.3);
     if (index > 0 && now < lines[index].start - 0.6 && now < lines[index - 1].end + 1.5) index -= 1;
+    // The coach's cues for this line (the labels on its notes and phrases), above the words.
+    const marks = this.labels?.annotations;
+    if (marks !== this.karaokeMarks || index !== this.karaokeCueLine) {
+      this.karaokeMarks = marks;
+      this.karaokeCueLine = index;
+      const line = lines[index];
+      const seen = new Set();
+      const chips = [];
+      for (const a of line ? marks ?? [] : []) {
+        if (a.time < line.start - 0.05 || a.time > line.end + 0.05) continue;
+        for (const label of a.labels) {
+          if (seen.has(label.id + label.text)) continue;
+          seen.add(label.id + label.text);
+          const chip = html("span", "practice-label-chip is-small", "");
+          chip.style.setProperty("--label", label.colour);
+          chip.append(html("span", "practice-label-icon", label.icon), html("span", "", label.text));
+          chips.push(chip);
+        }
+      }
+      this.karaokeCues.replaceChildren(...chips);
+    }
     if (index !== this.karaokeLine) {
       this.karaokeLine = index;
       const line = lines[index];

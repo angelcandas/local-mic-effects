@@ -1665,6 +1665,7 @@ class DawScreen {
       rule();
       item("Import audio…", () => this.importAudio(), { shortcut: "Ctrl+I" });
       item("Import MIDI file…", () => this.importMidi(), { hint: "A .mid file: each of its parts becomes a MIDI track with a clip (drag one in from the library too)" });
+      item("New practice track from MIDI…", () => this.practiceTrackFromMidi(), { hint: "The melody of a .mid file as a lane of notes under the ruler, to sing along to while you record (no sound)" });
       item("Export…", () => this.toggleExportPanel(true), { shortcut: "Ctrl+Shift+R" });
     }, anchor);
   }
@@ -2340,6 +2341,13 @@ class DawScreen {
     if (!result?.ok) return;
     this.showWhenDrawn({ track: result.track, clip: result.clip, start: result.start });
     if (result.tempo) toast(`The project's tempo is now ${result.tempo} BPM, from the file.`, "", "undo");
+  }
+
+  // A practice track: the melody of a .mid file shown as the guide lane (ui/guidelane.js).
+  async practiceTrackFromMidi() {
+    const result = await daw("guide", { action: "fromMidi" });
+    if (result?.ok) toast(`Practice track ready: ${result.notes} notes to sing along to.`, "", "undo");
+    else if (result && !result.cancelled && result.error) toast(result.error, "is-error");
   }
 
   // Writes a MIDI clip or a MIDI track's notes to a .mid file.
