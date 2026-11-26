@@ -2728,6 +2728,56 @@ void Edit::setChords (std::vector<ChordMark> marks)
         state.setProperty (ids::chords, text, undoTarget);
 }
 
+//==============================================================================
+Edit::Guide Edit::parseGuide (const juce::String& text, const juce::String& name)
+{
+    Guide guide;
+    guide.name = name;
+    for (const auto& item : juce::StringArray::fromTokens (text, ";", ""))
+    {
+        const auto parts = juce::StringArray::fromTokens (item, ",", "");
+        if (parts.size() < 3)
+            continue;
+        GuideNote note { parts[0].getDoubleValue(), parts[1].getDoubleValue(), parts[2].getFloatValue() };
+        if (std::isfinite (note.start) && std::isfinite (note.end) && std::isfinite (note.pitch) && note.start >= 0.0
+            && note.end > note.start && note.pitch > 0.0f && note.pitch < 128.0f)
+            guide.notes.push_back (note);
+    }
+    std::stable_sort (guide.notes.begin(), guide.notes.end(), [] (const GuideNote& a, const GuideNote& b) { return a.start < b.start; });
+    return guide;
+}
+
+juce::String Edit::formatGuide (const Guide& guide)
+{
+    juce::StringArray items;
+    for (const auto& n : guide.notes)
+        items.add (juce::String (std::round (n.start * 1000.0) / 1000.0) + "," + juce::String (std::round (n.end * 1000.0) / 1000.0) + ","
+                   + juce::String (std::round (n.pitch * 100.0f) / 100.0f));
+    return items.joinIntoString (";");
+}
+
+Edit::Guide Edit::getGuide() const
+{
+    return parseGuide (state[ids::guide].toString(), state[ids::guideName].toString());
+}
+
+void Edit::setGuide (Guide guide)
+{
+    // (parsing again drops anything out of range and sorts it)
+    guide.name = guide.name.removeCharacters (";\n").trim();
+    const auto tidy = parseGuide (formatGuide (guide), guide.name);
+    if (tidy.isEmpty())
+    {
+        state.removeProperty (ids::guide, undoTarget);
+        state.removeProperty (ids::guideName, undoTarget);
+        return;
+    }
+    if (const auto text = formatGuide (tidy); text != state[ids::guide].toString())
+        state.setProperty (ids::guide, text, undoTarget);
+    if (tidy.name != state[ids::guideName].toString())
+        state.setProperty (ids::guideName, tidy.name, undoTarget);
+}
+
 void Edit::setChordAt (double beat, const juce::String& name)
 {
     auto marks = getChords();

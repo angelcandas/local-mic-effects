@@ -119,6 +119,10 @@ public:
                           float gainDecibels = 0.0f; bool muted = false; };
     juce::var addSingAlongTracks (const std::vector<SingAlongRow>&);
 
+    // The practice guide (a lane of notes to sing along to, no sound): Practice sends its melody
+    // along with the song's tracks. `notes` are { start, end, pitch } in seconds. One undo step.
+    void setPracticeGuide (const juce::String& name, const std::vector<daw::Edit::GuideNote>& notes);
+
     // The tests run outside the standalone app; this lets them switch DAW mode on.
     static inline bool availableForTesting = false;
 
@@ -240,6 +244,8 @@ private:
     juce::var handleChords (const juce::var& args);
     void finishChords();
     juce::var describeChords() const;
+    juce::var handleGuide (const juce::var& args);
+    juce::var describeGuide() const;
     int setAutotunesToKey();
 
     // Song map (src/analysis/Structure.h): sections, bars and the performance's tempo.

@@ -19,6 +19,7 @@ import { MixCheckView } from "./mixcheck.js";
 import { SongMapView } from "./songmap.js";
 import { TempoMap, createTempoLane, gridImage } from "./tempo.js";
 import { CHORD_ROW, createChordLane } from "./chordlane.js";
+import { GUIDE_ROW, createGuideLane } from "./guidelane.js";
 import { createPatternsPanel } from "./patterns.js";
 import { createLauncherPanel } from "./launcher.js";
 import { createPatternLane, drawGhosts } from "./patternlane.js";
@@ -1918,6 +1919,16 @@ class DawScreen {
     this.ruler.append(this.loopBand);
     rulerRow.append(corner, this.ruler);
 
+    // The practice guide: the notes of a song's melody to sing along to (ui/guidelane.js); shown while there is one.
+    this.guideRow = html("div", "guide-row");
+    const guideCorner = html("div", "corner guide-corner");
+    this.guideNow = html("span", "chord-now");
+    this.guideClear = button("tool", "Remove", "Remove the practice guide", () => daw("guide", { action: "clear" }));
+    guideCorner.append(html("span", "tempo-corner-name", "Guide"), this.guideNow, this.guideClear);
+    this.guideLane = createGuideLane(this, { daw, popMenu });
+    this.guideRow.append(guideCorner, this.guideLane.element);
+    this.guideRow.hidden = true;
+
     // The chord track, under the ruler (shown with the Chords button; ui/chordlane.js).
     this.chordRow = html("div", "chord-row");
     const chordCorner = html("div", "corner chord-corner");
@@ -1981,7 +1992,7 @@ class DawScreen {
 
     this.cutGuide = html("div", "cut-guide");
     this.cutGuide.hidden = true;
-    this.inner.append(rulerRow, this.chordRow, this.tempoRow, this.patternRow, this.rows, this.pinned, this.loopShade, this.playhead, this.cutGuide);
+    this.inner.append(rulerRow, this.guideRow, this.chordRow, this.tempoRow, this.patternRow, this.rows, this.pinned, this.loopShade, this.playhead, this.cutGuide);
 
     // Scrolling by hand while playing switches Follow off, so you can look around
     // (and edit) elsewhere while the song keeps playing.
@@ -2371,7 +2382,7 @@ class DawScreen {
       (session.returns ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
       (session.groups ?? []).map(({ inserts, ...bus }) => [bus, inserts.length]),
       session.patterns, session.patternClips, this.selectedPatternClip,
-      session.master.volume, session.master.inserts.length, session.tempo, session.tempoMap, this.showTempo, session.chords, this.showChords, session.loop, session.beatsPerBar, session.markers,
+      session.master.volume, session.master.inserts.length, session.tempo, session.tempoMap, this.showTempo, session.chords, this.showChords, session.guide, session.loop, session.beatsPerBar, session.markers,
       this.zoom, width, this.selectedTrack, this.selectedClip, this.snap, this.rowHeight, this.takes.version, this.automation.version,
       this.headWidth, [...this.trackHeights], [...this.folded],
       this.showRouting, this.showSends, this.pinnedFolded, session.master.pan,
@@ -2393,9 +2404,14 @@ class DawScreen {
       this.inner.style.setProperty("--grid-image", gridImage(this.tempoMap, this.beatsPerBar, this.zoom, width));
       this.inner.style.setProperty("--grid-width", `${Math.ceil(width)}px`);
     }
+    const hasGuide = Boolean(session.guide);
+    this.guideRow.hidden = !hasGuide;
+    if (hasGuide) this.guideLane.update(session, width);
+    const guideHeight = hasGuide ? GUIDE_ROW : 0;
+    this.chordRow.style.top = `${30 + guideHeight}px`;
     this.chordRow.hidden = !this.showChords;
     if (this.showChords) this.chordLane.update(session, width);
-    const chordHeight = this.showChords ? CHORD_ROW : 0;
+    const chordHeight = (this.showChords ? CHORD_ROW : 0) + guideHeight;
     this.tempoRow.style.top = `${30 + chordHeight}px`;
     this.tempoRow.hidden = !this.showTempo;
     if (this.showTempo) this.tempoLane.update(session, width);
@@ -3473,6 +3489,10 @@ class DawScreen {
 
   movePlayhead(force = false) {
     if (!this.tempoMap.steady) this.showTempoValue();
+    if (this.guideNow && !this.guideRow.hidden) {
+      const name = this.guideLane.nameAt(Math.max(0, this.status.position));
+      if (this.guideNow.textContent !== name) this.guideNow.textContent = name;
+    }
     if (this.showChords && this.chordNow) {
       const name = this.chordLane.nameAt(Math.max(0, this.status.position));
       if (this.chordNow.textContent !== name) this.chordNow.textContent = name;

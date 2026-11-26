@@ -225,6 +225,8 @@ public:
     //==============================================================================
     // Live scoring, exposed for the tests.
     const analysis::coach::Song& getSong() const noexcept { return song; }
+    const analysis::coach::Song& getBaseSong() const noexcept { return baseSong; } // the whole song as it is
+    const juce::String& getSongName() const noexcept { return songName; }
     void setSong (analysis::coach::Song);
     // Pitch frames in song time, as tick() adds them while the song plays, then scores
     // every note and phrase that has ended by `songTime`.

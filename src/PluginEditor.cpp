@@ -1037,7 +1037,17 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                                                  (double) track->start / rate, (double) track->audio.getNumSamples() / rate,
                                                  juce::Decibels::gainToDecibels (track->gain.load(), -60.0f), track->muted.load() });
                            }
-                           complete (daw->addSingAlongTracks (rows));
+                           const auto result = daw->addSingAlongTracks (rows);
+
+                           // A Practice song goes along with its melody: a guide lane to sing to while recording.
+                           if (result.getProperty ("ok", false) && practice != nullptr && ! practice->getBaseSong().isEmpty())
+                           {
+                               std::vector<daw::Edit::GuideNote> notes;
+                               for (const auto& n : practice->getBaseSong().notes)
+                                   notes.push_back ({ n.start, n.end, n.pitch });
+                               daw->setPracticeGuide (practice->getSongName(), notes);
+                           }
+                           complete (result);
                        })
 
                        // (id, { gain?, muted? }) -> undefined

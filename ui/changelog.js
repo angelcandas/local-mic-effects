@@ -1,10 +1,17 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 233,
+ "latest": 234,
  "days": [
   {
    "date": "2026-11-26",
    "entries": [
+    {
+     "title": "Practice guide in the DAW",
+     "text": "Open in DAW from Practice now brings the song's melody along as a Guide lane under the ruler: the notes to sing scroll past as you record with a visual reference, not only the sound. Right-click it to nudge or remove it.",
+     "prs": [
+      234
+     ]
+    },
     {
      "title": "Review your takes",
      "text": "In Practice, Review take shows what you sang over the song's notes: your pitch coloured flat, in tune or sharp along the whole song, a score and what was off for each phrase, and a Where to focus list to hear or loop the weakest phrases.",
