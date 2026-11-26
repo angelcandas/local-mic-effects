@@ -159,6 +159,13 @@ void Multitrack::addTake (const juce::File& file, juce::int64 startSample)
     startLoad (file, true, startSample, nextId++);
 }
 
+void Multitrack::addTake (const juce::File& file, juce::int64 startSample, float gain, bool muted)
+{
+    const auto id = nextId++;
+    pendingMix[id] = { gain, muted };
+    startLoad (file, true, startSample, id);
+}
+
 int Multitrack::addAudio (const juce::String& name, juce::AudioBuffer<float>&& audio, juce::int64 startSample)
 {
     const auto id = nextId++;
@@ -275,6 +282,12 @@ void Multitrack::install (std::shared_ptr<Track> track)
         track->muted = mix->second.second;
         pendingMix.erase (mix);
     }
+
+    // The same take twice (the session and Practice both bringing it back) is kept once.
+    if (track->isTake && track->file != juce::File())
+        for (const auto& t : tracks)
+            if (t->isTake && t->file == track->file && t->start == track->start)
+                return;
 
     const auto it = std::lower_bound (tracks.begin(), tracks.end(), track->id,
                                       [] (const auto& t, int id) { return t->id < id; });

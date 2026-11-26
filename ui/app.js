@@ -1480,9 +1480,12 @@ class Tracks {
   }
 
   async refresh() {
-    const tracks = (await this.getTracks()) ?? [];
+    // The song's rows first, then your recordings under their own heading.
+    const tracks = [...((await this.getTracks()) ?? [])].sort((a, b) => Number(a.isTake) - Number(b.isTake));
     const seen = new Set();
     let takeNumber = 0;
+    this.takesHeading ??= html("div", "track-group", "Your recordings");
+    this.takesHeading.remove();
 
     for (const track of tracks) {
       seen.add(track.id);
@@ -1494,7 +1497,8 @@ class Tracks {
       row.mute.setAttribute("aria-pressed", String(track.muted));
       row.element.classList.toggle("is-muted", track.muted);
       row.volume.value = String(Math.round(Math.sqrt(track.gain) * 100));
-      this.rowsElement.append(row.element); // keeps rows in track order
+      if (track.isTake && takeNumber === 1) this.rowsElement.append(this.takesHeading);
+      this.rowsElement.append(row.element); // the song's rows, then the recordings
     }
 
     for (const [id, row] of this.rows) {

@@ -70,6 +70,8 @@ public:
     // and onTracksChanged fires. Errors are reported through onError.
     void loadBackingTrack (const juce::File&);
     void addTake (const juce::File&, juce::int64 startSample);
+    // A take that was kept before, with its volume and mute.
+    void addTake (const juce::File&, juce::int64 startSample, float gain, bool muted);
 
     // Audio already in memory at the session rate (e.g. a rendered copy), as a backing
     // track named `name`. Returns its id.

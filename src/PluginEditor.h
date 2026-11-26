@@ -93,6 +93,7 @@ private:
     int looperTicks = 0;
     juce::var describeWindow() const;
     juce::int64 getRoundTripLatency();
+    juce::int64 getOutputLatency(); // the interface's output latency alone (0 in a plug-in)
     juce::int64 getDeviceLatency(); // the audio interface's input + output latency
 
     juce::File lastTakeOnTimeline;

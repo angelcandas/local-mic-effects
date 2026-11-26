@@ -116,6 +116,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
                                            [this] (const juce::Identifier& event, const juce::var& payload)
                                            { webView->emitEventIfBrowserIsVisible (event, payload); },
                                            [this] { return getDeviceLatency(); });
+    practice->outputLatency = [this] { return getOutputLatency(); };
 
    #if JucePlugin_Build_Standalone
     // The app's audio interface: its open inputs by name, for the tracks' input pickers.
@@ -1600,6 +1601,17 @@ juce::int64 PluginEditor::getDeviceLatency()
    #endif
 
     return latency;
+}
+
+juce::int64 PluginEditor::getOutputLatency()
+{
+   #if JucePlugin_Build_Standalone
+    if (juce::JUCEApplicationBase::isStandaloneApp())
+        if (auto* holder = juce::StandalonePluginHolder::getInstance())
+            if (auto* device = holder->deviceManager.getCurrentAudioDevice())
+                return device->getOutputLatencyInSamples();
+   #endif
+    return 0;
 }
 
 juce::File PluginEditor::getRecordingFolder()

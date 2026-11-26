@@ -1741,3 +1741,6 @@ body.is-daw .setlist-drawer, body.is-daw .stage-view { display: none; }
 .feedback-notches .mini { flex: none; width: auto; height: auto; white-space: nowrap; padding: 3px 9px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel-raised); color: var(--muted); font: inherit; cursor: pointer; }
 .feedback-notches .mini:hover:not(:disabled) { color: var(--text); }
 .feedback-notches .mini:disabled { opacity: 0.4; cursor: default; }
+
+/* The Live track list: a heading above the recordings, apart from the song's own rows. */
+.track-group { padding: 8px 4px 2px; color: var(--muted); font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; }

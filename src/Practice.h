@@ -53,6 +53,7 @@ public:
     //   "cancel"                   stops a preparation
     //   "view" { open }            the view opened or closed (follows the singer while open)
     //   "guide" { level }          the guide vocal's level (0..1.5 gain, 0 mutes it)
+    //   "sync" { ms }              moves the picture of the notes -200..200 ms against the sound (to match what you hear)
     //   "reset"                    forgets this pass's scores
     //   "report"                   -> describeReport()
     //   "loop" { phrase, speed, semitones } loops one phrase (with a lead-in), slower and/or in
@@ -72,6 +73,10 @@ public:
     //                { line, at }  or starts it at `at` (the song's time now, e.g. the playhead)
     // Lyrics are sent in the song's time as it plays (after a speed change or in a loop),
     // in describeSong()'s "lyrics"; "practice" { state: "lyrics", lyrics } after a change.
+    // Samples between the song leaving the app and being heard (the interface's output latency): where the
+    // notes are drawn. Without it the picture uses the whole round trip.
+    std::function<juce::int64()> outputLatency;
+
     juce::var handle (const juce::String& action, const juce::var& options);
 
     // About 30 times a second (the editor's timer).
@@ -169,6 +174,9 @@ public:
     static std::vector<analysis::structure::Section> sectionsFromText (const juce::String&);
     static constexpr const char* sectionsFileName = "sections-v1.txt";
     static constexpr const char* lyricsFileName = "lyrics-v1.txt";
+    // The takes recorded over this song (file, place, volume, mute), kept in its folder so
+    // they come back whenever the song is opened again.
+    static constexpr const char* takesFileName = "takes-v1.txt";
 
     const analysis::lyrics::Lyrics& getLyrics() const noexcept { return lyrics; }
     void setLyrics (const juce::String& text); // as the "lyrics" action
@@ -262,6 +270,9 @@ private:
     juce::File songFolder; // its cache folder
     analysis::lyrics::Lyrics lyrics; // in the song as it is
     float guideLevel = 0.35f;
+    double visualSyncMs = 0.0; // the notes' picture against the sound
+    juce::String takesSeen;     // the takes as last written (or read)
+    bool takesReady = false;    // the song's own takes have loaded: from now on changes are written
     bool guidePending = false; // the guide track hasn't loaded yet: set its level when it does
     bool viewOpen = false;
 
@@ -302,6 +313,9 @@ private:
     juce::ThreadPool saver { juce::ThreadPoolOptions{}.withThreadName ("MicFX key and speed saver").withNumberOfThreads (1) };
     void dropShift (Shift&);
     void saveShift();
+    void restoreTakes();
+    void saveTakesIfChanged();
+    juce::String takesSignature() const;
 
     // The song's sections.
     std::vector<analysis::structure::Section> sections;
