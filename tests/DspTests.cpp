@@ -12145,7 +12145,7 @@ namespace
         }
         const auto heardTrack = pitch::analyse (heardAudio, sampleRate);
         const auto g4 = pitch::getPitch (heardTrack, 2.7 / 0.75, 3.0 / 0.75);
-        check (std::abs (g4 - 69.0f) < 0.5f, "live: F4 is heard as G4 at 75% speed (" + juce::String (g4, 2) + ")");
+        check (std::abs (g4 - 67.0f) < 0.5f, "live: F4 is heard as G4 at 75% speed (" + juce::String (g4, 2) + ")");
 
         // Back to the original, at the same place in the song.
         multitrack.seek ((juce::int64) (3.0 * sampleRate));
