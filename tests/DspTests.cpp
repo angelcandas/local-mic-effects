@@ -12319,6 +12319,34 @@ namespace
         check (! practice.isLooping() && multitrack.getTracks().size() == 1 && ! multitrack.getTracks()[0]->muted.load(),
                "leaving it removes the copy and brings the song back");
         multitrack.pause();
+
+        // Take review: a take of the voice sung right is looked at again and scored phrase by phrase.
+        {
+            juce::TemporaryFile takeFile (".wav");
+            writeWav (takeFile.getFile(), voice, sampleRate);
+            const auto id = multitrack.loadNow (takeFile.getFile(), true, 0);
+            auto listed = practice.handle ("takes", {});
+            check (id >= 0 && listed.size() == 1 && (int) listed[0]["id"] == id && std::abs ((double) listed[0]["speed"] - 1.0) < 1e-9,
+                   "the takes over the song are listed with the speed they were sung at");
+
+            auto reviewOptions = new juce::DynamicObject();
+            reviewOptions->setProperty ("id", id);
+            events.clear();
+            practice.handle ("review", juce::var (reviewOptions));
+            juce::var review;
+            for (int i = 0; i < 800 && review.isVoid(); ++i)
+            {
+                juce::Thread::sleep (25);
+                practice.tick();
+                for (const auto& e : events)
+                    if (e["id"].toString() == "practice" && e["v"]["state"].toString() == "review")
+                        review = e["v"]["review"];
+            }
+            check (review.isObject() && (int) review["take"] == id && review["frames"].size() > 100 && review["phraseScores"].size() == 2
+                       && (double) review["score"] > 80.0,
+                   "a take in tune is reviewed: its pitch every 20 ms and a score for each phrase (" + review["score"].toString() + ")");
+            practice.handle ("stopReview", {});
+        }
     }
 
     void testPitchNotes()

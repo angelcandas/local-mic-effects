@@ -5,6 +5,10 @@ What changed in MicFX, newest first, in plain language. The app shows it under
 haven't seen yet. To add an entry for your change, see "Adding entries" in
 `docs/changelog.md`.
 
+## 2026-11-26
+
+- **Review your takes.** In Practice, Review take shows what you sang over the song's notes: your pitch coloured flat, in tune or sharp along the whole song, a score and what was off for each phrase, and a Where to focus list to hear or loop the weakest phrases. (#233)
+
 ## 2026-11-25
 
 - **Arrange with sections, and mix versions.** Drag a song section on the ruler to move it and its music on every track, or right-click it to duplicate or delete it: automation, tempo changes and chords go along. The new Versions button keeps your mix as a version so you can try another and switch between them to compare. (#231)
