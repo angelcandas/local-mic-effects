@@ -10493,6 +10493,25 @@ namespace
         run ("chords", { { "action", "set" }, { "chords", juce::Array<juce::var>() } });
         check (edit.getChords().empty(), "set with nothing clears the chord track");
 
+        // The practice guide: notes to sing along to, kept in seconds, one undo step.
+        {
+            juce::Array<juce::var> notes;
+            for (const auto& [a, b, p] : std::vector<std::tuple<double, double, double>> { { 1.0, 1.5, 60.0 }, { 0.2, 0.9, 64.5 }, { 3.0, 2.0, 62.0 } })
+                notes.add (juce::Array<juce::var> { a, b, p });
+            check ((bool) run ("guide", { { "action", "set" }, { "name", "Demo" }, { "notes", notes } })["ok"], "a guide is set");
+            auto described = session()["guide"];
+            check (edit.getGuide().notes.size() == 2 && edit.getGuide().notes[0].pitch == 64.5f && described["name"].toString() == "Demo"
+                       && described["notes"].size() == 6 && std::abs ((double) described["notes"][3] - 1.0) < 1.0e-9,
+                   "sorted, the note that ends before it starts is dropped (" + juce::JSON::toString (described, true) + ")");
+            run ("guide", { { "action", "shift" }, { "by", 0.5 } });
+            check (std::abs (edit.getGuide().notes[0].start - 0.7) < 1.0e-9, "moved later");
+            check (! (bool) run ("guide", { { "action", "shift" }, { "by", -5.0 } })["ok"], "not before the start");
+            edit.getUndoManager().undo();
+            check (std::abs (edit.getGuide().notes[0].start - 0.2) < 1.0e-9, "an undo step per change");
+            run ("guide", { { "action", "clear" } });
+            check (edit.getGuide().isEmpty() && session()["guide"].isVoid(), "cleared");
+        }
+
         // Detect: a keys track playing C, Am, F, G7 (a bar each at 120 BPM) and a "Vocal" on
         // F# all along, which is left out.
         const auto keys = folder.getChildFile ("keys.wav"), vocal = folder.getChildFile ("vocal.wav");

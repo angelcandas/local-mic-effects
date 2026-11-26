@@ -409,7 +409,7 @@ namespace
             { "defineTempo", "Tempo definition" }, { "tempoFromClip", "Project tempo from clip" }, { "stretchClip", "Stretch clip" },
             { "flattenClip", "Make warp permanent" }, { "quantize", "Quantize" }, { "alignVoice", "Align to lead" }, { "setHitpoints", "Hitpoints" }, { "hitpointAction", "Hitpoints" }, { "setWarp", "Warp" }, { "clearWarp", "Clear warp" }, { "detectTempo", "Detect tempo" },
             { "addInstrument", "Change instrument" }, { "addMidiFx", "Add MIDI effect" }, { "setMidiFx", "MIDI effect change" },
-            { "removeMidiFx", "Remove MIDI effect" }, { "moveMidiFx", "Move MIDI effect" }, { "key", "Song key" }, { "chords", "Chord track" }, { "fitChain", "Fit to this track" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
+            { "removeMidiFx", "Remove MIDI effect" }, { "moveMidiFx", "Move MIDI effect" }, { "key", "Song key" }, { "chords", "Chord track" }, { "guide", "Practice guide" }, { "fitChain", "Fit to this track" }, { "songMap", "Song map" }, { "clearMuteSolo", "Clear mute and solo" },
             { "soloExclusive", "Solo" }, { "import", "Import" }, { "importFile", "Import" }, { "autoMix", "Auto Mix" }, { "mixCheck", "Mix Check" },
             { "addStarterPattern", "Add starter pattern" },
             { "addPattern", "New pattern" }, { "setPattern", "Pattern change" }, { "removePattern", "Delete pattern" },
@@ -1137,6 +1137,7 @@ juce::var DawBridge::describeSession()
         { "key", object ({ { "key", edit.getKey() }, { "minor", edit.isKeyMinor() },
                            { "name", analysis::KeyEstimate::getName (edit.getKey(), edit.isKeyMinor()) } }) },
         { "chords", describeChords() },
+        { "guide", describeGuide() },
         // Mix versions (Edit::addMixVersion): { current, previous (ids, -1: none), versions: [{ id, name }] }.
         { "mixes", [this]
           {
@@ -5041,6 +5042,73 @@ juce::var DawBridge::describeChords() const
 }
 
 //==============================================================================
+// The "guide" command (the practice guide: notes to sing along to, shown as a lane under the ruler);
+// args.action is one of:
+//   set     { name?, notes: [[start, end, pitch], ...] }   the whole guide (seconds of the timeline)
+//   shift   { by }                                         moves every note by `by` seconds
+//   clear   removes it
+// Every change is one undo step. The session's "guide" is { name, notes: [start, end, pitch, ...] } or null.
+juce::var DawBridge::handleGuide (const juce::var& args)
+{
+    const auto action = args["action"].toString();
+    auto guide = edit.getGuide();
+    if (action == "clear")
+    {
+        guide = {};
+    }
+    else if (action == "shift")
+    {
+        const auto by = (double) args["by"];
+        for (auto& n : guide.notes)
+        {
+            n.start += by;
+            n.end += by;
+        }
+        if (! guide.notes.empty() && guide.notes.front().start < 0.0)
+            return error ("The guide can't start before the beginning of the song.");
+    }
+    else if (action == "set")
+    {
+        guide = {};
+        guide.name = args["name"].toString();
+        if (const auto* list = args["notes"].getArray())
+            for (const auto& item : *list)
+                if (const auto* values = item.getArray(); values != nullptr && values->size() >= 3)
+                    guide.notes.push_back ({ (double) (*values)[0], (double) (*values)[1], (float) (double) (*values)[2] });
+    }
+    else
+        return error ("guide: action is set, shift or clear.");
+
+    edit.setGuide (std::move (guide));
+    return object ({ { "ok", true }, { "guide", describeGuide() } });
+}
+
+void DawBridge::setPracticeGuide (const juce::String& name, const std::vector<daw::Edit::GuideNote>& notes)
+{
+    daw::Edit::Guide guide;
+    guide.name = name;
+    guide.notes = notes;
+    edit.getUndoManager().beginNewTransaction ("Practice guide");
+    edit.setGuide (std::move (guide));
+    edit.getUndoManager().beginNewTransaction();
+}
+
+juce::var DawBridge::describeGuide() const
+{
+    const auto guide = edit.getGuide();
+    if (guide.isEmpty())
+        return {};
+    juce::Array<juce::var> flat;
+    for (const auto& n : guide.notes)
+    {
+        flat.add (std::round (n.start * 1000.0) / 1000.0);
+        flat.add (std::round (n.end * 1000.0) / 1000.0);
+        flat.add (std::round (n.pitch * 100.0f) / 100.0f);
+    }
+    return object ({ { "name", guide.name }, { "notes", flat } });
+}
+
+//==============================================================================
 // "fitChain" { action, track }: fit the track's chain to its voice (vocal effects V5).
 // The chain's effects and character stay; only what depends on how loud the voice and
 // the room arrive is set (analysis::fit): the chain's input gain (the voice to -18 LUFS,
@@ -8243,6 +8311,12 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     if (command == "chords")
     {
         complete (handleChords (args));
+        return;
+    }
+
+    if (command == "guide")
+    {
+        complete (handleGuide (args));
         return;
     }
 

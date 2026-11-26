@@ -58,6 +58,7 @@ juce_add_binary_data(MicFX_WebUI
         ui/pitchedit.js
         ui/tempo.js
         ui/chordlane.js
+        ui/guidelane.js
         ui/patterns.js
         ui/patterns.css
         ui/launcher.js

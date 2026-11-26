@@ -15,7 +15,9 @@
 //
 //   PROJECT  version, tempo, tempoChanges, beatsPerBar, loopOn, loopStart, loopEnd, viewState,
 //            key, keyMinor, chords (the chord track: "0:C;4:Am;8:F/A", beats and chord names in
-//            beat order, see getChords; missing when there is none)
+//            beat order, see getChords; missing when there is none),
+//            guide (the practice guide, notes to sing as a visual reference: "start,end,pitch;..." in
+//            seconds, see getGuide; missing when there is none), guideName
 //     MARKER  id, name, time
 //             (a song section from the song map also has length (seconds), colour, section
 //              (its kind: "intro", "verse", "chorus", "bridge", "outro", "part") and letter
@@ -134,7 +136,7 @@ namespace ids
     MICFX_DAW_ID (kind) MICFX_DAW_ID (INSTRUMENT) MICFX_DAW_ID (plugin) MICFX_DAW_ID (format) MICFX_DAW_ID (vendor)
     MICFX_DAW_ID (description) MICFX_DAW_ID (state) MICFX_DAW_ID (NOTE) MICFX_DAW_ID (CTRL) MICFX_DAW_ID (MIDIFX) MICFX_DAW_ID (number) MICFX_DAW_ID (pitch) MICFX_DAW_ID (velocity)
     MICFX_DAW_ID (inGain) MICFX_DAW_ID (outGain)
-    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (chords) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (mixPriority) MICFX_DAW_ID (autoMixAudition) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
+    MICFX_DAW_ID (key) MICFX_DAW_ID (keyMinor) MICFX_DAW_ID (chords) MICFX_DAW_ID (guide) MICFX_DAW_ID (guideName) MICFX_DAW_ID (mixRole) MICFX_DAW_ID (mixPriority) MICFX_DAW_ID (autoMixAudition) MICFX_DAW_ID (ride) MICFX_DAW_ID (automation)
     MICFX_DAW_ID (RETURN) MICFX_DAW_ID (SEND) MICFX_DAW_ID (target) MICFX_DAW_ID (level) MICFX_DAW_ID (pre)
     MICFX_DAW_ID (output) MICFX_DAW_ID (defaultReturns) MICFX_DAW_ID (group) MICFX_DAW_ID (folded)
     MICFX_DAW_ID (stretch) MICFX_DAW_ID (formant) MICFX_DAW_ID (tempoChanges) MICFX_DAW_ID (musical) MICFX_DAW_ID (clipTempo) MICFX_DAW_ID (link)
@@ -337,6 +339,24 @@ public:
     // One chord at a beat (replacing one there), or removes the chord at that beat.
     void setChordAt (double beat, const juce::String& name);
     void removeChordAt (double beat);
+    // The practice guide: the melody of a song to sing (Practice's "Send to DAW", or typed in the DAW),
+    // drawn as a lane of notes under the ruler for recording with a visual reference. Notes are in
+    // seconds of the timeline (as the song's own tracks sit); it makes no sound.
+    struct GuideNote
+    {
+        double start = 0.0, end = 0.0;
+        float pitch = 0.0f; // MIDI note number, fractions are cents
+    };
+    struct Guide
+    {
+        juce::String name;
+        std::vector<GuideNote> notes; // in time order
+        bool isEmpty() const noexcept { return notes.empty(); }
+    };
+    Guide getGuide() const;
+    void setGuide (Guide); // sorted and tidied; empty removes it
+    static Guide parseGuide (const juce::String& text, const juce::String& name);
+    static juce::String formatGuide (const Guide&);
     static std::vector<ChordMark> parseChords (const juce::String&);
     static juce::String formatChords (const std::vector<ChordMark>&);
 
