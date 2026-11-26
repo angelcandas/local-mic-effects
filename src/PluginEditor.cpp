@@ -116,6 +116,7 @@ PluginEditor::PluginEditor (PluginProcessor& p)
                                            [this] (const juce::Identifier& event, const juce::var& payload)
                                            { webView->emitEventIfBrowserIsVisible (event, payload); },
                                            [this] { return getDeviceLatency(); });
+    practice->outputLatency = [this] { return getOutputLatency(); };
 
    #if JucePlugin_Build_Standalone
     // The app's audio interface: its open inputs by name, for the tracks' input pickers.
@@ -1558,16 +1559,20 @@ juce::var PluginEditor::describeTracks()
 
     for (const auto& track : multitrack.getTracks())
     {
+        if (track->name.endsWith (" (new key)"))
+            continue; // Practice's better-sounding copy of the song in another key: not a row of its own
         auto* entry = new juce::DynamicObject();
         entry->setProperty ("id", track->id);
         entry->setProperty ("name", track->name);
         entry->setProperty ("file", track->file.getFullPathName());
         entry->setProperty ("isTake", track->isTake);
         entry->setProperty ("start", (double) track->start / rate);
-        entry->setProperty ("length", (double) track->audio.getNumSamples() / rate);
+        // (a song track in another speed is longer or shorter on the timeline)
+        const auto stretch = track->stretched.load() ? 1.0 / multitrack.getSongSpeed() : 1.0;
+        entry->setProperty ("length", (double) track->audio.getNumSamples() / rate * stretch);
         entry->setProperty ("gain", track->gain.load());
         entry->setProperty ("muted", track->muted.load());
-        entry->setProperty ("peakSeconds", Multitrack::peakSeconds);
+        entry->setProperty ("peakSeconds", Multitrack::peakSeconds * stretch);
 
         juce::Array<juce::var> peaks;
         peaks.ensureStorageAllocated (track->peaks.size());
@@ -1600,6 +1605,17 @@ juce::int64 PluginEditor::getDeviceLatency()
    #endif
 
     return latency;
+}
+
+juce::int64 PluginEditor::getOutputLatency()
+{
+   #if JucePlugin_Build_Standalone
+    if (juce::JUCEApplicationBase::isStandaloneApp())
+        if (auto* holder = juce::StandalonePluginHolder::getInstance())
+            if (auto* device = holder->deviceManager.getCurrentAudioDevice())
+                return device->getOutputLatencyInSamples();
+   #endif
+    return 0;
 }
 
 juce::File PluginEditor::getRecordingFolder()

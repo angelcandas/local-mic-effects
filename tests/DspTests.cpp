@@ -12111,29 +12111,14 @@ namespace
         auto* lyricOptions = new juce::DynamicObject();
         lyricOptions->setProperty ("text", "La la la la la\nLa la la la la la");
         const auto lyricsBefore = practice.handle ("lyrics", juce::var (lyricOptions));
-        const auto started = juce::Time::getMillisecondCounterHiRes();
         speedTo (0.75, 2.0);
-        check (practice.isShiftPending() && multitrack.getTracks().size() == 4, "the change is on its way, on two new tracks");
-        auto swappedAfter = -1.0;
-        for (int i = 0; i < 4000 && practice.isShiftRendering(); ++i)
-        {
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
-            practice.tick();
-            if (swappedAfter < 0.0 && ! practice.isShiftPending())
-            {
-                swappedAfter = juce::Time::getMillisecondCounterHiRes() - started;
-                // Where we were (2 s, the transport doesn't move here) in the slower copy.
-                check (std::abs (multitrack.getPosition() / sampleRate - 2.0 / 0.75) < 0.01 && practice.isShiftRendering(),
-                       "it's swapped in at the same place in the song (" + juce::String (multitrack.getPosition() / sampleRate, 2) + " s), the rest still rendering");
-            }
-        }
-        std::cout << "    (heard after " << juce::String (swappedAfter, 0) << " ms, all rendered after "
-                  << juce::String (juce::Time::getMillisecondCounterHiRes() - started, 0) << " ms)\n";
-        const auto tracks = multitrack.getTracks();
         const auto heard = [&] { juce::StringArray names; for (const auto& t : multitrack.getTracks()) if (! t->muted.load()) names.add (t->name); return names.joinIntoString (", "); };
-        check (swappedAfter >= 0.0 && std::abs (practice.getSpeed() - 0.75) < 1e-9 && std::abs (practice.getSemitones() - 2.0) < 1e-9
-                   && heard() == "Backing (new key), Guide (new key)",
-               "the new key and speed are heard instead of the song (" + heard() + ")");
+        check (! practice.isShiftRendering() && multitrack.getTracks().size() == 2 && heard() == "Backing (no voice), Guide voice",
+               "the change is live: no new tracks, the song's own are heard (" + heard() + ")");
+        check (std::abs (practice.getSpeed() - 0.75) < 1e-9 && std::abs (practice.getSemitones() - 2.0) < 1e-9
+                   && std::abs (multitrack.getPosition() / sampleRate - 2.0 / 0.75) < 0.01
+                   && std::abs (multitrack.getLength() / sampleRate - voice.getNumSamples() / sampleRate / 0.75) < 0.05,
+               "at the same place in the song (" + juce::String (multitrack.getPosition() / sampleRate, 2) + " s), the timeline longer by the speed");
         const auto lyricsAfter = juce::JSON::parse (juce::JSON::toString (practice.describe()))["song"]["lyrics"];
         check (lyricsBefore.size() == 2 && lyricsAfter.size() == 2
                    && std::abs ((double) lyricsAfter[1]["start"] - (double) lyricsBefore[1]["start"] / 0.75) < 0.01,
@@ -12142,62 +12127,40 @@ namespace
                    && std::abs (practice.getSong().notes[0].pitch - prepared.song.notes[0].pitch - 2.0f) < 1e-4f,
                "the notes to sing move with it");
 
-        // The copy matches the warp engine's render of the whole guide.
-        std::shared_ptr<const Multitrack::Track> guideCopy;
-        for (const auto& t : tracks)
-            if (t->name == "Guide (new key)")
-                guideCopy = t;
-        const auto reference = Practice::renderLoop (nullptr, &voice, sampleRate, 0.0, voice.getNumSamples() / sampleRate, 0.75, 2.0);
-        if (guideCopy != nullptr && guideCopy->audio.getNumSamples() == reference.guide.getNumSamples())
+        // What's heard: the guide alone, played through from the start, sings F4 two semitones higher (G4),
+        // 1/0.75 times later.
+        for (const auto& t : multitrack.getTracks())
+            multitrack.setTrackMuted (t->id, t->file != prepared.guide), multitrack.setTrackGain (t->id, 1.0f);
+        multitrack.seek (0);
+        multitrack.play();
+        const auto seconds = 3.2 / 0.75;
+        juce::AudioBuffer<float> heardAudio (1, (int) (seconds * sampleRate));
+        heardAudio.clear();
+        for (int done = 0; done < heardAudio.getNumSamples(); done += 512)
         {
-            auto worst = 0.0f;
-            for (int i = 0; i < reference.guide.getNumSamples(); ++i)
-                worst = juce::jmax (worst, std::abs (guideCopy->audio.getSample (0, i) - reference.guide.getSample (0, i)));
-            const auto copyTrack = pitch::analyse (guideCopy->audio, sampleRate);
-            const auto f4 = pitch::getPitch (copyTrack, 2.7 / 0.75, 3.0 / 0.75);
-            check (worst < 1e-3f && std::abs (f4 - 67.0f) < 0.2f && guideCopy->fill->complete,
-                   "the copy, rendered piece by piece out of order, is the whole render (worst " + juce::String (worst, 6) + ", F4 sung as " + juce::String (f4, 2) + ")");
+            juce::AudioBuffer<float> block (2, 512);
+            block.clear();
+            multitrack.process (block, 2, 512);
+            heardAudio.copyFrom (0, done, block, 0, 0, juce::jmin (512, heardAudio.getNumSamples() - done));
         }
-        else
-        {
-            check (false, "the guide's copy has the rendered length");
-        }
-
-        // Kept in the song's folder.
-        const auto keptGuide = Practice::getShiftFile (folder, 0.75, 2.0, true), keptBacking = Practice::getShiftFile (folder, 0.75, 2.0, false);
-        for (int i = 0; i < 400 && ! (keptGuide.existsAsFile() && keptBacking.existsAsFile()); ++i)
-            juce::Thread::sleep (10);
-        check (keptGuide.existsAsFile() && keptBacking.existsAsFile(), "and kept in the song's folder for next time");
+        const auto heardTrack = pitch::analyse (heardAudio, sampleRate);
+        const auto g4 = pitch::getPitch (heardTrack, 2.7 / 0.75, 3.0 / 0.75);
+        check (std::abs (g4 - 67.0f) < 0.5f, "live: F4 is heard as G4 at 75% speed (" + juce::String (g4, 2) + ")");
 
         // Back to the original, at the same place in the song.
         multitrack.seek ((juce::int64) (3.0 * sampleRate));
         speedTo (1.0, 0.0);
-        check (! practice.isShiftRendering() && multitrack.getTracks().size() == 2 && heard() == "Backing (no voice), Guide voice"
+        check (! practice.isShiftRendering() && multitrack.getTracks().size() == 2
                    && std::abs (multitrack.getPosition() / sampleRate - 3.0 * 0.75) < 0.01
-                   && std::abs (practice.getSong().notes[0].start - prepared.song.notes[0].start) < 1e-9,
-               "back to the original key and speed, where the song was (" + heard() + ")");
+                   && std::abs (practice.getSong().notes[0].start - prepared.song.notes[0].start) < 1e-9
+                   && std::abs (multitrack.getSongSpeed() - 1.0) < 1e-9,
+               "back to the original key and speed, where the song was");
 
-        // Again: from the kept copy this time.
-        const auto again = juce::Time::getMillisecondCounterHiRes();
-        speedTo (0.75, 2.0);
-        for (int i = 0; i < 1000 && practice.isShiftRendering(); ++i)
-        {
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
-            practice.tick();
-        }
-        check (! practice.isShiftRendering() && std::abs (practice.getSpeed() - 0.75) < 1e-9 && heard() == "Guide (new key), Backing (new key)",
-               "the same change again loads the kept copy (" + juce::String (juce::Time::getMillisecondCounterHiRes() - again, 0) + " ms)");
-
-        // A change that replaces another one on its way.
+        // A newer change replaces the last at once.
         speedTo (1.25, -3.0);
         speedTo (1.0, -1.0);
-        for (int i = 0; i < 4000 && practice.isShiftRendering(); ++i)
-        {
-            juce::MessageManager::getInstance()->runDispatchLoopUntil (5);
-            practice.tick();
-        }
-        check (std::abs (practice.getSpeed() - 1.0) < 1e-9 && std::abs (practice.getSemitones() + 1.0) < 1e-9 && multitrack.getTracks().size() == 4,
-               "a newer change wins over one still on its way");
+        check (std::abs (practice.getSpeed() - 1.0) < 1e-9 && std::abs (practice.getSemitones() + 1.0) < 1e-9 && multitrack.getTracks().size() == 2,
+               "a newer change wins");
         multitrack.pause();
     }
 

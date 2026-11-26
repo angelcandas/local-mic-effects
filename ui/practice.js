@@ -22,6 +22,7 @@ const CLOSE = 60;     // cents: amber
 const SECONDS_SHOWN = 9;
 const PLAYHEAD = 0.28; // where "now" sits across the lane
 const TRAIL_SECONDS = 12;
+const BIG_JUMP = 4; // semitones from the original: the live change starts to lose the voice's character
 
 const SPEEDS = [0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5];
 const nearestSpeed = (speed) => SPEEDS.reduce((a, b) => (Math.abs(b - speed) < Math.abs(a - speed) ? b : a));
@@ -33,6 +34,8 @@ const PHASES = {
   splitting: "Taking the voice out of the song…",
   listening: "Listening to the melody…",
 };
+
+const PHASE_SHORT = { reading: "Read the song", loading: "Load the separation model", splitting: "Take the voice out", listening: "Listen to the melody" };
 
 // "75% speed", "+2 st" for a key and speed change (nothing for the original).
 export const describeShift = (shift) => {
@@ -135,6 +138,18 @@ export class PracticeView {
     });
     guide.append(html("span", "", "Guide voice"), this.guideSlider, this.guideValue);
 
+    // Moves the notes against the sound, for a setup whose latency isn't reported right.
+    const sync = html("label", "practice-guide practice-sync");
+    sync.title = "If the notes reach the line before or after you hear them, nudge them here (ms; positive = later)";
+    this.syncSlider = Object.assign(document.createElement("input"), { type: "range", min: -200, max: 200, step: 5, value: 0 });
+    this.syncValue = html("span", "practice-guide-value", "0 ms");
+    this.syncSlider.addEventListener("input", () => {
+      this.syncValue.textContent = `${this.syncSlider.value} ms`;
+      practice("sync", { ms: Number(this.syncSlider.value) });
+    });
+    this.syncSlider.addEventListener("dblclick", () => { this.syncSlider.value = "0"; this.syncSlider.dispatchEvent(new Event("input")); });
+    sync.append(html("span", "", "Picture sync"), this.syncSlider, this.syncValue);
+
     // The speed of the whole song (the pitch stays); phrase and section loops use it too.
     this.loopSpeed = 1;
     const speedLabel = html("label", "practice-speed");
@@ -170,7 +185,7 @@ export class PracticeView {
                                     { type: "button", title: "Leave Practice and go back to the Live view (Esc)" });
     this.exitButton.addEventListener("click", () => this.show(false));
 
-    bar.append(title, this.openButton, this.voiceButton, this.libraryButton, this.lyricsButton, guide, speedLabel, keyLabel, restart, this.reportButton, this.passLabel, this.exitButton);
+    bar.append(title, this.openButton, this.voiceButton, this.libraryButton, this.lyricsButton, guide, sync, speedLabel, keyLabel, restart, this.reportButton, this.passLabel, this.exitButton);
 
     // Songs prepared before.
     this.library = html("div", "practice-library");
@@ -248,7 +263,31 @@ export class PracticeView {
     this.karaokeLine = -2;
     this.buildLyricsEditor();
 
-    s.append(bar, this.library, this.lyricsEditor, this.loopBar, this.progress, this.stage, this.karaoke, this.sectionStrip, this.phraseStrip, this.message);
+    // A modal card while a song is being prepared: nothing else in the view can be used meanwhile.
+    this.overlay = html("div", "practice-overlay");
+    this.overlay.hidden = true;
+    this.overlay.setAttribute("role", "alertdialog");
+    this.overlay.setAttribute("aria-modal", "true");
+    this.overlay.setAttribute("aria-live", "polite");
+    const card = html("div", "practice-overlay-card");
+    this.overlayName = html("strong", "practice-overlay-name");
+    this.overlaySteps = html("ol", "practice-overlay-steps");
+    for (const key of ["reading", "loading", "splitting", "listening"]) {
+      const item = html("li", "", PHASE_SHORT[key]);
+      item.dataset.phase = key;
+      this.overlaySteps.append(item);
+    }
+    this.overlayBar = html("div", "practice-progress-bar");
+    this.overlayBar.append(html("div"));
+    this.overlayInfo = html("small", "practice-overlay-info");
+    this.overlayCancel = Object.assign(html("button", "tool", "Cancel"), { type: "button" });
+    this.overlayCancel.addEventListener("click", () => practice("cancel"));
+    card.append(this.overlayName, this.overlaySteps, this.overlayBar, this.overlayInfo, this.overlayCancel);
+    this.overlay.append(card);
+    // (keys can't reach the controls behind it)
+    this.overlay.addEventListener("keydown", (event) => { if (event.key === "Escape") practice("cancel"); event.stopPropagation(); });
+
+    s.append(bar, this.library, this.lyricsEditor, this.loopBar, this.progress, this.stage, this.karaoke, this.sectionStrip, this.phraseStrip, this.message, this.overlay);
   }
 
   onSpeedChange() {
@@ -258,6 +297,32 @@ export class PracticeView {
     // playing now is rendered again to match.
     practice("speed", { speed: this.loopSpeed, semitones: this.loopKey });
     if (this.song?.loop) this.relooped();
+    // A big jump in key: the live change moves the voice's character, so offer the better copy.
+    if (Math.abs(this.loopKey) >= BIG_JUMP && this.qualityAsked !== this.loopKey) {
+      this.qualityAsked = this.loopKey;
+      this.askQuality();
+    } else if (Math.abs(this.loopKey) < BIG_JUMP) this.qualityAsked = null;
+  }
+
+  askQuality() {
+    const dialog = html("div", "practice-overlay");
+    dialog.setAttribute("role", "alertdialog");
+    dialog.setAttribute("aria-modal", "true");
+    const card = html("div", "practice-overlay-card");
+    const render = Object.assign(html("button", "tool is-accent", "Make it sound better"), { type: "button" });
+    const keep = Object.assign(html("button", "tool", "Keep the live version"), { type: "button" });
+    const buttons = html("div", "practice-overlay-buttons");
+    buttons.append(keep, render);
+    card.append(html("strong", "practice-overlay-name", "Big key change"),
+                html("small", "practice-overlay-info", "It plays now, but the voice can sound thin or squeaky this far from the original. The better version keeps the voice's character; it takes a little while to prepare, and the live one keeps playing meanwhile. The next key or speed change goes back to live."),
+                buttons);
+    dialog.append(card);
+    const close = () => dialog.remove();
+    keep.addEventListener("click", close);
+    render.addEventListener("click", () => { close(); practice("quality"); });
+    dialog.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); event.stopPropagation(); });
+    this.section.append(dialog);
+    render.focus();
   }
 
   async toggleLibrary(on = this.library.hidden) {
@@ -416,6 +481,10 @@ export class PracticeView {
       this.guideSlider.value = String(Math.round(state.guideLevel * 100));
       this.guideValue.textContent = state.guideLevel <= 0 ? "Off" : `${Math.round(state.guideLevel * 100)}%`;
     }
+    if (typeof state.visualSync === "number") {
+      this.syncSlider.value = String(state.visualSync);
+      this.syncValue.textContent = `${state.visualSync} ms`;
+    }
     this.setSong(state.song);
     if (state.job) this.showProgress(state.job);
     if (state.scores) this.onScore(state.scores);
@@ -511,11 +580,25 @@ export class PracticeView {
   }
 
   showProgress(job) {
-    this.progress.hidden = !job;
-    if (!job) return;
-    this.progressCancel.hidden = false;
-    this.progressText.textContent = `${job.name ? `${job.name}: ` : ""}${PHASES[job.phase] ?? "Preparing…"}`;
-    this.progressBar.firstChild.style.width = `${Math.round(clamp(job.progress) * 100)}%`;
+    this.progress.hidden = true;
+    const was = !this.overlay.hidden;
+    this.overlay.hidden = !job;
+    if (!job) { this.jobStart = 0; return; }
+    if (!was || !this.jobStart) this.jobStart = performance.now();
+    this.overlayName.textContent = job.name || "Your song";
+    // (downloading the model counts as loading it)
+    const order = ["reading", "loading", "splitting", "listening"];
+    const at = Math.max(0, order.indexOf(job.phase === "downloading" ? "loading" : job.phase));
+    for (const item of this.overlaySteps.children) {
+      const r = order.indexOf(item.dataset.phase);
+      item.className = r < at ? "is-done" : r === at ? "is-now" : "";
+    }
+    const percent = Math.round(clamp(job.progress) * 100);
+    this.overlayBar.firstChild.style.width = `${percent}%`;
+    const seconds = (performance.now() - this.jobStart) / 1000;
+    const left = job.progress > 0.05 ? seconds * (1 - job.progress) / job.progress : 0;
+    this.overlayInfo.textContent = `${PHASES[job.phase] ?? "Preparing…"} ${percent}%${left > 3 ? ` · about ${Math.floor(left / 60)}:${String(Math.round(left) % 60).padStart(2, "0")} left` : ""}`;
+    if (!was) this.overlayCancel.focus();
   }
 
   // A key or speed change: on its way (the part at the playhead first, so it's heard in a
@@ -810,23 +893,33 @@ export class PracticeView {
     const x = (t) => (PLAYHEAD + (t - now) / SECONDS_SHOWN) * width;
     const from = now - PLAYHEAD * SECONDS_SHOWN, to = from + SECONDS_SHOWN;
 
-    // Semitone rows, C rows stronger, with their names.
-    g.font = `${10 * ratio}px ui-monospace, Menlo, monospace`;
-    g.textBaseline = "middle";
-    for (let m = Math.ceil(top - span); m <= Math.floor(top); ++m) {
-      const isC = ((m % 12) + 12) % 12 === 0;
-      const black = [1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12);
-      if (black) {
-        g.fillStyle = "rgba(255,255,255,0.025)";
-        g.fillRect(0, y(m) - rowHeight / 2, width, rowHeight);
-      }
-      if (isC) {
-        g.fillStyle = line;
-        g.fillRect(0, y(m) + rowHeight / 2, width, ratio);
-        g.fillStyle = faint;
-        g.fillText(noteName(m), 6 * ratio, y(m));
+    // Semitone rows, C rows stronger, with their names: the same every frame, so drawn once
+    // per size and range (fullscreen redraws about four times the pixels).
+    const key = `${width}x${height}:${top}:${span}:${line}:${faint}`;
+    if (this.rowsKey !== key) {
+      this.rowsKey = key;
+      this.rowsLayer ??= document.createElement("canvas");
+      this.rowsLayer.width = width;
+      this.rowsLayer.height = height;
+      const r = this.rowsLayer.getContext("2d");
+      r.font = `${10 * ratio}px ui-monospace, Menlo, monospace`;
+      r.textBaseline = "middle";
+      for (let m = Math.ceil(top - span); m <= Math.floor(top); ++m) {
+        const isC = ((m % 12) + 12) % 12 === 0;
+        const black = [1, 3, 6, 8, 10].includes(((m % 12) + 12) % 12);
+        if (black) {
+          r.fillStyle = "rgba(255,255,255,0.025)";
+          r.fillRect(0, y(m) - rowHeight / 2, width, rowHeight);
+        }
+        if (isC) {
+          r.fillStyle = line;
+          r.fillRect(0, y(m) + rowHeight / 2, width, ratio);
+          r.fillStyle = faint;
+          r.fillText(noteName(m), 6 * ratio, y(m));
+        }
       }
     }
+    g.drawImage(this.rowsLayer, 0, 0);
 
     // Phrase spans behind the notes.
     g.fillStyle = "rgba(140,123,255,0.05)";

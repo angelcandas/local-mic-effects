@@ -96,6 +96,7 @@ Practice::Practice (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::fu
     : processor (p), settings (s), emit (std::move (e)), deviceLatency (std::move (latency))
 {
     guideLevel = (float) settings.getDoubleValue ("practice.guideLevel", 0.35);
+    visualSyncMs = settings.getDoubleValue ("practice.visualSyncMs", 0.0);
 
     // The editor closes and opens again (always in a plugin): pick the song up again when
     // its guide is still on the tracks.
@@ -103,20 +104,38 @@ Practice::Practice (PluginProcessor& p, juce::PropertiesFile& s, Emit e, std::fu
     const auto melody = folder.getChildFile (melodyFileName);
     const juce::File guide (settings.getValue ("practice.guide"));
 
-    if (folder.isDirectory() && melody.existsAsFile())
-        for (const auto& track : processor.getMultitrack().getTracks())
-            if (track->file == guide)
-            {
-                setSong (coach::Song::fromString (melody.loadFileAsString()));
-                songName = settings.getValue ("practice.name");
-                source = juce::File (settings.getValue ("practice.source"));
-                guideFile = guide;
-                backingFile = juce::File (settings.getValue ("practice.backing"));
-                songFolder = folder;
-                lyrics = analysis::lyrics::Lyrics::fromString (folder.getChildFile (lyricsFileName).loadFileAsString());
-                analysis::lyrics::timeWords (lyrics, baseSong);
-                break;
-            }
+    // (the tracks may not be back yet: a restart restores them in the background, so the
+    // song is picked up from its folder, not from what's on the tracks)
+    if (folder.isDirectory() && melody.existsAsFile() && guide.existsAsFile())
+    {
+        setSong (coach::Song::fromString (melody.loadFileAsString()));
+        songName = settings.getValue ("practice.name");
+        source = juce::File (settings.getValue ("practice.source"));
+        guideFile = guide;
+        backingFile = juce::File (settings.getValue ("practice.backing"));
+        songFolder = folder;
+        lyrics = analysis::lyrics::Lyrics::fromString (folder.getChildFile (lyricsFileName).loadFileAsString());
+        analysis::lyrics::timeWords (lyrics, baseSong);
+        if (const auto& mt = processor.getMultitrack(); std::abs (mt.getSongSpeed() - 1.0) > 1.0e-3 || std::abs (mt.getSongSemitones()) > 5.0e-3)
+        {
+            // (the editor was closed and opened again with the song in another key or speed)
+            shift.speed = mt.getSongSpeed();
+            shift.semitones = mt.getSongSemitones();
+            shift.live = true;
+            song = baseSong.transformed (shift.semitones, shift.speed);
+        }
+        guidePending = true; // (its level and mute are set once the track is there)
+        takesSeen = folder.getChildFile (takesFileName).loadFileAsString();
+        takesReady = false; // (written again once the tracks are back and the song's takes are on them)
+        sections = {};
+        if (const auto cached = folder.getChildFile (sectionsFileName); cached.existsAsFile())
+        {
+            sections = sectionsFromText (cached.loadFileAsString());
+            sectionsKnown = true;
+        }
+        // (a session that had no takes row, e.g. from before this was kept, gets them from the file)
+        restoreTakes();
+    }
 }
 
 Practice::~Practice()
@@ -448,6 +467,12 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
         return describe();
     }
 
+    if (action == "quality")
+    {
+        startQuality();
+        return describe();
+    }
+
     if (action == "cancel")
     {
         if (job != nullptr)
@@ -472,6 +497,11 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
         guideLevel = juce::jlimit (0.0f, 1.5f, (float) options.getProperty ("level", guideLevel));
         settings.setValue ("practice.guideLevel", guideLevel);
         applyGuideLevel();
+    }
+    else if (action == "sync")
+    {
+        visualSyncMs = juce::jlimit (-200.0, 200.0, (double) options.getProperty ("ms", visualSyncMs));
+        settings.setValue ("practice.visualSyncMs", visualSyncMs);
     }
     else if (action == "reset")
     {
@@ -580,7 +610,7 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
 
 juce::var Practice::describe() const
 {
-    return object ({ { "song", describeSong() }, { "job", describeJob() }, { "guideLevel", guideLevel }, { "open", viewOpen },
+    return object ({ { "song", describeSong() }, { "job", describeJob() }, { "guideLevel", guideLevel }, { "visualSync", visualSyncMs }, { "open", viewOpen },
                      { "scores", describeScores (true) } });
 }
 
@@ -689,6 +719,7 @@ void Practice::install (const Prepared& prepared)
         shiftLoad->cancel = true;
     shiftLoad = nullptr;
     songFolder = prepared.folder;
+    processor.getMultitrack().setSongTransform (1.0, 0.0);
     lyrics = prepared.folder != juce::File() ? analysis::lyrics::Lyrics::fromString (prepared.folder.getChildFile (lyricsFileName).loadFileAsString())
                                              : analysis::lyrics::Lyrics();
 
@@ -703,6 +734,11 @@ void Practice::install (const Prepared& prepared)
     if (prepared.backing != juce::File())
         multitrack.loadBackingTrack (prepared.backing);
     multitrack.loadBackingTrack (prepared.guide);
+
+    // The takes recorded over this song come back with it.
+    takesReady = false;
+    takesSeen = prepared.folder.getChildFile (takesFileName).loadFileAsString();
+    restoreTakes();
 
     if (sectionsJob != nullptr)
         sectionsJob->cancel = true;
@@ -760,6 +796,65 @@ void Practice::applyGuideLevel()
     applyMutes();
 }
 
+// One line per take: path | start seconds | gain | muted.
+juce::String Practice::takesSignature() const
+{
+    juce::String text;
+    const auto& multitrack = processor.getMultitrack();
+    const auto rate = juce::jmax (1.0, multitrack.getSampleRate());
+    for (const auto& track : multitrack.getTracks())
+        if (track->isTake && track->file.existsAsFile())
+            text << track->file.getFullPathName() << "|" << juce::String ((double) track->start / rate, 4) << "|"
+                 << juce::String (track->gain.load(), 3) << "|" << (track->muted.load() ? 1 : 0) << "\n";
+    return text;
+}
+
+void Practice::restoreTakes()
+{
+    if (songFolder == juce::File())
+        return;
+
+    auto& multitrack = processor.getMultitrack();
+    const auto rate = juce::jmax (1.0, multitrack.getSampleRate());
+    const auto present = takesSignature(); // (already on the tracks, e.g. restored with the session)
+    for (const auto& line : juce::StringArray::fromLines (takesSeen))
+    {
+        const auto parts = juce::StringArray::fromTokens (line, "|", "");
+        if (parts.size() < 4)
+            continue;
+        const juce::File file (parts[0]);
+        if (! file.existsAsFile() || present.contains (file.getFullPathName() + "|"))
+            continue;
+        multitrack.addTake (file, (juce::int64) std::round (parts[1].getDoubleValue() * rate), parts[2].getFloatValue(), parts[3].getIntValue() != 0);
+    }
+}
+
+void Practice::saveTakesIfChanged()
+{
+    if (songFolder == juce::File() || ! songFolder.isDirectory())
+        return;
+
+    const auto& multitrack = processor.getMultitrack();
+    if (! takesReady)
+    {
+        // Wait for the song's own takes to be on the tracks before writing anything.
+        if (multitrack.getNumLoading() == 0)
+        {
+            takesReady = true;
+            takesSeen = takesSignature().isNotEmpty() ? takesSignature() : takesSeen;
+        }
+        return;
+    }
+    if (multitrack.getNumLoading() > 0)
+        return;
+
+    if (const auto now = takesSignature(); now != takesSeen)
+    {
+        takesSeen = now;
+        songFolder.getChildFile (takesFileName).replaceWithText (now);
+    }
+}
+
 void Practice::applyMutes()
 {
     // Which of the song's versions is heard: a rendered loop's, else the song in another
@@ -776,7 +871,9 @@ void Practice::applyMutes()
         if (! (own || isShift || isPending || isLoop))
             continue;
 
-        const auto heard = loopRendered ? isLoop : shift.isActive() ? isShift : own;
+        if (own)
+            multitrack.setTrackStretched (track->id, true); // (it plays through the live key and speed change)
+        const auto heard = loopRendered ? isLoop : (shift.backingId >= 0 || shift.guideId >= 0) ? isShift : own;
         const auto isGuide = track->file == guideFile || track->id == shift.guideId || track->id == pending.guideId
                           || (loop.active && track->id == loop.guideId);
         const auto mute = ! heard || (isGuide && guideLevel <= 0.0f);
@@ -916,6 +1013,7 @@ void Practice::tick()
 
     if (guidePending)
         applyGuideLevel();
+    saveTakesIfChanged();
 
     auto& tap = processor.getPitchTap();
     if (! tap.isEnabled())
@@ -930,6 +1028,10 @@ void Practice::tick()
     const auto position = (double) multitrack.getPosition() / rate;
     const auto playing = multitrack.isPlaying();
     const auto songTime = juce::jmax (0.0, position - latency);
+    // What the picture shows: the sound that's being heard now. The singer's own answer (scoring) is later by
+    // the input latency too, but the notes should be at the line when you hear them.
+    const auto heardLatency = (double) (outputLatency != nullptr ? outputLatency() : deviceLatency != nullptr ? deviceLatency() : 0) / rate;
+    const auto displayTime = juce::jmax (0.0, position - heardLatency - visualSyncMs / 1000.0);
 
     // A jump (a seek, a restart, a loop going round) starts the part after it over.
     if (lastPosition >= 0.0 && (position < lastPosition - 0.05 || position > lastPosition + 0.75))
@@ -971,7 +1073,7 @@ void Practice::tick()
     }
 
     // The backing's chord here (Multitrack listens to it for the harmonies), for the chord chip.
-    emit ("practicePitch", object ({ { "time", round3 (songTime) }, { "playing", playing }, { "midi", round2 (lastMidi) },
+    emit ("practicePitch", object ({ { "time", round3 (displayTime) }, { "playing", playing }, { "midi", round2 (lastMidi) },
                                      { "frames", trail }, { "chord", processor.getMultitrack().getBackingChord (multitrack.getPosition()).getName() } }));
 }
 
@@ -1280,10 +1382,34 @@ void Practice::startSpeed (double speed, double semitones)
     if (neutral)
     {
         // Back to the song as it is, where we are.
+        processor.getMultitrack().setSongTransform (1.0, 0.0);
         swapShift();
         return;
     }
 
+    // Live: the song's own tracks go through the stretcher (Multitrack::setSongTransform), so there's
+    // nothing to render or wait for, and no extra tracks. The notes follow (swapShift).
+    pending = {};
+    pending.speed = speed;
+    pending.semitones = semitones;
+    pending.live = true;
+    processor.getMultitrack().setSongTransform (speed, semitones);
+    swapShift();
+}
+
+// A better-sounding copy of the song in the key and speed it plays in now (the live change moves the
+// voice's character a little; this keeps it, and takes a while). Hidden tracks: it replaces the live
+// change as what's heard, and goes away with the next change.
+void Practice::startQuality()
+{
+    if (! shift.live || (baseSong.isEmpty() && guideFile == juce::File()))
+        return;
+
+    const auto speed = shift.speed, semitones = shift.semitones;
+    dropShift (pending);
+    if (shiftLoad != nullptr)
+        shiftLoad->cancel = true;
+    shiftLoad = nullptr;
     pending.speed = speed;
     pending.semitones = semitones;
 

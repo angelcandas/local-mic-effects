@@ -1,5 +1,7 @@
 #pragma once
 
+#include "SongStretch.h"
+#include <array>
 #include <juce_audio_formats/juce_audio_formats.h>
 #include <juce_data_structures/juce_data_structures.h>
 #include <juce_events/juce_events.h>
@@ -55,6 +57,11 @@ public:
 
         std::shared_ptr<Fill> fill;     // set when the audio is still being written
 
+        // Practice's song tracks play through a live tempo and pitch change (setSongTransform)
+        // instead of as they are. The stretcher is made before the flag is set.
+        std::atomic<bool> stretched { false };
+        std::unique_ptr<SongStretcher> stretcher;
+
         juce::int64 end() const noexcept { return start + audio.getNumSamples(); }
     };
 
@@ -70,6 +77,8 @@ public:
     // and onTracksChanged fires. Errors are reported through onError.
     void loadBackingTrack (const juce::File&);
     void addTake (const juce::File&, juce::int64 startSample);
+    // A take that was kept before, with its volume and mute.
+    void addTake (const juce::File&, juce::int64 startSample, float gain, bool muted);
 
     // Audio already in memory at the session rate (e.g. a rendered copy), as a backing
     // track named `name`. Returns its id.
@@ -90,6 +99,14 @@ public:
     // files that are gone are left out. Message thread.
     juce::ValueTree saveSession() const;
     void restoreSession (const juce::ValueTree&);
+
+    // The song as it plays now: `speed` 0.5..1.5 times as fast and `semitones` higher, for the
+    // tracks marked with setTrackStretched. Live: no rendering, heard at once. The tracks' length
+    // on the timeline is their own divided by the speed.
+    void setSongTransform (double speed, double semitones);
+    double getSongSpeed() const noexcept     { return songSpeed.load(); }
+    double getSongSemitones() const noexcept { return songSemitones.load(); }
+    void setTrackStretched (int id, bool stretched);
 
     void removeTrack (int id);
     void setTrackGain (int id, float gain);
@@ -148,6 +165,8 @@ private:
     std::vector<std::shared_ptr<Track>> tracks; // message thread, ordered by id
     std::map<int, std::pair<float, bool>> pendingMix; // gain and mute for rows still loading
 
+    std::array<std::vector<float>, 2> stretchBuffer { std::vector<float> (4096), std::vector<float> (4096) }; // audio thread scratch
+
     juce::SpinLock liveLock;
     std::vector<Track*> live; // what the audio thread mixes
 
@@ -155,6 +174,7 @@ private:
     std::atomic<juce::int64> position { 0 };
     std::atomic<juce::int64> length { 0 };
     std::atomic<juce::int64> loopStart { 0 }, loopEnd { 0 };
+    std::atomic<double> songSpeed { 1.0 }, songSemitones { 0.0 }, songPitch { 1.0 };
     std::atomic<int> numLoading { 0 };
 
     juce::ThreadPool loader { juce::ThreadPoolOptions{}.withThreadName ("MicFX track loader").withNumberOfThreads (1) };

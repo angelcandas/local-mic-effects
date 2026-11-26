@@ -3,7 +3,8 @@
 .practice-toggle svg { width: 12px; height: 12px; fill: none; stroke: currentColor; stroke-width: 1.7; stroke-linecap: round; stroke-linejoin: round; }
 .practice-toggle:hover,
 .practice-toggle[aria-pressed="true"] { color: var(--text); border-color: var(--line-strong); }
-body.is-daw .practice-toggle, body.is-daw .practice { display: none; }
+body.is-daw .practice-toggle, body.is-daw .practice {
+  position: relative; display: none; }
 
 .practice {
   --good: #3fd9c6;
@@ -171,3 +172,22 @@ body.is-daw .practice-toggle, body.is-daw .practice { display: none; }
                   background: rgba(11, 13, 18, 0.85); border: 1px solid rgba(224, 180, 90, 0.7); color: #f3d79a;
                   font: 700 12px var(--mono); white-space: nowrap; }
 .practice-chord[hidden] { display: none; }
+
+/* Preparing a song: a modal card over the whole view. */
+.practice-overlay { position: absolute; inset: 0; z-index: 20; display: flex; align-items: center; justify-content: center;
+  background: rgba(8, 10, 14, 0.78); backdrop-filter: blur(2px); }
+.practice-overlay[hidden] { display: none; }
+.practice-overlay-card { display: flex; flex-direction: column; gap: 12px; width: min(380px, 86%); padding: 20px 22px; border: 1px solid var(--line);
+  border-radius: 12px; background: var(--panel, #12151c); box-shadow: 0 12px 40px rgba(0, 0, 0, 0.5); }
+.practice-overlay-name { font-size: 15px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.practice-overlay-steps { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; color: var(--faint); font-size: 12px; }
+.practice-overlay-steps li::before { content: "○ "; }
+.practice-overlay-steps li.is-done { color: var(--muted); }
+.practice-overlay-steps li.is-done::before { content: "✓ "; color: var(--good); }
+.practice-overlay-steps li.is-now { color: inherit; }
+.practice-overlay-steps li.is-now::before { content: "● "; color: var(--accent); }
+.practice-overlay-info { color: var(--muted); }
+.practice-overlay-card .tool { align-self: flex-end; }
+.practice-overlay-card .practice-progress-bar { flex: none; height: 6px; }
+.practice-overlay-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+.practice-overlay-card .practice-overlay-buttons .tool { align-self: auto; }
