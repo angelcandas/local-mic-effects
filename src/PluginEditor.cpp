@@ -1559,6 +1559,8 @@ juce::var PluginEditor::describeTracks()
 
     for (const auto& track : multitrack.getTracks())
     {
+        if (track->name.endsWith (" (new key)"))
+            continue; // Practice's better-sounding copy of the song in another key: not a row of its own
         auto* entry = new juce::DynamicObject();
         entry->setProperty ("id", track->id);
         entry->setProperty ("name", track->name);

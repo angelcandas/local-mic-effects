@@ -50,6 +50,9 @@ public:
     //                              Rendered with the warp engine around the playhead first (KeySpeedRender), so it's
     //                              swapped in where the song is within a moment; "practice" { state: "shifting" }
     //                              events give the progress of the rest. Kept in the song's folder for next time.
+    //   "quality"                  makes the song in its key and speed now (a big jump) sound better: rendered with the
+    //                              warp engine, keeping the voice's formants, into hidden tracks that replace the live
+    //                              change (the next change goes back to live); "practice" { state: "shifting" } events follow
     //   "cancel"                   stops a preparation
     //   "view" { open }            the view opened or closed (follows the singer while open)
     //   "guide" { level }          the guide vocal's level (0..1.5 gain, 0 mutes it)
@@ -233,6 +236,7 @@ private:
     struct SectionsJob;
 
     void startSpeed (double speed, double semitones);
+    void startQuality();
     void tickShift();
     void swapShift();
     void applyMutes();

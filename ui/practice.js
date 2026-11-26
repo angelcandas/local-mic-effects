@@ -22,6 +22,7 @@ const CLOSE = 60;     // cents: amber
 const SECONDS_SHOWN = 9;
 const PLAYHEAD = 0.28; // where "now" sits across the lane
 const TRAIL_SECONDS = 12;
+const BIG_JUMP = 4; // semitones from the original: the live change starts to lose the voice's character
 
 const SPEEDS = [0.5, 0.6, 0.7, 0.75, 0.8, 0.9, 1, 1.1, 1.25, 1.5];
 const nearestSpeed = (speed) => SPEEDS.reduce((a, b) => (Math.abs(b - speed) < Math.abs(a - speed) ? b : a));
@@ -296,6 +297,32 @@ export class PracticeView {
     // playing now is rendered again to match.
     practice("speed", { speed: this.loopSpeed, semitones: this.loopKey });
     if (this.song?.loop) this.relooped();
+    // A big jump in key: the live change moves the voice's character, so offer the better copy.
+    if (Math.abs(this.loopKey) >= BIG_JUMP && this.qualityAsked !== this.loopKey) {
+      this.qualityAsked = this.loopKey;
+      this.askQuality();
+    } else if (Math.abs(this.loopKey) < BIG_JUMP) this.qualityAsked = null;
+  }
+
+  askQuality() {
+    const dialog = html("div", "practice-overlay");
+    dialog.setAttribute("role", "alertdialog");
+    dialog.setAttribute("aria-modal", "true");
+    const card = html("div", "practice-overlay-card");
+    const render = Object.assign(html("button", "tool is-accent", "Make it sound better"), { type: "button" });
+    const keep = Object.assign(html("button", "tool", "Keep the live version"), { type: "button" });
+    const buttons = html("div", "practice-overlay-buttons");
+    buttons.append(keep, render);
+    card.append(html("strong", "practice-overlay-name", "Big key change"),
+                html("small", "practice-overlay-info", "It plays now, but the voice can sound thin or squeaky this far from the original. The better version keeps the voice's character; it takes a little while to prepare, and the live one keeps playing meanwhile. The next key or speed change goes back to live."),
+                buttons);
+    dialog.append(card);
+    const close = () => dialog.remove();
+    keep.addEventListener("click", close);
+    render.addEventListener("click", () => { close(); practice("quality"); });
+    dialog.addEventListener("keydown", (event) => { if (event.key === "Escape") close(); event.stopPropagation(); });
+    this.section.append(dialog);
+    render.focus();
   }
 
   async toggleLibrary(on = this.library.hidden) {

@@ -189,3 +189,5 @@ body.is-daw .practice-toggle, body.is-daw .practice {
 .practice-overlay-info { color: var(--muted); }
 .practice-overlay-card .tool { align-self: flex-end; }
 .practice-overlay-card .practice-progress-bar { flex: none; height: 6px; }
+.practice-overlay-buttons { display: flex; justify-content: flex-end; gap: 8px; }
+.practice-overlay-card .practice-overlay-buttons .tool { align-self: auto; }

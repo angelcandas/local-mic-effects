@@ -467,6 +467,12 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
         return describe();
     }
 
+    if (action == "quality")
+    {
+        startQuality();
+        return describe();
+    }
+
     if (action == "cancel")
     {
         if (job != nullptr)
@@ -1389,6 +1395,77 @@ void Practice::startSpeed (double speed, double semitones)
     pending.live = true;
     processor.getMultitrack().setSongTransform (speed, semitones);
     swapShift();
+}
+
+// A better-sounding copy of the song in the key and speed it plays in now (the live change moves the
+// voice's character a little; this keeps it, and takes a while). Hidden tracks: it replaces the live
+// change as what's heard, and goes away with the next change.
+void Practice::startQuality()
+{
+    if (! shift.live || (baseSong.isEmpty() && guideFile == juce::File()))
+        return;
+
+    const auto speed = shift.speed, semitones = shift.semitones;
+    dropShift (pending);
+    if (shiftLoad != nullptr)
+        shiftLoad->cancel = true;
+    shiftLoad = nullptr;
+    pending.speed = speed;
+    pending.semitones = semitones;
+
+    // Made before: load it (a moment) instead of rendering it again.
+    const auto cachedBacking = getShiftFile (songFolder, speed, semitones, false), cachedGuide = getShiftFile (songFolder, speed, semitones, true);
+    if (songFolder != juce::File() && cachedGuide.existsAsFile() && (backingFile == juce::File() || cachedBacking.existsAsFile()))
+    {
+        auto load = std::make_shared<ShiftLoad>();
+        load->speed = speed;
+        load->semitones = semitones;
+        load->guideFile = cachedGuide;
+        load->backingFile = backingFile != juce::File() ? cachedBacking : juce::File();
+        shiftLoad = load;
+        const auto rate = processor.getMultitrack().getSampleRate();
+        juce::Thread::launch ([load, rate]
+        {
+            auto guide = Multitrack::decode (load->guideFile, rate);
+            auto backing = load->backingFile != juce::File() ? Multitrack::decode (load->backingFile, rate) : Multitrack::Decoded {};
+            load->ok = guide.error.isEmpty() && (load->backingFile == juce::File() || backing.error.isEmpty());
+            load->guide = std::move (guide.audio);
+            load->backing = std::move (backing.audio);
+            load->finished = true;
+        });
+        emit ("practice", object ({ { "state", "shifting" }, { "shift", describeShift() } }));
+        return;
+    }
+
+    // Render it: empty tracks (muted until swapped in) filled piece by piece, the playhead's first.
+    auto& multitrack = processor.getMultitrack();
+    std::vector<KeySpeedRender::Part> parts;
+    for (const auto& track : multitrack.getTracks())
+    {
+        const auto voice = track->file == guideFile;
+        if (! voice && ! (backingFile != juce::File() && track->file == backingFile))
+            continue;
+
+        KeySpeedRender::Part part;
+        part.source = track;
+        part.voice = voice;
+        const auto length = KeySpeedRender::getLength (track->audio.getNumSamples(), speed);
+        const auto id = multitrack.addFilling (voice ? "Guide (new key)" : "Backing (new key)", track->audio.getNumChannels(), length,
+                                               0, true, part.fill);
+        (voice ? pending.guideId : pending.backingId) = id;
+        for (const auto& t : multitrack.getTracks())
+            if (t->id == id)
+                part.target = t;
+        parts.push_back (std::move (part));
+    }
+
+    if (parts.empty())
+        return;
+
+    pending.render = std::make_shared<KeySpeedRender> (multitrack.getSampleRate(), speed, semitones);
+    pending.render->start (std::move (parts), getOriginalTime() / speed);
+    applyGuideLevel();
+    emit ("practice", object ({ { "state", "shifting" }, { "shift", describeShift() } }));
 }
 
 void Practice::swapShift()
