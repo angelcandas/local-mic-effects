@@ -73,6 +73,7 @@
 #include "dsp/PitchDetector.h"
 #include "dsp/PitchEngine.h"
 #include "stems/StemSplitter.h"
+#include "AudioImport.h"
 #if MICFX_HAS_DEMUCS
  #include "stems/DemucsPipeline.h"
 #endif
@@ -8506,6 +8507,53 @@ namespace
             const auto g = estimateFrequency (out[0], (size_t) (0.25 * sampleRate), (size_t) (0.6 * sampleRate));
             check (std::abs (g - 466.16) < 4.0, "an effect switched off lets the notes through (" + juce::String (g, 1) + " Hz)");
         }
+    }
+
+    void testAudioImport()
+    {
+        std::cout << "\nAudio import (formats JUCE can't read, via ffmpeg)\n";
+        check (micfx::audioimport::wildcard().contains ("*.mp4") && micfx::audioimport::wildcard().contains ("*.m4a"),
+               "the file pickers offer MP4 and M4A");
+
+        const auto folder = juce::File::getSpecialLocation (juce::File::tempDirectory).getNonexistentChildFile ("micfx-audioimport", {});
+        folder.createDirectory();
+
+        juce::String error;
+        const auto missing = micfx::audioimport::makeReadable (folder.getChildFile ("nothing.mp4"), error);
+        check (missing == juce::File() && error.isNotEmpty(), "a file that isn't there gives a message");
+
+        const auto ffmpeg = micfx::audioimport::findFfmpeg();
+        if (ffmpeg == juce::File())
+        {
+            std::cout << "  (no ffmpeg here: the MP4 conversion isn't tried)\n";
+            folder.deleteRecursively();
+            return;
+        }
+
+        // A one second 440 Hz tone in an MP4 with a video track, as a phone would record it.
+        const auto video = folder.getChildFile ("clip.mp4");
+        juce::ChildProcess make;
+        const auto started = make.start (juce::StringArray { ffmpeg.getFullPathName(), "-nostdin", "-y", "-v", "error",
+                                                              "-f", "lavfi", "-i", "sine=frequency=440:duration=1",
+                                                              "-f", "lavfi", "-i", "color=c=black:s=64x64:d=1",
+                                                              "-c:a", "aac", "-c:v", "mpeg4", "-shortest", video.getFullPathName() });
+        if (! started || ! make.waitForProcessToFinish (60000) || make.getExitCode() != 0)
+        {
+            std::cout << "  (ffmpeg couldn't make the test MP4: skipped)\n";
+            folder.deleteRecursively();
+            return;
+        }
+
+        const auto readable = micfx::audioimport::makeReadable (video, error);
+        check (readable != juce::File() && error.isEmpty(), "an MP4 is converted to something readable (" + error + ")");
+
+        juce::AudioFormatManager formats;
+        formats.registerBasicFormats();
+        std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (readable));
+        check (reader != nullptr && std::abs ((double) reader->lengthInSamples / reader->sampleRate - 1.0) < 0.2,
+               "the audio of the MP4 is about one second long");
+        check (micfx::audioimport::makeReadable (video, error) == readable, "the same file converts once");
+        folder.deleteRecursively();
     }
 
     void testMidiFiles()
@@ -23117,6 +23165,14 @@ int main()
         return failures == 0 ? 0 : 1;
     }
 
+    // MICFX_TEST_ONLY=audioimport: just the extra audio formats.
+    if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "audioimport")
+    {
+        testAudioImport();
+        std::cout << "\n" << (failures == 0 ? "All tests passed" : juce::String (failures) + " test(s) failed") << "\n";
+        return failures == 0 ? 0 : 1;
+    }
+
     // MICFX_TEST_ONLY=midifiles: just MIDI file import and export.
     if (juce::SystemStats::getEnvironmentVariable ("MICFX_TEST_ONLY", {}) == "midifiles")
     {
@@ -23182,6 +23238,7 @@ int main()
     testStereoInputs();
     testMidiTracks();
     testMidiFiles();
+    testAudioImport();
     testMidiEffects();
     testMidiClock();
     testInstruments();

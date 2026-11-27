@@ -319,6 +319,8 @@ target_compile_definitions(MicFX
         JUCE_WEB_BROWSER=1
         JUCE_USE_CURL=0
         JUCE_VST3_CAN_REPLACE_VST2=0
+        # MP3 files open on Linux too (macOS and Windows have their own decoders for it).
+        JUCE_USE_MP3AUDIOFORMAT=1
         # MIDI tracks in DAW mode host instrument plugins (src/daw/PluginHost).
         JUCE_PLUGINHOST_VST3=1
         JUCE_PLUGINHOST_AU=1
