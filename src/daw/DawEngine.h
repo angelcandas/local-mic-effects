@@ -351,6 +351,7 @@ private:
         std::atomic<float> targetDirect { 1.0f }; // tracks: 0 while a return is soloed (sends still play)
         std::atomic<float> peakLeft { 0.0f }, peakRight { 0.0f };
         std::atomic<bool> monitoring { false }; // mic in (audio tracks) or MIDI in (MIDI tracks)
+        std::atomic<bool> monitorAuto { false }; // Auto: also hear the armed input while the transport rolls or records
         std::atomic<int> inputLeft { 0 }, inputRight { Edit::noInput }; // audio tracks: Edit::getTrackInput
 
         // MIDI tracks: the instrument (null if it didn't load) and what it was made from.
@@ -731,6 +732,14 @@ private:
 
     std::atomic<bool> playing { false };
     std::atomic<juce::int64> position { 0 }, length { 0 };
+    // Whether a strip's live input is heard now. Auto monitoring (armed track) hears it only
+    // while recording or while the transport plays; In always does. Any thread.
+    bool isMonitored (const Strip& s) const noexcept
+    {
+        return s.monitoring.load (std::memory_order_relaxed)
+            || (s.monitorAuto.load (std::memory_order_relaxed) && (playing.load (std::memory_order_relaxed) || isRecording()));
+    }
+
     std::atomic<int> latency { 0 }, monitorLatency { 0 };
 
     // The cue mix (Edit::getCue), set by updateMix. Never on in an offline engine.
