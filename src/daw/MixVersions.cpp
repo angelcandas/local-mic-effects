@@ -205,6 +205,47 @@ juce::ValueTree Edit::addMixVersion (const juce::String& name)
     return made;
 }
 
+juce::ValueTree Edit::addMixVersionAfterChange (const juce::ValueTree& before, const juce::String& name,
+                                                const juce::String& beforeName)
+{
+    auto mixes = state.getChildWithName (ids::MIXES);
+    if (! mixes.isValid())
+    {
+        mixes = juce::ValueTree (ids::MIXES);
+        state.appendChild (mixes, undoTarget);
+    }
+
+    const auto make = [&] (const juce::String& wanted, const juce::String& mix)
+    {
+        juce::ValueTree version (ids::MIX);
+        version.setProperty (ids::id, takeNextId(), nullptr);
+        version.setProperty (ids::name, wanted.trim().isNotEmpty() ? wanted.trim().substring (0, 40)
+                                                                  : "Mix " + juce::String (mixes.getNumChildren() + 1), nullptr);
+        version.setProperty (ids::mix, mix, nullptr);
+        mixes.appendChild (version, undoTarget);
+        return version;
+    };
+
+    // The version you were on keeps the mix from before the change; with none, the mix
+    // before becomes a version of its own.
+    auto previous = getCurrentMixVersion();
+    if (before.hasType (snapshotType))
+    {
+        if (previous >= 0)
+        {
+            auto version = mixes.getChildWithProperty (ids::id, previous);
+            if (const auto text = encode (before); text != version[ids::mix].toString())
+                version.setProperty (ids::mix, text, undoTarget);
+        }
+        else
+            previous = (int) make (beforeName, encode (before))[ids::id];
+    }
+    const auto made = make (name, encode (captureMix()));
+    mixes.setProperty (ids::previous, previous, undoTarget);
+    mixes.setProperty (ids::current, (int) made[ids::id], undoTarget);
+    return made;
+}
+
 bool Edit::recallMixVersion (int mixId)
 {
     auto mixes = state.getChildWithName (ids::MIXES);

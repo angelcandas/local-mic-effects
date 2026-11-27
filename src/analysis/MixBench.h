@@ -102,6 +102,8 @@ struct Options
     float amount = 1.0f;
     double sampleRate = 44100.0;
     bool alignments = true;           // measure phase between tracks like the app does
+    bool balance = false;             // MixOptions::balance (band balance like records)
+    bool recordVoice = false;         // MixOptions::recordVoice (voice level like records)
     bool listen = false;              // listen and correct (MixCorrect.h) before writing the plan
     std::function<void (const juce::String&)> log; // progress lines
 };

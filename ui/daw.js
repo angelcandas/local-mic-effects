@@ -5667,6 +5667,15 @@ class DawScreen {
       this.refreshAutoMixTags(true);
       this.setAutoMixResult("Kept. The changes are in your mix; Undo takes them back.");
     });
+    // Keep as a version: the same, and the mix becomes a mix version of its own (the one you
+    // were on keeps the mix from before), to compare several runs in the Versions menu.
+    $(".automix-keep-version").addEventListener("click", async () => {
+      const result = await daw("autoMix", { action: "keep", version: true });
+      if (result?.ok === false) return this.setAutoMixResult(result.error || "Couldn't keep the changes.", true);
+      this.resetAutoMix();
+      this.refreshAutoMixTags(true);
+      this.setAutoMixResult(`Kept as "${result?.name ?? "a new version"}". Listen again with another style or other choices to make another, then compare them in the Versions menu.`);
+    });
     // Discard: back to the mix as it was.
     $(".automix-discard").addEventListener("click", async () => {
       if (!(await this.confirmDiscardAutoMix())) return;
@@ -5939,7 +5948,7 @@ class DawScreen {
     about.textContent = picked?.about ?? "";
     panel.classList.toggle("is-clean", mode === "clean");
     panel.classList.toggle("is-master", mode === "master");
-    // Mastering is its own flow with its own title; the mix modes' tabs hide.
+    // Mastering is its own flow with its own title; the tabs stay so Mix is one click away.
     panel.querySelector(".ai-title strong").textContent = mode === "master" ? "Master" : "Auto Mix";
     panel.querySelector(".ai-title small").textContent = mode === "master" ? "Mastering · listens offline, one undo" : "AI mixer · listens offline, one undo";
     const intro = panel.querySelector(".automix-mode-intro");
@@ -6310,6 +6319,9 @@ class DawScreen {
     keep.disabled = !applied || !after;
     keep.classList.toggle("is-accent", applied);
     keep.title = !applied ? "Try the changes on the mix first" : !after ? "Switch to the mix with Auto Mix's changes first" : "Makes the changes you hear final and clears this list. One undo takes them back";
+    const keepVersion = panel.querySelector(".automix-keep-version");
+    keepVersion.hidden = keep.hidden;
+    keepVersion.disabled = keep.disabled;
     panel.querySelector(".automix-discard").hidden = !plan || plan.moves.length === 0;
     panel.querySelector(".automix-analyse").textContent = plan ? "Listen again" : "Listen";
     panel.querySelector(".automix-amount").hidden = !plan || plan.moves.length === 0;
