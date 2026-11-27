@@ -1,7 +1,7 @@
 // MicFXMixBench: the Auto Mix test bench (see analysis/MixBench.h and tools/README-mixbench.md).
 //
 //   MicFXMixBench <songs folder | song folder> [--style pop|rock|...|song|all] [--out folder]
-//                 [--amount 0..1] [--only name] [--no-phase] [--learn folder] [--no-audio]
+//                 [--amount 0..1] [--only name] [--no-phase] [--learn folder] [--no-audio] [--balance] [--record-voice]
 //
 // --learn also writes each song's measurements for learning targets (analysis/MixLearn.h)
 // to that folder; --no-audio keeps no rendered mixes or copies (only the scores).
@@ -31,13 +31,16 @@ void printUsage()
 {
     std::cout << "Usage: MicFXMixBench <songs folder | song folder> [--style pop|rock|...|song|all]\n"
                  "                     [--out folder] [--amount 0..1] [--only name] [--no-phase]\n"
-                 "                     [--listen both|on|off] [--learn folder] [--no-audio]\n\n"
+                 "                     [--listen both|on|off] [--learn folder] [--no-audio]\n"
+                 "                     [--balance] [--record-voice]\n\n"
                  "A song folder holds tracks/*.wav, the human mix as mix.* and optionally song.txt\n"
                  "(style = rock, tempo = 96, role.<track file name> = voice).\n"
                  "--style song (default) mixes each song in its own style (pop when it has none).\n"
                  "--listen both (default) mixes each song with and without listen-and-correct.\n"
                  "--learn writes each song's measurements for learning (no audio) to that folder.\n"
-                 "--no-audio keeps only the scores, no rendered mixes.\n";
+                 "--no-audio keeps only the scores, no rendered mixes.\n"
+                 "--balance and --record-voice turn on the learned band balance and voice level\n"
+                 "(the panel's \"like records\" choices, off by default).\n";
 }
 }
 
@@ -75,6 +78,8 @@ int main (int argc, char* argv[])
     bench::Options options;
     options.amount = juce::jlimit (0.0f, 1.0f, value ("--amount", "1").getFloatValue());
     options.alignments = ! args.contains ("--no-phase");
+    options.balance = args.contains ("--balance");
+    options.recordVoice = args.contains ("--record-voice");
     options.log = [] (const juce::String& line) { std::cout << line << "\n"; };
     const auto listenArg = value ("--listen", "both");
     std::vector<bool> listenModes;

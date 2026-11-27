@@ -938,6 +938,7 @@ body.is-daw .chip--live { display: none; }
 .automix-panel.is-running .automix-analyse,
 .automix-panel.is-running .automix-apply,
 .automix-panel.is-running .automix-keep,
+.automix-panel.is-running .automix-keep-version,
 .automix-panel.is-running .automix-discard { display: none; }
 
 /* ---------- Track header: volume and pan ---------- */
@@ -2927,7 +2928,7 @@ body.is-daw .library-hint { display: none; }
 .automix-sliders span { text-align: right; font-family: var(--mono); color: var(--text); }
 
 /* Auto Mix: asking before changes are thrown away */
-.automix-panel.is-master .ai-modes, .automix-panel.is-master .ai-about { display: none; }
+.automix-panel.is-master .ai-about { display: none; }
 
 /* Auto Mix: dialogs (who's who, losing changes) and the options fold */
 .automix-dialog { width: min(560px, 92vw); max-height: 86vh; display: flex; flex-direction: column; }
@@ -3027,3 +3028,4 @@ body.is-daw .library-hint { display: none; }
 .guide-lane { position: relative; flex: none; height: 46px; overflow: hidden; }
 .guide-note { position: absolute; height: 6px; border-radius: 3px; background: #8c7bff; opacity: 0.85; }
 .guide-note:hover { opacity: 1; }
+.automix-panel .automix-target[hidden] { display: none; } /* "Section moves" is a label.check, whose display would show it in the mix modes */

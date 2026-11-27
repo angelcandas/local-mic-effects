@@ -5,6 +5,10 @@ What changed in MicFX, newest first, in plain language. The app shows it under
 haven't seen yet. To add an entry for your change, see "Adding entries" in
 `docs/changelog.md`.
 
+## 2026-11-27
+
+- **Auto Mix mixes like before, Master is back, and runs kept as versions.** Auto Mix puts the voice back up front: the levels learned from engineers' mixes (a lower voice, a set band balance) are now choices under More options, off unless you tick them. Master the song opens the Master panel again, with a Master tab next to Mix, Fit and Clean. Keep as a version saves each Auto Mix run as its own mix version, so you can compare them in the Versions menu and keep the one you like. (#239)
+
 ## 2026-11-26
 
 - **Practice labels on the lyrics line, and a practice track from a MIDI file.** The coach's cues for the line being sung (Grit, Piano, Prepare position...) show above the words of the karaoke line. In the DAW, File > New practice track from MIDI... turns the melody of a .mid file into the guide lane to sing along to while you record. (#236)

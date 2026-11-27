@@ -1885,7 +1885,7 @@ float getMonoLossDb (float pan)
 }
 
 //==============================================================================
-MixTargets getTargets (MixStyle style)
+MixTargets getTargets (MixStyle style, bool recordVoice)
 {
     MixTargets t { 1.5f, 0.0f, 0.0f };
 
@@ -1960,9 +1960,10 @@ MixTargets getTargets (MixStyle style)
             break;
     }
     // Learned from engineers' mixes (LearnedTargets.h): the voice sits lower over the band
-    // than these hand-set numbers, by about the same amount in every style. Speech and voice
-    // up front are about hearing the voice, not a finished song, so they stay.
-    if (style != MixStyle::speech && style != MixStyle::coaching)
+    // than these hand-set numbers, by about the same amount in every style. Only when asked
+    // (MixOptions::recordVoice). Speech and voice up front are about hearing the voice, not
+    // a finished song, so they stay.
+    if (recordVoice && style != MixStyle::speech && style != MixStyle::coaching)
         t.voiceOverBackingLu += learned::voiceOverBandShiftLu;
 
     t.style = style;
@@ -2234,7 +2235,7 @@ static MixPlan planMixMoves (const SessionAnalyser::Result& measured, const std:
                              const MixOptions& options)
 {
     MixPlan plan;
-    auto targets = getTargets (style);
+    auto targets = getTargets (style, options.recordVoice);
 
     const auto volumeOf = [&] (int id) { auto it = currentVolumes.find (id); return it != currentVolumes.end() ? it->second : 0.0f; };
     const auto roleOf = [&] (int id) { auto it = roles.find (id); return it != roles.end() ? it->second : Role::other; };

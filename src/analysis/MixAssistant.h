@@ -166,7 +166,15 @@ struct MixOptions
 
     // Balance the band: instrument tracks whose faders are untouched are brought to the
     // balance between roles learned from engineers' mixes (drums, bass, guitar, ...).
-    bool balance = true;
+    // Off by default: learned on band songs (piano 5 dB under the drums, for one), it can
+    // bury the main instrument of a smaller arrangement. A "May add" choice.
+    bool balance = false;
+
+    // The lead voice where engineers put it in finished records (LearnedTargets.h,
+    // voiceOverBandShiftLu: about 5 dB lower over the band than the style's own target).
+    // Off by default: on the bench it set the voice ~3 LU lower and the mix ~2 LU quieter
+    // than before, which people heard as a worse mix. A "May add" choice.
+    bool recordVoice = false;
 
     // Normalize: first bring every track (voices, instruments) to a level that fits its
     // role in the style, with the chain's input gain ("inGain" moves); the rest of the
@@ -242,7 +250,9 @@ struct MixOptions
     std::set<int> drawnRides;
 };
 
-MixTargets getTargets (MixStyle);
+// The style's targets. `recordVoice`: the lead voice as low as in the learned finished
+// records (MixOptions::recordVoice), for the music styles.
+MixTargets getTargets (MixStyle, bool recordVoice = false);
 
 // True when a recording has a stereo image worth keeping: two channels that differ
 // (a dual-mono file, the same signal on both sides, is a mono part).

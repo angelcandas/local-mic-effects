@@ -114,6 +114,11 @@
 .automix-panel .automix-amount { margin: 0; padding: 8px 10px; border: 1px solid var(--line); border-radius: 10px; background: #0f1218; }
 .automix-panel .automix-amount input { accent-color: var(--ai); }
 .automix-panel .export-footer, .stems-panel .export-footer { padding-top: 2px; }
+/* Up to six buttons once a plan is tried (Discard, Hear original, Listen again, In the mix,
+   Keep as a version, Keep changes): they wrap, right-aligned, instead of overflowing. */
+.automix-panel .export-footer { flex-wrap: wrap; justify-content: flex-end; row-gap: 6px; }
+.automix-panel .export-footer .automix-result { flex-basis: 100%; }
+.automix-panel .export-footer .automix-result:empty { display: none; }
 .ai-plugin .tool.is-accent { background: linear-gradient(145deg, var(--ai), var(--ai-2)); color: #0b0d12; border-color: transparent; font-weight: 700; }
 .ai-plugin .tool.is-accent:disabled { opacity: 0.4; }
 

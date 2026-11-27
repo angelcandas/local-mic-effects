@@ -110,7 +110,7 @@ MixCorrection listenAndCorrect (const juce::ValueTree& session, const MixPlan& p
     if (options.mode != MixMode::mix && options.mode != MixMode::fit)
         return result;
 
-    const auto targets = getTargets (style);
+    const auto targets = getTargets (style, options.recordVoice);
 
     // The plan as it would be written, on a copy.
     daw::Edit copy;

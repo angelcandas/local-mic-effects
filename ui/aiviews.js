@@ -5,6 +5,7 @@ const MODES = [
   ["mix", "Mix", "Mix the whole song"],
   ["fit", "Fit", "Fit one track into the backing"],
   ["clean", "Clean", "Clean & polish one track"],
+  ["master", "Master", "Master the song: mastering EQ, multiband, width and a limiter"],
 ];
 
 export function decorateAiPanels(root) {

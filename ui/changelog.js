@@ -1,7 +1,19 @@
 // Generated from CHANGELOG.md by scripts/changelog.py. Do not edit by hand.
 export const CHANGELOG = {
- "latest": 236,
+ "latest": 239,
  "days": [
+  {
+   "date": "2026-11-27",
+   "entries": [
+    {
+     "title": "Auto Mix mixes like before, Master is back, and runs kept as versions",
+     "text": "Auto Mix puts the voice back up front: the levels learned from engineers' mixes (a lower voice, a set band balance) are now choices under More options, off unless you tick them. Master the song opens the Master panel again, with a Master tab next to Mix, Fit and Clean. Keep as a version saves each Auto Mix run as its own mix version, so you can compare them in the Versions menu and keep the one you like.",
+     "prs": [
+      239
+     ]
+    }
+   ]
+  },
   {
    "date": "2026-11-26",
    "entries": [

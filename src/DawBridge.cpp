@@ -3444,6 +3444,8 @@ void DawBridge::readAutoMixEffects (const juce::var& effects)
     read ("phase", autoMixOptions.phase);
     read ("sectionMoves", autoMixOptions.sectionMoves);
     read ("bySection", autoMixOptions.bySection);
+    read ("balance", autoMixOptions.balance);
+    read ("recordVoice", autoMixOptions.recordVoice);
     read ("split", autoMixSplit);
 }
 
@@ -3595,6 +3597,7 @@ juce::var DawBridge::describeAutoMix() const
                                    { "dynamicEq", autoMixOptions.dynamicEq }, { "transients", autoMixOptions.transients },
                                    { "smooth", autoMixOptions.smooth }, { "pan", autoMixOptions.pan }, { "phase", autoMixOptions.phase },
                                    { "sectionMoves", autoMixOptions.sectionMoves }, { "bySection", autoMixOptions.bySection },
+                                   { "balance", autoMixOptions.balance }, { "recordVoice", autoMixOptions.recordVoice },
                                    { "normalize", autoMixOptions.normalize }, { "split", autoMixSplit } });
 
     return object ({ { "state", "ready" }, { "kind", autoMixReference ? "reference" : "mix" }, { "reference", autoMixReferenceName },
@@ -5515,6 +5518,40 @@ juce::var DawBridge::handleAutoMix (const juce::var& args, Complete& complete)
     {
         if (! autoMixApplied || undo.getUndoDescription() != autoMixUndoName)
             return error ("Try the changes on the mix first, with the mix after Auto Mix playing.");
+
+        // { version: true }: also keep it as a mix version of its own (Edit::addMixVersionAfterChange),
+        // so several runs can be compared by ear. The version you were on keeps the mix from
+        // before; with none yet, that mix becomes "Before Auto Mix".
+        if (arg (args, "version", false))
+        {
+            undo.undo();
+            const auto before = edit.captureMix();
+            undo.redo();
+            if (undo.getUndoDescription() != autoMixUndoName)
+                return error ("Couldn't keep it as a version.");
+
+            const auto master = autoMixOptions.mode == analysis::MixMode::master;
+            const juce::String stem = master ? "Master" : "Auto Mix";
+            int count = 1;
+            for (const auto& mix : edit.getMixVersions())
+                if (mix[ids::name].toString().startsWith (stem + " "))
+                    ++count;
+            const auto dot = juce::String (juce::CharPointer_UTF8 (" \xc2\xb7 ")); // " · "
+            auto name = args["name"].toString().trim();
+            if (name.isEmpty())
+            {
+                name = stem + " " + juce::String (count);
+                if (autoMixOptions.mode == analysis::MixMode::mix)
+                    name << dot << analysis::getStyleName (autoMixStyle);
+                else if (! master)
+                    name << dot << (autoMixOptions.mode == analysis::MixMode::fit ? "Fit" : "Clean");
+            }
+            undo.beginNewTransaction ("Keep as a mix version");
+            const auto made = edit.addMixVersionAfterChange (before, name, master ? "Before mastering" : "Before Auto Mix");
+            clearAutoMix();
+            return object ({ { "ok", true }, { "version", (int) made[ids::id] }, { "name", made[ids::name] } });
+        }
+
         clearAutoMix();
         return error ({});
     }

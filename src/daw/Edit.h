@@ -435,6 +435,12 @@ public:
     // A new version from the mix as it is now, and it becomes current. The first time, the
     // mix so far is kept first as its own version ("Mix 1"), so there are two to compare.
     juce::ValueTree addMixVersion (const juce::String& name = {});
+    // A new version from the mix as it is now after a change (Auto Mix kept), with `before`
+    // (a captureMix() from before the change) as what the version you were on keeps, or as a
+    // first version named `beforeName` when you weren't on one. The new one becomes current
+    // and the one before it "previous", so Compare switches between the two.
+    juce::ValueTree addMixVersionAfterChange (const juce::ValueTree& before, const juce::String& name,
+                                              const juce::String& beforeName);
     bool recallMixVersion (int mixId);  // the current one gets the live mix first
     void updateMixVersion (int mixId);  // stores the live mix into it
     void renameMixVersion (int mixId, const juce::String& name);

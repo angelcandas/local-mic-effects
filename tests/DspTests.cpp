@@ -1934,6 +1934,7 @@ namespace
             analysis::MixOptions options;
             options.eq = options.compressor = options.deEsser = options.reverb = options.saturation = options.echo = options.exciter
                 = options.width = options.rides = false;
+            options.balance = true; // a "May add" choice, off by default
             const auto result = analysis::planMix (source, roles, { { voice, 0.0f }, { drums, 0.0f }, { bass, 0.0f }, { guitar, guitarFader } },
                                                    0.0f, analysis::MixStyle::pop, options);
             std::map<juce::String, float> volumes { { "drums", 0.0f }, { "bass", 0.0f }, { "guitar", guitarFader } };
@@ -1964,12 +1965,13 @@ namespace
     {
         std::cout << "\nAuto Mix learned targets\n";
 
-        const auto pop = analysis::getTargets (analysis::MixStyle::pop).voiceOverBackingLu;
+        const auto pop = analysis::getTargets (analysis::MixStyle::pop, true).voiceOverBackingLu;
         check (std::abs (pop - (1.5f + analysis::learned::voiceOverBandShiftLu)) < 0.01f
-                   && std::abs (analysis::getTargets (analysis::MixStyle::speech).voiceOverBackingLu - 10.0f) < 0.01f
-                   && std::abs (analysis::getTargets (analysis::MixStyle::coaching).voiceOverBackingLu - 4.0f) < 0.01f,
-               "the learned shift moves the music styles' voice level (pop " + juce::String (pop, 1)
-                   + " LU), not speech or voice up front");
+                   && std::abs (analysis::getTargets (analysis::MixStyle::pop).voiceOverBackingLu - 1.5f) < 0.01f
+                   && std::abs (analysis::getTargets (analysis::MixStyle::speech, true).voiceOverBackingLu - 10.0f) < 0.01f
+                   && std::abs (analysis::getTargets (analysis::MixStyle::coaching, true).voiceOverBackingLu - 4.0f) < 0.01f,
+               "asked for, the learned shift moves the music styles' voice level (pop " + juce::String (pop, 1)
+                   + " LU), not speech or voice up front; by default pop stays at 1.5 LU");
 
         const auto folder = juce::File::createTempFile ("micfx-learned");
         folder.createDirectory();
@@ -20460,6 +20462,36 @@ static void testMixVersions()
     edit.removeMixVersion ((int) versions[0][ids::id]);
     check (edit.getMixVersions().size() == 1 && edit.getCurrentMixVersion() < 0 && edit.getPreviousMixVersion() == (int) second[ids::id],
            "delete the current version: the mix stays as it is, and the other one is still there to compare with");
+
+    // Auto Mix kept as a version: the version before keeps the mix from before the change.
+    {
+        Edit e;
+        const auto v = (int) e.addTrack ("Voice")[ids::id];
+        e.setTrackVolume (v, -6.0f);
+        const auto before = e.captureMix();
+        e.setTrackVolume (v, 1.0f); // what Auto Mix did
+        const auto first = e.addMixVersionAfterChange (before, "Auto Mix 1", "Before Auto Mix");
+        auto list = e.getMixVersions();
+        check (list.size() == 2 && list[0][ids::name].toString() == "Before Auto Mix" && e.getCurrentMixVersion() == (int) first[ids::id]
+                   && e.getPreviousMixVersion() == (int) list[0][ids::id] && std::abs ((float) e.getTrack (v)[ids::volume] - 1.0f) < 1.0e-4f,
+               "keeping Auto Mix as a version makes \"Before Auto Mix\" from the mix before and carries on in the new one");
+
+        const auto again = e.captureMix();
+        e.setTrackVolume (v, 3.0f); // a second run
+        const auto second = e.addMixVersionAfterChange (again, "Auto Mix 2", "Before Auto Mix");
+        list = e.getMixVersions();
+        check (list.size() == 3 && e.getCurrentMixVersion() == (int) second[ids::id] && e.getPreviousMixVersion() == (int) first[ids::id],
+               "a second run is a third version, compared with the first run");
+        e.recallMixVersion ((int) first[ids::id]);
+        const auto firstVolume = (float) e.getTrack (v)[ids::volume];
+        e.recallMixVersion ((int) list[0][ids::id]);
+        const auto beforeVolume = (float) e.getTrack (v)[ids::volume];
+        e.recallMixVersion ((int) second[ids::id]);
+        check (std::abs (firstVolume - 1.0f) < 1.0e-4f && std::abs (beforeVolume + 6.0f) < 1.0e-4f
+                   && std::abs ((float) e.getTrack (v)[ids::volume] - 3.0f) < 1.0e-4f,
+               "each version plays its own run (" + juce::String (beforeVolume, 1) + ", " + juce::String (firstVolume, 1) + ", "
+                   + juce::String ((float) e.getTrack (v)[ids::volume], 1) + " dB)");
+    }
 }
 
 static void testTimeRange()

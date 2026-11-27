@@ -588,6 +588,8 @@ Run runSong (const Song& song, MixStyle style, const juce::File& outFolder, cons
 
     MixOptions mixOptions;
     mixOptions.tempo = song.tempo;
+    mixOptions.balance = options.balance;
+    mixOptions.recordVoice = options.recordVoice;
     std::map<int, Role> knownRoles;
     std::map<int, juce::String> fileNames;
 
