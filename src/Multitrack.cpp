@@ -1,4 +1,5 @@
 #include "Multitrack.h"
+#include "AudioImport.h"
 
 namespace
 {
@@ -52,7 +53,13 @@ Multitrack::Decoded Multitrack::decode (const juce::File& file, double targetRat
     juce::AudioFormatManager formats;
     formats.registerBasicFormats();
 
-    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
+    // An MP4, M4A or other file JUCE can't open here: decoded to a WAV first (see AudioImport.h).
+    juce::String unreadable;
+    const auto readable = micfx::audioimport::makeReadable (file, unreadable);
+    if (readable == juce::File())
+        return { {}, unreadable };
+
+    std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (readable));
 
     if (reader == nullptr)
         return { {}, "Couldn't open " + file.getFileName() + ". Try a WAV, AIFF, FLAC, Ogg or MP3 file." };
