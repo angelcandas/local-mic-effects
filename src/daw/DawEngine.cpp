@@ -730,8 +730,11 @@ void DawEngine::updateMix()
             setStripTargets (*it->second, track, audible, false);
             it->second->targetDirect = Edit::getTrackOutput (track) != Edit::masterId || ! anyReturnSolo || (bool) track[ids::solo] ? 1.0f : 0.0f;
             // MIDI tracks play the MIDI input when armed too, so you hear what you record.
-            // Auto monitoring hears the input only while the track is armed.
-            it->second->monitoring = (bool) track[ids::monitor] || ((bool) track[ids::arm] && (Edit::isMidiTrack (track) || (bool) track.getProperty (ids::monitorAuto, true)));
+            // In always hears the input; MIDI tracks while armed. Auto hears an armed audio
+            // track only while recording or playing (isMonitored checks the transport).
+            const auto armed = (bool) track[ids::arm];
+            it->second->monitoring = (bool) track[ids::monitor] || (armed && Edit::isMidiTrack (track));
+            it->second->monitorAuto = armed && ! Edit::isMidiTrack (track) && (bool) track.getProperty (ids::monitorAuto, true);
             const auto input = Edit::getTrackInput (track);
             it->second->inputLeft = input.left;
             it->second->inputRight = input.right;
@@ -3029,7 +3032,7 @@ void DawEngine::renderInstrument (Track& track, const TempoMap& tempo, bool isPl
         }
     }
 
-    if (input != nullptr && strip.monitoring.load (std::memory_order_relaxed))
+    if (input != nullptr && isMonitored (strip))
         midi.addEvents (*input, midiOffset, numSamples, -midiOffset);
 
     if (! strip.audition.isEmpty())
@@ -3188,7 +3191,7 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
     // What the monitored tracks are heard through, for the audio status.
     auto slowestMonitored = -1;
     for (const auto& track : graph.tracks)
-        if (track.strip->monitoring.load (std::memory_order_relaxed) && (track.strip->isMidi || numInputs > 0))
+        if (isMonitored (*track.strip) && (track.strip->isMidi || numInputs > 0))
             slowestMonitored = juce::jmax (slowestMonitored, track.strip->isMidi || cue == nullptr
                                                                  ? track.strip->latencyAtBuild + graph.directDelay.samples + graph.master->latencyAtBuild
                                                                  : cue->latencyAtBuild);
@@ -3220,7 +3223,7 @@ void DawEngine::renderBlock (Graph& graph, juce::AudioBuffer<float>& output, int
 
         // Live input after the delay line: monitoring shouldn't wait for compensation. A
         // mono input plays on both sides, a stereo one left and right.
-        else if (numInputs > 0 && strip.monitoring.load (std::memory_order_relaxed))
+        else if (numInputs > 0 && isMonitored (strip))
         {
             const auto* left = inputChannel (strip.inputLeft.load (std::memory_order_relaxed));
             const auto rightIndex = strip.inputRight.load (std::memory_order_relaxed);

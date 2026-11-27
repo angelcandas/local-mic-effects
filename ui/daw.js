@@ -2881,7 +2881,7 @@ class DawScreen {
         monitor.textContent = { in: "Mon", auto: "Auto", off: "Off" }[mode];
         monitor.dataset.mode = mode;
         monitor.setAttribute("aria-pressed", String(mode !== "off"));
-        monitor.title = `Monitor: ${{ in: "Mon: always hear the input", auto: "Auto: hear the input while the track is armed", off: "Off: don't hear the input" }[mode]}`
+        monitor.title = `Monitor: ${{ in: "Mon: always hear the input", auto: "Auto: hear the input while the track is armed and recording or playing", off: "Off: don't hear the input" }[mode]}`
           + ` (${inputText(latest.input, this.session.inputs)}, through this track's effects). Click: Mon → Auto → Off.`;
       }
       if (document.activeElement !== name) name.value = latest.name;

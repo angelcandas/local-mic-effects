@@ -6990,6 +6990,23 @@ namespace
         edit.setTrackMonitor (vocal, false);
         edit.setTrackPan (vocal, 0.0f);
 
+        // Auto monitoring: an armed track is heard only while the transport plays or records.
+        edit.setTrackMonitorMode (vocal, "auto");
+        edit.setTrackArm (vocal, true);
+        engine.rebuildNow();
+        playInputs (8);
+        float autoStopped = 0.0f, autoPlaying = 0.0f;
+        playInputs (8, [&] (const auto& out) { autoStopped = std::max (autoStopped, out.getMagnitude (0, 0, blockSize)); });
+        engine.play();
+        playInputs (8);
+        playInputs (8, [&] (const auto& out) { autoPlaying = std::max (autoPlaying, out.getMagnitude (0, 0, blockSize)); });
+        engine.stop();
+        check (autoStopped < 0.001f && autoPlaying > 0.05f,
+               "Auto monitoring hears the armed input only while playing (" + juce::String (autoStopped, 3) + ", " + juce::String (autoPlaying, 3) + ")");
+        edit.setTrackArm (vocal, false);
+        edit.setTrackMonitorMode (vocal, "off");
+        check (daw::Edit::getTrackMonitorMode (edit.addTrack ("Fresh")) == "off", "a new track's monitoring is Off");
+
         // Recording: one file per input, so each track gets what it listens to.
         const auto doubled = (int) edit.addTrack ("Vocal double")[daw::ids::id]; // also input 1
         for (const auto id : { vocal, piano, pair, doubled })
@@ -7561,7 +7578,7 @@ namespace
 
         check (engine.startRecording (folder).isNotEmpty() && ! engine.isRecording(), "refuses to record with no armed track");
 
-        check (daw::Edit::getTrackMonitorMode (edit.getTrack (second)) == "auto", "a new audio track monitors its input while armed (Auto), so it is not silent while recording");
+        check (daw::Edit::getTrackMonitorMode (edit.getTrack (second)) == "off", "a new audio track starts with monitoring Off");
 
         edit.setTrackArm (vocal, true);
         edit.setTrackArm (second, true);

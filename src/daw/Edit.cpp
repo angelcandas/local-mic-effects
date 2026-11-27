@@ -155,6 +155,7 @@ juce::ValueTree Edit::addTrack (const juce::String& name, int index)
     track.setProperty (ids::solo, false, nullptr);
     track.setProperty (ids::arm, false, nullptr);
     track.setProperty (ids::monitor, false, nullptr);
+    track.setProperty (ids::monitorAuto, false, nullptr); // monitoring is Off until you pick In or Auto
     track.appendChild (juce::ValueTree (ids::INSERTS), nullptr);
 
     // Index counts tracks only (markers and returns sit among them in the tree). A new
