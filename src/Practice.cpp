@@ -3,6 +3,7 @@
 
 #include <juce_cryptography/juce_cryptography.h>
 
+#include "AudioImport.h"
 #include "daw/Warp.h"
 
 namespace coach = analysis::coach;
@@ -187,7 +188,7 @@ juce::File Practice::getCacheFolder (const juce::File& source, bool split, const
     return root.getChildFile (split ? hash : hash + "-voice");
 }
 
-Practice::Prepared Practice::prepare (const juce::File& source, const Options& options, const Progress& progress)
+Practice::Prepared Practice::prepare (const juce::File& picked, const Options& options, const Progress& progress)
 {
     Prepared result;
     auto phase = Phase::reading;
@@ -198,9 +199,18 @@ Practice::Prepared Practice::prepare (const juce::File& source, const Options& o
         return result;
     };
 
-    if (! source.existsAsFile())
+    if (! picked.existsAsFile())
     {
-        result.error = "Couldn't find " + source.getFullPathName() + ".";
+        result.error = "Couldn't find " + picked.getFullPathName() + ".";
+        return result;
+    }
+
+    // An MP4, M4A or other file JUCE can't open here: decoded to a WAV first (see AudioImport.h).
+    juce::String unreadable;
+    const auto source = micfx::audioimport::makeReadable (picked, unreadable);
+    if (source == juce::File())
+    {
+        result.error = unreadable;
         return result;
     }
 
@@ -427,7 +437,7 @@ juce::var Practice::handle (const juce::String& action, const juce::var& options
         const auto split = (bool) options.getProperty ("split", true);
         chooser = std::make_unique<juce::FileChooser> (split ? "Choose a song to practise" : "Choose a voice on its own (a guide vocal)",
                                                        juce::File::getSpecialLocation (juce::File::userMusicDirectory),
-                                                       "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3;*.m4a");
+                                                       micfx::audioimport::wildcard());
         chooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                               [this, split] (const juce::FileChooser& c)
                               {

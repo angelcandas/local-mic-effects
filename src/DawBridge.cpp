@@ -1,4 +1,5 @@
 #include <set>
+#include "AudioImport.h"
 #include "DawBridge.h"
 
 #include "analysis/TakeComp.h"
@@ -2099,12 +2100,15 @@ namespace
     // it can't be read.
     std::variant<double, juce::String> readAudioLength (const juce::File& file)
     {
+        if (! file.existsAsFile())
+            return juce::String ("Couldn't find " + file.getFullPathName() + ".");
+
         juce::AudioFormatManager formats;
         formats.registerBasicFormats();
         const std::unique_ptr<juce::AudioFormatReader> reader (formats.createReaderFor (file));
 
         if (reader == nullptr)
-            return juce::String ("Couldn't open " + file.getFileName() + ". Try a WAV, AIFF, FLAC, Ogg or MP3 file.");
+            return juce::String ("Couldn't open " + file.getFileName() + ". Try a WAV, AIFF, FLAC, Ogg, MP3 or M4A/MP4 file.");
         if (reader->sampleRate <= 0.0 || reader->lengthInSamples <= 0)
             return juce::String (file.getFileName() + " is empty.");
         if ((double) reader->lengthInSamples / reader->sampleRate > maxImportMinutes * 60.0)
@@ -2116,13 +2120,18 @@ namespace
     juce::String getAudioFilePatterns()
     {
         juce::AudioFormatManager formats;
-        formats.registerBasicFormats();
-        return formats.getWildcardForAllFormats();
+        return micfx::audioimport::wildcard();
     }
 }
 
-juce::var DawBridge::importAudio (const juce::File& file, int trackId, double start, bool match, bool continueStep)
+juce::var DawBridge::importAudio (const juce::File& picked, int trackId, double start, bool match, bool continueStep)
 {
+    // An MP4, M4A or other file JUCE can't open here is decoded to a WAV first (see AudioImport.h).
+    juce::String unreadable;
+    const auto file = micfx::audioimport::makeReadable (picked, unreadable);
+    if (file == juce::File())
+        return error (unreadable);
+
     // Check the file before copying it anywhere. Only the header is read: the audio
     // itself loads in the background (AudioPool), so a long song doesn't freeze the app.
     const auto length = readAudioLength (file);
@@ -2680,6 +2689,8 @@ namespace
             juce::AudioFormatManager formats;
             formats.registerBasicFormats();
             juce::StringArray list;
+            for (const auto& extension : micfx::audioimport::extraExtensions())
+                list.addIfNotAlreadyThere (extension);
             for (auto* format : formats)
                 for (const auto& extension : format->getFileExtensions())
                     list.addIfNotAlreadyThere (extension.toLowerCase());
@@ -8097,7 +8108,9 @@ void DawBridge::handle (const juce::String& command, const juce::var& args, Comp
     {
         // A file's length, and as a loop (with the switch on) its length at the project's
         // tempo: what the Draw tool paints with. -> { ok, seconds, length, loop? }
-        const juce::File file (args["file"].toString());
+        juce::String unreadable;
+        const auto file = micfx::audioimport::makeReadable (juce::File (args["file"].toString()), unreadable);
+        if (unreadable.isNotEmpty()) { complete (error (unreadable)); return; }
         const auto seconds = readAudioLength (file);
         if (const auto* message = std::get_if<juce::String> (&seconds)) { complete (error (*message)); return; }
         auto reply = object ({ { "ok", true }, { "error", juce::String() }, { "seconds", std::get<double> (seconds) }, { "length", std::get<double> (seconds) } });

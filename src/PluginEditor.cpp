@@ -1,6 +1,7 @@
 #include "PluginEditor.h"
 #include "instruments/InstrumentProcessor.h"
 #include "instruments/Registry.h"
+#include "AudioImport.h"
 #include "Presets.h"
 #include "FactoryChains.h"
 #include "analysis/Key.h"
@@ -998,7 +999,7 @@ juce::WebBrowserComponent::Options PluginEditor::createOptions()
                        {
                            folderChooser = std::make_unique<juce::FileChooser> ("Load a backing track",
                                                                                 juce::File::getSpecialLocation (juce::File::userMusicDirectory),
-                                                                                "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3;*.m4a");
+                                                                                micfx::audioimport::wildcard());
                            folderChooser->launchAsync (juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
                                                        [this, complete] (const juce::FileChooser& chooser)
                                                        {
@@ -1512,7 +1513,7 @@ void PluginEditor::handleSetlist (const juce::String& action, const juce::var& o
     if (action == "chooseBacking")
     {
         choose ("The song's backing track", juce::File::getSpecialLocation (juce::File::userMusicDirectory),
-                "*.wav;*.aif;*.aiff;*.flac;*.ogg;*.mp3;*.m4a", Flags::openMode | Flags::canSelectFiles,
+                micfx::audioimport::wildcard(), Flags::openMode | Flags::canSelectFiles,
                 [this, index] (const juce::File& picked)
                 {
                     auto* fields = new juce::DynamicObject();
